@@ -1,0 +1,43 @@
+{
+  "name": "qq-agent",
+  "version": "0.3.0",
+  "private": false,
+  "description": "QQ 群 AI 机器人（桌面版）：事件驱动的无状态 Agent，接 OpenAI 兼容 API，带会话式控制台。",
+  "type": "module",
+  "main": "electron/main.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "chcp 65001 && electron .",
+    "server": "node src/server.js"
+  },
+  "dependencies": {
+    "js-yaml": "^5.4.1",
+    "undici": "^6.28.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  },
+  "license": "MIT",
+  "author": "Kondius",
+  "keywords": [
+    "qq",
+    "bot",
+    "agent",
+    "openai",
+    "onebot",
+    "llm",
+    "desktop",
+    "electron"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kondius/qq-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Kondius/qq-agent/issues"
+  },
+  "homepage": "https://github.com/Kondius/qq-agent#readme"
+}
