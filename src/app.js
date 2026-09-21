@@ -80,11 +80,14 @@ export function createApp({ log = console.log } = {}) {
   function snowlumaDir() {
     const configured = String(getConfig().snowluma?.dir || '').trim();
     if (configured) return configured;
-    const bundled = path.join(ROOT, 'snowluma');
-    if (fs.existsSync(bundled)) return bundled;
-    // 兼容已有安装版：asar 里的文件不可执行，协议端可能位于解包目录。
-    const unpacked = bundled.replace('app.asar', 'app.asar.unpacked');
-    if (unpacked !== bundled && fs.existsSync(unpacked)) return unpacked;
+    // Windows 不区分大小写，而 Linux 区分；兼容仓库当前的 snowLuma 目录和旧版 snowluma 目录。
+    for (const name of ['snowLuma', 'snowluma']) {
+      const bundled = path.join(ROOT, name);
+      if (fs.existsSync(bundled)) return bundled;
+      // 兼容已有安装版：asar 里的文件不可执行，协议端可能位于解包目录。
+      const unpacked = bundled.replace('app.asar', 'app.asar.unpacked');
+      if (unpacked !== bundled && fs.existsSync(unpacked)) return unpacked;
+    }
     return '';
   }
 
@@ -164,7 +167,7 @@ export function createApp({ log = console.log } = {}) {
     return true;
   }
 
-  /** 拉起 SnowLuma。优先用项目内置 node.exe 直接运行（日志进内置控制台）；失败再回退到独立窗口 launcher.bat。 */
+  /** 拉起 SnowLuma。优先用项目内置 node.exe 直接运行；失败后按平台回退到 launcher.bat / launcher.sh。 */
   async function launchSnowluma() {
     const dir = snowlumaDir();
     if (!dir) return { ok: false, error: '找不到 SnowLuma 目录：请确认项目内 snowluma/ 文件夹存在，或在设置里填写 SnowLuma 目录' };
@@ -213,17 +216,21 @@ export function createApp({ log = console.log } = {}) {
         snowlumaProc = null;
       }
     }
-    // 回退：launcher.bat 独立控制台窗口（老行为，日志无法内置）
-    const launcher = path.join(dir, 'launcher.bat');
-    if (!fs.existsSync(launcher)) return { ok: false, error: `目录里没有 index.mjs / node.exe，也没有 launcher.bat：${dir}` };
-    const child = spawn('cmd.exe', ['/c', launcher], {
+    // 回退到发行包自带的启动脚本。Linux/macOS 通过 sh 执行，因此脚本无需预先设置可执行位。
+    const isWindows = process.platform === 'win32';
+    const launcherName = isWindows ? 'launcher.bat' : 'launcher.sh';
+    const launcher = path.join(dir, launcherName);
+    if (!fs.existsSync(launcher)) {
+      return { ok: false, error: `目录里没有可用的 index.mjs / node.exe，也没有 ${launcherName}：${dir}` };
+    }
+    const child = spawn(isWindows ? 'cmd.exe' : '/bin/sh', isWindows ? ['/c', launcher] : [launcher], {
       cwd: dir,
       detached: true,
       stdio: 'ignore',
-      windowsHide: false // 保留 SnowLuma 自己的控制台窗口
+      windowsHide: isWindows ? false : undefined // Windows 保留 SnowLuma 自己的控制台窗口
     });
     child.unref();
-    pushSnowlumaLog('SnowLuma 已用独立控制台窗口启动（此模式下日志不进内置控制台）', 'stdout');
+    pushSnowlumaLog(`SnowLuma 已通过 ${launcherName} 启动（此模式下日志不进内置控制台）`, 'stdout');
     return { ok: true, launched: true, embedded: false };
   }
 
