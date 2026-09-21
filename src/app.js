@@ -91,13 +91,17 @@ export function createApp({ log = console.log } = {}) {
     return '';
   }
 
-  function snowlumaWsPort() {
+  function snowlumaServicePort() {
     try {
-      const wsUrl = String(getConfig().snowluma?.wsUrl || 'ws://127.0.0.1:3001');
-      const u = new URL(wsUrl);
-      if (u.port) return Number(u.port);
+      const dir = snowlumaDir();
+      const runtimePath = dir && path.join(dir, 'config', 'runtime.json');
+      if (runtimePath && fs.existsSync(runtimePath)) {
+        const runtime = JSON.parse(fs.readFileSync(runtimePath, 'utf8'));
+        const port = Number(runtime.webuiPort);
+        if (Number.isInteger(port) && port > 0 && port <= 65535) return port;
+      }
     } catch { /* ignore */ }
-    return 3001;
+    return 5099;
   }
 
   /** 从 SnowLuma 的 runtime.json 读取 WebUI 地址（http(s)://host:port/）。拿不到就返回空串。 */
@@ -174,9 +178,9 @@ export function createApp({ log = console.log } = {}) {
   async function launchSnowluma() {
     const dir = snowlumaDir();
     if (!dir) return { ok: false, error: '找不到 SnowLuma 目录：请确认项目内 snowluma/ 文件夹存在，或在设置里填写 SnowLuma 目录' };
-    const wsPort = snowlumaWsPort();
-    if (await isPortOpen('127.0.0.1', wsPort)) {
-      pushSnowlumaLog(`SnowLuma 已在运行（端口 ${wsPort} 已就绪），无需重复启动`, 'stdout');
+    const servicePort = snowlumaServicePort();
+    if (await isPortOpen('127.0.0.1', servicePort)) {
+      pushSnowlumaLog(`SnowLuma 已在运行（端口 ${servicePort} 已就绪），无需重复启动`, 'stdout');
       return { ok: true, alreadyRunning: true };
     }
     const indexMjs = path.join(dir, 'index.mjs');
@@ -758,7 +762,7 @@ export function createApp({ log = console.log } = {}) {
           },
           snowluma: {
             dir: snowlumaDir(),
-            running: await isPortOpen('127.0.0.1', snowlumaWsPort()),
+            running: await isPortOpen('127.0.0.1', snowlumaServicePort()),
             webuiUrl: snowlumaWebuiUrl(),
             ...snowlumaStatus()
           },
@@ -1626,11 +1630,11 @@ export function createApp({ log = console.log } = {}) {
     // 拉起 SnowLuma（如配置了自动启动）、连 OneBot。
     if (getConfig().snowluma?.autoLaunch) {
       try {
-        const wsPort = snowlumaWsPort();
-        if (!(await isPortOpen('127.0.0.1', wsPort))) {
+        const servicePort = snowlumaServicePort();
+        if (!(await isPortOpen('127.0.0.1', servicePort))) {
           const r = await launchSnowluma();
           if (r.ok && r.launched) {
-            for (let i = 0; i < 20 && !(await isPortOpen('127.0.0.1', wsPort)); i++) {
+            for (let i = 0; i < 20 && !(await isPortOpen('127.0.0.1', servicePort)); i++) {
               await new Promise((resolve) => setTimeout(resolve, 1000));
             }
           }
