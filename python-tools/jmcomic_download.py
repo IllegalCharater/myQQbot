@@ -67,21 +67,34 @@ def get_comic_pdf(comic_id, download_dir):
     staging_pdf = os.path.join(staging_dir, f"{comic_id}.pdf")
     option = build_download_option()
 
+    success = False
     try:
-        download_album(
+        result = download_album(
             comic_id,
             option=option,
             extra=Feature.export_pdf(
                 pdf_dir=staging_dir,
-                filename_rule=comic_id,
+                filename_rule="Aid",
                 delete_original_file=True,
             ),
         )
-        if not is_valid_pdf(staging_pdf):
-            raise FileNotFoundError(f"PDF 未生成或文件无效：{staging_pdf}")
-        os.replace(staging_pdf, pdf_path)
+
+        exported = result.manifest.get_export_filepath_list("pdf")
+        if not exported:
+            raise FileNotFoundError(f"jmcomic 未报告 PDF 导出结果，临时目录：{staging_dir}")
+
+        generated_pdf = exported[0]
+        if not is_valid_pdf(generated_pdf):
+            raise FileNotFoundError(f"PDF 未生成或文件无效：{generated_pdf}")
+
+        os.replace(generated_pdf, pdf_path)
+        success = True
     finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        if success:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        else:
+            print(f"[调试] 保留失败现场：{staging_dir}", file=sys.stderr, flush=True)
+    
     return pdf_path, False
 
 
