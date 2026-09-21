@@ -139,6 +139,7 @@ export function createApp({ log = console.log } = {}) {
   // 确保 SnowLuma 随 QQ Agent 退出、无需单独管理窗口。
   const snowlumaLogs = [];
   let snowlumaProc = null;
+  let snowlumaProcessGroup = false;
   let snowlumaStopping = false;
 
   function pushSnowlumaLog(text, stream = 'stdout') {
@@ -158,7 +159,9 @@ export function createApp({ log = console.log } = {}) {
     const proc = snowlumaProc;
     if (!proc) return false;
     try {
-      proc.kill();
+      // launcher.sh 可能再拉起子进程；Linux 下终止整个进程组，避免只关掉 shell 后 SnowLuma 残留。
+      if (snowlumaProcessGroup && process.platform !== 'win32' && proc.pid) process.kill(-proc.pid, 'SIGTERM');
+      else proc.kill();
       pushSnowlumaLog('已请求关闭 SnowLuma。', 'stdout');
     } catch (error) {
       pushSnowlumaLog(`关闭 SnowLuma 失败：${error?.message ?? error}`, 'stderr');
@@ -226,12 +229,47 @@ export function createApp({ log = console.log } = {}) {
     const child = spawn(isWindows ? 'cmd.exe' : '/bin/sh', isWindows ? ['/c', launcher] : [launcher], {
       cwd: dir,
       detached: true,
-      stdio: 'ignore',
+      stdio: isWindows ? 'ignore' : ['ignore', 'pipe', 'pipe'],
       windowsHide: isWindows ? false : undefined // Windows 保留 SnowLuma 自己的控制台窗口
     });
-    child.unref();
-    pushSnowlumaLog(`SnowLuma 已通过 ${launcherName} 启动（此模式下日志不进内置控制台）`, 'stdout');
-    return { ok: true, launched: true, embedded: false };
+
+    // spawn 的 ENOENT 等错误是异步事件；等待 spawn 后再向管理页面报告启动成功。
+    try {
+      await new Promise((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+    } catch (error) {
+      pushSnowlumaLog(`通过 ${launcherName} 启动失败：${error?.message ?? error}`, 'stderr');
+      return { ok: false, error: `无法执行 ${launcherName}：${error?.message ?? error}` };
+    }
+
+    if (isWindows) {
+      child.unref();
+      pushSnowlumaLog(`SnowLuma 已通过 ${launcherName} 启动（此模式下日志不进内置控制台）`, 'stdout');
+      return { ok: true, launched: true, embedded: false };
+    }
+
+    // Linux/macOS 下把脚本进程纳入管理页：转发日志、显示 PID，并允许“停止”按钮关闭进程组。
+    snowlumaProc = child;
+    snowlumaProcessGroup = true;
+    pushSnowlumaLog(`SnowLuma 启动中（${launcherName}，pid=${child.pid}）…`, 'stdout');
+    child.stdout?.on('data', (data) => {
+      for (const line of String(data).split(/\r?\n/)) if (line.trim()) pushSnowlumaLog(line, 'stdout');
+    });
+    child.stderr?.on('data', (data) => {
+      for (const line of String(data).split(/\r?\n/)) if (line.trim()) pushSnowlumaLog(line, 'stderr');
+    });
+    child.on('exit', (code, signal) => {
+      if (snowlumaProc === child) {
+        snowlumaProc = null;
+        snowlumaProcessGroup = false;
+      }
+      pushSnowlumaLog(`SnowLuma 进程已退出（code=${code ?? ''} signal=${signal ?? ''}）`, code ? 'stderr' : 'stdout');
+      emit('snowluma-status', { running: false, embedded: false, pid: null });
+    });
+    emit('snowluma-status', { running: true, embedded: true, pid: child.pid });
+    return { ok: true, launched: true, embedded: true, pid: child.pid };
   }
 
   const emit = (type, payload) => {
@@ -1623,7 +1661,7 @@ export function createApp({ log = console.log } = {}) {
     // 内置启动的 SnowLuma：QQ Agent 退出时一并关掉，避免留一个无窗口的后台进程。
     // 注意：SnowLuma 退出时不一定能立刻把 config 落盘，但我们的 stop 不会再去读它，
     // 下次启动会读到完整文件。
-    try { snowlumaProc?.kill(); } catch { /* ignore */ }
+    try { stopSnowluma(); } catch { /* ignore */ }
   }
 
   return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus };
