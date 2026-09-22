@@ -8,7 +8,7 @@ import { normalizeMessageList, unquoteJsonString } from './util.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 import { webSearch, webFetch } from './web-search.js';
-import { expandForwardNodes } from './onebot.js';
+import { expandForwardNodes, forwardIdFromData } from './onebot.js';
 import { enqueueJmcomicDownload } from './jmcomic.js';
 
 async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
@@ -45,6 +45,25 @@ function midHint(ctx) {
   return uniq.length
     ? `消息 id 只能用聊天记录里每条消息前的 #数字（最近可见：${uniq.join(' ')}），不要自己编`
     : '聊天记录里还没有带 #id 的消息';
+}
+
+/** 从存档的 media 里取转发 res_id（入库时 extractMediaFromSegments 存下的）。 */
+function forwardResIdFromMedia(entry) {
+  const hit = (entry?.media || []).find((x) => x && x.kind === 'forward' && x.id);
+  return hit ? String(hit.id) : '';
+}
+
+// 模型指错 id 时（典型：拿了"引用了某条转发"的那条普通消息的 id），把当前会话里确实
+// 是合并转发的消息列出来，让它下一轮能改对 —— 只报一句"失败"模型只会换着 id 瞎试。
+function forwardHint(ctx) {
+  const ids = ctx.store.recent(ctx.chatKey, { limit: 200 })
+    .filter((m) => m.mid !== null && m.mid !== undefined && String(m.mid) !== '')
+    .filter((m) => /\[合并转发|\[转发消息/.test(String(m.text || '')) || forwardResIdFromMedia(m))
+    .map((m) => String(m.mid));
+  const uniq = [...new Set(ids)].slice(-5);
+  return uniq.length
+    ? `当前会话里确实是合并转发的消息 id：${uniq.join(' ')}，请用其中之一重试`
+    : '当前会话里没有合并转发消息（可能还没收到过，或那条已被撤回）';
 }
 
 // 需要数字 QQ 号但模型传了名字时，把当前会话真实可见的成员列出来，让它选一个。
@@ -277,7 +296,7 @@ export function buildToolDefs() {
     },
     {
       name: 'read_forward',
-      description: '展开查看合并转发的聊天记录。消息文本出现 [合并转发聊天记录] 或 [转发消息 …] 占位符时用。参数填那条转发消息前的 #数字（千万别用方括号里那串长 id，会过期报错）。展开结果会写回存档，以后再看就是展开的文本，不用重复调。',
+      description: '展开查看合并转发的聊天记录。消息文本出现 [合并转发聊天记录] 或 [转发消息 …] 占位符时用。参数 messageId 填**那条转发消息自己**前面的 #数字 —— 不要填"引用了这条转发"的别的消息的 id，也不要自己编。展开结果会写回存档，以后再看就是展开的文本，不用重复调。',
       parameters: {
         type: 'object',
         properties: {
@@ -293,8 +312,26 @@ export function buildToolDefs() {
           if (String(entry.text || '').startsWith('[合并转发 共')) {
             return ok({ messageId: entry.mid, text: entry.text, note: '该转发已展开（读的是存档）' });
           }
-          const r = await ctx.onebot.call('get_forward_msg', { message_id: Number(entry.mid) });
-          const nodes = Array.isArray(r?.messages) ? r.messages : [];
+          // res_id 优先取入库时存下的（省一次 get_msg）；老存档没存就问协议端要 ——
+          // 顺便用它确认这条到底是不是转发，模型指错 id 时能给出可执行的提示。
+          let resId = forwardResIdFromMedia(entry);
+          if (!resId) {
+            let msg = null;
+            try { msg = await ctx.onebot.getMsg(entry.mid); } catch { /* 老消息可能已超出服务端保留范围 */ }
+            if (msg) {
+              const segs = Array.isArray(msg.message) ? msg.message : null;
+              const fwdSeg = segs ? segs.find((s) => s?.type === 'forward') : null;
+              if (!fwdSeg) {
+                const preview = String(entry.text || '').replace(/\s+/g, ' ').slice(0, 60);
+                return err(`消息 ${args.messageId} 不是合并转发，是一条普通消息（内容：${preview}）。${forwardHint(ctx)}`);
+              }
+              resId = forwardIdFromData(fwdSeg.data ?? {});
+            }
+            if (!resId) {
+              return err(`取不到消息 ${args.messageId} 的转发 id（可能已被撤回，或超出服务端保留范围）。${forwardHint(ctx)}`);
+            }
+          }
+          const nodes = await ctx.onebot.getForwardNodes({ resId, messageId: entry.mid });
           const ex = await expandForwardNodes(nodes);
           if (!ex || !ex.text) return err('转发内容为空或已被 QQ 服务端丢弃（发送时间太久）');
           // 写回存档：一次展开，永久升级这条记录（模型/存档页/金句墙都受益）

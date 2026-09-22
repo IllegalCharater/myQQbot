@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
 import { customSearch } from './web-search.js';
-import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
+import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, forwardIdFromData } from './onebot.js';
 import { ChatStore } from './store.js';
 import { MemoryStore } from './memory.js';
 import { StickerManager } from './sticker-manager.js';
@@ -518,14 +518,19 @@ export function createApp({ log = console.log } = {}) {
     }
 
     // 合并转发：占位符 → 展开真实内容（模型要读懂、看懂转发的聊天记录）
-    // 实测结论（2026-09-05，SnowLuma/NapCat）：get_forward_msg 只认 message_id；
-    // res_id（转发卡片里那个 id）会过期，报 "payload is empty"。
+    // 用转发段自带的 res_id 展开 —— 实测（2026-09-22，SnowLuma）get_forward_msg 认 res_id、
+    // 不认 message_id（传后者报 retcode=100 "download forward message payload is empty"）。
+    // 旧注释把结论记反成"只认 message_id、res_id 会过期"，照它写的这行代码从来没成功过：
+    // 每条收到的合并转发都只留下占位符，正文永远进不了存档。
     // 媒体里的 url 此时是新鲜的，一并收进 media（取图/金句都能用）。
     // 展开失败时占位符留在存档里，模型可用 read_forward 工具稍后重试。
-    if (segments && (text.includes('[合并转发') || text.includes('[转发消息')) && event.message_id != null) {
+    const fwdSeg = segments ? segments.find((s) => s?.type === 'forward') : null;
+    if (fwdSeg || text.includes('[合并转发') || text.includes('[转发消息')) {
       try {
-        const r = await onebot.call('get_forward_msg', { message_id: Number(event.message_id) });
-        const nodes = Array.isArray(r?.messages) ? r.messages : (Array.isArray(r?.data?.messages) ? r.data.messages : []);
+        const nodes = await onebot.getForwardNodes({
+          resId: forwardIdFromData(fwdSeg?.data ?? {}),
+          messageId: event.message_id
+        });
         const ex = await expandForwardNodes(nodes);
         if (ex && ex.text) {
           text = ex.text;

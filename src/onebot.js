@@ -207,6 +207,41 @@ export class OneBotClient {
   async getGroupMemberInfo(groupId, userId) {
     return this.call('get_group_member_info', { group_id: Number(groupId), user_id: Number(userId) });
   }
+
+  /**
+   * 展开一条合并转发，返回节点数组（可能是空数组 —— 那表示这条转发确实没内容）。
+   *
+   * ⚠️ 参数形态是踩过坑的。实测（2026-09-22，SnowLuma，群 623820457）：
+   *   get_forward_msg { message_id: -1563345974 }        → retcode=100 "download forward message payload is empty"
+   *   get_forward_msg { id: "e4C6ZyYg…"（转发段的 id）}  → 正常返回全部节点
+   * 即**认 res_id、不认 message_id**，且 res_id 并不像旧注释说的那样会过期。
+   * 旧注释把这个因果记反了（原话："只认 message_id；res_id 会过期，报 payload is empty"），
+   * 据此写出的两处调用（app.js 的入库展开、tools.js 的 read_forward）**从来没成功过** ——
+   * 后果是每条收到的合并转发都只留下占位符，正文永远进不了存档。
+   *
+   * 这里 res_id 优先、message_id 兜底：别的协议端（如 NapCat）可能只认后者，
+   * 代价仅是前者失败时多一次请求。
+   */
+  async getForwardNodes({ resId = '', messageId = null } = {}) {
+    const attempts = [];
+    if (resId) attempts.push({ id: String(resId) });
+    if (messageId !== null && messageId !== undefined && String(messageId).trim() !== '') {
+      attempts.push({ message_id: Number(messageId) });
+    }
+    if (!attempts.length) throw new Error('没有可用的转发 id（res_id 与 message_id 都没有）');
+    let lastError = null;
+    for (const params of attempts) {
+      try {
+        const r = await this.call('get_forward_msg', params);
+        // 接口成功就以它为准：节点为空说明这条转发确实没内容，
+        // 换另一种参数重试只会拿到更含糊的错误、把真正的原因盖掉。
+        return Array.isArray(r?.messages) ? r.messages : (Array.isArray(r?.data?.messages) ? r.data.messages : []);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError ?? new Error('展开合并转发失败');
+  }
 }
 
 // ── 入站事件 → 文本（移植自原版 segmentsToText） ─────────────────────────
@@ -263,8 +298,9 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
       }
       case 'json': out.push(parseCardSegment(d).text); break;
       case 'forward': {
-        // 不带 res_id：那个 id 会过期（payload is empty），打出来只会误导模型拿它当参数。
-        // 模型要看内容用 read_forward 工具 + 消息前的 #数字。
+        // 文本里不带 res_id：模型该用的是消息前的 #数字（read_forward 会自己去取 res_id）。
+        // 实测 res_id 并不会过期（旧注释说"会过期"是记反了），但一串 70 字符的长 id 印在
+        // 聊天记录里只会误导模型拿它当参数。res_id 存在 media 里（kind:'forward'）。
         out.push('[合并转发聊天记录]');
         break;
       }
@@ -393,6 +429,12 @@ export function extractMediaFromSegments(segments) {
       media.push({ kind: 'image', file: String(d.file ?? ''), url: String(d.url ?? ''), summary: String(d.summary ?? '') });
     } else if (seg.type === 'face') {
       media.push({ kind: 'face', faceId: String(d.id ?? '') });
+    } else if (seg.type === 'forward') {
+      // 存下 res_id：get_forward_msg 认它、不认 message_id（见 getForwardNodes），
+      // 存了就不必再花一次 get_msg 去取；顺带让这条消息在提示词里带上 #id，
+      // 模型更容易瞄对目标。这项没有 url/file，金句取图会自动跳过它。
+      const id = forwardIdFromData(d);
+      if (id) media.push({ kind: 'forward', id });
     } else if (seg.type === 'json') {
       // 卡片：结构化字段 + 封面图（封面已在 parseCardSegment 里拆成 kind:'image'）
       media.push(...parseCardSegment(d).media);
@@ -404,9 +446,10 @@ export function extractMediaFromSegments(segments) {
 /**
  * 展开合并转发节点为可读文本（纯函数，便于测试）。
  *
- * 背景：OneBot 事件里的 forward 段只有一个 res_id 占位符，
+ * 背景：OneBot 事件里的 forward 段只带一个 res_id，
  * 需要 get_forward_msg 拿回节点数组（本函数处理的就是这个数组）。
- * 实测 NapCat：{ message_id } 可用；res_id 会过期（payload is empty），别依赖。
+ * 取节点请用 OneBotClient.getForwardNodes —— 它认 res_id、不认 message_id，
+ * 参数形态的实测记录见那个方法的注释。
  *
  * 规则：
  *   - 每个节点一行「昵称: 内容」，内容复用 segmentsToText（@/图片/表情等占位一致）
