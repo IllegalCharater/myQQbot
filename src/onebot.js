@@ -261,7 +261,7 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
         out.push(replyText || '[引用消息]');
         break;
       }
-      case 'json': out.push('[卡片消息]'); break;
+      case 'json': out.push(parseCardSegment(d).text); break;
       case 'forward': {
         // 不带 res_id：那个 id 会过期（payload is empty），打出来只会误导模型拿它当参数。
         // 模型要看内容用 read_forward 工具 + 消息前的 #数字。
@@ -274,6 +274,115 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
   return sanitizeUserText(out.join('').trim());
 }
 
+// ── 卡片消息（json 段）解析 ──────────────────────────────────────────────
+// OneBot 的 json 段是 { type:'json', data:{ data: <JSON字符串|对象> } }，解析出来是
+// 一张卡片报文：app（模板）/ view（展示形态）/ prompt（无法展示时的兜底文字）/ meta
+// （按卡片类型再嵌一层，如 meta.music / meta.news，含 title/desc/jumpUrl/preview/tag）。
+//
+// ⚠️ 卡片报文是完全由群成员伪造的不可信输入，且会进系统提示词，所以：
+//   1. 只按白名单取字段 —— 绝不把卡片对象展开进任何对象（防 __proto__ 原型污染）
+//   2. 绝不在这里请求卡片里的 URL —— jumpUrl / preview 只作为文本和存档输出。
+//      要看内容由模型自己决定 web_fetch（那里有 safe-fetch 的 SSRF 防护）；
+//      否则任何群友发一张卡片就能让本机去请求任意地址（内网探测 / DNS rebinding）。
+//   3. 折叠空白 —— 卡片 title 里若含换行，会伪造出整行假历史
+//      （formatEntry 把 text 原样拼进行里）。这里沿用 expandForwardNodes 的同款做法。
+const CARD_MAX_CHARS = 32 * 1024;   // 超过就不解析了，走 prompt 兜底
+const CARD_FIELD_MAX = 120;
+const CARD_URL_MAX = 300;
+const CARD_TEXT_MAX = 300;
+
+/** 只认字符串/数字，挡掉对象（否则 String({}) 会把 [object Object] 塞进提示词）。 */
+function isTextValue(v) {
+  return typeof v === 'string' || typeof v === 'number';
+}
+
+/** 取文本字段：折叠空白 + 按码点截断（避免把代理对切成乱码）。 */
+function textField(value, max) {
+  if (!isTextValue(value)) return '';
+  const s = String(value).replace(/\s+/g, ' ').trim();
+  if (s.length <= max) return s;
+  return Array.from(s).slice(0, max).join('') + '…';
+}
+
+/** 只收 http/https：mqqapi:// 小程序链接、javascript: 等一律丢弃。 */
+function httpUrlField(value) {
+  const s = textField(value, CARD_URL_MAX);
+  if (!s) return '';
+  try {
+    const u = new URL(s);
+    return (u.protocol === 'http:' || u.protocol === 'https:') ? u.toString() : '';
+  } catch { return ''; }
+}
+
+/**
+ * 从 meta 里挑出承载正文的子对象。
+ * 常见形态是 meta.music / meta.news / meta.miniapp 再嵌一层；也有协议端把
+ * title/desc 直接挂在 meta 上。只下探一层 —— 再深就是小程序自己的私有结构。
+ */
+function firstCardBody(meta) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null;
+  const looksLikeBody = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+    && (textField(v.title, 1) || textField(v.desc, 1) || textField(v.jumpUrl, 1));
+  if (looksLikeBody(meta)) return meta;
+  for (const key of Object.keys(meta)) {
+    if (looksLikeBody(meta[key])) return meta[key];
+  }
+  return null;
+}
+
+/**
+ * 把 json 卡片段解析成可读文本 + 媒体（纯函数，便于测试）。
+ * 解析不出内容时 text 保持 '[卡片消息]'（与旧行为一致，模型会如实说看不到）。
+ *
+ * @param {object} data json 段的 data（形如 { data: <JSON字符串|对象> }）
+ * @returns {{ text: string, media: Array }}
+ */
+export function parseCardSegment(data) {
+  const fallback = { text: '[卡片消息]', media: [] };
+  const raw = data?.data;
+  let card = null;
+
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    card = raw;   // 有的协议端直接给已解析好的对象
+  } else {
+    const str = isTextValue(raw) ? String(raw) : '';
+    if (!str || str.length > CARD_MAX_CHARS) return fallback;
+    try {
+      const parsed = JSON.parse(str);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return fallback;
+      card = parsed;
+    } catch { return fallback; }
+  }
+
+  const app = textField(card.app, 60);
+  const view = textField(card.view, 40);
+  const body = firstCardBody(card.meta);
+  const title = textField(body?.title, CARD_FIELD_MAX);
+  const desc = textField(body?.desc, CARD_FIELD_MAX);
+  const tag = textField(body?.tag, 40);
+  const url = httpUrlField(body?.jumpUrl);
+  const preview = httpUrlField(body?.preview);
+
+  if (!title && !desc && !url) {
+    // 白名单字段全空 → 退回 prompt（协议端准备的"无法展示卡片时的文字"，形如 [QQ小程序]xxx）
+    const prompt = textField(card.prompt, CARD_FIELD_MAX);
+    return prompt ? { text: `[卡片 ${prompt}]`, media: [] } : fallback;
+  }
+
+  // 展示名：优先 tag（"QQ音乐"/"网易云音乐"），退到 view，再退到 app 的末段
+  const label = tag || view || textField(String(app).split('.').pop(), 30);
+  const bits = [];
+  if (title) bits.push(`标题：${title}`);
+  if (desc && desc !== title) bits.push(`描述：${desc}`);
+  if (url) bits.push(`链接：${url}`);
+  // 封面单独作为 image 并存：get_message_images 的筛选条件就是 kind==='image' && url，
+  // 不改一行代码模型就能看到卡片封面；顺带让这条消息在提示词里带上 #id。
+  const media = [{ kind: 'card', app, view, title, desc, url, tag }];
+  if (preview) media.push({ kind: 'image', url: preview, summary: '卡片封面' });
+
+  return { text: textField(`[卡片${label ? ' ' + label : ''}] ${bits.join(' ｜ ')}`, CARD_TEXT_MAX), media };
+}
+
 /** 从消息段提取媒体定位信息（不下载）。 */
 export function extractMediaFromSegments(segments) {
   const media = [];
@@ -284,6 +393,9 @@ export function extractMediaFromSegments(segments) {
       media.push({ kind: 'image', file: String(d.file ?? ''), url: String(d.url ?? ''), summary: String(d.summary ?? '') });
     } else if (seg.type === 'face') {
       media.push({ kind: 'face', faceId: String(d.id ?? '') });
+    } else if (seg.type === 'json') {
+      // 卡片：结构化字段 + 封面图（封面已在 parseCardSegment 里拆成 kind:'image'）
+      media.push(...parseCardSegment(d).media);
     }
   }
   return media;
