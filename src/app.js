@@ -462,17 +462,33 @@ export function createApp({ log = console.log } = {}) {
     return null;
   }
 
-  async function resolveReply(messageId) {
+  // 引用预览的长度上限。原先是 120：卡片解析出的文本最长 300，被截到 120 会丢内容。
+  const REPLY_PREVIEW_MAX = 300;
+
+  /**
+   * 解析被引用消息的原文。
+   * ctx 传当前会话的 kind/id：QQ 里引用只可能发生在同一个会话内，所以被引用消息里的
+   * @ 就是本群成员，能正常解析成群名片（与主消息路径的行为保持一致）。
+   */
+  async function resolveReply(messageId, { kind = '', id = '' } = {}) {
     try {
       const msg = await onebot.getMsg(messageId);
       const senderName = msg?.sender?.card || msg?.sender?.nickname || '';
       let text = '';
       if (Array.isArray(msg?.message)) {
-        text = msg.message.map((s) => (s.type === 'text' ? s.data?.text ?? '' : `[${s.type}]`)).join('').trim();
+        // 必须复用 segmentsToText，不能自己拼。被引用的消息可能是 json 卡片 /
+        // 合并转发 / 图片，自己拼只会得到 "[json]" "[forward]" 这类原始英文段名，
+        // 模型完全读不懂 —— 曾经这里就是这样把"引用了一张卡片"变成四个无用字符。
+        // includeReply:false：引用里再套引用只展开一层，防递归。
+        // 注意这里不展开合并转发（只留占位符），展开是模型用 read_forward 主动做的事。
+        text = await segmentsToText(msg.message, {
+          includeReply: false,
+          resolveAtName: (qq) => (kind === 'group' ? resolveAtName(id, qq) : null)
+        });
       } else if (typeof msg?.message === 'string') {
         text = msg.message;
       }
-      return { sender: String(senderName), text: String(text).slice(0, 120) };
+      return { sender: String(senderName), text: String(text).slice(0, REPLY_PREVIEW_MAX) };
     } catch {
       return null;
     }
@@ -494,7 +510,7 @@ export function createApp({ log = console.log } = {}) {
     let text;
     if (segments) {
       text = await segmentsToText(segments, {
-        resolveReply: (mid) => resolveReply(mid),
+        resolveReply: (mid) => resolveReply(mid, { kind, id }),
         resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : null
       });
     } else {
