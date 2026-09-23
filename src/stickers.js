@@ -150,7 +150,7 @@ export function buildStickerContext(entries, max = 10) {
 /** 发送前的表情包策略提示（软策略）。 */
 export function buildStickerStrategyHint(level = 1) {
   // 活跃度引导放在系统提示的策略段里（而不是"本次输入"的【表情包用法】）——
-  // 同一主题两处引导会左右脑互搏（Kondius 2026-09-07）：策略讲时机、档位讲频率，
+  // 同一主题两处引导会左右脑互搏（2026-09-07）：策略讲时机、档位讲频率，
   // 合并成一处由档位直接改写频率行。
   // ⚠️ 索引严格对应 0~3 档，与 ui 的 STICKER_LEVELS 一致。
   const freqByLevel = [

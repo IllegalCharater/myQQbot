@@ -131,6 +131,34 @@ export const DEFAULT_CONFIG = {
   wakeDelayMs: 2000,        // 空闲时收到消息到发起运行的防抖窗口（等连发聚成一批）
   drainDelayMs: 1200,       // 一次运行结束后发现还有未读，到下一次运行的间隔
   maxConcurrentRuns: 2,     // 全局同时进行的 agent 运行数
+  // 回复态节奏（静默态 ↔ 回复态）。
+  //
+  // 静默→回复的转换点是 scheduleWake 建立"等待中"会话的那一刻；回复→静默是
+  // 运行结束（含失败重试跑完）的 finally。这一组只影响"回复态期间"的行为。
+  reply: {
+    // 等待窗口的**硬上限**：从本批第一条消息算起，等够这么久就不再等新消息、直接回复。
+    // 与 wakeDelayMs（立即回复时间）配合：wakeDelayMs 是尾沿防抖（每条新消息重置），
+    // maxWaitMs 是不被重置的天花板，防止连发不停导致永远不触发。0 = 不限制（= 原行为）。
+    maxWaitMs: 0,
+    // 回复态内的出站限频（条/分钟）。0 = 不额外收紧，沿用 send.maxPerMinute。
+    maxPerMinute: 0,
+    // 命中分钟限频时最多等多久（毫秒）再发。0 = 直接报错（= 原行为）。
+    // 之所以默认等待而非报错：抛错会让那条消息被丢弃，模型还会按提示重发、再失败，
+    // 群里表现为"机器人坏了"。真人撞到打字速度上限时也是停一下再发。
+    maxLimitWaitMs: 20000
+  },
+  // 聊天记录定时压缩：把老消息交给模型摘要成一段纪要写回存档，原文移到冷归档。
+  compact: {
+    enabled: false,             // 默认关：会调 LLM 花钱
+    checkIntervalMs: 3600000,   // 巡检间隔（毫秒）
+    minIntervalMs: 86400000,    // 同一会话两次压缩之间的冷却
+    minMessagesToCompact: 800,  // 存档条数超过它才考虑压缩
+    keepRecentMessages: 300,    // 最近 N 条原样保留、不参与压缩
+    maxMessagesPerRound: 400,   // 单轮最多摘要多少条
+    maxContextChars: 24000,     // 喂给模型的原始文本上限（先按它裁剪，再决定压缩范围）
+    maxChatsPerSweep: 1,        // 一次巡检最多处理几个会话（控成本）
+    compactMemory: true         // 顺带触发一次记忆整理（走它自己的冷却）
+  },
   // 发送保护
   send: {
     minGapMs: 1000,         // 相邻两条消息最小间隔
@@ -167,6 +195,13 @@ export const DEFAULT_CONFIG = {
     //   - store 的 #trim 在 maxPerChat<=0 时直接跳过
     // 注意：单群文件会随时间增长，磁盘占用请自行留意。
     maxMessagesPerChat: 0,
+    // ── 运行时动态上下文窗口 ──
+    // 一次运行最多把多少条未读放进【本次唤醒】。超出时丢最老的（它们会被降级进
+    // 【过去状态】，不会丢失——drainUnread 取走时已全部置为已读，不会再触发运行）。
+    // 用途：长时间离线/被 @ 唤醒时，一次运行可能带上几百条积压，token 会失控。
+    // **0 = 不限制**（= 原行为）。注意它与上面 maxMessagesPerChat 的区别：
+    // 那个管"存档留多少条"（磁盘），这个管"本次运行读多少条"（token）。
+    maxContextMessages: 0,
     // ── 上下文读取档位（决定本次唤醒读多少条历史）──
     // 档位是"累积生效"的：选 4 档时 1/2/3 档也都生效，按 4→3→2→1 顺序检查，
     // 第一个命中的决定读取条数。这个设置替代了原来的 pastStateLimit 固定值。

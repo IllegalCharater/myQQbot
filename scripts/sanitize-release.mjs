@@ -207,6 +207,9 @@ if (!SCAN_ONLY) {
   rmrf('usage-today.json', '今日用量');
   rmrf('feedbacks.json', '反馈记录');
   rmrf('price-feed-cache.json', '远程价格表缓存');
+  // 遥测已从代码中移除，这里顺手清掉旧版本遗留的文件
+  rmrf('telemetry.json', '遥测安装标识');
+  rmrf('telemetry-totals.json', '遥测累计量');
 
   // 中转目录在系统临时文件夹里（不在项目内），尽力清一次即可
   const trashRoot = path.join(os.tmpdir(), 'qq-agent-sanitize');

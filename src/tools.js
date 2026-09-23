@@ -334,7 +334,7 @@ export function buildToolDefs() {
           const nodes = await ctx.onebot.getForwardNodes({ resId, messageId: entry.mid });
           const ex = await expandForwardNodes(nodes);
           if (!ex || !ex.text) return err('转发内容为空或已被 QQ 服务端丢弃（发送时间太久）');
-          // 写回存档：一次展开，永久升级这条记录（模型/存档页/金句墙都受益）
+          // 写回存档：一次展开，永久升级这条记录（模型/存档页都受益）
           ctx.store.updateByMid(ctx.chatKey, entry.mid, { text: ex.text, appendMedia: ex.media || [] });
           return ok({ messageId: entry.mid, text: ex.text, images: (ex.media || []).length });
         } catch (error) {

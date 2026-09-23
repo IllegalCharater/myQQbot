@@ -21,7 +21,7 @@
     "electron": "^33.2.0"
   },
   "license": "MIT",
-  "author": "Kondius",
+  "author": "",
   "keywords": [
     "qq",
     "bot",
@@ -34,10 +34,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Kondius/qq-agent.git"
+    "url": "https://github.com/IllegalCharater/myQQbot.git"
   },
   "bugs": {
-    "url": "https://github.com/Kondius/qq-agent/issues"
+    "url": "https://github.com/IllegalCharater/myQQbot/issues"
   },
-  "homepage": "https://github.com/Kondius/qq-agent#readme"
+  "homepage": "https://github.com/IllegalCharater/myQQbot#readme"
 }

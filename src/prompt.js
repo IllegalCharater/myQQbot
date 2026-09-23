@@ -70,7 +70,7 @@ function subjectivity() {
 
 function speakOrNot(participation) {
   // 参与度档位（安静/普通/活跃）在系统提示里改写引导——放在人设文本里
-  // 变动太无力（Kondius 2026-09-07）：模型不把人设正文当行为指令。
+  // 变动太无力（2026-09-07）：模型不把人设正文当行为指令。
   const style = participationText(participation);
   return [
     `【该说/不该说】${style}`,
@@ -237,6 +237,13 @@ function participationText(level) {
 // withId：是否带 "#消息id" 前缀。id 只在需要引用/看图的场景展示（触发批、带图消息），
 // 纯文本历史行不带，避免整屏数字噪音。
 function formatEntry(m, { withId = true } = {}) {
+  // 压缩摘要条目：它不是某个人说的话，而是一段系统生成的纪要。
+  // 走普通分支会渲染成「[HH:MM] 聊天记录摘要：…」，读起来像群里多了个昵称叫
+  // "聊天记录摘要"的人。摘要文本自带【历史摘要 时间范围 · 共 N 条】表头，
+  // 这里只需前置时间戳，不要再套一层"某人："。
+  if (m.kind === 'digest') {
+    return `[${formatShortTime(m.ts)}] ${String(m.text || '')}`;
+  }
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');
   const who = m.self ? '我' : (notes[senderId] || m.senderName || senderId || '未知');
@@ -485,7 +492,13 @@ export function buildUserPrompt(ctx) {
 
   // 本次唤醒
   const triggerBlock = buildTriggerBlock(ctx.triggerEntries, ctx);
-  parts.push(`【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它）：\n${triggerBlock}`);
+  // 动态上下文窗口裁剪过时要说清楚：否则"以下是你还没看过的最新消息"就成了假话，
+  // 模型可能意识不到自己漏看了一波消息的开头。这些条并没有丢，只是降级进了【过去状态】。
+  const folded = Math.max(0, Number(ctx.foldedAway) || 0);
+  const foldedNote = folded > 0
+    ? `\n（这批消息较早的 ${folded} 条已折入【过去状态】，需要时用 get_recent_messages 往前翻）`
+    : '';
+  parts.push(`【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它）：${foldedNote}\n${triggerBlock}`);
 
   // 参与度已并入系统提示的【该说/不该说】，这里不再重复。
 

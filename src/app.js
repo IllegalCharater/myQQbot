@@ -18,7 +18,6 @@ import { Orchestrator } from './orchestrator.js';
 import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from './llm.js';
 import { resolveOfficialPrice, listOfficialPrices, isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from './model-prices.js';
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from './price-feed.js';
-import { startTelemetryLoop } from './telemetry.js';
 import { importFromDsh, currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from './providers.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
@@ -48,27 +47,13 @@ function allowed(kind, id, cfg) {
   return cfg.allowAllWhenEmpty === true;
 }
 
-// ── 版本更新检查 ─────────────────────────────────────────────────────
-// 线上版本信息只有一份：kondius.cn/qq-agent/version.json（发版时手动改）。
-// 由后端代取而不是前端直连：绕过 CORS，且失败信息能统一回给 UI。
-const UPDATE_INFO_URL = 'https://kondius.cn/qq-agent/version.json';
-
+// ── 版本信息 ─────────────────────────────────────────────────────────
+// 只读本机 package.json，不做任何联网检查。
 function localVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
     return String(pkg.version || '0.0.0');
   } catch { return '0.0.0'; }
-}
-
-/** x.y.z 三段数字比较；返回 1 / 0 / -1。非数字段按 0 处理，够用。 */
-function compareSemver(a, b) {
-  const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0);
-  const pb = String(b).split('.').map((x) => parseInt(x, 10) || 0);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
-    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
-  }
-  return 0;
 }
 
 export function createApp({ log = console.log } = {}) {
@@ -522,7 +507,7 @@ export function createApp({ log = console.log } = {}) {
     // 不认 message_id（传后者报 retcode=100 "download forward message payload is empty"）。
     // 旧注释把结论记反成"只认 message_id、res_id 会过期"，照它写的这行代码从来没成功过：
     // 每条收到的合并转发都只留下占位符，正文永远进不了存档。
-    // 媒体里的 url 此时是新鲜的，一并收进 media（取图/金句都能用）。
+    // 媒体里的 url 此时是新鲜的，一并收进 media（模型看图/存档页展示都能用）。
     // 展开失败时占位符留在存档里，模型可用 read_forward 工具稍后重试。
     const fwdSeg = segments ? segments.find((s) => s?.type === 'forward') : null;
     if (fwdSeg || text.includes('[合并转发') || text.includes('[转发消息')) {
@@ -1244,6 +1229,8 @@ export function createApp({ log = console.log } = {}) {
         const next = updateConfig(patch);
         store.setMaxPerChat(next.store?.maxMessagesPerChat ?? 0);
         if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
+        // 压缩巡检同理：开关一改就立刻生效，不用重启进程
+        if (next.compact?.enabled) orchestrator.startCompactLoop(); else orchestrator.stopCompactLoop();
         initPriceFeed(next.api?.priceRemoteUrl || '');   // 远程价格表 URL 可能改了（内部幂等）
         emit('status', { configUpdated: true });
         return json(res, 200, { ok: true, config: next });
@@ -1252,25 +1239,6 @@ export function createApp({ log = console.log } = {}) {
       if (pathname === '/api/version' && method === 'GET') {
         // 纯本地读取，无网络依赖：设置页"当前版本"展示用
         return json(res, 200, { version: localVersion() });
-      }
-
-      if (pathname === '/api/update-check' && method === 'GET') {
-        const current = localVersion();
-        try {
-          const r = await fetch(UPDATE_INFO_URL, { signal: AbortSignal.timeout(8000), cache: 'no-store' });
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          const info = await r.json();
-          const latest = String(info.version || '');
-          if (!latest) throw new Error('version.json 缺少 version 字段');
-          return json(res, 200, {
-            ok: true, current, latest,
-            hasUpdate: compareSemver(latest, current) > 0,
-            url: String(info.url || 'https://kondius.cn/qq-agent'),
-            notes: String(info.notes || '')
-          });
-        } catch (error) {
-          return json(res, 200, { ok: false, current, error: String(error?.message ?? error) });
-        }
       }
 
       if (pathname === '/api/models' && method === 'GET') {
@@ -1283,7 +1251,7 @@ export function createApp({ log = console.log } = {}) {
       }
 
       if (pathname === '/api/sessions' && method === 'GET') {
-        // 上限 2^20（Kondius 钦定 1048576）：约等于不限，但拦得住真正的失控请求。
+        // 上限 2^20（1048576）：约等于不限，但拦得住真正的失控请求。
         // 前端靠分页（一次渲染 50 条）避免卡顿，后端不截断。
         const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
         return json(res, 200, { sessions: sessions.listSummaries(limit) });
@@ -1299,6 +1267,15 @@ export function createApp({ log = console.log } = {}) {
       if (pathname === '/api/chats' && method === 'GET') {
         const chats = store.listChats().map((key) => ({ key, ...store.getChatMeta(key) }))
           .sort((a, b) => b.lastTs - a.lastTs);
+        // 静默/回复态与压缩状态：15s 轮询即使漏了 SSE 事件也能自己纠正。
+        // 对照下面 memory-files 的 f.consolidating = busy.has(...) 的写法。
+        const compacting = orchestrator.compacting;
+        for (const c of chats) {
+          const st = orchestrator.chatState(c.key);
+          c.replying = st?.state === 'replying';
+          c.phase = c.replying ? (st.phase || '') : '';
+          c.compacting = compacting.has(c.key);
+        }
         // 附带群名，让 UI 能显示"群名（群号）"。
         // 群名要调 OneBot 拿，可能慢或失败 —— 用 allSettled 保证绝不影响主流程：
         // 拿不到的 chatName 为空，UI 自动退回只显示群号。
@@ -1419,73 +1396,41 @@ export function createApp({ log = console.log } = {}) {
         }
       }
 
+      // 手动压缩某个会话的历史记录（存档页的"立即压缩"按钮）。
+      // 这是验证压缩功能的唯一手段 —— 否则只能等巡检（默认每小时看一眼，
+      // 同一会话还有 24 小时冷却）。
+      const chatCompactMatch = /^\/api\/chats\/(group|private)_(\d+)\/compact$/.exec(pathname);
+      if (chatCompactMatch && method === 'POST') {
+        const chatKey = `${chatCompactMatch[1]}:${chatCompactMatch[2]}`;
+        try {
+          // 这里**同步等待**结果（不像记忆整理那样 202 后走 SSE）：手动动作需要
+          // 明确的成功/失败交代，模型调用最长可能到超时，前端配 loading 即可。
+          const result = await orchestrator.compactChat(chatKey, { force: true });
+          emit('chat-update', chatKey);
+          if (!result?.ok) return json(res, 409, { ok: false, error: result?.note || '压缩未执行' });
+          return json(res, 200, { ...result, chatKey });
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
       const chatMsgMatch = /^\/api\/chats\/(group|private)_(\d+)\/messages$/.exec(pathname);
       if (chatMsgMatch && method === 'GET') {
         const chatKey = `${chatMsgMatch[1]}:${chatMsgMatch[2]}`;
-        // 单群消息上限 2^20（Kondius 钦定）：约等于不限，存档一口气全给
+        // 单群消息上限 2^20：约等于不限，存档一口气全给
         const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
         const messages = store.recent(chatKey, { limit }).map((m) => ({
           id: m.id, mid: m.mid, ts: m.ts, senderId: m.senderId, senderName: m.senderName,
           text: m.text, self: m.self, read: m.read, reply: m.reply,
-          // media 必须带：金句上传要靠它把图片 URL 传给服务器转存
+          // media 必须带：存档页要靠它把图片 URL 交给前端渲染
           // （曾经漏了这个字段，前端收到的 media 永远是 undefined → 图片全丢）
-          media: m.media || []
+          media: m.media || [],
+          // 压缩摘要条目（kind:'digest'）要在存档页换一种样式：它不是某个人
+          // 说的话，多行文本靠已有的 white-space: pre-wrap 正常显示。
+          kind: m.kind || '',
+          digest: m.digest || null
         }));
         return json(res, 200, { chatKey, messages });
-      }
-
-      // ── 金句上传取图：把存档消息里的图片转成 dataURL ──
-      // 背景：存档只存图片 URL，而 QQ 图床的 rkey 会过期（失效后全网 400 invalid url，
-      // 服务器转存必败、原图也救不回）。NapCat/SnowLuma 收到图时有本地缓存，
-      // 走 OneBot get_image 拿缓存文件读出来，彻底不依赖 URL 时效。
-      // POST { items: [{ file, url }] } → { results: [{ dataUrl } | null, ...] }
-      const mediaDataMatch = pathname === '/api/media-data';
-      if (mediaDataMatch && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          const items = Array.isArray(body?.items) ? body.items.slice(0, 20) : [];
-          const mimeOf = (p) => /\.png$/i.test(p) ? 'image/png' : /\.gif$/i.test(p) ? 'image/gif' : /\.webp$/i.test(p) ? 'image/webp' : 'image/jpeg';
-          const fileToDataUrl = (fp) => {
-            const st = fs.statSync(fp);   // 不存在直接抛
-            if (st.size > 15 * 1024 * 1024) return null;
-            return `data:${mimeOf(fp)};base64,${fs.readFileSync(fp).toString('base64')}`;
-          };
-          const results = [];
-          for (const it of items) {
-            let dataUrl = null;
-            // 路径 1：OneBot get_image → NapCat 本地缓存文件
-            try {
-              const ret = await onebot.call('get_image', { file: String(it?.file || '') });
-              if (ret?.file && fs.existsSync(String(ret.file))) dataUrl = fileToDataUrl(String(ret.file));
-              // 有的实现返回的是可下载的 url
-              if (!dataUrl && ret?.url) {
-                const r = await fetch(String(ret.url), { signal: AbortSignal.timeout(10000) });
-                if (r.ok) {
-                  const buf = Buffer.from(await r.arrayBuffer());
-                  if (buf.length && buf.length <= 15 * 1024 * 1024) {
-                    dataUrl = `data:${r.headers.get('content-type') || 'image/jpeg'};base64,${buf.toString('base64')}`;
-                  }
-                }
-              }
-            } catch { /* 缓存没有就走下一条 */ }
-            // 路径 2：直接拉存档里的 URL（新消息 URL 还没过期时有效）
-            if (!dataUrl && it?.url) {
-              try {
-                const r = await fetch(String(it.url), { signal: AbortSignal.timeout(10000) });
-                if (r.ok && (r.headers.get('content-type') || '').startsWith('image/')) {
-                  const buf = Buffer.from(await r.arrayBuffer());
-                  if (buf.length && buf.length <= 15 * 1024 * 1024) {
-                    dataUrl = `data:${r.headers.get('content-type')};base64,${buf.toString('base64')}`;
-                  }
-                }
-              } catch { /* 过期就放弃，返回 null 让前端保留原 URL */ }
-            }
-            results.push(dataUrl ? { dataUrl } : null);
-          }
-          return json(res, 200, { ok: true, results });
-        } catch (error) {
-          return json(res, 200, { ok: false, error: String(error?.message ?? error), results: [] });
-        }
       }
 
       // 群成员列表（OneBot get_group_member_list），用于备注与记忆页成员展示
@@ -1645,9 +1590,6 @@ export function createApp({ log = console.log } = {}) {
     }
     if (port == null) throw lastError ?? new Error('无法监听端口');
 
-    // 匿名用量遥测：启动 90 秒后发第一次，之后每 6 小时一次；失败静默不影响使用
-    startTelemetryLoop(log);
-
     // 拉起 SnowLuma（如配置了自动启动）、连 OneBot。
     if (getConfig().snowluma?.autoLaunch) {
       try {
@@ -1673,6 +1615,8 @@ export function createApp({ log = console.log } = {}) {
     }
     await onebot.connect();
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
+    // 压缩巡检：启动时按当前开关决定是否拉起（默认关，会在 60s 后才第一次巡检）
+    if (getConfig().compact?.enabled) orchestrator.startCompactLoop(); else orchestrator.stopCompactLoop();
     log(`控制台已就绪：http://127.0.0.1:${port}`);
     log(`OneBot（SnowLuma）: ws=${getConfig().snowluma?.wsUrl} http=${getConfig().snowluma?.httpUrl}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);

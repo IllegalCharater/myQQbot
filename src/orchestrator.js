@@ -10,7 +10,7 @@
 // 不同会话之间并行，受 maxConcurrentRuns 全局限流。
 import { getConfig, storeConfigForChat } from './config.js';
 import { vendorOfConfig } from './model-prices.js';
-import { sleep, randInt, createEventBus, todayKey } from './util.js';
+import { sleep, randInt, createEventBus, todayKey, formatShortTime } from './util.js';
 import { buildSystemPrompt, buildUserPrompt, resolveContextTier } from './prompt.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from './llm.js';
 import { buildToolDefs, toOpenAiTools, executeTool } from './tools.js';
@@ -38,6 +38,22 @@ export class Orchestrator {
     this.runningChats = new Set();     // 正在运行的 chatKey
     this.activeRuns = new Map();       // chatKey -> sessionId
     this.runSeq = new Map();           // chatKey -> 第几次处理（跨重启清零即可）
+    // chatKey -> {
+    //   state: 'silent' | 'replying',
+    //   phase: 'waiting' | 'running' | '',
+    //   since: 进入回复态的时刻（用于 UI 显示"回复中 3s"），
+    //   batchStartedAt: 本批第一条消息的时刻（等待窗口硬上限的计时起点），
+    //   roll: 本批固定的随机骰子（0~100，见 #predictTier 的说明），
+    //   waitingSessionId: 当前"等待中"会话 id
+    // }
+    //
+    // 为什么不从 pendingWake / runningChats 推导状态？scheduleWake 里档位预判翻转为
+    // "不响应"时会丢弃等待会话（#discardWaiting），而 pendingWake 仍置位、计时器仍
+    // armed —— 推导出来的状态会对一个明显什么都没做的会话报"回复态"。只有显式的
+    // Map 才能让"静默态"有意义，也才能让状态跟随用户真正看得到的等待会话。
+    this.chatStates = new Map();
+    this.compacting = new Set();       // 正在压缩历史记录的 chatKey
+    this.compactTimer = null;
     this.paused = false;
     this.pauseReason = null;
     this.proactiveTimer = null;
@@ -52,6 +68,93 @@ export class Orchestrator {
     for (const chatKey of this.store.listChats()) {
       if (this.store.unreadCount(chatKey) > 0) this.scheduleWake(chatKey, 0);
     }
+  }
+
+  // ── 静默态 / 回复态 ────────────────────────────────────────────────────
+  //
+  // 静默态 = 没有在对这个会话作答（不在表里或 state==='silent'）
+  // 回复态 = 已经从这批消息里判定"要回应"，正在等待窗口里聚批或正在跑 agent
+  //
+  // 转换点（全部幂等，重入不会重置时钟）：
+  //   静默→回复：scheduleWake 真正建出"等待中"会话时 / wake 开始跑 agent 时
+  //   回复→静默：wake 的 finally / 等待会话被丢弃或终结的每一个出口
+  //
+  // 这一组只是"状态的表达"，不改变原有的触发逻辑；它存在的意义是让
+  // ①回复态限速 ②等待窗口的硬上限 ③UI/接口能如实说出"它现在在干嘛"。
+
+  /** 当前状态；null = 静默态。 */
+  chatState(chatKey) {
+    return this.chatStates.get(chatKey) || null;
+  }
+
+  #ensureState(chatKey) {
+    let st = this.chatStates.get(chatKey);
+    if (!st) {
+      st = { state: 'silent', phase: '', since: 0, batchStartedAt: 0, roll: null, waitingSessionId: null };
+      this.chatStates.set(chatKey, st);
+    }
+    return st;
+  }
+
+  /** 进入回复态（幂等）。已在回复态时不重置 since —— drain 重入、waiting→running
+   *  都不该让"回复中"的计时归零。 */
+  #enterReplying(chatKey, { phase = undefined, waitingSessionId = undefined } = {}) {
+    const st = this.#ensureState(chatKey);
+    if (st.state !== 'replying') {
+      st.state = 'replying';
+      st.since = Date.now();
+    }
+    if (phase !== undefined) st.phase = phase;
+    if (waitingSessionId !== undefined) st.waitingSessionId = waitingSessionId;
+    this.sender.setReplying?.(chatKey, true);
+  }
+
+  /**
+   * 回到静默态（幂等）。
+   *
+   * **直接删键**（而不是留着写 state='silent'）：本 Map 的契约就是
+   * 「有 = 回复态，无 = 静默态」，/api/status 又把它整表透出。留墓碑的话，
+   * 每个曾经醒过的会话都会在状态里永久占一行空壳，越跑越多。
+   * 下次 scheduleWake 会经 #setBatchStart 重新建，代价为零。
+   *
+   * ⚠️ 刻意不 clearTimeout(this.wakeTimers)：计时器归 scheduleWake/wake 管，
+   *    在这里杀它会让防抖窗口内后续到达的消息失去触发。这里只表达"状态"。
+   */
+  #exitReplying(chatKey) {
+    const st = this.chatStates.get(chatKey);
+    if (!st) return;
+    // 连 silent 墓碑一起删：#setBatchStart 会先建出一张 state:'silent' 的表，
+    // 若这批最后判定"不响应"，它就会以墓碑形态留在表里。出口统一清干净。
+    this.chatStates.delete(chatKey);
+    if (st.state === 'replying') this.sender.setReplying?.(chatKey, false);
+  }
+
+  /**
+   * 打点"本批第一条消息"：等待窗口的硬上限（reply.maxWaitMs）从这里算起，
+   * 同时作废上一批的随机骰子。
+   * ⚠️ 记在 chatStates 而不是等待会话上：会话是惰性创建、且会在预判"不响应"时
+   *    被丢弃重建，放在它上面会让一次"丢弃→重建"静默重启硬上限。
+   */
+  #setBatchStart(chatKey, ts = Date.now()) {
+    const st = this.#ensureState(chatKey);
+    st.batchStartedAt = ts;
+    st.roll = null;   // 新批次重新掷骰子（见 #batchRoll）
+    return st;
+  }
+
+  /**
+   * 取本批**固定**的随机骰子；不存在则掷一次并固定下来。
+   *
+   * #predictTier（防抖窗口内每次来消息都会调）与 wake（真正运行前）共用它，
+   * 这样随机档在一次批次里只掷一次骰子。此前两处各自 Math.random()，
+   * 结果是 randomPercent:10 的 3 档群在窗口内每来一条消息就重掷一次，
+   * 在"响应/不响应"之间反复横跳（UI 上表现为状态闪烁 + 会话记的档位理由
+   * 与放行它的那次判定对不上）。resolveContextTier 本来就支持传入 roll。
+   */
+  #batchRoll(chatKey) {
+    const st = this.#ensureState(chatKey);
+    if (st.roll === null || st.roll === undefined) st.roll = Math.random() * 100;
+    return st.roll;
   }
 
   // ── 入站接口 ───────────────────────────────────────────────────────────
@@ -84,7 +187,10 @@ export class Orchestrator {
       selfNickname: cfg.persona?.selfNickname || this.onebot.selfNickname || '',
       botName: cfg.persona?.botName || '',
       selfId: cfg.onebot?.selfId || this.onebot.selfId || '',
-      cfg: storeConfigForChat(chatKey)   // 按会话取档位：统一开关关闭时各群可以有独立滑条
+      cfg: storeConfigForChat(chatKey),  // 按会话取档位：统一开关关闭时各群可以有独立滑条
+      // 骰子固定：窗口内每次来消息都重判，但必须用同一颗骰子，
+      // 否则随机档会随每条新消息翻来覆去（见 #batchRoll）
+      roll: this.#batchRoll(chatKey)
     });
     // 没有未读就不算"需要响应"（防抖窗口刚建立时的空转）
     if (entries.length === 0) return { ...r, shouldRespond: false, reason: '无未读' };
@@ -92,9 +198,31 @@ export class Orchestrator {
   }
 
   scheduleWake(chatKey, delay = null) {
-    const ms = delay ?? Math.max(0, Number(getConfig().wakeDelayMs) || 2000);
-    if (this.pendingWake.has(chatKey)) clearTimeout(this.wakeTimers.get(chatKey));
+    const cfg = getConfig();
+    // delay 显式传入 = 调用方自己定节奏（跑后 drain / 手动唤醒 / 恢复补处理 / 并发满重试），
+    // 不是"静默→回复"的转换，因此跳过等待窗口的硬上限与批次打点，用给多少就是多少。
+    const explicit = delay !== null && delay !== undefined;
+    const immediateMs = explicit ? Math.max(0, Number(delay) || 0) : Math.max(0, Number(cfg.wakeDelayMs) || 2000);
+    const maxWaitMs = explicit ? 0 : Math.max(0, Number(cfg.reply?.maxWaitMs) || 0);
+
+    const alreadyWaiting = this.pendingWake.has(chatKey);
+    if (alreadyWaiting) clearTimeout(this.wakeTimers.get(chatKey));
     this.pendingWake.add(chatKey);
+
+    // 批次打点：只在"本批第一条消息"上打。窗口内的后续消息只重置尾沿计时器，
+    // 不重置硬上限的起点 —— 否则连发不停就永远等不到触发，这正是要解决的问题。
+    if (!alreadyWaiting) this.#setBatchStart(chatKey);
+
+    // 等待窗口 = 尾沿防抖（immediateMs，每条新消息重置）+ 硬上限（maxWaitMs，不重置）。
+    // 只用一个计时器：把延迟钳到"距硬上限还剩多久"即可 —— 为
+    // min(immediateMs, 剩余) armed 的计时器恰好在上限时刻触发。
+    // 比"再加一个不重置的计时器"严格更优：单计时器不可能双触发，也不会留下过期回调。
+    // maxWaitMs === 0 时 ms === immediateMs，与改造前逐字节一致。
+    let ms = immediateMs;
+    if (maxWaitMs > 0) {
+      const startedAt = this.chatStates.get(chatKey)?.batchStartedAt || Date.now();
+      ms = Math.max(0, Math.min(immediateMs, startedAt + maxWaitMs - Date.now()));
+    }
 
     // 等待窗口 > 0：在会话页立刻创建“等待中”会话，并随新消息重置倒计时
     //
@@ -108,11 +236,12 @@ export class Orchestrator {
         // 不响应：把已存在的等待会话撤掉（例如刚被艾特、随后判定又不成立的情况）
         const stale = this.pendingSessions.get(chatKey);
         if (stale) {
-          this.#discardWaiting(stale);   // 干净消失，不留"中止"
+          this.#discardWaiting(stale);   // 干净消失，不留"中止"（内部会退回静默态）
           this.pendingSessions.delete(chatKey);
         }
         this.emit('chat-update', chatKey);
         // 定时器仍然保留：窗口内可能来新消息，届时重新预判
+        // （批次打点不重置 —— 判定翻转不该让硬上限重新计时）
       } else {
       const unread = this.store.peekUnread(chatKey, 3);
       const first = unread[0];
@@ -120,7 +249,12 @@ export class Orchestrator {
       const waitUntil = Date.now() + ms;
       const existing = this.pendingSessions.get(chatKey);
       if (existing) {
-        const s = this.sessions.get(existing);
+        // ⚠️ 必须取**活对象**（sessions.current），不能用 sessions.get()：
+        //    get() 返回的是 structuredClone，改它等于改一份抛弃的副本 ——
+        //    下面 sessions.update() 读的又是活对象，于是 waitUntil/trigger 的刷新
+        //    静默失效。原先就是 get()，导致"等待中"会话的倒计时永远停在第一次
+        //    算出的时刻（本文件的其它地方早就在用 sessions.current.get 这个写法）。
+        const s = this.sessions.current.get(existing);
         if (s && s.status === 'waiting') {
           s.waitUntil = waitUntil;
           s.triggerSummary = summary;
@@ -143,13 +277,19 @@ export class Orchestrator {
         this.pendingSessions.set(chatKey, session.id);
         this.emit('session-start', { sessionId: session.id, chatKey, status: 'waiting', triggerSummary: summary });
       }
+      // 静默→回复：真正出现"等待中"会话才算进入回复态，
+      // 与上面的反闪烁规则一致（没有可见的等待会话就对外维持静默）。
+      this.#enterReplying(chatKey, { phase: 'waiting', waitingSessionId: this.pendingSessions.get(chatKey) ?? null });
       this.emit('chat-update', chatKey);
       }
     }
 
     const timer = setTimeout(() => {
       this.pendingWake.delete(chatKey);
-      const waitingId = this.pendingSessions.get(chatKey);
+      // 并发满时 wake 会调 scheduleWake(chatKey, 0)，ms===0 从不写 pendingSessions，
+      // 只认 pendingSessions 会让原等待会话变成孤儿（永远停在 waiting）。
+      // chatStates 里记着它，优先取那边。
+      const waitingId = this.chatStates.get(chatKey)?.waitingSessionId ?? this.pendingSessions.get(chatKey);
       this.pendingSessions.delete(chatKey);
       if (this.paused || this.aborted || this.runningChats.has(chatKey)) {
         if (waitingId) this.#finishWaiting(waitingId, 'aborted');
@@ -172,6 +312,8 @@ export class Orchestrator {
     if (!sessionId) return;
     const s = this.sessions.current.get(sessionId);
     this.sessions.discard(sessionId);
+    // 回复态的出口之一：等待会话没了，就该对外回到静默态
+    if (s?.chatKey) this.#exitReplying(s.chatKey);
     this.emit('session-end', {
       sessionId,
       chatKey: s?.chatKey || '',
@@ -186,6 +328,8 @@ export class Orchestrator {
     if (!s || s.status !== 'waiting') return;
     if (error) s.error = error;
     this.sessions.finish(sessionId, status);
+    // 所有中止路径的公共出口：暂停 / 未设模型 / 无未读 / 计时器触发时已暂停
+    if (s.chatKey) this.#exitReplying(s.chatKey);
     this.emit('session-end', { sessionId, chatKey: s.chatKey, status, error: s.error || null });
   }
 
@@ -201,7 +345,13 @@ export class Orchestrator {
   async wake(chatKey, { proactive = false, waitingSessionId = null } = {}) {
     if (this.aborted) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.paused && !proactive) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
-    if (this.runningChats.has(chatKey)) return;
+    if (this.runningChats.has(chatKey)) {
+      // 该会话已在跑（例如并发满的重试撞上了新的一轮）。
+      // 必须终结等待会话再走 —— 原先这里是裸 return，等待会话会被永久滞留在
+      // waiting，会话页永远挂着一条不会前进的条目，状态机也退不回静默态。
+      if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted');
+      return;
+    }
 
     // 模型未设置：不产生报错会话，消息保留为未读；设置模型后（下一条消息或手动唤醒）自动补处理
     if (!String(getConfig().api.model || '').trim()) {
@@ -274,6 +424,25 @@ export class Orchestrator {
       return; // 没有未读就不空跑
     }
 
+    // ── 运行时动态上下文窗口：超出上限就丢最老的 ──
+    // 收口点只能在这里：drainUnread 取走的快照**就是**"本次运行的动态上下文"。
+    // 关键前提是 drainUnread 返回前已把**全部**未读置为已读（store.js:123-129），
+    // 所以被丢掉的条目不可能再次触发运行 —— 它们是"降级"而不是"丢失"：
+    // buildPastState 的 excludeIds 拿到的是**裁剪后**的列表（prompt.js:442），
+    // 被丢的 id 不再被排除，会作为已读历史出现在【过去状态】里。
+    // 这正是现有"不响应→之后被 @"路径依赖的同一套降级机制（见上面 markAllRead 分支）。
+    //
+    // ⚠️ 不要把这个上限加到 #predictTier 的 peekUnread 上：那是艾特/关键词判定，
+    //    积压几百条时埋在里面的 @ 会被漏判。
+    // ⚠️ 也不要给 get_recent_messages 加钳制：那是模型主动发起的查询，
+    //    钳死会让存档对唯一的消费者不可达。
+    let foldedAway = 0;
+    const ctxCap = Math.max(0, Number(cfgNow.store?.maxContextMessages) || 0);
+    if (!proactive && ctxCap > 0 && triggerEntries.length > ctxCap) {
+      foldedAway = triggerEntries.length - ctxCap;
+      triggerEntries = triggerEntries.slice(-ctxCap);   // 留最新、丢最老
+    }
+
     // ── 档位：响应时带多少条已读历史 ──
     // 在唤醒时算一次并固定下来（尤其是随机档的骰子结果），
     // 否则后续每次渲染提示词都会重新掷，会话记录与提示词会对不上。
@@ -282,10 +451,15 @@ export class Orchestrator {
       selfNickname: cfgNow.persona?.selfNickname || this.onebot.selfNickname || '',
       botName: cfgNow.persona?.botName || '',
       selfId: cfgNow.onebot?.selfId || this.onebot.selfId || '',
-      cfg: storeConfigForChat(chatKey)   // 与 #predictTier 同一来源，保证预判/实跑一致
+      cfg: storeConfigForChat(chatKey),  // 与 #predictTier 同一来源，保证预判/实跑一致
+      // 与 #predictTier 用**同一颗**固定骰子 —— 否则预判放行了、实跑又掷一次，
+      // 可能出现"窗口显示等待中、真要跑时却判成不响应"（反之亦然）。
+      roll: this.#batchRoll(chatKey)
     });
 
     this.runningChats.add(chatKey);
+    // 状态机：静默→回复。phase 转 running；since 若已是回复态则保留（drain 重入不重置时钟）
+    this.#enterReplying(chatKey, { phase: 'running', waitingSessionId });
     const seq = (this.runSeq.get(chatKey) || 0) + 1;
     this.runSeq.set(chatKey, seq);
     const [kind, chatId] = String(chatKey).split(':');
@@ -325,7 +499,7 @@ export class Orchestrator {
     try {
       for (let attempt = 1; attempt <= MAX_SESSION_ATTEMPTS; attempt++) {
         try {
-          await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit: tierResult.count, tierInfo: tierResult });
+          await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit: tierResult.count, tierInfo: tierResult, foldedAway });
           lastError = null;
           break;
         } catch (error) {
@@ -357,6 +531,10 @@ export class Orchestrator {
     } finally {
       this.activeRuns.delete(chatKey);
       this.runningChats.delete(chatKey);
+      // 状态机：回复→静默。放在 finally 且循环之外 —— 3 次重试共用这一次转移，
+      // 重试不可能重复进出状态。下面的 drain 会以 phase:'waiting' 再进来，
+      // 所以"还在答话"期间状态并不会真正掉回静默（符合预期）。
+      this.#exitReplying(chatKey);
       this.emit('chat-update', chatKey);
     }
 
@@ -395,7 +573,7 @@ export class Orchestrator {
     this.emit('session-update', session.id);
   }
 
-  async #runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit = null, tierInfo = null }) {
+  async #runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit = null, tierInfo = null, foldedAway = 0 }) {
     const cfg = getConfig();
     const chatName = kind === 'group' ? await this.#chatName(chatId) : '';
     const selfNickname = kind === 'group' ? (cfg.persona.selfNickname || this.onebot.selfNickname || cfg.persona.botName) : cfg.persona.botName;
@@ -432,7 +610,8 @@ export class Orchestrator {
       moreUnreadDuringRun: this.store.unreadCount(chatKey) > 0,
       proactive,
       contextLimit,
-      tierInfo
+      tierInfo,
+      foldedAway
     });
 
     session.systemPrompt = systemPrompt;
@@ -876,6 +1055,11 @@ export class Orchestrator {
     const uidToName = new Map();
     for (const m of this.store.recent(chatKey, { limit: 2000 })) {
       if (m.self || !m.senderId) continue;
+      // 压缩摘要的 senderId 是 'digest'，不跳过就会造出一个幻影成员
+      // （名字"聊天记录摘要"），进而生成"对聊天记录摘要的印象"这种幻觉。
+      // 这里跳过而不是加进 PLACEHOLDER_NAMES：那个表是按**名字**匹配的，
+      // 而问题出在条目类型，用 kind 判定才准确。
+      if (m.kind === 'digest') continue;
       const uid = String(m.senderId);
       memberMsgCount.set(uid, (memberMsgCount.get(uid) || 0) + 1);
       const nm = String(m.senderName || '').trim();
@@ -1077,6 +1261,268 @@ export class Orchestrator {
     this.proactiveTimer = null;
   }
 
+  // ── 定时压缩：摘要入档 + 原文冷归档 ─────────────────────────────────────
+  //
+  // 长期运行的群里存档只增不减：磁盘慢慢变大，【过去状态】也越来越贵。
+  // 压缩把最老的一段交给模型摘要成一段纪要写回存档，原文移到冷归档（**不删除**）。
+  //
+  // 安全姿态（每一处都是刻意的）：
+  //   - 摘要在**前面**：模型必须先返回可用摘要，此后才删任何东西；摘要失败 = 整轮零改动。
+  //   - 只归档"模型真正看到的那部分"：先按字符预算从新往旧回填提示词，据此裁剪区间。
+  //   - 按显式 id 集合删，不按下标（LLM 调用期间新到的消息会让下标错位）。
+
+  /**
+   * 启动压缩巡检（自重新调度的 setTimeout 链，镜像 startProactiveLoop）。
+   * 区别：补上了 unref()（姿态同 price-feed.js）—— 巡检是纯维护任务，
+   * 不该因为它一个 timer 把进程钉住不让退出。首次延迟也错开（60s vs proactive 15s）。
+   */
+  startCompactLoop() {
+    this.stopCompactLoop();
+    const tick = async () => {
+      const cfg = getConfig();
+      const next = Math.max(300000, Number(cfg.compact?.checkIntervalMs) || 3600000);
+      this.compactTimer = setTimeout(() => { tick().catch(() => {}); }, next);
+      this.compactTimer.unref?.();
+      if (this.aborted || this.paused || cfg.compact?.enabled !== true) return;
+      await this.#compactSweep().catch((error) => console.error('[compact] 巡检失败:', error?.message ?? error));
+    };
+    this.compactTimer = setTimeout(() => { tick().catch(() => {}); }, 60000);
+    this.compactTimer.unref?.();
+  }
+
+  stopCompactLoop() {
+    clearTimeout(this.compactTimer);
+    this.compactTimer = null;
+  }
+
+  /** 巡检：挑一个够格的会话压缩。按"最久没人说话"排序（那种群最该清）。 */
+  async #compactSweep() {
+    const cfg = getConfig();
+    if (this.aborted || this.paused) return { compacted: 0 };
+    const limit = Math.max(1, Number(cfg.compact?.maxChatsPerSweep) || 1);
+    const minMessages = Math.max(1, Number(cfg.compact?.minMessagesToCompact) || 800);
+    const cooldown = Math.max(600000, Number(cfg.compact?.minIntervalMs) || 86400000);
+    const allowGroups = (cfg.allow?.groups ?? []).map(String);
+    const allowPrivate = (cfg.allow?.private ?? []).map(String);
+
+    // 白名单：与主动开话题同一套判定。用户的改动会即时生效 ——
+    // 从白名单里去掉一个群之后，它在磁盘上的存档不该再花 LLM 的钱去维护。
+    const allowed = (chatKey) => {
+      const [kind, id] = String(chatKey).split(':');
+      const list = kind === 'group' ? allowGroups : allowPrivate;
+      return list.length > 0 ? list.includes(id) : !!cfg.allowAllWhenEmpty;
+    };
+
+    const candidates = [];
+    for (const chatKey of this.store.listChats()) {
+      if (!allowed(chatKey)) continue;
+      if (this.compacting.has(chatKey)) continue;
+      if (this.runningChats.has(chatKey) || this.pendingWake.has(chatKey)) continue;
+      const meta = this.store.getChatMeta(chatKey);
+      if (meta.unread > 0) continue;                                   // 还有没处理的消息，先让它回完
+      if (meta.total < minMessages) continue;                          // 条数不够，不值得花这笔钱
+      if (Date.now() - this.store.lastCompactedAt(chatKey) < cooldown) continue;
+      candidates.push({ chatKey, lastTs: meta.lastTs });
+    }
+    if (!candidates.length) return { compacted: 0 };
+
+    candidates.sort((a, b) => a.lastTs - b.lastTs);
+    let compacted = 0;
+    for (const c of candidates.slice(0, limit)) {
+      if (this.aborted || this.paused) break;
+      const r = await this.compactChat(c.chatKey).catch((error) => {
+        console.error(`[compact] ${c.chatKey} 压缩失败:`, error?.message ?? error);
+        return null;
+      });
+      if (r?.ok) compacted += 1;
+    }
+    return { compacted };
+  }
+
+  /**
+   * 压缩一个会话的历史记录 —— **唯一入口**（定时巡检与手动"立即压缩"都走这里）。
+   *
+   * @param {string} chatKey
+   * @param {object} [opts]
+   * @param {boolean} [opts.force] 跳过门槛/冷却/未读检查（手动触发）。只跳过"该不该压"，
+   *                               绝不跳过"能不能安全压"（正在回复中一律拒绝）。
+   * @returns {Promise<{ok:boolean, note:string, removed?:number, remaining?:number}>}
+   */
+  async compactChat(chatKey, { force = false } = {}) {
+    const cfg = getConfig();
+    const c = cfg.compact || {};
+    if (!String(cfg.api?.model || '').trim() || !String(cfg.api?.baseUrl || '').trim()) {
+      return { ok: false, note: '模型未配置，无法压缩' };
+    }
+    if (this.compacting.has(chatKey)) return { ok: false, note: '该会话正在压缩中' };
+    // 这两条即使 force 也不放行：正在跑的运行依赖当前存档渲染【过去状态】，
+    // 抽掉中间的条目会让它上下文错乱；等待聚批的批次同理。
+    if (this.runningChats.has(chatKey) || this.pendingWake.has(chatKey)) {
+      return { ok: false, note: '该会话正在回复或等待聚批，稍后再试' };
+    }
+
+    const keepRecent = Math.max(0, Number(c.keepRecentMessages) || 300);
+    const maxMessages = Math.max(1, Number(c.maxMessagesPerRound) || 400);
+    const minMessages = Math.max(1, Number(c.minMessagesToCompact) || 800);
+    const cooldown = Math.max(600000, Number(c.minIntervalMs) || 86400000);
+
+    if (!force) {
+      const total = this.store.getChatMeta(chatKey).total;
+      if (total < minMessages) return { ok: false, note: `存档只有 ${total} 条，未到 ${minMessages} 条门槛` };
+      if (this.store.unreadCount(chatKey) > 0) return { ok: false, note: '还有未读消息待处理，先让它回复完' };
+      const since = Date.now() - this.store.lastCompactedAt(chatKey);
+      if (since < cooldown) {
+        return { ok: false, note: `距上次压缩还不到冷却时间（还需 ${Math.ceil((cooldown - since) / 60000)} 分钟）` };
+      }
+    }
+
+    // 候选区间 = 最老的一段（最近 keepRecent 条原样保留）。
+    // 再兜底剔除未读条目：它们还没被任何一次运行看到过，绝不能连摘要都没有就被归档。
+    const raw = this.store.selectArchiveRange(chatKey, { keepRecent, maxMessages });
+    const entries = raw.entries.filter((m) => m.read === true);
+    if (!entries.length) {
+      return { ok: false, note: `最近 ${keepRecent} 条要原样保留，没有可压缩的老消息` };
+    }
+
+    this.compacting.add(chatKey);
+    this.emit('chat-update', chatKey);
+    try {
+      // 摘要调用本身可能失败（网络、超时、限流、模型没配好）。这里**必须**接住：
+      // 让异常穿出去的话，接口会把它当成 500 报给 UI，而这里其实是一次
+      // "什么都没做"的正常回绝 —— 用户该看到原因，不是一坨堆栈。
+      let res = null;
+      try {
+        res = await this.#compactChatHistory(chatKey, entries);
+      } catch (error) {
+        return { ok: false, note: `摘要调用失败，本轮不改动任何数据：${String(error?.message ?? error)}` };
+      }
+      // 摘要没成功 → 零改动。这是整条链路最重要的一道闸：宁可白花一次 token，
+      // 也不能把原文归档掉却什么都没换回来。
+      if (!res) return { ok: false, note: '模型没有返回可用摘要，本轮不改动任何数据' };
+
+      // 先写冷归档、再重写主文件，两步之间不夹任何 await：
+      // 中途崩溃只会让消息**同时存在于两处**（可恢复的重复），而不是两处都没有（丢失）。
+      const archived = this.store.appendArchive(chatKey, res.entries);
+      res.digestEntry.digest.archivedFile = archived.file;
+      const commit = this.store.commitCompaction(chatKey, {
+        removeIds: res.removeIds,
+        digestEntry: res.digestEntry
+      });
+
+      console.log(`[compact] ${chatKey} 已摘要 ${commit.removed} 条 → 1 条纪要（原文 → ${archived.file}）`);
+
+      // 记忆那一半：压缩会稀释 #scanChatActivity 的证据（它在 recent(2000) 上计数），
+      // 可能悄悄关掉"发现新人"。所以压完立刻让它整理一次 ——
+      // #maybeConsolidateMemory 自带开关、阈值与 6 小时冷却，不满足条件时什么都不做。
+      if (c.compactMemory !== false) this.#maybeConsolidateMemory(chatKey);
+
+      return {
+        ok: true,
+        note: `已把 ${commit.removed} 条老消息摘要成 1 条纪要（原文归档到 ${archived.file}）`,
+        removed: commit.removed,
+        remaining: commit.remaining,
+        archiveFile: archived.file
+      };
+    } finally {
+      this.compacting.delete(chatKey);
+      this.emit('chat-update', chatKey);
+    }
+  }
+
+  /**
+   * 把一段历史交给模型摘要。
+   *
+   * 铁律：**绝不归档摘要没真正看到的内容**。先按字符预算从新往旧回填提示词行，
+   * 据此裁剪出归档区间 —— 返回的 removeIds 恰好是模型看到的那批，多一条都不会被删。
+   *
+   * @returns {{entries:Array, removeIds:Set, digestEntry:object, seen:number}|null}
+   *          null = 放弃（调用方必须零改动）
+   */
+  async #compactChatHistory(chatKey, entries) {
+    const cfg = getConfig();
+    const maxChars = Math.max(2000, Number(cfg.compact?.maxContextChars) || 24000);
+    const notes = cfg.memberNotes || {};
+    const nameOf = (m) => (m.self ? '我' : (notes[String(m.senderId || '')] || m.senderName || String(m.senderId || '未知')));
+
+    const lines = [];
+    let chars = 0;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      const text = String(e.text || '').replace(/\s+/g, ' ').slice(0, 200);
+      const line = `${formatShortTime(e.ts)} ${nameOf(e)}：${text}`;
+      // 至少留一行，否则一条超长消息就会让整轮空转
+      if (chars + line.length > maxChars && lines.length) break;
+      chars += line.length;
+      lines.unshift(line);
+    }
+    if (!lines.length) return null;
+    const range = entries.slice(entries.length - lines.length);   // 只压缩这部分
+    const from = range[0].ts;
+    const to = range[range.length - 1].ts;
+
+    const res = await this.#memoryChat([
+      {
+        role: 'system',
+        content: [
+          '你是聊天机器人的聊天记录归档模块，负责把一段群聊记录压缩成可长期保留的纪要。',
+          '严格要求：',
+          '1. 只依据给定的聊天记录写，绝不编造，也不要用常识去补全。',
+          '2. 保留：谁和谁在聊什么、聊出了什么结论、发生过的具体事件、反复出现的梗与专有名词、约定和承诺。',
+          '3. 丢掉：寒暄、复读、表情包灌水、没有信息量的应答。',
+          '4. 用第三人称按时间顺序分段陈述，不要逐条复述。',
+          '5. 输出必须是严格的 JSON 对象，不要 Markdown 代码块，不要任何解释文字。',
+          '格式：{"summary":"…","seen":N}。seen 必须等于你收到的消息行数 —— 它用来证明你确实读完了全部输入。'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          `下面是聊天记录（共 ${lines.length} 行，按时间排序），请压缩成纪要：`,
+          '',
+          lines.join('\n')
+        ].join('\n')
+      }
+    ]);
+
+    const rawText = String(res?.message?.content ?? '');
+    const parsed = extractJsonObject(rawText);
+    if (!parsed) {
+      console.warn(`[compact] ${chatKey} 摘要结果无法解析为 JSON，本轮放弃`);
+      if (process.env.QQ_AGENT_DEBUG_COMPACT) console.warn('[compact][debug] 原始返回 =', JSON.stringify(rawText).slice(0, 1500));
+      return null;
+    }
+    const summary = String(parsed.summary ?? '').trim();
+    if (!summary) {
+      console.warn(`[compact] ${chatKey} 摘要为空，本轮放弃`);
+      return null;
+    }
+    // 幻觉守卫：模型必须自证读到了输入。比"长度/条数对比"强得多 ——
+    // 摘要本来就是要压缩的，没法拿长度判断；而 seen 是让它自己数。
+    const seen = Number(parsed.seen);
+    if (!Number.isFinite(seen) || seen !== lines.length) {
+      console.warn(`[compact] ${chatKey} 摘要自称只读了 ${parsed.seen}/${lines.length} 行，疑似未读完或幻觉，本轮放弃`);
+      return null;
+    }
+    // 过长只截断、不丢弃：截断损失保真度，丢弃损失整轮（要和上面两种失败区分开）
+    const clipped = summary.length > 4000 ? `${summary.slice(0, 4000)}…（摘要过长，已截断）` : summary;
+
+    const digestEntry = {
+      id: 0,   // 真正分配在 commitCompaction 里（取自 nextLocalId，被删掉的 id 绝不回收）
+      mid: null,
+      ts: to,  // 用被归档区间的最后一条：它才会成为【过去状态】里最老的一行
+      senderId: 'digest',
+      senderName: '聊天记录摘要',
+      text: `【历史摘要 ${formatShortTime(from)} ~ ${formatShortTime(to)} · 共 ${range.length} 条】\n${clipped}`,
+      self: false,
+      read: true,   // 关键：read:true 保证它永远不进未读、永远不触发运行
+      reply: null,
+      media: [],
+      kind: 'digest',
+      digest: { from, to, count: range.length, archivedFile: '', model: res?.model || '', createdAt: Date.now() }
+    };
+    return { entries: range, removeIds: new Set(range.map((m) => m.id)), digestEntry, seen };
+  }
+
   // ── 控制接口 ───────────────────────────────────────────────────────────
 
   setPaused(paused, reason = 'manual') {
@@ -1093,6 +1539,11 @@ export class Orchestrator {
     for (const sessionId of this.pendingSessions.values()) this.#finishWaiting(sessionId, 'aborted');
     this.pendingSessions.clear();
     this.stopProactiveLoop();
+    this.stopCompactLoop();
+    // 状态与限速标记一并清空：进程要停了，留着只会让下次启动读到脏状态
+    this.chatStates.clear();
+    this.compacting.clear();
+    this.sender.clearReplying?.();
   }
 
   statusSummary() {
@@ -1103,6 +1554,14 @@ export class Orchestrator {
       running: [...this.runningChats],
       activeSessions: [...this.activeRuns.entries()].map(([chatKey, sessionId]) => ({ chatKey, sessionId })),
       consolidating: [...this.consolidating],
+      // 静默态/回复态（供 UI 与 /api/status 显示"它现在在干嘛"）
+      chatStates: [...this.chatStates.entries()].map(([chatKey, s]) => ({
+        chatKey,
+        state: s.state,
+        phase: s.phase || '',
+        since: s.since || 0
+      })),
+      compacting: [...this.compacting],
       onebotConnected: this.onebot.connected,
       model: cfg.api.model,
       maxConcurrentRuns: cfg.maxConcurrentRuns

@@ -351,7 +351,6 @@ function switchTab(name) {
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
   state.tab = name;
-  if (state.quoteMode && name !== 'chats') exitQuoteMode();   // 离开存档页自动退出金句勾选
   if (name === 'sessions') loadSessions();
   if (name === 'chats') loadChats();
   if (name === 'memory') loadMemoryView();
@@ -999,7 +998,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
     }).join('\n') || '暂无日志';
 
     // 整页重建前记住日志滚动位置：SSE/轮询触发的 quiet 重建会重置 DOM，
-    // 不补偿的话用户往下翻日志会被弹回顶部（Kondius 实测：划两下就蹦上去）
+    // 不补偿的话用户往下翻日志会被弹回顶部（实测：划两下就蹦上去）
     const oldPre = box.querySelector('.snowluma-logs-view');
     const prevScroll = oldPre
       ? { top: oldPre.scrollTop, atBottom: oldPre.scrollTop + oldPre.clientHeight >= oldPre.scrollHeight - 40 }
@@ -1109,11 +1108,22 @@ function renderChatList() {
   box.innerHTML = state.chats.map((c) => {
     const name = formatChatTitle(c.key, chatNameOf(c.key));
     const isNew = !state.seenChatKeys.has(c.key);
+    // 状态标签：回复态分"等待中/回复中"两种 phase；压缩中单独标。
+    // 数据来自 /api/chats（后端实时读 orchestrator 的状态机），15s 轮询即使漏了
+    // SSE 事件也能自己纠正，所以这里不需要额外的前端状态。
+    // ⚠️ 背景色只用 style.css 里真实定义的变量（--accent/--orange/--red）：
+    //    写一个不存在的 var() 会让整条声明在计算时失效，标签直接变透明看不见。
+    const pills = [
+      c.unread ? `<span class="unread-pill">${c.unread}</span>` : '',
+      c.phase === 'waiting' ? '<span class="unread-pill" style="background:var(--accent)">等待中…</span>' : '',
+      c.phase === 'running' ? '<span class="unread-pill" style="background:var(--orange)">回复中…</span>' : '',
+      c.compacting ? '<span class="unread-pill" style="background:var(--orange)">压缩中…</span>' : ''
+    ].filter(Boolean).join('');
     return `
       <div class="chat-item ${c.key === state.currentChatKey ? 'selected' : ''} ${c.unread ? 'unread-row' : ''} ${isNew ? 'new-item' : ''}" data-key="${c.key}">
         <div class="chat-item-title">
           <span class="session-chat">${esc(name)}</span>
-          ${c.unread ? `<span class="unread-pill">${c.unread}</span>` : ''}
+          ${pills}
         </div>
         <div class="chat-item-sub">${esc(c.lastText || '（空）')}</div>
         <div class="session-meta"><span>${c.total} 条</span><span>${fmtTime(c.lastTs)}</span></div>
@@ -1127,7 +1137,6 @@ function renderChatList() {
 
 async function selectChat(key) {
   state.currentChatKey = key;
-  if (state.quoteMode) state.quoteSelected = new Set();   // 金句按单段对话收录，换会话清空勾选
   renderChatList();
   $('#chat-detail').innerHTML = '<div class="empty-hint">加载中…</div>';
   await loadChatMessages(key);
@@ -1198,9 +1207,11 @@ function renderChatMessages() {
     <div class="chat-toolbar">
       <button class="btn btn-small" id="chat-wake-btn">唤醒一次处理</button>
       <button class="btn btn-small" id="chat-read-btn">全部标为已读</button>
+      <button class="btn btn-small" id="chat-compact-btn" title="把最老的一段聊天记录交给模型摘要成一条纪要，原文移到 data/messages/archive/ 冷归档（不删除）。不等定时巡检，立刻压一次。">立即压缩历史</button>
       <input type="text" id="test-send-text" placeholder="手动发一条测试消息" style="flex:1" />
       <button class="btn btn-small" id="chat-testsend-btn">发送</button>
     </div>
+    <div class="hint" id="chat-compact-status" style="margin:-4px 0 10px"></div>
     <table class="archive-table"><tbody id="chat-msg-body"></tbody></table>
     <div class="list-more muted" id="chat-msg-more"></div>`;
 
@@ -1214,6 +1225,32 @@ function renderChatMessages() {
     loadChats();
     // 保持视图：用户可能已经滚到中间了，别把他弹回顶部
     loadChatMessages(key, { keepView: true });
+  });
+  // 立即压缩：手动触发一次历史压缩（跳过门槛与冷却）。
+  // 这是唯一不用等巡检间隔就能验证压缩是否正常的手段，所以结果要明确写出来。
+  // 反馈写进工具栏下方的 #chat-compact-status（跟 SnowLuma 页的 #sl-hint 同一套做法），
+  // 不用 alert：轮询刷新只重建 tbody，这行文字不会被冲掉。
+  $('#chat-compact-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (btn.disabled) return;
+    const status = $('#chat-compact-status');
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '压缩中…';
+    if (status) status.textContent = '正在调用模型摘要，可能等几十秒…';
+    try {
+      const r = await api(`/api/chats/${key.replace(':', '_')}/compact`, { method: 'POST', body: '{}' });
+      if (status) status.textContent = r?.note || '压缩完成';
+      loadChats();
+      loadChatMessages(key, { keepView: true });
+    } catch (err) {
+      // 409 是"这次压不了"的正常回绝（未配模型 / 正在回复 / 门槛没到 / 摘要失败），
+      // 不是故障 —— 后端把原因写在 error 里，原样显示即可。
+      if (status) status.textContent = `未压缩：${err.message || err}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
   });
   $('#chat-testsend-btn').addEventListener('click', async () => {
     const input = $('#test-send-text');
@@ -1230,18 +1267,6 @@ function renderChatMessages() {
   updateChatMessagesBody();
   // 滚动加载只挂一次（attachScrollLoader 内部有防重复）
   initChatScrollLoader();
-  // 金句勾选：事件委托挂在容器上（tbody 会被轮询重建，委托不受影响的）。
-  // 防重复：renderChatMessages 每次切会话都会跑，容器只绑一次。
-  if (!detail.__quoteBound) {
-    detail.__quoteBound = true;
-    detail.addEventListener('change', (e) => {
-      const cb = e.target.closest?.('.quote-check');
-      if (!cb) return;
-      const mid = Number(cb.dataset.mid);
-      if (cb.checked) state.quoteSelected.add(mid); else state.quoteSelected.delete(mid);
-      cb.closest('tr')?.classList.toggle('quote-selected', cb.checked);
-    });
-  }
 }
 
 /**
@@ -1269,16 +1294,13 @@ function chatMessagesNewestFirst() {
 
 /** 单行消息 HTML（全量渲染与滚动追加共用同一个模板，保证两处长得一样）。 */
 function chatMsgRowHtml(m) {
-  // 金句勾选模式：行首加勾选框；选中态存 state.quoteSelected（按消息 id），
-  // 轮询重建行时勾选状态不丢
-  const q = state.quoteMode
-    ? `<td class="q-check"><input type="checkbox" class="quote-check" data-mid="${m.id}" ${state.quoteSelected.has(m.id) ? 'checked' : ''} /></td>`
-    : '';
-  const sel = state.quoteMode && state.quoteSelected.has(m.id) ? ' quote-selected' : '';
+  // 压缩摘要（kind:'digest'）不是某个人说的话，用弱化样式区分：
+  // 多行文本靠 .text 已有的 white-space: pre-wrap 正常换行显示。
+  const isDigest = m.kind === 'digest';
   return `
-    <tr class="${m.read ? '' : 'unread'}${sel}" data-midrow="${m.id}">${q}
+    <tr class="${m.read ? '' : 'unread'}${isDigest ? ' digest-row' : ''}" data-midrow="${m.id}">
       <td class="t">${fmtTime(m.ts)}</td>
-      <td class="w ${m.self ? 'self' : ''}">${m.self ? '我' : esc(m.senderName)}</td>
+      <td class="w ${m.self ? 'self' : ''}">${isDigest ? '摘要' : (m.self ? '我' : esc(m.senderName))}</td>
       <td class="text">${esc(m.text)}${m.read ? '' : ' <span class="unread-pill">未读</span>'}</td>
     </tr>`;
 }
@@ -1841,7 +1863,7 @@ function renderMemoryList() {
     const busy = !!state.consolidating[key];
     // 整理中：在列表项上直接标出，切页签回来也能一眼看到
     const busyHtml = busy
-      ? `<span class="unread-pill" style="background:var(--color-background-warning)">整理中…</span>`
+      ? `<span class="unread-pill" style="background:var(--orange)">整理中…</span>`
       : '';
     const sub = busy
       ? '正在整理本群记忆'
@@ -2665,17 +2687,8 @@ function renderSettingsSidebar() {
       <div class="rs-row muted">${state.paused ? '⏸ 已暂停' : (s?.orchestrator?.model ? `模型：${s.orchestrator.model}` : '模型：未设置')}</div>
     </div>
     <div class="settings-menu">
-      ${menu.map(([id, label]) => `<button class="settings-menu-item ${state.settingsSection === id ? 'active' : ''}" data-section="${id}">${label}${id === 'desktop' && updateAvailable ? '<span class="update-dot" title="发现新版本"></span>' : ''}</button>`).join('')}
-      <button class="settings-menu-item egg-hot" id="qrcode-egg-btn">！？群群？！</button>
+      ${menu.map(([id, label]) => `<button class="settings-menu-item ${state.settingsSection === id ? 'active' : ''}" data-section="${id}">${label}</button>`).join('')}
     </div>`;
-  // 群二维码彩蛋：点一下弹出，再点屏幕任意位置关闭
-  sidebar.querySelector('#qrcode-egg-btn')?.addEventListener('click', () => {
-    const ov = document.createElement('div');
-    ov.className = 'qrcode-egg-overlay';
-    ov.innerHTML = '<img src="group-qrcode.jpg" alt="群二维码" />';
-    ov.addEventListener('click', () => ov.remove());
-    document.body.appendChild(ov);
-  });
   sidebar.querySelectorAll('.settings-menu-item').forEach((el) => {
     el.addEventListener('click', () => {
       state.settingsSection = el.dataset.section;
@@ -2909,6 +2922,7 @@ function renderSearchSection(c) {
 
 function renderMemorySettingsSection(c) {
   const mem = c.memory || {};
+  const comp = c.compact || {};
   const providers = state.providers || [];
   const useChat = mem.useChatModel !== false;
   const selP = providers.find((p) => p.id === mem.provider);
@@ -2930,7 +2944,34 @@ function renderMemorySettingsSection(c) {
       </div>
     </div>
     <div class="field"><label>整理冷却时间（毫秒）</label><input type="number" id="cfg-mem-interval" min="1800000" step="600000" value="${esc(mem.consolidateMinIntervalMs ?? 21600000)}" /></div>
-    <div class="hint">条数超过阈值且距上次整理超过该冷却时间后，才会在运行结束后后台整理。默认 6 小时（21600000 毫秒）。</div>`;
+    <div class="hint">条数超过阈值且距上次整理超过该冷却时间后，才会在运行结束后后台整理。默认 6 小时（21600000 毫秒）。</div>
+
+    <h3>聊天记录压缩</h3>
+    <div class="hint" style="margin-bottom:8px">
+      长期运行的群里存档只增不减。压缩把最老的一段交给模型摘要成一段纪要写回存档，
+      <b>原文不会被删除</b>，只是移到 <code>data/messages/archive/&lt;会话&gt;.jsonl</code> 冷归档。
+      摘要在存档页显示为一条「历史摘要」，模型在【过去状态】里也能看到它。
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-compact-enabled" ${comp?.enabled ? 'checked' : ''} />
+      <label for="cfg-compact-enabled">启用定时压缩（会调用模型，产生费用）</label></div>
+    <div class="field-row">
+      <div class="field"><label>巡检间隔（毫秒）</label><input type="number" id="cfg-compact-interval" min="300000" step="60000" value="${esc(comp?.checkIntervalMs ?? 3600000)}" /></div>
+      <div class="field"><label>同一会话冷却（毫秒）</label><input type="number" id="cfg-compact-cooldown" min="600000" step="600000" value="${esc(comp?.minIntervalMs ?? 86400000)}" /></div>
+      <div class="field"><label>一次巡检最多处理几个会话</label><input type="number" id="cfg-compact-chats" min="1" max="10" value="${esc(comp?.maxChatsPerSweep ?? 1)}" /></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>存档条数超过多少才压</label><input type="number" id="cfg-compact-minmsgs" min="50" value="${esc(comp?.minMessagesToCompact ?? 800)}" /></div>
+      <div class="field"><label>最近多少条原样保留（下限 100）</label><input type="number" id="cfg-compact-keep" min="100" value="${esc(comp?.keepRecentMessages ?? 300)}" /></div>
+      <div class="field"><label>单轮最多摘要多少条</label><input type="number" id="cfg-compact-perround" min="20" value="${esc(comp?.maxMessagesPerRound ?? 400)}" /></div>
+    </div>
+    <div class="field"><label>喂给模型的原始文本上限（字符）</label><input type="number" id="cfg-compact-chars" min="2000" step="1000" value="${esc(comp?.maxContextChars ?? 24000)}" /></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-compact-memory" ${comp?.compactMemory !== false ? 'checked' : ''} />
+      <label for="cfg-compact-memory">压缩后顺带整理一次本群记忆（走它自己的冷却）</label></div>
+    <div class="hint">
+      「最近多少条原样保留」是这里最关键的旋钮：它同时是记忆引擎的证据来源
+      （判断"谁在活跃/该不该发现新人"要数最近的发言），设得太小会让这些判断悄悄失灵。
+      建议不低于 200。冷却与门槛没到就什么都不做，不会白花钱。
+    </div>`;
 }
 
 function renderPersonaSection(c) {
@@ -3077,9 +3118,26 @@ function renderChatSection(c) {
 return `
     <h3>运行节奏</h3>
     <div class="field-row">
-      <div class="field"><label>防抖聚批窗口（毫秒）—— 等连发消息聚成一批再开运行</label><input type="number" id="cfg-wakedelay" min="0" value="${esc(c.wakeDelayMs)}" /></div>
+      <div class="field"><label>立即回复时间（毫秒）—— 最后一条新消息之后等这么久没有新消息，就直接回复（原「防抖聚批窗口」）</label><input type="number" id="cfg-wakedelay" min="0" value="${esc(c.wakeDelayMs)}" /></div>
       <div class="field"><label>批次间隔（毫秒）—— 上轮结束到下轮处理的间隔</label><input type="number" id="cfg-draindelay" min="0" value="${esc(c.drainDelayMs)}" /></div>
       <div class="field"><label>同时处理几个会话</label><input type="number" id="cfg-maxruns" min="1" max="8" value="${esc(c.maxConcurrentRuns)}" /></div>
+    </div>
+
+    <h3>回复节奏（静默态 ↔ 回复态）</h3>
+    <div class="hint" style="margin-bottom:8px">
+      机器人判断"这批消息值得回应"之后进入<b>回复态</b>，运行结束即回到静默态。
+      上面两个时间旋钮就是这段等待窗口：<b>立即回复时间</b>是尾沿防抖（每条新消息重新计时），
+      <b>等待窗口硬上限</b>是不被重置的天花板 —— 群里连着刷屏时，靠它保证不会永远等下去。
+    </div>
+    <div class="field-row">
+      <div class="field"><label>等待窗口硬上限（毫秒，0 = 不限）</label><input type="number" id="cfg-reply-maxwait" min="0" step="500" value="${esc(c.reply?.maxWaitMs ?? 0)}" /></div>
+      <div class="field"><label>回复态每分钟最多发送（0 = 沿用下方每分钟上限）</label><input type="number" id="cfg-reply-maxpermin" min="0" value="${esc(c.reply?.maxPerMinute ?? 0)}" /></div>
+      <div class="field"><label>命中分钟限频时最多等待（毫秒，0 = 直接报错）</label><input type="number" id="cfg-reply-limitwait" min="0" step="1000" value="${esc(c.reply?.maxLimitWaitMs ?? 20000)}" /></div>
+    </div>
+    <div class="hint">
+      硬上限填 0（不限）时行为与从前完全一致：每条新消息都把计时器重置满，连发不停就一直不触发。<br />
+      命中分钟限频时默认改成了"停一下再发"（最多等 20 秒）而不是直接报错 —— 报错会让那条消息被丢掉，
+      真人撞到自己的打字速度上限时做的正是等一会儿。
     </div>
 
     <h3>发送保护</h3>
@@ -3182,6 +3240,14 @@ return `
         <label>④ 其余情况也响应：发未读 + <input type="number" id="cfg-allcount" min="0" max="500" value="${esc(st.allCount ?? 80)}" /> 条已读</label>
         <div class="hint"><b>任何消息都响应</b>。</div>
       </div>
+      <div class="tier-param">
+        <label>动态上下文窗口：一次运行时最多把 <input type="number" id="cfg-maxctx" min="0" max="5000" value="${esc(st.maxContextMessages ?? 0)}" /> 条未读放进【本次唤醒】（0 = 不限）</label>
+        <div class="hint">
+          与上面的"发未读 + N 条已读"是两回事：那些管<b>读多少历史</b>，这个管<b>本次运行读多少新消息</b>。
+          长时间离线或被 @ 唤醒时可能一次积压几百条，靠它兜住 token。
+          超出时丢最老的几条 —— 它们不会消失，只是降级进【过去状态】，模型会被告知折走了多少条。
+        </div>
+      </div>
     </div>
 
     <h3>屏蔽名单</h3>
@@ -3211,12 +3277,8 @@ function renderDesktopSection(c) {
     <div class="checkbox-row"><input type="checkbox" id="cfg-showvision" ${c.ui?.showVision !== false ? 'checked' : ''} />
       <label for="cfg-showvision">模型目录显示“支持图片输入/不支持图片输入”徽标</label></div>
     <div class="field"><label>界面刷新间隔（毫秒）</label><input type="number" id="cfg-refreshms" min="1000" step="1000" value="${esc(c.ui?.refreshMs ?? 15000)}" /></div>
-    <h3>版本更新</h3>
-    <div class="field"><label>当前版本 <b id="update-current">…</b><span id="update-status-text">${updateAvailable ? '<b style="color:var(--warn)">；发现新版本</b>' : '；检查线上是否有新版本'}</span></label>
-      <div style="display:flex;gap:10px;align-items:center">
-        <button class="btn btn-small" id="check-update-btn">检查更新</button>
-        <span class="hint" id="update-hint" style="margin:0"></span>
-      </div></div>`;
+    <h3>版本</h3>
+    <div class="field"><label>当前版本 <b id="update-current">…</b><span class="muted">（本机 package.json）</span></label></div>`;
 }
 
 function renderOnebotSection(c) {
@@ -3821,28 +3883,12 @@ function bindSettingsEvents(c) {
   const pickFriendsBtn = $('#pick-friends-btn');
   if (pickFriendsBtn) pickFriendsBtn.addEventListener('click', () => openWhitelistPicker('friends'));
 
-  // ── 检查更新（桌面端区块） ──
+  // ── 当前版本（桌面端区块；纯本地读取，不联网） ──
   const curVerEl = $('#update-current');
   if (curVerEl) {
     api('/api/version').then((d) => { curVerEl.textContent = `v${d.version || '?'}`; })
       .catch(() => { curVerEl.textContent = ''; });
   }
-  const checkUpdateBtn = $('#check-update-btn');
-  if (checkUpdateBtn) checkUpdateBtn.addEventListener('click', async () => {
-    const hint = $('#update-hint');
-    checkUpdateBtn.disabled = true;
-    if (hint) hint.textContent = '检查中…';
-    const data = await runUpdateCheck({ manual: true });   // 手动：即使关过浮窗也再弹一次
-    if (!data) {
-      if (hint) hint.textContent = '检查失败：网络不可达';
-    } else if (!data.ok) {
-      if (hint) hint.textContent = `检查失败：${data.error || '未知错误'}`;
-    } else if (data.hasUpdate) {
-      // 有新版：给下载链接。Electron 里 target=_blank 会被 main.js 转给系统浏览器。
-      if (hint) hint.innerHTML = `发现新版本 <b>v${esc(data.latest)}</b>（当前 v${esc(data.current)}） <a href="${esc(data.url)}" target="_blank" rel="noopener">去下载</a>`;
-    } else if (hint) hint.textContent = `已是最新（v${data.current}）`;
-    checkUpdateBtn.disabled = false;
-  });
 
   // ── OneBot 区块事件 ──
   const openSnowlumaBtn = $('#open-snowluma-btn');
@@ -4447,6 +4493,20 @@ async function saveConfig({ quiet = false } = {}) {
       model: val('#cfg-mem-model', c.memory?.model || '').trim(),
       consolidateMinIntervalMs: Number(val('#cfg-mem-interval', c.memory?.consolidateMinIntervalMs ?? 21600000)) || 21600000
     };
+    // 聊天记录压缩。保存后由后端按 enabled 决定是否拉起/停掉巡检循环。
+    patch.compact = {
+      ...(c.compact || {}),
+      enabled: chk('#cfg-compact-enabled', !!c.compact?.enabled),
+      checkIntervalMs: clampInt(val('#cfg-compact-interval', c.compact?.checkIntervalMs), 300000, 86400000, 3600000),
+      minIntervalMs: clampInt(val('#cfg-compact-cooldown', c.compact?.minIntervalMs), 600000, 2592000000, 86400000),
+      maxChatsPerSweep: clampInt(val('#cfg-compact-chats', c.compact?.maxChatsPerSweep), 1, 10, 1),
+      minMessagesToCompact: clampInt(val('#cfg-compact-minmsgs', c.compact?.minMessagesToCompact), 50, 100000, 800),
+      // 下限钳到 100：它同时是记忆引擎的证据来源，设太小会让"发现新人"静默失灵
+      keepRecentMessages: clampInt(val('#cfg-compact-keep', c.compact?.keepRecentMessages), 100, 100000, 300),
+      maxMessagesPerRound: clampInt(val('#cfg-compact-perround', c.compact?.maxMessagesPerRound), 20, 5000, 400),
+      maxContextChars: clampInt(val('#cfg-compact-chars', c.compact?.maxContextChars), 2000, 200000, 24000),
+      compactMemory: chk('#cfg-compact-memory', c.compact?.compactMemory !== false)
+    };
   }
 
   if (sec === 'api') {
@@ -4624,6 +4684,8 @@ async function saveConfig({ quiet = false } = {}) {
       randomPercent: clampInt(val('#cfg-randpct', c.store?.randomPercent), 0, 100, 10),
       randomCount: clampInt(val('#cfg-randcount', c.store?.randomCount), 1, 500, 8),
       allCount: clampInt(val('#cfg-allcount', c.store?.allCount), 1, 500, 80),
+      // 运行时动态上下文窗口（条）；0 = 不限。与 maxMessagesPerChat（存档留多少条）无关。
+      maxContextMessages: clampInt(val('#cfg-maxctx', c.store?.maxContextMessages), 0, 5000, 0),
       // 统一开关 + 分群滑条表（__replace__：删掉的群设置要真删，深合并做不到）
       unifiedTier: chk('#cfg-unifiedtier', c.store?.unifiedTier !== false),
       groupSliderPos: {
@@ -4633,6 +4695,15 @@ async function saveConfig({ quiet = false } = {}) {
     // 清掉已废弃的两个字段，避免残留配置误导后来读代码的人
     delete patch.store.pastStateLimit;
     delete patch.store.pastStateMaxChars;
+
+    // 回复态节奏。wakeDelayMs（上面单独写顶层）是"立即回复时间"，这三项是它的配套。
+    // patch.reply 必须建在这个分支里 —— saveConfig 只提交当前 section 的键。
+    patch.reply = {
+      ...(c.reply || {}),
+      maxWaitMs: clampInt(val('#cfg-reply-maxwait', c.reply?.maxWaitMs), 0, 3600000, 0),
+      maxPerMinute: clampInt(val('#cfg-reply-maxpermin', c.reply?.maxPerMinute), 0, 1000, 0),
+      maxLimitWaitMs: clampInt(val('#cfg-reply-limitwait', c.reply?.maxLimitWaitMs), 0, 300000, 20000)
+    };
   }
 
   if (sec === 'desktop') {
@@ -4668,45 +4739,6 @@ async function saveConfig({ quiet = false } = {}) {
   state.config = data.config;
   if (!quiet) $('#model-label').textContent = `模型：${state.config.api.model || '未设置'}`;
   return data;
-}
-
-/* ══════════════════════════════════════════════════════════════
-   社区功能：意见收集 + 金句上传
-   ══════════════════════════════════════════════════════════════
-   数据流向：浏览器 → https://kondius.cn/qq-agent/api（作者自建的公开
-   收件箱，静态站之外的一个小型接收服务）。不经过本地后端 ——
-   本地后端只服务本机，碰不到作者的服务器；分发版用户也是这个地址
-   （意见和金句本来就是发给作者看的）。
-*/
-const COMMUNITY_API = 'https://kondius.cn/qq-agent/api';
-
-/** 统一的提示小模态框（替代 alert —— 原生对话框与 UI 风格割裂）。 */
-function showNoticeModal(title, text) {
-  const overlay = modelModalShell({
-    head: title,
-    body: `<div class="hint" style="font-size:13.5px;line-height:1.7">${esc(text)}</div>`,
-    foot: `<button class="btn btn-primary" id="notice-ok">知道了</button>`
-  });
-  overlay.querySelector('#notice-ok').addEventListener('click', () => closeModelModal(overlay));
-}
-
-/**
- * 上传成功浮框（右上角）：不自动消失，只能手动关闭，带目标网址。
- * 意见收集 / 金句上传成功后调用。
- */
-function showUploadToast(title, url, { onClose } = {}) {
-  // 同类型只留一个（连着传两次不堆叠）
-  document.querySelectorAll('.upload-toast').forEach((el) => el.remove());
-  const el = document.createElement('div');
-  el.className = 'upload-toast';
-  el.innerHTML = `
-    <div class="ut-head">
-      <span class="ut-title">${esc(title)}</span>
-      <button class="ut-close" title="关闭">×</button>
-    </div>
-    <a class="ut-link" href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>`;
-  document.body.appendChild(el);
-  el.querySelector('.ut-close').addEventListener('click', () => { el.remove(); onClose?.(); });
 }
 
 // ── 屏蔽名单 ──
@@ -4826,394 +4858,6 @@ function openBlocklistModal() {
   loadMembers();
 }
 
-// ── 意见收集 ──
-const FB_DRAFT_KEY = 'qqa-feedback-draft';
-
-/** 读草稿（昵称/正文/图片 dataURL 列表）。 */
-function fbLoadDraft() {
-  try {
-    const d = JSON.parse(localStorage.getItem(FB_DRAFT_KEY) || '{}');
-    return {
-      nickname: String(d.nickname || ''),
-      text: String(d.text || ''),
-      images: Array.isArray(d.images) ? d.images.slice(0, 9) : []
-    };
-  } catch { return { nickname: '', text: '', images: [] }; }
-}
-
-/** 图片压缩：最大边 1200px、JPEG 0.75 —— 够看清，又不会把 localStorage 塞爆。 */
-function fbCompressImage(file) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(img.src);
-      const max = 1200;
-      let { width: w, height: h } = img;
-      if (w > max || h > max) {
-        const r = Math.min(max / w, max / h);
-        w = Math.round(w * r); h = Math.round(h * r);
-      }
-      const cv = document.createElement('canvas');
-      cv.width = w; cv.height = h;
-      cv.getContext('2d').drawImage(img, 0, 0, w, h);
-      resolve(cv.toDataURL('image/jpeg', 0.75));
-    };
-    img.onerror = () => { URL.revokeObjectURL(img.src); reject(new Error('图片读取失败')); };
-    img.src = URL.createObjectURL(file);
-  });
-}
-
-function openFeedbackModal() {
-  const draft = fbLoadDraft();
-  const state2 = { images: draft.images.slice() };   // 弹窗内的图片列表（dataURL）
-
-  const overlay = modelModalShell({
-    head: '意见收集',
-    body: `
-      <div id="fb-form">
-        <div class="hint" style="flex-shrink:0">
-          昵称和意见会上传到作者的服务器（kondius.cn/qq-agent/comments 公开展示）。
-          内容实时保存在本机，误点弹窗外面也不会丢。
-        </div>
-        <div class="field"><label>昵称</label>
-          <input type="text" id="fb-nickname" maxlength="32" placeholder="怎么称呼你" value="${esc(draft.nickname)}" /></div>
-        <div class="field"><label>意见 / 建议</label>
-          <textarea id="fb-text" rows="6" maxlength="5000" placeholder="哪里好用、哪里难用、想要什么功能…">${esc(draft.text)}</textarea></div>
-        <div class="field"><label>附图（最多 9 张，自动压缩）</label>
-          <!-- 原生 <input type=file> 的"选择文件"按钮是系统样式，与 UI 割裂：
-               隐藏本体，用统一的 .btn 风格 label 触发 -->
-          <input type="file" id="fb-file" accept="image/*" multiple style="display:none" />
-          <label for="fb-file" class="btn btn-small" id="fb-file-btn" style="cursor:pointer">＋ 添加图片（<span id="fb-img-count">${state2.images.length}</span>/9）</label>
-          <div class="fb-imgs" id="fb-imgs"></div>
-        </div>
-        <div id="fb-hint" class="muted" style="font-size:12px"></div>
-      </div>
-      <div id="fb-confirm" style="display:none">
-        <div class="hint">请确认上传内容：</div>
-        <div id="fb-summary" style="white-space:pre-wrap;font-size:13px;max-height:300px;overflow-y:auto"></div>
-        <div id="fb-confirm-hint" class="muted" style="font-size:12px;margin-top:8px"></div>
-      </div>`,
-    foot: `
-      <button class="btn" id="fb-cancel">取消</button>
-      <button class="btn btn-primary" id="fb-next">下一步</button>
-      <button class="btn hidden" id="fb-back">返回修改</button>
-      <button class="btn btn-primary hidden" id="fb-submit">确认上传</button>`
-  });
-
-  const $q = (sel) => overlay.querySelector(sel);
-  const formEl = $q('#fb-form'), confirmEl = $q('#fb-confirm');
-  const nextBtn = $q('#fb-next'), backBtn = $q('#fb-back'), submitBtn = $q('#fb-submit');
-
-  // ── 草稿实时保存（300ms 防抖）──
-  let saveTimer = null;
-  const saveDraft = () => {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      try {
-        localStorage.setItem(FB_DRAFT_KEY, JSON.stringify({
-          nickname: $q('#fb-nickname').value,
-          text: $q('#fb-text').value,
-          images: state2.images
-        }));
-      } catch { /* 图片太多塞不下时至少保住文字 */ 
-        try {
-          localStorage.setItem(FB_DRAFT_KEY, JSON.stringify({
-            nickname: $q('#fb-nickname').value, text: $q('#fb-text').value, images: []
-          }));
-        } catch { /* 放弃 */ }
-      }
-    }, 300);
-  };
-  $q('#fb-nickname').addEventListener('input', saveDraft);
-  $q('#fb-text').addEventListener('input', saveDraft);
-
-  // ── 图片九宫格 ──
-  function renderImgs() {
-    const cnt = $q('#fb-img-count');
-    if (cnt) cnt.textContent = state2.images.length;
-    $q('#fb-imgs').innerHTML = state2.images.map((d, i) => `
-      <div class="fb-img"><img src="${d}" alt="附图${i + 1}" />
-        <button class="fb-img-del" data-i="${i}" title="移除">×</button></div>`).join('');
-    $q('#fb-imgs').querySelectorAll('.fb-img-del').forEach((el) => {
-      el.addEventListener('click', () => {
-        state2.images.splice(Number(el.dataset.i), 1);
-        renderImgs();
-        saveDraft();
-      });
-    });
-  }
-  renderImgs();
-
-  $q('#fb-file').addEventListener('change', async (e) => {
-    const hint = $q('#fb-hint');
-    const files = [...(e.target.files || [])];
-    e.target.value = '';
-    for (const f of files) {
-      if (state2.images.length >= 9) { hint.textContent = '最多 9 张，超出的已忽略'; break; }
-      try {
-        state2.images.push(await fbCompressImage(f));
-      } catch (err) { hint.textContent = String(err.message || err); }
-    }
-    renderImgs();
-    saveDraft();
-  });
-
-  // ── 步骤切换 ──
-  $q('#fb-cancel').addEventListener('click', () => closeModelModal(overlay));
-  nextBtn.addEventListener('click', () => {
-    const nickname = $q('#fb-nickname').value.trim();
-    const text = $q('#fb-text').value.trim();
-    if (!nickname) { $q('#fb-hint').textContent = '先填个昵称'; return; }
-    if (!text) { $q('#fb-hint').textContent = '意见还没写'; return; }
-    saveDraft();
-    $q('#fb-summary').textContent =
-      `昵称：${nickname}\n\n${text}\n\n附图：${state2.images.length} 张`;
-    formEl.style.display = 'none';
-    confirmEl.style.display = '';
-    nextBtn.classList.add('hidden');
-    backBtn.classList.remove('hidden');
-    submitBtn.classList.remove('hidden');
-  });
-  backBtn.addEventListener('click', () => {
-    formEl.style.display = '';
-    confirmEl.style.display = 'none';
-    nextBtn.classList.remove('hidden');
-    backBtn.classList.add('hidden');
-    submitBtn.classList.add('hidden');
-  });
-
-  // ── 上传 ──
-  submitBtn.addEventListener('click', async () => {
-    const hint = $q('#fb-confirm-hint');
-    hint.textContent = '上传中…';
-    submitBtn.disabled = true;
-    try {
-      const res = await fetch(`${COMMUNITY_API}/comment`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          nickname: $q('#fb-nickname').value.trim(),
-          text: $q('#fb-text').value.trim(),
-          images: state2.images
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
-      localStorage.removeItem(FB_DRAFT_KEY);   // 上传成功才清草稿
-      closeModelModal(overlay);
-      showUploadToast('意见已上传，感谢反馈！', 'https://kondius.cn/qq-agent/comments');
-    } catch (err) {
-      hint.textContent = `上传失败：${err.message}（内容已保存在本机，可稍后再试）`;
-      submitBtn.disabled = false;
-    }
-  });
-}
-
-// ── 打开网站 ──
-// Electron 里 window.open 会被 main.js 的 setWindowOpenHandler 转给系统默认浏览器；
-// 开发模式（纯浏览器）则正常开新标签页。
-function openSite() {
-  window.open('https://kondius.cn/qq-agent', '_blank', 'noopener');
-}
-
-// ── 自动检查更新 ──
-// 节奏：启动时一次 + 之后每小时一次（version.json 作者手动改，这个频率足够）。
-// 有更新 → 弹浮窗引导下载；用户手动关掉浮窗 → 本次启动内不再弹（重启恢复）。
-// 但只要检测到新版，设置侧栏「桌面端」右侧就一直挂红点，直到版本追平。
-let updateAvailable = false;
-let updateToastDismissed = false;   // 本次启动内用户关过更新浮窗
-
-function renderUpdateDot() {
-  // 侧栏菜单每次重渲染都会重建（菜单 HTML 里已按 updateAvailable 画了点）；
-  // 这里兜底处理"侧栏已渲染完、检测结果刚到"的情况。
-  const item = document.querySelector('.settings-menu-item[data-section="desktop"]');
-  if (!item) return;
-  let dot = item.querySelector('.update-dot');
-  if (updateAvailable && !dot) {
-    dot = document.createElement('span');
-    dot.className = 'update-dot';
-    item.appendChild(dot);
-  } else if (!updateAvailable && dot) {
-    dot.remove();
-  }
-  // 桌面端页签的版本文案同步：有新版时"检查线上是否有新版本"→"发现新版本"
-  const st = document.getElementById('update-status-text');
-  if (st) {
-    st.innerHTML = updateAvailable ? '<b style="color:var(--warn)">；发现新版本</b>' : '；检查线上是否有新版本';
-  }
-}
-
-async function runUpdateCheck({ manual = false } = {}) {
-  try {
-    const data = await api('/api/update-check');
-    if (!data?.ok) return data;   // 网络/服务器错误原样返回，手动检查要显示原因
-    updateLatest = data;
-    updateAvailable = !!data.hasUpdate;
-    renderUpdateDot();
-    // 自动检查弹浮窗；本次启动内被用户关过就不再弹（手动点「检查更新」除外）
-    if (updateAvailable && (!updateToastDismissed || manual)) {
-      showUploadToast(
-        `发现新版本 v${data.latest}（当前 v${data.current}）`,
-        data.url,
-        { onClose: () => { updateToastDismissed = true; } }
-      );
-    }
-    return data;
-  } catch { return null; }
-}
-let updateLatest = null;
-
-// ── 金句上传 ──
-state.quoteMode = false;
-state.quoteSelected = new Set();   // 当前存档会话里勾选的消息 id（m.id）
-
-/** 进入/退出勾选模式时切换顶栏按钮形态。 */
-function syncQuoteButtons() {
-  const qb = $('#quote-btn'), qc = $('#quote-confirm-btn');
-  if (!qb || !qc) return;
-  if (state.quoteMode) {
-    qb.textContent = '取消';
-    qc.classList.remove('hidden');
-  } else {
-    qb.textContent = '金句上传';
-    qc.classList.add('hidden');
-  }
-}
-
-function enterQuoteMode() {
-  state.quoteMode = true;
-  state.quoteSelected = new Set();
-  syncQuoteButtons();
-  switchTab('chats');
-  if (state.currentChatKey) renderChatMessages();   // 重建出勾选框
-}
-
-function exitQuoteMode() {
-  if (!state.quoteMode) return;
-  state.quoteMode = false;
-  state.quoteSelected = new Set();
-  syncQuoteButtons();
-  if (state.tab === 'chats' && state.currentChatKey) updateChatMessagesBody(true);
-}
-
-/** 勾选模式下的确认：二次确认框 + 昵称。 */
-function openQuoteConfirmModal() {
-  const all = state.chatMessages || [];
-  const picked = all.filter((m) => state.quoteSelected.has(m.id))
-    .sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0));   // 按时间正序，读起来才是对话
-  if (!picked.length) { showNoticeModal('金句上传', '还没有勾选任何消息。先在存档列表里勾几段对话吧。'); return; }
-  const botCount = picked.filter((m) => m.self).length;
-  if (!botCount) {
-    showNoticeModal('金句上传', '勾选的消息里必须包含至少一条机器人发送的消息 —— 金句墙收的是机器人的发言。');
-    return;
-  }
-
-  const key = state.currentChatKey || '';
-  const chatName = formatChatTitle(key, chatNameOf(key));
-  const lastNickname = localStorage.getItem('qqa-quote-nickname') || '';
-
-  const overlay = modelModalShell({
-    head: '确认上传金句',
-    body: `
-      <div class="hint">将上传 ${picked.length} 条消息（含机器人 ${botCount} 条），
-        来自「${esc(chatName)}」，公开展示在 kondius.cn/qq-agent/holyshits。</div>
-      <div class="field"><label>昵称（收录人）</label>
-        <input type="text" id="q-nickname" maxlength="32" placeholder="怎么称呼你" value="${esc(lastNickname)}" /></div>
-      <div style="max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:10px;font-size:12.5px">
-        ${picked.map((m) => `<div style="margin-bottom:8px">
-          <span class="muted">${esc(m.self ? '🤖 ' : '')}${esc(m.senderName || '?')}：</span>${esc(String(m.text || '').slice(0, 200))}
-        </div>`).join('')}
-      </div>
-      <div id="q-hint" class="muted" style="font-size:12px"></div>`,
-    foot: `<button class="btn" id="q-cancel">取消</button>
-           <button class="btn btn-primary" id="q-submit">确认上传</button>`
-  });
-
-  overlay.querySelector('#q-cancel').addEventListener('click', () => closeModelModal(overlay));
-  overlay.querySelector('#q-submit').addEventListener('click', async () => {
-    const nickname = overlay.querySelector('#q-nickname').value.trim();
-    const hint = overlay.querySelector('#q-hint');
-    if (!nickname) { hint.textContent = '先填个昵称'; return; }
-    overlay.querySelector('#q-submit').disabled = true;
-    try {
-      // ── 先取图：QQ 图床 URL 会过期（老消息全网 400），
-      //    让本地后端走 OneBot get_image 从 NapCat 缓存里把原图读出来转 dataURL，
-      //      随消息一起上传 —— 服务器不再依赖 URL 时效。
-      const mediaItems = [];
-      const mediaOwners = [];   // 记录每个 item 属于哪条消息，方便回填
-      for (const m of picked) {
-        for (const x of (Array.isArray(m.media) ? m.media : [])) {
-          if (x && (x.url || x.file)) {
-            mediaItems.push({ file: x.file || '', url: x.url || '' });
-            mediaOwners.push(m);
-          }
-        }
-      }
-      const dataUrls = new Map();   // message -> [dataUrl,...]
-      if (mediaItems.length) {
-        hint.textContent = `正在从本地缓存取图（${mediaItems.length} 张）…`;
-        try {
-          const r = await api('/api/media-data', {
-            method: 'POST', body: JSON.stringify({ items: mediaItems })
-          });
-          (r.results || []).forEach((res, i) => {
-            if (res?.dataUrl) {
-              const m = mediaOwners[i];
-              if (!dataUrls.has(m)) dataUrls.set(m, []);
-              dataUrls.get(m).push(res.dataUrl);
-            }
-          });
-          hint.textContent = `取到 ${[...dataUrls.values()].flat().length}/${mediaItems.length} 张图，上传中…`;
-        } catch { hint.textContent = '取图失败（按无图上传），上传中…'; }
-      } else {
-        hint.textContent = '上传中…';
-      }
-      const res = await fetch(`${COMMUNITY_API}/holyshits`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          nickname,
-          // 不传 chatKey / chatName：金句墙只展示时间和收录人，群信息不出本机
-          messages: picked.map((m) => {
-            const dus = dataUrls.get(m) || [];
-            let di = 0;
-            return {
-              ts: m.ts, senderName: m.senderName, text: m.text,
-              self: !!m.self,
-              media: (Array.isArray(m.media) ? m.media : [])
-                .filter((x) => x && (x.url || x.file))
-                .map((x) => ({
-                  kind: 'image',
-                  url: x.url || '',
-                  file: x.file || '',
-                  // 取到就带上（服务器直接落盘）；取不到服务器再尝试 URL 下载
-                  ...(dus[di] ? { dataUrl: dus[di++] } : {})
-                }))
-            };
-          })
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
-      localStorage.setItem('qqa-quote-nickname', nickname);
-      closeModelModal(overlay);
-      exitQuoteMode();
-      showUploadToast('金句已收录！', 'https://kondius.cn/qq-agent/holyshits');
-    } catch (err) {
-      hint.textContent = `上传失败：${err.message}`;
-      overlay.querySelector('#q-submit').disabled = false;
-    }
-  });
-}
-
-// 顶栏按钮绑定
-$('#feedback-btn')?.addEventListener('click', () => openFeedbackModal());
-$('#open-site-btn')?.addEventListener('click', () => openSite());
-$('#quote-btn')?.addEventListener('click', () => {
-  if (state.quoteMode) exitQuoteMode(); else enterQuoteMode();
-});
-$('#quote-confirm-btn')?.addEventListener('click', () => openQuoteConfirmModal());
-
 // ── 标签页切换 ──
 // ⚠️ 必须统一走 switchTab：曾经这里把切换逻辑 inline 复制了一份，
 //    结果漏了 usage 分支 —— 点「用量」页签只切了视图、从不加载内容，
@@ -5238,8 +4882,6 @@ $$('.tab').forEach((tab) => {
   // 启动 loading：先等 HTTP 服务可用（页面可能先于服务打开）
   setLoadingStatus('正在启动 QQ Agent 服务…');
   await bootLoop();
-  runUpdateCheck();                                 // 启动时静默查一次（失败不打扰）
-  setInterval(() => runUpdateCheck(), 3600_000);    // 之后每小时查一次
 
   // 主题：以后端配置为准（跨设备同步），仅当后端确实存过才覆盖本地
   try {

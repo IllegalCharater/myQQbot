@@ -261,79 +261,10 @@ body {
 .dot-off { background: var(--red); }
 .dot-wait { background: var(--orange); }
 
-/* ── 页签栏右侧的社区功能按钮（意见收集 / 金句上传）── */
-.nav-spacer { flex: 1; }
-.nav-btn {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  padding: 5px 14px;
-  cursor: pointer;
-  font-size: 12.5px;
-  font-weight: 500;
-  font-family: inherit;
-  border-radius: 6px;
-  margin: 4px 0 6px;
-  margin-left: 6px;
-  white-space: nowrap;
-  transition: color .14s ease, border-color .14s ease, background .14s ease;
-}
-.nav-btn:hover { color: var(--text); border-color: var(--accent); }
-.nav-btn.nav-btn-primary { color: var(--accent); border-color: var(--accent); }
-/* 醒目版（打开网站！）：实心 accent 底 + 白字，在页签栏里一眼能看到 */
-.nav-btn.nav-btn-hot { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 700; }
-.nav-btn.nav-btn-hot:hover { background: var(--accent); color: #fff; border-color: var(--accent); filter: brightness(1.15); }
-
 /* 屏蔽名单弹窗：群员行 */
 .bl-member { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .bl-member:hover { background: var(--panel2, rgba(127,147,199,.08)); }
 .bl-member .bl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* 群二维码彩蛋：全屏遮罩，点任意位置关闭 */
-.qrcode-egg-overlay {
-  position: fixed; inset: 0; z-index: 9999;
-  background: rgba(0,0,0,.78);
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer;
-}
-.qrcode-egg-overlay img {
-  max-width: min(80vw, 480px); max-height: 80vh;
-  border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.5);
-}
-/* 上传成功浮框（右上角，不自动消失，只能手动关） */
-.upload-toast {
-  position: fixed; top: 14px; right: 14px; z-index: 9999;
-  background: var(--bg-2); border: 1px solid var(--accent); border-radius: 10px;
-  padding: 12px 14px; min-width: 260px; max-width: 380px;
-  box-shadow: var(--shadow-lg);
-  animation: popIn var(--dur-slow, .3s) ease;
-}
-.upload-toast .ut-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-.upload-toast .ut-title { font-weight: 600; font-size: 13.5px; color: var(--text); }
-.upload-toast .ut-close {
-  background: none; border: none; color: var(--muted); font-size: 16px;
-  cursor: pointer; line-height: 1; padding: 0 2px; flex-shrink: 0;
-}
-.upload-toast .ut-close:hover { color: var(--text); }
-.upload-toast .ut-link {
-  display: block; margin-top: 6px; font-size: 12px; color: var(--accent);
-  text-decoration: none; overflow-wrap: anywhere;
-}
-.upload-toast .ut-link:hover { text-decoration: underline; }
-
-/* 金句勾选模式：存档消息行前的勾选框与选中行高亮 */
-.q-check { width: 26px; text-align: center; }
-.q-check input { cursor: pointer; accent-color: var(--accent); }
-tr.quote-selected td { background: rgba(91,140,255,.10); }
-/* 意见收集：图片九宫格预览 */
-.fb-imgs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
-.fb-img { position: relative; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; aspect-ratio: 1; }
-.fb-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.fb-img .fb-img-del {
-  position: absolute; top: 4px; right: 4px; width: 20px; height: 20px;
-  background: rgba(0,0,0,.65); color: #fff; border: none; border-radius: 50%;
-  cursor: pointer; font-size: 12px; line-height: 1;
-}
 
 /* ── 标签页 ── */
 #tabs {
@@ -525,6 +456,10 @@ tr.quote-selected td { background: rgba(91,140,255,.10); }
 .archive-table .w.self { color: var(--accent); }
 .archive-table .unread td { background: rgba(255,180,84,.05); }
 .archive-table .text { word-break: break-word; white-space: pre-wrap; }
+/* 压缩摘要条目：系统生成的纪要，不是某个人说的话 —— 弱化一下让它一眼可辨 */
+.archive-table .digest-row td { background: rgba(91,140,255,.06); }
+.archive-table .digest-row .w { color: var(--muted); font-style: italic; }
+.archive-table .digest-row .text { color: var(--muted); }
 
 /* ── 设置 ── */
 .settings-sidebar {
@@ -557,12 +492,6 @@ tr.quote-selected td { background: rgba(91,140,255,.10); }
 }
 .settings-menu-item:hover { background: var(--bg-3); color: var(--text); }
 .settings-menu-item.active { background: var(--bg-3); color: var(--accent); font-weight: 600; }
-/* 彩蛋按钮（！？群群？！）：与顶栏「打开网站！」同款的实心 accent 醒目样式 */
-.settings-menu-item.egg-hot { background: var(--accent); color: #fff; font-weight: 700; text-align: center; margin-top: 10px; }
-.settings-menu-item.egg-hot:hover { background: var(--accent); color: #fff; filter: brightness(1.15); }
-
-/* 有新版本时侧栏「桌面端」右侧的红点 */
-.update-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #e5534b; margin-left: 6px; vertical-align: middle; }
 
 .settings-pane { flex: 1; max-width: 860px; margin: 0 auto; padding: 22px 26px 40px; overflow-y: auto; width: 100%; }
 .settings-pane h3 { margin: 22px 0 12px; font-size: 14px; color: var(--accent); }
@@ -1076,8 +1005,8 @@ tr.quote-selected td { background: rgba(91,140,255,.10); }
    这条规则保证任何带 hidden 属性的元素一律不可见。 */
 [hidden] { display: none !important; }
 /* .hidden 工具类：与 [hidden] 属性同义（JS 侧用 classList 切换更方便）。
-   曾经只有 .banner.hidden 一条专属规则 —— 其他地方（确认金句按钮、删除人设按钮）
-   加了 hidden 类却没有任何效果，按钮常态显示。 */
+   曾经只有 .banner.hidden 一条专属规则 —— 其他地方加了 hidden 类却没有任何
+   效果，元素常态显示。 */
 .hidden { display: none !important; }
 
 /* ── 用量/成本看板 ── */
@@ -1544,7 +1473,7 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
 /* ══════════════════════════════════════════════════════════════
    「？」主题 v3 —— 抽象至极（glitch / 抽帧 / VHS 故障美学）
    ══════════════════════════════════════════════════════════════
-   v3 设计转向（Kondius：还掉帧 + 不够抽象）：
+   v3 设计转向（还掉帧 + 不够抽象）：
    ★ 核心思路：抽帧即风格。平滑动画既费性能又"太正常" ——
      全部改用 steps() 跳切：元素不滑动，而是闪现。开销≈0，抽象度拉满。
    ★ 性能铁律：只动 transform/opacity；filter 全删（hue-rotate 也删了，
@@ -1671,7 +1600,6 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
 
 [data-theme='?'] .model-modal-overlay { animation: none; }
 [data-theme='?'] .model-modal { animation: chaosCutIn .5s steps(5, end); will-change: transform; }
-[data-theme='?'] .upload-toast { animation: chaosCutR .45s steps(4, end); }
 [data-theme='?'] .session-item.new-item:nth-child(odd),
 [data-theme='?'] .chat-item.new-item:nth-child(odd) { animation: chaosCutL .5s steps(4, end); }
 [data-theme='?'] .session-item.new-item:nth-child(even),
@@ -1757,7 +1685,7 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
 [data-theme='?'] .session-item:nth-child(even):hover, [data-theme='?'] .chat-item:nth-child(even):hover { transform: translateX(12px) rotate(-1.6deg) scale(1.03); }
 
 /* ── 按钮：hover 抽帧摇摆；主按钮翻跟斗；按压压扁 ── */
-[data-theme='?'] .btn:hover, [data-theme='?'] .nav-btn:hover, [data-theme='?'] .icon-btn:hover {
+[data-theme='?'] .btn:hover, [data-theme='?'] .icon-btn:hover {
   animation: chaosBtnShake .45s steps(4) infinite;
 }
 @keyframes chaosBtnShake {
@@ -1772,7 +1700,7 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
   0%   { transform: rotateX(0) scale(1.1); }
   100% { transform: rotateX(360deg) scale(1.1); }
 }
-[data-theme='?'] .btn:active, [data-theme='?'] .nav-btn:active { transform: scale(.65) rotate(-4deg); }
+[data-theme='?'] .btn:active { transform: scale(.65) rotate(-4deg); }
 
 /* ── 主题选项：hover 起飞 ── */
 [data-theme='?'] .theme-option { transition: transform .15s steps(3, end), border-color .15s ease; }

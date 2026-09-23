@@ -19,6 +19,19 @@ export class SendQueue {
     this.chains = new Map();      // chatKey -> enqueue fn
     this.minuteTimes = new Map(); // chatKey -> [ts]
     this.hourTimes = new Map();   // chatKey -> [ts]
+    // chatKey -> 正在回复态（由 orchestrator 的静默/回复状态机维护）。
+    // 回复态内用 config.reply.maxPerMinute 收紧出站限频；不在表里 = 静默态，沿用 send.maxPerMinute。
+    this.replying = new Set();
+  }
+
+  /** 由编排器在进入/退出回复态时调用（幂等）。 */
+  setReplying(chatKey, on) {
+    if (on) this.replying.add(chatKey);
+    else this.replying.delete(chatKey);
+  }
+
+  clearReplying() {
+    this.replying.clear();
   }
 
   #chain(chatKey) {
@@ -26,16 +39,53 @@ export class SendQueue {
     return this.chains.get(chatKey);
   }
 
-  #checkRate(chatKey) {
+  /**
+   * 限频检查。**async**：回复态内命中分钟限频时会有界等待一个空位再放行
+   * （见下面 maxLimitWaitMs 的说明），所以调用方必须 await。
+   */
+  async #checkRate(chatKey) {
     const now = Date.now();
     const cfg = getConfig().send;
+    const rep = getConfig().reply || {};
     const minute = (this.minuteTimes.get(chatKey) || []).filter((t) => now - t < 60000);
     const hour = (this.hourTimes.get(chatKey) || []).filter((t) => now - t < 3600000);
     // 回退值必须与 config.js 的默认值一致（80）。此前这里是 8，
     // 配置缺失/为 0 时限频突然收紧 10 倍，行为不可预测。
-    if (minute.length >= Math.max(1, Number(cfg.maxPerMinute) || DEFAULT_MAX_PER_MINUTE)) {
-      throw new Error(`发送频率超限（每分钟最多 ${cfg.maxPerMinute || DEFAULT_MAX_PER_MINUTE} 条），请等一会再发`);
+    const baseMinute = Math.max(1, Number(cfg.maxPerMinute) || DEFAULT_MAX_PER_MINUTE);
+    // 回复态内额外收紧（取更严的那个）。reply.maxPerMinute 为 0 = 不额外收紧。
+    const replyMinute = Math.max(0, Number(rep.maxPerMinute) || 0);
+    const tighter = this.replying.has(chatKey) && replyMinute > 0;
+    const effMinute = tighter ? Math.min(baseMinute, replyMinute) : baseMinute;
+
+    if (minute.length >= effMinute) {
+      // 回复态内**有界等待**一个空位，而不是直接抛错。
+      //
+      // 抛错意味着模型收到工具错误且那条消息被丢弃；系统提示又明确要求模型
+      //"失败的请稍后再试"，于是常见结果是重复重发再次失败，或模型放弃、
+      // 在对话中途变哑巴 —— 在群里看起来就是机器人坏了。
+      // 真人撞到自己的打字速度上限时做的正是有界等待：停一下再发。
+      // 有界（maxLimitWaitMs，默认 20s）保证工具延迟可预测；本函数位于每会话
+      // 串行 chain 内，sleep 会自动按会话串行，不会与别的发送交错。
+      // 静默态（tighter=false）维持原行为：直接抛错。
+      const wait = Math.max(0, minute[0] + 60000 - Date.now() + 50);
+      const grace = Math.max(0, Number(rep.maxLimitWaitMs) || 0);
+      if (tighter && grace > 0 && wait <= grace) {
+        await sleep(wait);
+        const now2 = Date.now();
+        const freed = (this.minuteTimes.get(chatKey) || []).filter((t) => now2 - t < 60000);
+        if (freed.length >= effMinute) {
+          throw new Error(`发送频率超限（每分钟最多 ${effMinute} 条），请等一会再发`);
+        }
+        freed.push(now2);
+        this.minuteTimes.set(chatKey, freed);
+        const hour2 = (this.hourTimes.get(chatKey) || []).filter((t) => now2 - t < 3600000);
+        hour2.push(now2);
+        this.hourTimes.set(chatKey, hour2);
+        return;
+      }
+      throw new Error(`发送频率超限（每分钟最多 ${effMinute} 条），请等一会再发`);
     }
+    // 小时窗口维持直接报错：在工具调用里等一小时不是"速度"语义
     if (hour.length >= Math.max(1, Number(cfg.maxPerHour) || DEFAULT_MAX_PER_HOUR)) {
       throw new Error(`发送频率超限（每小时最多 ${cfg.maxPerHour} 条）`);
     }
@@ -84,7 +134,7 @@ export class SendQueue {
       const isLast = i === parts.length - 1;
       const gap = this.#gap(text, isLast);
       promises.push(chain(async () => {
-        this.#checkRate(chatKey);
+        await this.#checkRate(chatKey);
         if (gap > 0) await sleep(gap);
         const data = await this.onebot.sendText(kind, id, text, {
           replyToMessageId: i === 0 ? options.replyToMessageId : null, // 引用挂在第一条上：回的就是那条
@@ -121,7 +171,7 @@ export class SendQueue {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
-      this.#checkRate(chatKey);
+      await this.#checkRate(chatKey);
       await sleep(randInt(600, 1500)); // 发表情前真人式的短暂停顿
       const data = await this.onebot.sendSticker(kind, id, sticker.url, {
         replyToMessageId: options.replyToMessageId ?? null,
@@ -139,6 +189,8 @@ export class SendQueue {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
+      // 拍一拍同样是出站动作：原先完全不走限频，回复态的限速对它形同虚设。
+      await this.#checkRate(chatKey);
       await sleep(randInt(300, 900));
       const data = await this.onebot.sendPoke(kind, id, targetUserId);
       const ts = Date.now();
