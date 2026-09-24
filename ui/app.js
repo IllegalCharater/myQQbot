@@ -87,32 +87,32 @@ let usageRange = '7';
  */
 const TOOL_META = {
   // 发言类
-  send_message:      { name: '发消息',     cat: '发言',   icon: '💬' },
-  send_sticker:      { name: '发表情包',   cat: '发言',   icon: '🎴' },
-  download_jmcomic:  { name: '下载漫画',   cat: '文件',   icon: '📥' },
-  send_poke:         { name: '戳一戳',     cat: '发言',   icon: '👆' },
+  send_message: { name: '发消息', cat: '发言', icon: '💬' },
+  send_sticker: { name: '发表情包', cat: '发言', icon: '🎴' },
+  download_jmcomic: { name: '下载漫画', cat: '文件', icon: '📥' },
+  send_poke: { name: '戳一戳', cat: '发言', icon: '👆' },
   // 查看类
   get_recent_messages: { name: '翻聊天记录', cat: '查看', icon: '📜' },
-  get_message_detail:  { name: '看消息详情', cat: '查看', icon: '🔍' },
-  get_message_images:  { name: '看图片',     cat: '查看', icon: '🖼️' },
-  get_active_members:  { name: '看活跃群友', cat: '查看', icon: '👥' },
-  read_forward:        { name: '展开转发',   cat: '查看', icon: '📨' },
-  read_group_notice:   { name: '看群公告',   cat: '查看', icon: '📢' },
+  get_message_detail: { name: '看消息详情', cat: '查看', icon: '🔍' },
+  get_message_images: { name: '看图片', cat: '查看', icon: '🖼️' },
+  get_active_members: { name: '看活跃群友', cat: '查看', icon: '👥' },
+  read_forward: { name: '展开转发', cat: '查看', icon: '📨' },
+  read_group_notice: { name: '看群公告', cat: '查看', icon: '📢' },
   // 表情包
-  list_stickers:     { name: '列表情库',   cat: '表情',   icon: '📚' },
-  get_sticker_image: { name: '看表情图',   cat: '表情',   icon: '🖼️' },
-  collect_sticker:   { name: '收藏表情',   cat: '表情',   icon: '⭐' },
-  sticker_note:      { name: '备注表情',   cat: '表情',   icon: '📝' },
+  list_stickers: { name: '列表情库', cat: '表情', icon: '📚' },
+  get_sticker_image: { name: '看表情图', cat: '表情', icon: '🖼️' },
+  collect_sticker: { name: '收藏表情', cat: '表情', icon: '⭐' },
+  sticker_note: { name: '备注表情', cat: '表情', icon: '📝' },
   // 记忆
-  memory_append:     { name: '记一条',     cat: '记忆',   icon: '🧠' },
-  memory_query:      { name: '查记忆',     cat: '记忆',   icon: '🧠' },
-  memory_remove:     { name: '删记忆',     cat: '记忆',   icon: '🧹' },
+  memory_append: { name: '记一条', cat: '记忆', icon: '🧠' },
+  memory_query: { name: '查记忆', cat: '记忆', icon: '🧠' },
+  memory_remove: { name: '删记忆', cat: '记忆', icon: '🧹' },
   // 联网
-  web_search:        { name: '联网搜索',   cat: '联网',   icon: '🌐' },
-  web_fetch:         { name: '抓网页',     cat: '联网',   icon: '🔗' },
+  web_search: { name: '联网搜索', cat: '联网', icon: '🌐' },
+  web_fetch: { name: '抓网页', cat: '联网', icon: '🔗' },
   // 其他
-  report_feedback:   { name: '汇报反馈',   cat: '其他',   icon: '📣' },
-  finish:            { name: '结束本次',   cat: '其他',   icon: '🏁' }
+  report_feedback: { name: '汇报反馈', cat: '其他', icon: '📣' },
+  finish: { name: '结束本次', cat: '其他', icon: '🏁' }
 };
 
 /** 分类的展示顺序（"其他"垫底） */
@@ -1057,8 +1057,8 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
         <div class="snowluma-state-row">
           <span>WebUI：</span>
           ${webuiUrl
-            ? `<button class="btn btn-small" id="sl-open-webui-btn" title="在浏览器中打开 SnowLuma 控制台">${esc(webuiUrl)}</button>`
-            : '<span class="muted">等待 SnowLuma 启动后自动识别…</span>'}
+        ? `<button class="btn btn-small" id="sl-open-webui-btn" title="在浏览器中打开 SnowLuma 控制台">${esc(webuiUrl)}</button>`
+        : '<span class="muted">等待 SnowLuma 启动后自动识别…</span>'}
         </div>
         <div class="snowluma-actions">
           <button class="btn btn-primary" id="sl-start-btn" ${running ? 'disabled' : ''}>${running ? '已运行' : '启动 SnowLuma'}</button>
@@ -1543,8 +1543,8 @@ function updateChatDigestBlock() {
   // 两个会话的摘要 id 完全可能重合成一样的数组。
   // 签名里带正文长度：下面要报"摘要存档共多少字"，只盯 id 的话字数变了也不刷新。
   const sig = JSON.stringify([state.currentChatKey,
-    all.map((m) => `${m.id}:${String(m.text || '').length}`),
-    status.injectedIds, status.droppedIds, status.truncatedId, status.chars, status.budget, status.config]);
+  all.map((m) => `${m.id}:${String(m.text || '').length}`),
+  status.injectedIds, status.droppedIds, status.truncatedId, status.chars, status.budget, status.config]);
   if (state.chatDigestSig === sig) return;
   state.chatDigestSig = sig;
 
@@ -1570,7 +1570,7 @@ function updateChatDigestBlock() {
     summary.textContent = closed
       ? `历史印象 · 已关闭注入 · 共 ${all.length} 段`
       : `历史印象 · 已注入 ${inj.length}/${all.length} 段 · ${status.chars}/${status.budget} 字`
-        + ` · 覆盖 ${lo} ~ ${hi}${totalRaw ? `（共 ${totalRaw} 条原始消息）` : ''}`;
+      + ` · 覆盖 ${lo} ~ ${hi}${totalRaw ? `（共 ${totalRaw} 条原始消息）` : ''}`;
   }
   const meta = $('#chat-digest-meta');
   if (meta) {
@@ -1602,7 +1602,7 @@ function updateChatDigestBlock() {
   if (list) {
     list.innerHTML = table(inj, true) + (dropped.length
       ? `<details class="digest-dropped"><summary>未注入 ${dropped.length} 段（超出字数预算，模型看不到）</summary>`
-        + table(dropped, false) + '</details>'
+      + table(dropped, false) + '</details>'
       : '');
   }
   const more = $('#chat-digest-more');
@@ -1973,7 +1973,7 @@ function updateUsagePage(stats, st, prices) {
  */
 let usageLoadToken = 0;          // 每次加载递增，用于丢弃过期结果
 let usageLastData = null;        // 上一次加载成功的数据：{ range, stats, st, prices }
-                                 // 用于切回用量页时先立即画出旧内容，避免"黑一下"
+// 用于切回用量页时先立即画出旧内容，避免"黑一下"
 
 async function loadUsageView({ force = false } = {}) {
   const box = $('#usage-page');
@@ -2115,8 +2115,8 @@ function openUsageBreakdown(dim, key) {
         ? r.rows.map((x) => `
             <tr>
               <td>${esc(activeBy === 'chat'
-                ? formatChatTitle(x.key, chatNameOf(x.key))
-                : (x.vendor ? `${x.vendor}：${x.model}` : (x.model ?? x.key)))}</td>
+          ? formatChatTitle(x.key, chatNameOf(x.key))
+          : (x.vendor ? `${x.vendor}：${x.model}` : (x.model ?? x.key)))}</td>
               <td class="r">${x.runs}</td>
               <td class="r">${fmtTok(x.promptTokens)}</td>
               <td class="r">${fmtTok(x.completionTokens)}</td>
@@ -2285,11 +2285,11 @@ async function loadMemoryDetail(chatKey) {
         </summary>
         <div class="coll-body">
           ${impRows || '<div class="muted">（没有印象）</div>'}
-          <div class="hint">单条「改」保留原本的记录时间；「批量编辑」是把整份印象重写一遍，
-            会把所有条目的时间刷成当下 —— 想让"这条印象是什么时候形成的"保持准确，用单条改。</div>
         </div>
       </div>`;
     }).join('');
+    //   <div class="hint">单条「改」保留原本的记录时间；「批量编辑」是把整份印象重写一遍，
+    //     会把所有条目的时间刷成当下 —— 想让"这条印象是什么时候形成的"保持准确，用单条改。</div>
     // 整理状态从 state 恢复：切页签回来 / 刷新页面后依然可见
     const busy = !!state.consolidating[chatKey];
     const result = state.consolidateResult[chatKey];
@@ -2581,9 +2581,8 @@ function renderStickerItems() {
     cnt.textContent = note;
   }
   if (!state.stickers.length) {
-    box.innerHTML = `<div class="muted" style="padding:10px">${
-      String(state.stickerQuery || '').trim() ? '没有匹配的表情。' : '表情库是空的（在设置里启用表情包后，同步一次 QQ 收藏即可）。'
-    }</div>`;
+    box.innerHTML = `<div class="muted" style="padding:10px">${String(state.stickerQuery || '').trim() ? '没有匹配的表情。' : '表情库是空的（在设置里启用表情包后，同步一次 QQ 收藏即可）。'
+      }</div>`;
     return;
   }
   box.innerHTML = `<div class="sticker-grid">${state.stickers.map((s) => {
@@ -2640,8 +2639,8 @@ function renderStickerDetail(s) {
         <div class="chat-toolbar">
           <button class="btn btn-small" id="sticker-edit-btn">编辑备注 · 标签 · 场景</button>
           ${s.deletable
-            ? '<button class="btn btn-small btn-danger" id="sticker-del-btn">删除</button>'
-            : '<button class="btn btn-small" disabled title="这是 QQ 收藏里的表情，本地删不掉（下次同步就会回来）。想删请到 QQ 里取消收藏。">QQ 收藏不能在这里删</button>'}
+      ? '<button class="btn btn-small btn-danger" id="sticker-del-btn">删除</button>'
+      : '<button class="btn btn-small" disabled title="这是 QQ 收藏里的表情，本地删不掉（下次同步就会回来）。想删请到 QQ 里取消收藏。">QQ 收藏不能在这里删</button>'}
         </div>
         <div class="hint">「备注 / 标签 / 适用场景」是机器人挑表情时看的依据（提示词里的【可用表情包】）。
           改完备注后，标注相同的两个表情会让它挑不出来 —— 那种情况它会明确报错并列出候选 id，不会乱挑一个。
@@ -2780,14 +2779,14 @@ async function loadGroupMembers(chatId, chatKey) {
       box.innerHTML = `<div class="collapsible" open><summary>群成员（${state.groupMembers.length} 人）</summary><div class="coll-body"><table class="member-table">
         <tr><th style="text-align:left">群名片</th><th style="text-align:left">QQ昵称</th><th style="text-align:left">QQ号</th><th style="width:90px;text-align:right">备注</th></tr>
         ${state.groupMembers.map((m) => {
-          const note = notes[String(m.userId)];
-          return `<tr>
+        const note = notes[String(m.userId)];
+        return `<tr>
             <td>${esc(note || m.card || '—')}${note && (m.card || m.nickname) ? ` <span class="muted">(${esc(m.card || m.nickname)})</span>` : ''}</td>
             <td>${esc(m.nickname || '—')}</td>
             <td class="muted" style="font-size:11px">${esc(m.userId)}</td>
             <td style="text-align:right"><button class="btn btn-small member-note-edit" data-qq="${esc(m.userId)}">编辑备注</button></td>
           </tr>`;
-        }).join('')}
+      }).join('')}
       </table></div></div>`;
       box.querySelectorAll('.member-note-edit').forEach((el) => {
         el.addEventListener('click', () => openMemberNoteModal(el.dataset.qq, chatKey));
@@ -3306,9 +3305,9 @@ function renderModelColumn(pid, c) {
   const current = `${c.api.provider || ''}|||${c.api.model || ''}`;
   return `<div class="mp-provider"><span>${esc(p.displayName || p.id)}${p.anthropicOrigin ? ' · Anthropic 协议' : ''}</span><span class="mp-url">${esc(p.baseURL || '无端点')}</span></div>
     ${p.models.map((m) => {
-      const v = `${p.id}|||${m}`;
-      return `<div class="mp-row${v === current ? ' current' : ''}" data-v="${esc(v)}"><span class="mp-name">${esc(m)}</span>${visionBadge(p.id, m)}</div>`;
-    }).join('')}`;
+    const v = `${p.id}|||${m}`;
+    return `<div class="mp-row${v === current ? ' current' : ''}" data-v="${esc(v)}"><span class="mp-name">${esc(m)}</span>${visionBadge(p.id, m)}</div>`;
+  }).join('')}`;
 }
 
 function applyProviderPick(value, { silent = false } = {}) {
@@ -3798,7 +3797,7 @@ const TIER_HINT = {
 };
 
 function renderChatSection(c) {
-    const st = c.store || {};
+  const st = c.store || {};
   // 滑条位置是唯一真相；档位与概率都由它派生（与后端 tier-slider.js 同一套规则）
   const sliderPos = sliderToTierUI_tierToSlider(st);
   const { tier: curTier, randomPercent: curPct } = sliderToTierUI(sliderPos);
@@ -3806,7 +3805,7 @@ function renderChatSection(c) {
   // ⚠️ 这个别名不能删 —— 曾经漏掉它，导致模板里 B 未定义，
   //    整个 renderChatSection 抛 ReferenceError，聊天设置页直接打不开。
   const B = TIER_SLIDER_BANDS;
-return `
+  return `
     <h3>运行节奏</h3>
     <div class="field-row">
       <div class="field"><label>立即回复时间（毫秒）—— 最后一条新消息之后等这么久没有新消息，就直接回复（原「防抖聚批窗口」）</label><input type="number" id="cfg-wakedelay" min="0" value="${esc(c.wakeDelayMs)}" /></div>
@@ -3860,8 +3859,8 @@ return `
       <label>发表情包的积极程度</label>
       <select id="cfg-sticker-encourage">
         ${STICKER_LEVELS.map(([v, label], i) =>
-          `<option value="${v}" ${Number(c.sticker?.encourage ?? 1) === v ? 'selected' : ''}>${esc(label)}</option>`
-        ).join('')}
+    `<option value="${v}" ${Number(c.sticker?.encourage ?? 1) === v ? 'selected' : ''}>${esc(label)}</option>`
+  ).join('')}
       </select>
       <div class="hint">
         这是"引导"不是"强制"，模型仍会自行判断什么时机合适。
@@ -4244,7 +4243,7 @@ function bindSettingsEvents(c) {
         const n = names.get(o.value);
         if (n) o.textContent = `${n}（${o.value}）${extraIds.includes(o.value) ? ' · 已不在白名单' : ''}`;
       });
-    }).catch(() => {});
+    }).catch(() => { });
 
     const syncG = () => {
       const pos = Number(gSlider.value);
@@ -4346,7 +4345,7 @@ function bindSettingsEvents(c) {
           const n = names.get(o.value);
           if (n) o.textContent = `${n}（${o.value}）${extraIds.includes(o.value) ? ' · 已不在白名单' : ''}`;
         });
-      }).catch(() => {});
+      }).catch(() => { });
 
       digGroupSel.addEventListener('change', loadGroup);
       gEvery.addEventListener('change', storeGroup);
@@ -5659,7 +5658,7 @@ function openBlocklistModal() {
   api('/api/onebot/groups').then((d) => {
     for (const g of (d.groups || [])) groupNames.set(String(g.id), g.name);
     renderLeft();
-  }).catch(() => {});
+  }).catch(() => { });
 
   function isBlocked(uid) { return (pending[activeGid] || []).map(String).includes(String(uid)); }
 
