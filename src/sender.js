@@ -166,14 +166,18 @@ export class SendQueue {
     return { sent, failed };
   }
 
-  /** 发送一个收藏表情（独立气泡）。 */
+  /**
+   * 发送一个收藏表情（独立气泡）。
+   * options.file 覆盖用哪张图：默认 sticker.url，工具层会传 bot 收藏条目在
+   * data/sticker-cache/ 里的**本机绝对路径**（协议端与本机同进程树，读得到）。
+   */
   sendSticker(chatKey, sticker, options = {}) {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
       await this.#checkRate(chatKey);
       await sleep(randInt(600, 1500)); // 发表情前真人式的短暂停顿
-      const data = await this.onebot.sendSticker(kind, id, sticker.url, {
+      const data = await this.onebot.sendSticker(kind, id, options.file || sticker.url, {
         replyToMessageId: options.replyToMessageId ?? null,
         atUserId: options.atUserId ?? null
       });

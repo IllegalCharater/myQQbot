@@ -14,6 +14,7 @@ import { MemoryStore } from './memory.js';
 import { StickerManager } from './sticker-manager.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 import { detectMime } from './tools.js';
+import { cachedPath } from './sticker-cache.js';
 import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
 import { Orchestrator } from './orchestrator.js';
@@ -534,7 +535,9 @@ export function createApp({ log = console.log } = {}) {
     }
 
     if (!text && !media.length) return;
-    store.appendIncoming(`${kind}:${id}`, {
+    // 条目要**当面交给**编排器（onIncoming 的第二个参数）：上下文窗口的入窗入口
+    // 只有它一个，少传一次窗口与存档就会静默分叉（那条消息永远不会被回应）。
+    const entry = store.appendIncoming(`${kind}:${id}`, {
       mid: event.message_id,
       ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
       senderId,
@@ -543,7 +546,7 @@ export function createApp({ log = console.log } = {}) {
       media
     });
     emit('chat-update', `${kind}:${id}`);
-    orchestrator.onIncoming(`${kind}:${id}`);
+    orchestrator.onIncoming(`${kind}:${id}`, entry);
   }
 
   async function ingestPoke(event) {
@@ -578,7 +581,7 @@ export function createApp({ log = console.log } = {}) {
       const targetName = isGroup ? (await resolveAtName(id, targetId)) || targetId : targetId;
       text = operatorId === targetId ? `[拍一拍] ${operatorName} 拍了拍自己` : `[拍一拍] ${operatorName} 拍了拍 ${targetName}`;
     }
-    store.appendIncoming(chatKeyNow, {
+    const entry = store.appendIncoming(chatKeyNow, {
       mid: null,
       ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
       senderId: operatorId,
@@ -586,8 +589,8 @@ export function createApp({ log = console.log } = {}) {
       text,
       media: []
     });
-    emit('chat-update', `${isGroup ? 'group' : 'private'}:${id}`);
-    orchestrator.onIncoming(`${isGroup ? 'group' : 'private'}:${id}`);
+    emit('chat-update', chatKeyNow);
+    orchestrator.onIncoming(chatKeyNow, entry);
   }
 
   async function handleOneBotEvent(event) {
@@ -1558,6 +1561,8 @@ export function createApp({ log = console.log } = {}) {
         const localId = Number(chatMsgItemMatch[3]);
         const result = store.deleteByLocalId(chatKey, localId);
         if (!result) return json(res, 404, { ok: false, error: '找不到这条记录（可能已在别处删掉）' });
+        // 窗口里也得跟着去掉：留着的话下次唤醒会把一条已被删掉的消息递给模型
+        orchestrator.forgetMessage(chatKey, localId);
         emit('chat-update', chatKey);
         return json(res, 200, {
           ok: true,
@@ -1622,8 +1627,10 @@ export function createApp({ log = console.log } = {}) {
       const chatReadMatch = /^\/api\/chats\/(group|private)_(\d+)\/mark-read$/.exec(pathname);
       if (chatReadMatch && method === 'POST') {
         const chatKey = `${chatReadMatch[1]}:${chatReadMatch[2]}`;
-        const drained = store.drainUnread(chatKey);
-        return json(res, 200, { ok: true, marked: drained.length });
+        // 走窗口消费，**不能直接改存档的已读字段**：窗口的游标才是"看过没看过"的真相，
+        // 只标存档不动游标的话，这批消息下次唤醒还会被当成待回应。
+        const marked = orchestrator.markChatSeen(chatKey);
+        return json(res, 200, { ok: true, marked });
       }
 
       if (pathname === '/api/pause' && method === 'POST') {
@@ -1642,7 +1649,8 @@ export function createApp({ log = console.log } = {}) {
         orchestrator.setPaused(false);
         const marked = {};
         for (const chatKey of store.listChats()) {
-          const n = store.drainUnread(chatKey).length;
+          // 与面板"标为已读"同一条路：窗口推进游标 + 下沉 read 镜像
+          const n = orchestrator.markChatSeen(chatKey);
           if (n > 0) marked[chatKey] = n;
         }
         emit('chat-update', '*');
@@ -1659,7 +1667,8 @@ export function createApp({ log = console.log } = {}) {
         const force = url.searchParams.get('force') === '1';
         try {
           const data = await stickers.adminList(q, limit, force);
-          return json(res, 200, { ok: true, ...data });
+          // maxKeepCount 一并回显：面板顶部的计数行要拿它跟 owned 比着写（"bot 收藏 12 个 / 上限 20"）
+          return json(res, 200, { ok: true, ...data, maxKeepCount: Math.max(0, Number(getConfig().sticker?.maxKeepCount) || 0) });
         } catch (error) {
           return json(res, 502, { ok: false, error: String(error?.message ?? error) });
         }
@@ -1677,6 +1686,35 @@ export function createApp({ log = console.log } = {}) {
         }
       }
 
+      // 「缓存图片」：把 bot 自己收藏的表情的图补进 data/sticker-cache/（发送时就不再依赖
+      // 会过期的图床链接），顺手删掉没人认领的缓存文件。
+      // 顺序做、一次有上限：这是个手工按钮，不需要快，更需要别把图床和事件循环打满。
+      if (pathname === '/api/stickers/cache' && method === 'POST') {
+        try {
+          const targets = stickers.entries.filter((e) => e.source !== 'qq' && !cachedPath(e));
+          const MAX = 200;
+          let cached = 0;
+          const failed = [];
+          for (const item of targets.slice(0, MAX)) {
+            const r = await stickers.cacheOne(item.id);
+            if (r.cached) cached++;
+            else failed.push({ id: item.id, error: r.error || '缓存失败' });
+          }
+          const swept = stickers.sweep();
+          if (cached || swept) emit('sticker-update', {});
+          return json(res, 200, {
+            ok: true,
+            cached,
+            swept,
+            failed: failed.length,
+            errors: failed.slice(0, 5),
+            remains: Math.max(0, targets.length - MAX)
+          });
+        } catch (error) {
+          return json(res, 502, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
       // 缩略图代理。**必须**走这里，页面上绝不能写 <img src="qpic…">：
       //  ① 图床有防盗链，直连大概率裂图；
       //  ② stickers.json 一旦被污染成内网地址，直连就是"用户的浏览器"去打内网 ——
@@ -1688,6 +1726,26 @@ export function createApp({ log = console.log } = {}) {
         try { ref = decodeURIComponent(stickerImageMatch[1]); } catch { return json(res, 400, { error: '表情 id 编码错误' }); }
         const entry = await stickers.find(ref).catch(() => null);
         if (!entry) return json(res, 404, { error: '找不到这个表情' });
+        // 有本地缓存就直接读盘：这类条目（bot 自己收藏的）的图床链接是会过期的，
+        // 缓存文件才是它真正的图源 —— 顺带省一次图床请求、绕开防盗链。
+        // 读不出图片就往下走网络路径，不因为一个坏文件让面板裂图。
+        const local = cachedPath(entry);
+        if (local) {
+          try {
+            const buffer = await fs.promises.readFile(local);
+            const mime = detectMime(buffer);
+            if (mime) {
+              res.writeHead(200, {
+                'content-type': mime,
+                'content-length': buffer.length,
+                'cache-control': 'private, max-age=600',
+                'x-content-type-options': 'nosniff',
+                'content-security-policy': "default-src 'none'"
+              });
+              return res.end(buffer);
+            }
+          } catch { /* 读不到就当没有缓存 */ }
+        }
         if (!entry.url) return json(res, 404, { error: '该表情没有图片地址' });
         try {
           const safeUrl = await validateImageUrl(entry.url);

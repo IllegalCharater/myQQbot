@@ -5,8 +5,9 @@ import { getConfig } from './config.js';
 import {
   loadStickerStore, saveStickerStore, mergeStickerLibrary,
   findSticker, formatStickerList, formatStickerAdminList, applyStickerNote, markStickerUsed,
-  removeSticker
+  removeSticker, resolveStickerRef, selectEvictions
 } from './stickers.js';
+import { ensureCached, dropCached, cachedPath, sweepOrphans } from './sticker-cache.js';
 
 export class StickerManager {
   /**
@@ -21,6 +22,8 @@ export class StickerManager {
     this.syncing = null;
     this.collectTimes = [];
     this.onChange = typeof onChange === 'function' ? onChange : null;
+    // 上一次 collect 淘汰掉的条目（工具回执要照实说删了谁；每次 collect 重置）
+    this.lastEvicted = [];
   }
 
   /** 库有变动（改/删/收藏/发过）时通知外面一次。绝不抛错出去影响写盘。 */
@@ -86,6 +89,7 @@ export class StickerManager {
     if (!result.removed) return { removed: null, refused: '' };
     if (result.removed.source === 'qq') return { removed: null, refused: 'qq' };
     this.entries = result.entries;
+    dropCached(result.removed);   // 条目走了，它在本地的图也不该留着
     saveStickerStore(this.entries);
     this.#changed();
     return { removed: result.removed, refused: '' };
@@ -94,6 +98,37 @@ export class StickerManager {
   async find(ref) {
     const synced = await this.sync(false);
     return findSticker(synced.entries, ref);
+  }
+
+  /**
+   * 认 id/resId/md5/url，也认备注/标签（唯一命中时）—— send_sticker / get_sticker_image 用它。
+   * 与 find() 的区别：find 是"按 id 精确取"，返回条目或 null；这个返回 { entry, ambiguous }，
+   * 让工具能把"说不清是哪个"如实报回去（多命中时报候选 id，不猜）。
+   */
+  async resolve(ref) {
+    const synced = await this.sync(false);
+    return resolveStickerRef(synced.entries, ref);
+  }
+
+  /**
+   * 把某一条的图补进本地缓存（面板「缓存图片」按钮用）。已经有的不重下。
+   * 返回 { entry, cached, error }：error 是人话，面板要照实说"哪几条没补上、为什么"。
+   */
+  async cacheOne(ref) {
+    const entry = await this.find(ref);
+    if (!entry || entry.source === 'qq') return { entry: entry || null, cached: false, error: '' };
+    if (cachedPath(entry)) return { entry, cached: true, error: '' };
+    const error = await this.#cacheEntry(entry);
+    if (entry.cacheFile) {
+      saveStickerStore(this.entries);
+      this.#changed();
+    }
+    return { entry, cached: !!entry.cacheFile, error };
+  }
+
+  /** 删掉没人认领的缓存文件（手改过库、写盘写一半崩了的残留），返回删了几个。 */
+  sweep() {
+    return sweepOrphans(this.entries);
   }
 
   /** 改备注。ref 可以是 id，也可以是备注/标签（唯一命中时）。返回整个结果，供工具报歧义。 */
@@ -115,8 +150,43 @@ export class StickerManager {
     return result.entry;
   }
 
-  /** 收藏一条消息里的图片（本地新增条目，不入 QQ 收藏）。 */
-  collect(messageId, { url, note = '' } = {}) {
+  /** 把图落到本地缓存并把文件名写回条目。返回错误信息（'' = 成功）。绝不抛 —— 收藏本身已经成了。 */
+  async #cacheEntry(entry) {
+    try {
+      const cached = await ensureCached(entry);
+      if (!cached) return '';
+      entry.cacheFile = cached.name;
+      entry.cachedAt = new Date().toISOString();
+      return '';
+    } catch (error) {
+      return String(error?.message ?? error);   // 图床取不到就算了，发送时会退回原链接
+    }
+  }
+
+  /**
+   * 超出 sticker.maxKeepCount 时，删掉 bot 自己收藏里"使用频率最低、保存时间最早"的那些
+   * （条目和它的本地图片一起走）。返回被删的条目。
+   *
+   * 只在**收藏新条目之后**调一次，正是用户要的"当有新的表情包保存时"——
+   * 把上限调小不会立刻删东西，得等下一次收藏。QQ 收藏既不算进上限也一条不动（见 selectEvictions）。
+   */
+  #enforceCap() {
+    const cap = Math.max(0, Number(getConfig().sticker?.maxKeepCount) || 0);
+    const { keep, drop } = selectEvictions(this.entries, cap);
+    if (!drop.length) return [];
+    for (const entry of drop) dropCached(entry);
+    this.entries = keep;
+    return drop;
+  }
+
+  /**
+   * 收藏一条消息里的图片（本地新增条目，不入 QQ 收藏）。
+   *
+   * 顺带把图落到本地缓存（见 sticker-cache.js）：收藏这一刻的图床链接最新鲜，是下载
+   * 成功率最高的时机，之后发送就给协议端一个本机路径，不再看那条会过期的链接的脸色。
+   * 所以要等这次下载 —— 失败也只是没有缓存，收藏本身照成。
+   */
+  async collect(messageId, { url, note = '' } = {}) {
     if (!getConfig().sticker?.collectEnabled) throw new Error('收藏表情功能未开启');
     // 限频
     const now = Date.now();
@@ -129,6 +199,7 @@ export class StickerManager {
     const id = `collected_${messageId}`;
     const existing = this.entries.find((e) => e.id === id);
     if (existing) {
+      this.lastEvicted = [];
       return this.note(id, { note: String(note || '') });
     }
     const entry = {
@@ -145,10 +216,14 @@ export class StickerManager {
       lastUsedAt: 0,
       lastContext: '',
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      cacheFile: '',
+      cachedAt: ''
     };
     this.entries.push(entry);
     this.collectTimes.push(now);
+    await this.#cacheEntry(entry);
+    this.lastEvicted = this.#enforceCap();
     saveStickerStore(this.entries);
     this.#changed();
     return entry;

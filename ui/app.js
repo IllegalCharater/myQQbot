@@ -34,6 +34,9 @@ const state = {
   stickerQuery: '',
   stickerTotal: 0,
   stickerSync: null,      // { fromCache, error, at }
+  stickerOwned: 0,        // bot 自己收藏的条数（= 唯一会被"上限"淘汰的那一批）
+  stickerMaxKeep: 0,      // sticker.maxKeepCount，0 = 不限
+  stickerCacheNote: '',   // 「缓存图片」的结果，交给下一次渲染写进计数行（渲染会把它消费掉）
   stickerSelectedId: null,
   stickerBusy: false,     // 弹窗/请求进行中：SSE 刷新时先让路
   // 存档页的查找词。切会话时清空 —— 为一个群写的词拿到另一个群里没有意义。
@@ -2552,6 +2555,8 @@ async function loadStickerView({ quiet = false } = {}) {
     const data = await api(`/api/stickers?q=${q}&limit=200`);
     state.stickers = data.stickers || [];
     state.stickerTotal = data.total || 0;
+    state.stickerOwned = Number(data.owned) || 0;
+    state.stickerMaxKeep = Number(data.maxKeepCount) || 0;
     state.stickerSync = { fromCache: !!data.fromCache, error: data.syncError || '', at: Date.now() };
     renderStickerItems();
     // 选中的那条可能已经被删/被过滤掉了：还在就重画详情，不在就退回提示
@@ -2575,6 +2580,13 @@ function renderStickerItems() {
     const sync = state.stickerSync;
     const q = String(state.stickerQuery || '').trim();
     let note = q ? `匹配 ${state.stickers.length} / ${state.stickerTotal} 张` : `共 ${state.stickerTotal} 张`;
+    // bot 自己收藏的那一批是唯一会被上限淘汰的（QQ 收藏不算也不删），这个数得让用户看得见
+    if (state.stickerOwned || state.stickerMaxKeep > 0) {
+      note += ` · bot 收藏 ${state.stickerOwned} 个${state.stickerMaxKeep > 0 ? `（上限 ${state.stickerMaxKeep}）` : ''}`;
+    }
+    // 手工操作的结果（缓存图片）搭这一次渲染露个面就被清掉 —— 否则紧接着的
+    // loadStickerView 会把它冲掉，用户永远看不见自己刚点的那一下干了什么
+    if (state.stickerCacheNote) { note += ` · ${state.stickerCacheNote}`; state.stickerCacheNote = ''; }
     // QQ 同步失败时必须说出来：否则用户看着的是本地缓存，却以为那是 QQ 里真实的收藏
     if (sync?.error) note += ' · ⚠️ 同步 QQ 失败，显示本地缓存';
     else if (sync?.fromCache) note += ' · 缓存';
@@ -2636,6 +2648,12 @@ function renderStickerDetail(s) {
           <div class="sticker-field-static">${s.usage ? esc(s.usage) : '<span class="muted">（未标注）</span>'}</div></div>
         <div class="field"><label>id / md5</label>
           <div class="sticker-field-static mono">${esc(s.id)}<br /><span class="muted">${esc(s.md5 || '（无）')}</span></div></div>
+        <div class="field"><label>本地缓存图片</label>
+          <div class="sticker-field-static">${s.cached
+      ? '<span class="muted">已缓存，发送时直接用本机图片</span>'
+      : (s.source === 'qq'
+        ? '<span class="muted">QQ 收藏不进缓存（它的链接每次同步都会换新的）</span>'
+        : '<span class="muted">还没有本地图片，点上面的「缓存图片」或等它被发送时自动补一份</span>')}</div></div>
         <div class="chat-toolbar">
           <button class="btn btn-small" id="sticker-edit-btn">编辑备注 · 标签 · 场景</button>
           ${s.deletable
@@ -3867,6 +3885,18 @@ function renderChatSection(c) {
       </div>
     </div>
 
+    <div class="field">
+      <label>bot 收藏上限（个）</label>
+      <input type="number" id="cfg-sticker-maxkeep" min="0" max="5000" step="10"
+             value="${esc(c.sticker?.maxKeepCount ?? 0)}" />
+      <div class="hint">
+        只数 <b>bot 自己收藏的</b>（QQ 收藏不算进这个数，也删不掉）；<b>0 = 不限</b>。<br />
+        超上限时在「新收藏一个」的时候才整理：按使用频率最低、保存时间最早整条删掉。<br />
+        所以把数字调小<b>不会</b>立刻删东西，要等下一次收藏。<br />
+        这一项同时管着本地缓存图片的占用 —— 条目被删，它在 data/sticker-cache/ 里的图一起删。
+      </div>
+    </div>
+
     <h3>响应档位</h3>
 
     <div class="checkbox-row"><input type="checkbox" id="cfg-unifiedtier" ${st.unifiedTier !== false ? 'checked' : ''} />
@@ -3933,9 +3963,11 @@ function renderChatSection(c) {
       <div class="tier-param">
         <label>动态上下文窗口：一次运行时最多把 <input type="number" id="cfg-maxctx" min="0" max="5000" value="${esc(st.maxContextMessages ?? 0)}" /> 条未读放进【本次唤醒】（0 = 不限）</label>
         <div class="hint">
-          与上面的"发未读 + N 条已读"是两回事：那些管<b>读多少历史</b>，这个管<b>本次运行读多少新消息</b>。
+          每个会话常驻一个只装对方消息的窗口，消息一到就入窗、超出立刻丢最老，所以它看到的聊天<b>一直是最新的</b>。
+          与上面的"发未读 + N 条已读"是两回事：那些管<b>读多少历史</b>，这个管<b>一次运行读多少新消息</b>。
           长时间离线或被 @ 唤醒时可能一次积压几百条，靠它兜住 token。
-          超出时丢最老的几条 —— 它们不会消失，只是降级进【过去状态】，模型会被告知折走了多少条。
+          超出时丢最老的几条 —— 它们不会消失，只是降级进【过去状态】，模型会被告知折走了多少条；
+          而且它们<b>照样参与"要不要回应"的判定</b>（积压里的 @ 不会被漏掉），改动即时生效、不用重启。
         </div>
       </div>
     </div>
@@ -5504,7 +5536,9 @@ async function saveConfig({ quiet = false } = {}) {
       // 先取界面实时值（没这个控件时才退回已保存配置），再钳到 0~3
       encourage: Math.min(3, Math.max(0, Number(
         $('#cfg-sticker-encourage') ? $('#cfg-sticker-encourage').value : (c.sticker?.encourage ?? 1)
-      ) || 0))
+      ) || 0)),
+      // 0 = 不限（与 digest.maxKeepChars 同一方向：默认绝不删用户数据）
+      maxKeepCount: clampInt(val('#cfg-sticker-maxkeep', c.sticker?.maxKeepCount), 0, 5000, 0)
     };
     // 读取历史档位（替代原来的「最多条数 + 字符预算」两个固定值）
     patch.store = {
@@ -5780,6 +5814,30 @@ $('#sticker-sync-btn')?.addEventListener('click', async (e) => {
   } catch (err) {
     const cnt = $('#sticker-count');
     if (cnt) cnt.textContent = `同步失败：${err.message || err}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+    loadStickerView({ quiet: true });
+  }
+});
+
+// 缓存图片：把 bot 自己收藏的表情的图落到本地（发送时不再依赖会过期的图床链接），
+// 顺手删掉没人认领的缓存文件 —— 一个按钮两个活，结果行把两件事都说清楚。
+$('#sticker-cache-btn')?.addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  if (btn.disabled) return;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '缓存中…';
+  try {
+    const r = await api('/api/stickers/cache', { method: 'POST', body: '{}' });
+    const parts = [`新缓存 ${r.cached || 0} 张`];
+    if (r.swept) parts.push(`清掉 ${r.swept} 个没人认领的旧文件`);
+    if (r.failed) parts.push(`${r.failed} 张没取到（${(r.errors || []).map((x) => x.error).slice(0, 2).join('；') || '图床取不到图'}）`);
+    if (r.remains) parts.push(`还剩 ${r.remains} 张，再点一次继续`);
+    state.stickerCacheNote = parts.join(' · ');
+  } catch (err) {
+    state.stickerCacheNote = `缓存失败：${err.message || err}`;
   } finally {
     btn.disabled = false;
     btn.textContent = old;

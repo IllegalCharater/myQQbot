@@ -266,6 +266,22 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024) {
 }
 
 /**
+ * 按魔数判图片类型（png/jpeg/gif/webp），认不出返回 null。
+ *
+ * 放在这里而不是 tools.js：它只跟"拿到的字节"有关，跟网络、跟工具集都无关，
+ * 而落盘缓存（sticker-cache.js）也要用它定文件后缀 —— 让那个模块去 import 整个
+ * 工具集不合适。tools.js 照旧转出这个名字，调用点一行都不用改。
+ */
+export function detectMime(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a') return 'image/gif';
+  if (buf.toString('ascii', 0, 8) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
+/**
  * 图片地址校验（供 send_sticker / 图片下载使用）。
  * 默认内网地址一律拒绝；security.allowPrivateImageHosts=true 时放行（仅本地测试/自建图床）。
  */

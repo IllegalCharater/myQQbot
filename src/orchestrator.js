@@ -2,11 +2,14 @@
 //
 // 流程（对应需求）：
 //   机器人空闲 → 用户发言 → 防抖聚批(wakeDelayMs) → 新开会话（一次独立的 agent 处理）
-//   → 开始时把所有消息标记为已读（触发批作为【本次唤醒】）→ agent 用工具发言/决定不发言
-//   → 会话弃置（不留 LLM 历史）→ 发现 JSON 里有未读 → drainDelayMs 后再新开会话 → …
-//   → 直到没有未读 → 回到空闲。
+//   → 消息进动态上下文窗口（src/context-window.js，谁到就收谁、超出上限丢最老）
+//   → 判定这批值不值得回应：值得就把窗口里"还没看过"的那批当【本次唤醒】；不值得就只看不答
+//   → 两条分支都会推进窗口游标（看过就是看过）→ 会话弃置（不留 LLM 历史）
+//   → 发现窗口还有没看过的 → drainDelayMs 后再新开会话 → …
+//   → 直到没有未看过 → 回到空闲。
 //
-// 同一会话（群/私聊）同时最多一个运行；运行期间新消息只写 JSON（未读），不叠加触发。
+// 同一会话（群/私聊）同时最多一个运行；运行期间新消息照样进窗口（进 JSON、未读），
+// 只是不叠加触发 —— 运行结束后 drain 会接着处理。
 // 不同会话之间并行，受 maxConcurrentRuns 全局限流。
 import { getConfig, storeConfigForChat, digestConfigForChat } from './config.js';
 import { vendorOfConfig } from './model-prices.js';
@@ -18,9 +21,10 @@ import { modelImageVerdict } from './vision-scan.js';
 import { currentProviders } from './providers.js';
 import { initializeJmcomicQueue } from './jmcomic.js';
 import { isSystemRecord } from './store.js';
+import { ContextWindowRegistry } from './context-window.js';
 
 export class Orchestrator {
-  constructor({ store, memory, stickers, sender, sessions, onebot, emit = null }) {
+  constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, windows = null }) {
     this.store = store;
     this.memory = memory;
     this.stickers = stickers;
@@ -30,6 +34,13 @@ export class Orchestrator {
     this.emit = typeof emit === 'function' ? emit : ((b) => b.emit.bind(b))(createEventBus());
     this.toolDefs = buildToolDefs();
     initializeJmcomicQueue({ onebot, sender, store });
+
+    // 动态上下文窗口（每会话一个，见 src/context-window.js）。
+    // 容量每次现读配置 —— 设置页改上限要即时生效，不能在构造时固化。
+    this.windows = windows instanceof ContextWindowRegistry ? windows : new ContextWindowRegistry({
+      store,
+      capacity: () => Math.max(0, Number(getConfig().store?.maxContextMessages) || 0)
+    });
 
     this.chatNameCache = new Map();    // groupId -> name
     this.wakeTimers = new Map();       // chatKey -> timer
@@ -62,12 +73,15 @@ export class Orchestrator {
   }
 
   /**
-   * 恢复后处理：所有当前有未读消息的会话都安排一次唤醒，把积压消息补处理掉。
-   * 如果模型未配置，wake 会自然跳过（消息保留未读，不丢失）。
+   * 恢复后处理：所有当前有未处理消息的会话都安排一次唤醒，把积压消息补处理掉。
+   * 如果模型未配置，wake 会自然跳过（消息保留未处理，不丢失）。
+   *
+   * 判据是**窗口里还没看过的消息**（不是存档的 read 字段）：暂停期间消息照样进窗口，
+   * 进程重启后窗口由存档播种，两种情况下这里的判断都成立。
    */
   drainBacklogAfterResume() {
     for (const chatKey of this.store.listChats()) {
-      if (this.store.unreadCount(chatKey) > 0) this.scheduleWake(chatKey, 0);
+      if (this.windows.pending(chatKey).length > 0) this.scheduleWake(chatKey, 0);
     }
   }
 
@@ -158,10 +172,56 @@ export class Orchestrator {
     return st.roll;
   }
 
+  // ── 动态上下文窗口的消费 ───────────────────────────────────────────────
+
+  /**
+   * 把窗口里"还没看过"的消息一次性消费掉：推进游标 + 把存档的 read 下沉成镜像。
+   *
+   * **这是写 read 镜像的唯一出口**（别再在别处动存档的 read）。响应与不响应两条分支
+   * 都走它 —— 这就是"不论响应还是不响应，都要更新上下文窗口"：看过就是看过，
+   * 否则被跳过的老消息下次会被当成"刚发生的"重新塞进【本次唤醒】。
+   *
+   * ⚠️ 与 windows.batch()/foldedCount() 必须同处一个同步块（中间不夹 await）：
+   *    Node 单线程下这才是原子的，一让出事件循环，新消息就会挤进窗口。
+   *
+   * @returns {number} 本次消费掉的条数
+   */
+  #consumeWindow(chatKey) {
+    const crossed = this.windows.seen(chatKey);
+    const ids = this.windows.takeSettled(chatKey);
+    if (ids.length) this.store.markRead(chatKey, { ids });
+    return crossed.length;
+  }
+
+  /**
+   * 面板「全部标为已读」/ 恢复时丢弃积压：等价于"机器人看过这批了"。
+   *
+   * 必须走这里（而不是直接改存档的 read）：窗口游标才是"看过没看过"的真相，
+   * 只改存档的话那些消息下一次还会被当成待回应重新处理。
+   * @returns {number} 消费掉的条数
+   */
+  markChatSeen(chatKey) {
+    const n = this.#consumeWindow(chatKey);
+    this.emit('chat-update', chatKey);
+    return n;
+  }
+
+  /** 面板把某条消息删了：窗口也得跟着忘掉它（否则会把它当新消息递给模型）。 */
+  forgetMessage(chatKey, id) {
+    return this.windows.remove(chatKey, id);
+  }
+
   // ── 入站接口 ───────────────────────────────────────────────────────────
 
-  /** 收到新消息（已通过白名单校验并写入 store）。 */
-  onIncoming(chatKey) {
+  /**
+   * 收到新消息（已通过白名单校验并写入 store）。
+   *
+   * ⚠️ **必须传 entry**（store.appendIncoming 的返回值）：窗口靠它保持最新。
+   * ⚠️ push 必须排在两个早退**之前**：暂停期间和运行期间到达的消息同样要进窗口，
+   *    否则恢复后的补处理、以及"运行结束后 drain 掉运行期间的新消息"都会看不到它们。
+   */
+  onIncoming(chatKey, entry = null) {
+    this.windows.push(chatKey, entry);
     if (this.paused || this.aborted) return;
     if (this.runningChats.has(chatKey)) return;   // 运行结束后 drain 会接管
     this.scheduleWake(chatKey);
@@ -174,15 +234,18 @@ export class Orchestrator {
    * scheduleWake（建等待会话前）与 wake（真正运行前）共用这一个函数，
    * 避免两处各写一份判定、日后逻辑漂移。
    *
-   * 注意：这里**不消费**未读（用 peekUnread 只看不取），
+   * 注意：这里**不消费**（窗口只看不推游标），
    * 所以防抖窗口期间每次来新消息都可以重新预判 ——
    * 先来一句闲聊（不命中、不显示），接着有人 @ 机器人（命中、立刻显示）。
+   *
+   * 判据是窗口的 pending()：**窗口内 + 被挤出窗口但还没消费**的全部消息，不设上限。
+   * 别改成窗口内容（batch()）—— 上限设小时，埋在积压里的 @ 会被漏判（见上下文窗口的注释）。
    *
    * @returns {{shouldRespond:boolean, tier:number, count:number, reason:string}}
    */
   #predictTier(chatKey) {
     const cfg = getConfig();
-    const entries = this.store.peekUnread(chatKey, 200) || [];
+    const entries = this.windows.pending(chatKey);
     const r = resolveContextTier({
       triggerEntries: entries,
       selfNickname: cfg.persona?.selfNickname || this.onebot.selfNickname || '',
@@ -244,7 +307,7 @@ export class Orchestrator {
         // 定时器仍然保留：窗口内可能来新消息，届时重新预判
         // （批次打点不重置 —— 判定翻转不该让硬上限重新计时）
       } else {
-      const unread = this.store.peekUnread(chatKey, 3);
+      const unread = this.windows.pending(chatKey).slice(0, 3);
       const first = unread[0];
       const summary = first ? `${first.senderName || first.senderId}：${String(first.text || '').slice(0, 40)}` : '等待新消息聚批';
       const waitUntil = Date.now() + ms;
@@ -378,32 +441,30 @@ export class Orchestrator {
       return;
     }
 
-    // ── 档位：先判断"这批消息值不值得回应"，再决定要不要取走未读 ──
+    // ── 档位：先判断"这批消息值不值得回应"，再决定要不要消费窗口 ──
     //
-    // 关键顺序：判定必须发生在 drainUnread() 之前。
-    // drainUnread 会把未读取走并全部置为已读（作为触发批），
-    // 如果先取走再判定，未命中时就拿不到"该标记已读"的对象了。
+    // 关键顺序：判定必须发生在消费之前。消费（#consumeWindow）会把游标推到底并把
+    // 这批标记已读，如果先消费再判定，未命中时就拿不到"该标记已读"的对象了。
     //
-    // 未命中时：标记已读、不创建会话、不调模型 —— 这才是省 token 的关键
+    // 未命中时：推进游标、不创建会话、不调模型 —— 这才是省 token 的关键
     // （消息内容仍留在存档里，日后被艾特时会作为"已读历史"带进提示词）。
     const cfgNow = getConfig();
-    let pendingEntries = [];
     if (!proactive) {
-      // peekUnread 只看不取，limit 给足以免漏判（判定用的是这批的文本）
-      pendingEntries = this.store.peekUnread(chatKey, 200) || [];
-      if (pendingEntries.length === 0) {
+      // 窗口的 pending()：窗口内 + 被挤出窗口但还没消费的全部（不设上限，判定用）。
+      // 空就早退 —— 防抖窗口刚建立时会空转一次。
+      if (this.windows.pending(chatKey).length === 0) {
         if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted');
-        return; // 没有未读就不空跑
+        return; // 没有没看过的消息就不空跑
       }
 
       // 复用 scheduleWake 那一份判定逻辑，避免两处各写一套、日后漂移
       const tierResult0 = this.#predictTier(chatKey);
 
       if (tierResult0.shouldRespond === false) {
-        // 不响应：沉入历史（已读），不产生会话、不消耗 token。
-        // 防抖窗口内后续到达的消息同样是"未读"状态，会在下一次唤醒时
-        // 被一起判定 —— 若期间有人艾特机器人，它们会作为已读上下文带上。
-        const marked = this.store.markAllRead(chatKey);
+        // 不响应：推进窗口游标（"看过就是看过"）+ 下沉存档镜像，不产生会话、不消耗 token。
+        // 防抖窗口内后续到达的消息会在下一次唤醒时被一起判定 ——
+        // 若期间有人艾特机器人，它们会作为已读上下文带上。
+        const marked = this.#consumeWindow(chatKey);
         // 关键：让等待会话**干净消失**，而不是标成"中止"留在列表里
         if (waitingSessionId) this.#discardWaiting(waitingSessionId);
         this.emit('chat-update', chatKey);
@@ -414,35 +475,29 @@ export class Orchestrator {
       }
     }
 
-    // 触发批：当前所有未读（含之前积压的）—— 到这说明确定要响应了
-    let triggerEntries = proactive ? [] : this.store.drainUnread(chatKey);
+    // ── 取批 + 消费：这一段**必须同步**（中间不夹 await），
+    //    否则"取的批"和"消费掉的范围"会错位（见 context-window.js 的警告）──
+    //
+    // 触发批 = 窗口里还没看过的那批（≤ 上限）；被挤出窗口、还没消费的条数算进 foldedAway。
+    // 上限现在由窗口在**入窗时**维护（超上限丢最老），不再在这里对触发批切片 ——
+    // 两条分支（响应 / 不响应）从此走的是同一套窗口逻辑。
+    let triggerEntries = [];
+    let foldedAway = 0;
     if (proactive) {
-      // 主动机会：不打扰、无触发批，只带状态
-      this.store.drainUnread(chatKey); // 把可能的零星未读一并处理掉
+      // 主动机会：不打扰、无触发批，只带状态；顺手把零星没看过的消费掉
+      this.#consumeWindow(chatKey);
+    } else {
+      triggerEntries = this.windows.batch(chatKey);
+      foldedAway = this.windows.foldedCount(chatKey);
+      this.#consumeWindow(chatKey);
     }
     if (!proactive && triggerEntries.length === 0) {
       if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted');
-      return; // 没有未读就不空跑
+      return; // 没有没看过的消息就不空跑
     }
 
-    // ── 运行时动态上下文窗口：超出上限就丢最老的 ──
-    // 收口点只能在这里：drainUnread 取走的快照**就是**"本次运行的动态上下文"。
-    // 关键前提是 drainUnread 返回前已把**全部**未读置为已读（store.js:123-129），
-    // 所以被丢掉的条目不可能再次触发运行 —— 它们是"降级"而不是"丢失"：
-    // buildPastState 的 excludeIds 拿到的是**裁剪后**的列表（prompt.js:442），
-    // 被丢的 id 不再被排除，会作为已读历史出现在【过去状态】里。
-    // 这正是现有"不响应→之后被 @"路径依赖的同一套降级机制（见上面 markAllRead 分支）。
-    //
-    // ⚠️ 不要把这个上限加到 #predictTier 的 peekUnread 上：那是艾特/关键词判定，
-    //    积压几百条时埋在里面的 @ 会被漏判。
-    // ⚠️ 也不要给 get_recent_messages 加钳制：那是模型主动发起的查询，
+    // ⚠️ 不要给 get_recent_messages 加钳制：那是模型主动发起的查询，
     //    钳死会让存档对唯一的消费者不可达。
-    let foldedAway = 0;
-    const ctxCap = Math.max(0, Number(cfgNow.store?.maxContextMessages) || 0);
-    if (!proactive && ctxCap > 0 && triggerEntries.length > ctxCap) {
-      foldedAway = triggerEntries.length - ctxCap;
-      triggerEntries = triggerEntries.slice(-ctxCap);   // 留最新、丢最老
-    }
 
     // ── 档位：响应时带多少条已读历史 ──
     // 在唤醒时算一次并固定下来（尤其是随机档的骰子结果），
@@ -541,7 +596,7 @@ export class Orchestrator {
 
     // drain：运行期间来的新消息 → 再次新开会话处理（这是"确保看到所有发言"的关键）
     if (!this.aborted && !this.paused) {
-      const unread = this.store.unreadCount(chatKey);
+      const unread = this.windows.pending(chatKey).length;
       if (unread > 0) {
         const drainDelay = Math.max(200, Number(getConfig().drainDelayMs) || 1200);
         this.scheduleWake(chatKey, drainDelay);
@@ -608,7 +663,9 @@ export class Orchestrator {
       lastMessageAt,
       recentCount,
       runSeq: seq,
-      moreUnreadDuringRun: this.store.unreadCount(chatKey) > 0,
+      // 从窗口取（口径与判定/消费一致）。⚠️ 提示词侧没有任何消费者读它，
+      //    属既有的死负载 —— 顺带记一笔，本次不动它的语义。
+      moreUnreadDuringRun: this.windows.pending(chatKey).length > 0,
       proactive,
       contextLimit,
       tierInfo,
@@ -854,7 +911,7 @@ export class Orchestrator {
       if (kind !== 'group') continue;
       if (allowGroups.length > 0 ? !allowGroups.includes(id) : !cfg.allowAllWhenEmpty) continue;
       const meta = this.store.getChatMeta(chatKey);
-      if (meta.unread > 0) continue;
+      if (this.windows.pending(chatKey).length > 0) continue;   // 还有没处理的消息，先别去冷场
       if (Date.now() - meta.lastTs < idleMs) continue;
       if (this.runningChats.has(chatKey)) continue;
       out.push(chatKey);
@@ -1320,7 +1377,7 @@ export class Orchestrator {
       if (this.compacting.has(chatKey)) continue;
       if (this.runningChats.has(chatKey) || this.pendingWake.has(chatKey)) continue;
       const meta = this.store.getChatMeta(chatKey);
-      if (meta.unread > 0) continue;                                   // 还有没处理的消息，先让它回完
+      if (this.windows.pending(chatKey).length > 0) continue;          // 还有没处理的消息，先让它回完
       if (meta.total < minMessages) continue;                          // 条数不够，不值得花这笔钱
       if (Date.now() - this.store.lastCompactedAt(chatKey) < cooldown) continue;
       candidates.push({ chatKey, lastTs: meta.lastTs });
@@ -1371,7 +1428,7 @@ export class Orchestrator {
     if (!force) {
       const total = this.store.getChatMeta(chatKey).total;
       if (total < minMessages) return { ok: false, note: `存档只有 ${total} 条，未到 ${minMessages} 条门槛` };
-      if (this.store.unreadCount(chatKey) > 0) return { ok: false, note: '还有未读消息待处理，先让它回复完' };
+      if (this.windows.pending(chatKey).length > 0) return { ok: false, note: '还有没处理的消息，先让它回复完' };
       const since = Date.now() - this.store.lastCompactedAt(chatKey);
       if (since < cooldown) {
         return { ok: false, note: `距上次压缩还不到冷却时间（还需 ${Math.ceil((cooldown - since) / 60000)} 分钟）` };

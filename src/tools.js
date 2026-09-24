@@ -10,6 +10,7 @@ import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 import { webSearch, webFetch } from './web-search.js';
 import { expandForwardNodes, forwardIdFromData } from './onebot.js';
 import { enqueueJmcomicDownload } from './jmcomic.js';
+import { cachedDataUrl, isCacheFile, sendTarget } from './sticker-cache.js';
 
 async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
   const safeUrl = await validateImageUrl(url);
@@ -19,14 +20,9 @@ async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
   return `data:${mime};base64,${buffer.toString('base64')}`;
 }
 
-export function detectMime(buf) {
-  if (!buf || buf.length < 12) return null;
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
-  if (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a') return 'image/gif';
-  if (buf.toString('ascii', 0, 8) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
-  return null;
-}
+// 按魔数判图片类型的实现搬到了 safe-fetch.js（那边没有依赖，sticker-cache.js 也要用）。
+// 这里原样转出：app.js 等既有调用点一行都不用改。
+export { detectMime } from './safe-fetch.js';
 
 function ok(payload) {
   return { content: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 1) };
@@ -153,11 +149,11 @@ export function buildToolDefs() {
     },
     {
       name: 'send_sticker',
-      description: '发送一个 QQ 收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 从 list_stickers 获取。',
+      description: '发送一个表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 填【可用表情包】或 list_stickers 给出的 id；已经标注过的表情也可以直接填它的备注/标签（唯一命中时才作数）。',
       parameters: {
         type: 'object',
         properties: {
-          stickerId: { type: 'string', description: '表情 id' },
+          stickerId: { type: 'string', description: '表情 id，或该表情的备注/标签（如"蕾米的凝"）；来自【可用表情包】或 list_stickers' },
           replyToMessageId: { type: ['integer', 'string'], description: '可选：要引用的消息 id（聊天记录里的 #数字）' },
           atUserId: { type: ['integer', 'string'], description: '可选：要 @ 的 QQ 号' }
         },
@@ -165,18 +161,45 @@ export function buildToolDefs() {
       },
       async execute(ctx, args) {
         try {
-          const sticker = await ctx.stickers.find(unquoteJsonString(args.stickerId));
-          if (!sticker) return err(`找不到表情 ${args.stickerId}，请先用 list_stickers 获取有效 id`);
-          if (!sticker.url) return err(`表情 ${sticker.id} 没有可发送的图片地址`);
-          try {
-            await validateImageUrl(sticker.url); // 只允许公网 http(s)，防止本地库被污染后诱导 OneBot 抓内网
-          } catch (error) {
-            return err(`表情 ${sticker.id} 的图片地址不合法，已拒绝发送：${error?.message ?? error}`);
+          const ref = unquoteJsonString(args.stickerId);
+          // 与 sticker_note 用同一个解析器：一个标签在那儿认得出，在这里就必须同样认得出
+          const { entry: sticker, ambiguous } = await ctx.stickers.resolve(ref);
+          if (!sticker && ambiguous?.length) {
+            const ids = ambiguous.slice(0, 5).map((e) => e.id).join('、');
+            return err(`"${ref}" 对应 ${ambiguous.length} 个表情，说不清是哪个，请改用 id 指定：${ids}${ambiguous.length > 5 ? ' …' : ''}（id 用 list_stickers 查）`);
           }
-          const result = await ctx.sender.sendSticker(ctx.chatKey, sticker, {
+          if (!sticker) return err(`找不到表情 ${ref}，请先用 list_stickers 获取有效 id；已经标注过的表情也可以直接填它的备注/标签。`);
+          // 发送目标：bot 自己收藏的优先给本机缓存文件（收藏那一刻就落盘了，不再依赖会过期的
+          // 图床链接）；QQ 收藏、以及还没有缓存的，退回原始 url。
+          const target = await sendTarget(sticker);
+          if (!target) return err(`表情 ${sticker.id} 没有可发送的图片地址`);
+          // 本地文件不走 URL 校验（它根本不是 URL），但也不是"就信了"：
+          // isCacheFile 断言它确实落在 data/sticker-cache/ 里且存在。
+          const local = isCacheFile(target);
+          if (!local) {
+            try {
+              await validateImageUrl(target); // 只允许公网 http(s)，防止本地库被污染后诱导 OneBot 抓内网
+            } catch (error) {
+              return err(`表情 ${sticker.id} 的图片地址不合法，已拒绝发送：${error?.message ?? error}`);
+            }
+          }
+          const options = {
+            file: target,
             replyToMessageId: args.replyToMessageId ?? null,
             atUserId: args.atUserId ?? null
-          });
+          };
+          let result;
+          try {
+            result = await ctx.sender.sendSticker(ctx.chatKey, sticker, options);
+          } catch (error) {
+            // 本地路径是"协议端认不认"这件事唯一没法在本机验证的地方，所以留一步兜底：
+            // 只有在协议端**明确拒绝**（错误里带 retcode=）时才退回原链接重发。
+            // 超时那类错误说不清消息到底发出去没有，重发就可能是刷屏 —— 不冒这个险。
+            const refused = /retcode=/.test(String(error?.message || ''));
+            if (!local || !refused || !sticker.url) throw error;
+            console.warn(`[tools] 本机图片路径被协议端拒绝，退回原链接重发：${sticker.id}`);
+            result = await ctx.sender.sendSticker(ctx.chatKey, sticker, { ...options, file: sticker.url });
+          }
           ctx.stickers.markUsed(sticker.id, String(ctx.session.triggerText || '').slice(0, 100));
           ctx.session.sent.push({ type: 'sticker', text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
           ctx.emit('session-update', ctx.session.id);
@@ -207,18 +230,25 @@ export function buildToolDefs() {
     },
     {
       name: 'get_sticker_image',
-      description: '查看一个没有备注/不确定含义的表情的图片（视觉模型可直接"看懂"）。',
+      description: '查看一个没有备注/不确定含义的表情的图片（视觉模型可直接"看懂"）。stickerId 填 id，也可以填备注/标签（唯一命中时）。',
       parameters: {
         type: 'object',
-        properties: { stickerId: { type: 'string', description: '表情 id' } },
+        properties: { stickerId: { type: 'string', description: '表情 id，或该表情的备注/标签（唯一命中时）' } },
         required: ['stickerId']
       },
       async execute(ctx, args) {
         try {
-          const sticker = await ctx.stickers.find(args.stickerId);
-          if (!sticker) return err(`找不到表情 ${args.stickerId}，请先用 list_stickers 获取有效 id`);
-          if (!sticker.url) return err('该表情没有图片地址');
-          const dataUrl = await downloadImageAsDataUrl(sticker.url);
+          const ref = unquoteJsonString(args.stickerId);
+          const { entry: sticker, ambiguous } = await ctx.stickers.resolve(ref);
+          if (!sticker && ambiguous?.length) {
+            const ids = ambiguous.slice(0, 5).map((e) => e.id).join('、');
+            return err(`"${ref}" 对应 ${ambiguous.length} 个表情，说不清是哪个，请改用 id 指定：${ids}${ambiguous.length > 5 ? ' …' : ''}（id 用 list_stickers 查）`);
+          }
+          if (!sticker) return err(`找不到表情 ${ref}，请先用 list_stickers 获取有效 id；已经标注过的表情也可以直接填它的备注/标签。`);
+          // 有本地缓存就直接读盘：少一次图床请求，也绕开那些会过期的签名链接
+          const cached = await cachedDataUrl(sticker);
+          const dataUrl = cached || (sticker.url ? await downloadImageAsDataUrl(sticker.url) : '');
+          if (!dataUrl) return err('该表情既没有本地缓存图片，也没有可下载的图片地址');
           return { content: imageParts(`表情 ${sticker.id}（备注：${sticker.desc || '无'}）：`, [dataUrl]) };
         } catch (error) {
           return err(error?.message ?? error);
@@ -270,9 +300,19 @@ export function buildToolDefs() {
           if (!entry) return err(`在当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
           const imageMedia = (entry.media || []).find((m) => m.kind === 'image' && m.url);
           if (!imageMedia) return err('该消息没有可收藏的图片');
-          const saved = ctx.stickers.collect(args.messageId, { url: imageMedia.url, note: String(args.note ?? '') });
+          const saved = await ctx.stickers.collect(args.messageId, { url: imageMedia.url, note: String(args.note ?? '') });
+          // 上限淘汰是真删数据，必须在回执里说出来 —— 静默删收藏是最吓人的那种行为
+          const dropped = ctx.stickers.lastEvicted || [];
+          const droppedTip = dropped.length
+            ? `另外：收藏已到上限，删掉了 ${dropped.length} 个用得最少、收得最早的（${dropped.slice(0, 3).map((e) => e.desc || e.localNote || e.id).join('、')}${dropped.length > 3 ? ' …' : ''}），它们在本地的图片也一并删了。`
+            : '';
           // hint 不能叫 note —— note 这个键已经被上面那条备注占了
-          return ok({ collected: true, id: saved.id, note: saved.localNote, hint: '顺手用 sticker_note 给这个表情补一句标签和适用场景（内容/什么场合发），以后才选得准。' });
+          return ok({
+            collected: true,
+            id: saved.id,
+            note: saved.localNote,
+            hint: `顺手用 sticker_note 给这个表情补一句标签和适用场景（内容/什么场合发），以后才选得准。${droppedTip}`
+          });
         } catch (error) {
           return err(error?.message ?? error);
         }

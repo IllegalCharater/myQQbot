@@ -10,7 +10,9 @@
 //   senderName:群名片/昵称（自己发送的为 botName）
 //   text:      解析后的纯文本（[图片] 等占位符已内联）
 //   self:      是否是机器人自己发的
-//   read:      已读状态（运行开始时批量置 true）
+//   read:      已读状态。**由动态上下文窗口（src/context-window.js）消费时单向下沉的
+//              展示镜像**，面板用它画未读角标；触发判定不再看它（看窗口的游标）。
+//              唯一例外：窗口首次播种时用它的前缀还原游标（见 ContextWindow#seed）。
 //   reply:     可选 { sender, text }：该消息引用/回复的对象摘要
 //   media:     可选 [{ kind, url, file, faceId, summary }] 原始媒体定位信息
 // }
@@ -139,7 +141,13 @@ export class ChatStore {
     return entry;
   }
 
-  /** 快照当前未读并全部置为已读（运行开始时调用）。 */
+  /**
+   * 快照当前未读并全部置为已读。
+   *
+   * ⚠️ **已不是触发路径**（触发判定与消费都归 src/context-window.js），
+   *    保留给存档层的调用方 / 探针套件当 fixture 用。新代码要"看过这批"请走
+   *    orchestrator 的窗口消费（它同时推进游标并下沉 read 镜像）。
+   */
   drainUnread(chatKey) {
     const st = this.#state(chatKey);
     const unread = st.messages.filter((m) => !m.read && !m.self);
@@ -155,6 +163,9 @@ export class ChatStore {
    * 消息就沉入历史（已读），不会产生会话、不消耗 token；
    * 但内容仍留在存档里，日后被艾特时还能作为"已读上下文"带进提示词。
    * 与 drainUnread 的区别：drainUnread 取走并作为触发批，这个只标记。
+   *
+   * ⚠️ **已不是触发路径**（"不响应也推进窗口游标"现在由窗口负责，见 context-window.js），
+   *    保留给探针套件当 fixture 用。
    *
    * @returns {number} 被标记为已读的条数
    */
@@ -173,10 +184,69 @@ export class ChatStore {
     return st.messages.filter((m) => !m.read && !m.self).length;
   }
 
-  /** 查看当前未读消息（不置已读），用于“等待中”会话的触发摘要。 */
+  /** 查看当前未读消息（不置已读）。**已不是触发路径**，保留给探针套件当 fixture 用。 */
   peekUnread(chatKey, limit = 3) {
     const st = this.#state(chatKey);
     return st.messages.filter((m) => !m.read && !m.self).slice(0, Math.max(1, Number(limit) || 3));
+  }
+
+  /**
+   * 按 id 批量置为已读 —— 动态上下文窗口消费时**下沉 read 镜像的唯一入口**。
+   *
+   * 为什么按显式 id（而不是"再扫一遍未读"）：窗口的游标才是"看过没看过"的真相，
+   * 存档只负责把它画出来。窗口给什么就写什么，存档不自己判断。
+   *
+   * 与其它写方法同一套约束：按 id 找、绝不按下标、中间不夹 await、改完立刻 saveChat
+   * （Node 单线程下这就是原子的，一旦让出事件循环，bot 的追加就会挤进来）。
+   *
+   * @param {number[]} ids 要置为已读的本地 id
+   * @returns {number} 实际被改动的条数（本来就已读的不算）
+   */
+  markRead(chatKey, { ids = [] } = {}) {
+    const targets = new Set((Array.isArray(ids) ? ids : []).map((x) => Number(x) || 0));
+    targets.delete(0);
+    if (!targets.size) return 0;
+    const st = this.#state(chatKey);
+    let n = 0;
+    for (const m of st.messages) {
+      if (!targets.has(m.id) || m.read) continue;
+      m.read = true;
+      n++;
+    }
+    if (n) saveChat(st);
+    return n;
+  }
+
+  /**
+   * 最新的 `limit` 条**对方发来的消息**（排除机器人自己、压缩摘要、人工备注），旧→新。
+   * `limit <= 0` = 全部。
+   *
+   * 为什么需要它（不能直接拿 recent() 顶）：recent() 把 self/摘要/备注也算进条数，
+   * 过滤完拿到的会少于 limit；而且它的 `slice(-limit)` 碰到 Infinity 会被
+   * `slice(0,0)` 吃掉、返回空数组 —— 而"不限"正是上下文窗口的默认容量
+   * （见 src/context-window.js 的播种）。
+   */
+  recentIncoming(chatKey, { limit = 0 } = {}) {
+    const st = this.#state(chatKey);
+    const all = st.messages.filter((m) => !m.self && !isSystemRecord(m));
+    const n = Math.max(0, Number(limit) || 0);
+    return n > 0 ? all.slice(-n) : all;
+  }
+
+  /**
+   * 最新一条对方消息的本地 id（没有则 0）。
+   *
+   * 给上下文窗口的一致性兜底用：窗口保存着"我收到过的最新 id"，两者不等说明
+   * 有消息绕过 push 直接进了存档，窗口该补齐（见 ContextWindowRegistry#sync）。
+   * 从尾往前扫 —— 正常情况下第一次比较就命中，是 O(1)。
+   */
+  lastIncomingId(chatKey) {
+    const st = this.#state(chatKey);
+    for (let i = st.messages.length - 1; i >= 0; i--) {
+      const m = st.messages[i];
+      if (!m.self && !isSystemRecord(m)) return Number(m.id) || 0;
+    }
+    return 0;
   }
 
   recent(chatKey, { limit = 80, offset = 0, includeSelf = true } = {}) {
@@ -349,8 +419,8 @@ export class ChatStore {
   /**
    * 插一条**人工备注**：kind:'note'，不是群友说的话，也不冒充 bot 自己。
    *
-   * read:true 是关键 —— drainUnread/unreadCount/markAllRead 过滤的都是
-   * `!m.read && !m.self`，置 true 它才不会变成一次运行的触发批。
+   * read:true 是关键 —— 存档层的未读统计（unreadCount）和窗口的播种/同步都按
+   * `!m.read && !m.self` 判断，置 true 它才不会变成一次运行的触发批。
    *
    * 按 ts 找位置插入（同 commitCompaction）：给几天前那段对话补一句更正，
    * 它应该落在当时的位置，而不是漂在末尾。

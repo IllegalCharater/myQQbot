@@ -204,6 +204,7 @@ if (!SCAN_ONLY) {
   rmrf('sessions', '会话留档');
   rmrf('memory', '记忆');
   rmrf('stickers.json', '表情库');
+  rmrf('sticker-cache', '表情包本地缓存图片');
   rmrf('usage-today.json', '今日用量');
   rmrf('feedbacks.json', '反馈记录');
   rmrf('price-feed-cache.json', '远程价格表缓存');
