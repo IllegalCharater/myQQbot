@@ -729,6 +729,12 @@ export class Orchestrator {
     const maxRounds = Math.max(1, Number(cfg.api.maxRounds) || 12);
     let finish = false;
     let webSearchCount = 0;
+    // 刚往会话记录里压过一条「N 张图片已作为图像输入注入模型」时，记下它的下标。
+    // 模型对这张图的解读在**下一轮**的响应里，而那一轮如果只调工具、没输出文本，
+    // 会话记录会整条跳过它（ui 的 continue）—— 排查"图裂了看不见"那类事故时，
+    // 用户看到的就只有"图片已注入"，看不到模型到底看见了什么。所以下一轮拿到响应后
+    // 把那段话回填到这条记录上（见下面 slot.toolImages.reply）。
+    let pendingImageEntry = -1;
     session.activity = '';
     session.webSearchCount = 0;
     const markActivity = (activity) => {
@@ -756,6 +762,25 @@ export class Orchestrator {
       };
       messages.push(assistantEntry);
       session.messages.push(structuredClone(assistantEntry));
+      // 上一轮刚注入过图片 → 这一轮模型的输出就是它的"读图结论"，回填到那条记录上。
+      // 只挂最后一批：同一轮注入过多批时（多个读图工具）模型看的是同一个响应，
+      // 同一句话挂两遍只会刷屏。标记 imageReply 让 ui 跳过这条 assistant 气泡 ——
+      // 那段话已经在卡片里显示了，再冒一个"思考（不发送）"就是同一句话出现两次、
+      // 还看不出跟哪次读图有关。
+      if (pendingImageEntry >= 0) {
+        const slot = session.messages[pendingImageEntry];
+        if (slot?.toolImages) {
+          slot.toolImages.reply = {
+            text: typeof finalContent === 'string' ? finalContent : '',
+            calls: (Array.isArray(finalToolCalls) ? finalToolCalls : []).map((c) => ({
+              name: c?.function?.name ?? '',
+              args: safeParse(c?.function?.arguments ?? '{}')
+            }))
+          };
+          session.messages[session.messages.length - 1].imageReply = true;
+        }
+        pendingImageEntry = -1;
+      }
       session.rounds = round + 1;
       markActivity('');
 
@@ -831,6 +856,8 @@ export class Orchestrator {
             ]
           });
           session.messages.push({ toolImages: { tool: name, count: images.length } });
+          // 等下一轮把模型的读图结论回填到这条上（见循环开头 pendingImageEntry 那段）
+          pendingImageEntry = session.messages.length - 1;
         }
         this.sessions.update(session.id);
         this.emit('session-update', session.id);

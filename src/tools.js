@@ -6,7 +6,7 @@
 import { getConfig } from './config.js';
 import { normalizeMessageList, unquoteJsonString, formatShortTime } from './util.js';
 import { formatStickerList } from './stickers.js';
-import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
+import { validateImageUrl, safeFetchBinary, detectMime } from './safe-fetch.js';
 import { webSearch, webFetch } from './web-search.js';
 import { expandForwardNodes, forwardIdFromData } from './onebot.js';
 import { enqueueJmcomicDownload } from './jmcomic.js';
@@ -22,7 +22,10 @@ async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
 
 // 按魔数判图片类型的实现搬到了 safe-fetch.js（那边没有依赖，sticker-cache.js 也要用）。
 // 这里原样转出：app.js 等既有调用点一行都不用改。
-export { detectMime } from './safe-fetch.js';
+// ⚠️ 必须**同时 import 进来**（见上面那行 import）：`export { x } from '…'` 只转出、不在本模块
+// 建立绑定，光有它的话本文件里用 detectMime 会 ReferenceError（2026-09-24 就是这么炸的：
+// get_message_images 整条读图路径全灭，报 `detectMime is not defined`）。
+export { detectMime };
 
 function ok(payload) {
   return { content: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 1) };

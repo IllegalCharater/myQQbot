@@ -164,10 +164,13 @@ export function cleanStickerRef(raw) {
   //    而"把菜单那一行粘回来"恰恰是模型最常做的事。所以这里排除的是 URL/标识符字符。
   const m = /(?:^|[^\w/?&=%.-])id=([^\s]+)/.exec(s);
   if (m) push(m[1]);
-  // 2) 剥掉列表符号 `- `、尾部 `（用过N次）`、以及**前面带空白的** ` [a/b/c]`。
+  // 2) 剥掉渲染加上去的装饰：列表符号 `- `、`（未标注）` 标记、`（QQ 名：xxx）`、
+  //    尾部 `（用过N次）`、以及**前面带空白的** ` [a/b/c]`。
   //    要求括号前有空白，是因为备注本身可能就叫 `[doge]`（QQ 收藏里真有这种），
   //    无差别剥括号会把这种备注直接吃掉。
   const label = s.replace(/^-\s*/, '')
+    .replace(/^[（(]未标注[）)]\s*/, '')
+    .replace(/[（(]\s*(?:QQ\s*名|名称|原名)\s*[:：][^）)]*[）)]/g, ' ')
     .replace(/[（(]用过\d+次[）)]\s*$/, '')
     .replace(/\s+\[[^\[\]]*\]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -319,27 +322,49 @@ export function formatStickerList(entries, query = '', limit = 48) {
  * 未标注的排在最前，但**最多 3 个**：一库没标注的图会把这几行全占满，把能直接用的
  * 表情挤出菜单。段头里报"还剩几个没标注"，让它在后续轮次里继续推进。
  */
+/**
+ * 拼【可用表情包】段（模型挑表情时的唯一菜单）。
+ *
+ * 一条表情算不算"bot 标注过"看的是 **localNote**（bot 自己记下的意思），不是"有没有名字"：
+ * QQ 收藏一同步进来就带着 QQ 给的名字（desc 由 fetch_custom_face_detail 提供），
+ * 但 bot 从没看过它、不知道什么场合能用 —— 按"有名字就算标注过"会把这一大批整个漏出
+ * "待标注"那一队，而它们恰恰是最该标的一批。所以两种来源一视同仁：
+ * 只要 bot 还没记过它的意思，就带 id= 出现在菜单里、请它先看图再标注。
+ *
+ * 已标注的照旧只给标签（不带 id，省 token）；未标注的带 id=、并把已有的名字一起带着，
+ * 免得"还没标注"反而比"有名字"更难用。
+ */
 export function buildStickerContext(entries, max = 10) {
   const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
   if (!list.length) return '';
   const limit = Math.max(1, Math.min(30, Number(max) || 10));
-  const isLabeled = (e) => !!(e.desc || e.localNote);
-  const unlabeled = list.filter((e) => !isLabeled(e));
-  const labeled = list.filter(isLabeled).sort((a, b) => (b.useCount || 0) - (a.useCount || 0));
   const FRESH_QUOTA = 3;   // 一轮最多推几个"待标注"的（与策略段里"一轮最多标 3 个"对齐）
-  const fresh = unlabeled.slice(0, Math.min(FRESH_QUOTA, limit));
-  const top = [...fresh, ...labeled.slice(0, Math.max(0, limit - fresh.length))];
-  const lines = top.map((e) => {
+  const needNote = (e) => !e.localNote;
+  // 待标注的：用得多的先标（用得越频繁越值得知道它是什么意思），同频率里新收的优先
+  const fresh = list.filter(needNote)
+    .sort((a, b) => (b.useCount || 0) - (a.useCount || 0)
+      || (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0))
+    .slice(0, Math.min(FRESH_QUOTA, limit));
+  const freshIds = new Set(fresh.map((e) => e.id));
+  // 剩下的位置**不按"标没标注"锯开**，一律按使用次数排：否则一个还没标过几个的库会被
+  // 饿成三行，bot 反而没得挑 —— 名字（desc）本来就够它大致判断，缺的只是"按意思精确挑"。
+  const rest = list.filter((e) => !freshIds.has(e.id))
+    .sort((a, b) => (b.useCount || 0) - (a.useCount || 0))
+    .slice(0, Math.max(0, limit - fresh.length));
+  const lines = [...fresh, ...rest].map((e) => {
     const extra = e.tags?.length ? ` [${e.tags.join('/')}]` : '';
     const used = e.useCount ? `（用过${e.useCount}次）` : '';
-    return isLabeled(e) ? `- ${e.desc || e.localNote}${extra}${used}` : `- （未标注）id=${e.id}${extra}${used}`;
+    if (e.localNote) return `- ${e.desc || e.localNote}${extra}${used}`;
+    // ⚠️ id= 后面必须跟空格：cleanStickerRef 按 `[^\s]+` 取值，名字紧挨着会被一起吞进 id
+    const name = e.desc ? (e.source === 'qq' ? ` （QQ 名：${e.desc}）` : ` （名称：${e.desc}）`) : '';
+    return `- （未标注）id=${e.id}${name}${extra}${used}`;
   });
-  const rest = unlabeled.length - fresh.length;
+  const pending = list.filter(needNote).length - fresh.length;
   const head = [
-    `【可用表情包】表情库里 ${list.length} 个（下面是常用的 ${top.length} 个，完整列表可用 list_stickers 查询）。`,
-    '带 id= 的是还没标注过的：先 get_sticker_image 看图、sticker_note 记下它的意思（以后就能按意思挑），再挑合适的发。'
+    `【可用表情包】表情库里 ${list.length} 个（下面是常用的 ${lines.length} 个，完整列表可用 list_stickers 查询）。`,
+    '带 id= 的是你还没标注过的（QQ 收藏里那些只有名字、你还没看过的也算）：先 get_sticker_image 看图、sticker_note 记下它的意思和适用场合，再判断这张合不合适发。'
   ];
-  if (rest > 0) head.push(`（另有 ${rest} 个还没标注的，一轮先标上面这几个就够，别一口气全标）`);
+  if (pending > 0) head.push(`（另有 ${pending} 个还没标注的 —— 一轮先标最前面那 ${fresh.length} 个就够，别一口气全标）`);
   return `${head.join('\n')}\n${lines.join('\n')}`;
 }
 
@@ -359,8 +384,8 @@ export function buildStickerStrategyHint(level = 1) {
     '【表情包策略：像真人一样用，不刷屏】',
     '- 合适时机：被戳中笑点/槽点、接梗、怼人、赞同、自嘲、安慰、无语、赢了/输了、告别/晚安、别人发了表情时回一张，都可以自然用。',
     `- ${freqByLevel}`,
-    '- 选择：优先用备注（desc）和你的记忆（localNote/tags）能准确对上语境的；没有备注/不确定的表情，先 get_sticker_image 看图再决定，不要瞎发。',
-    '- 标注优先：菜单里带 id= 的那些你还没看过 —— 打算发表情时，先用 get_sticker_image 看图、再用 sticker_note 记下它的意思和适用场景（一轮最多标 3 个），之后就能按标签挑。看图、标注、发送可以在同一轮里连着做完。',
+    '- 选择：优先用备注（desc）和你的记忆（localNote/tags）能准确对上语境的；还没标注过、你也不确定的表情，先 get_sticker_image 看图再决定，不要瞎发。',
+    '- 标注优先：菜单里带 id= 的那些你还没标注过（**自己收藏的和 QQ 里原来就有的都算**）—— 打算发表情时，遇到这种就先 get_sticker_image 看图、用 sticker_note 记下它的意思和适用场景（一轮最多标 3 个），标注完再判断这张合不合适：合适就发，不合适就换一张。看图、标注、发送可以在同一轮里连着做完。',
     '- 发送：用 send_sticker；stickerId 可以填 id，也可以直接填菜单（或 list_stickers）里那个表情的备注/标签 —— 唯一命中时才作数，撞了它会让你改用 id。一条消息只能是一张表情，不能在同一气泡里附带文字；想说的话先用 send_message 作为单独气泡发出，再单独发表情。',
     '- 不要：在严肃/正式/敏感话题硬塞表情；不要每次都用同一个；不要一条消息里塞多个表情；不要把文字和表情混在同一个气泡里。'
   ].join('\n');

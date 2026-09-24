@@ -251,6 +251,28 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/**
+ * 会话记录里给工具调用配一句人话摘要（`send_message("好可爱")`）。
+ *
+ * 只挑最常见的几个文本参数（`messages` 是数组时用 / 连起来），挑不到就返回空串
+ * （宁可不显示也不显示 `{}`）—— 记录里本来就有完整的 args，这句只是让人一眼看懂
+ * "模型顺手干了什么"。
+ */
+function argsHint(args, max = 60) {
+  if (!args || typeof args !== 'object') return '';
+  const keys = ['messages', 'text', 'message', 'content', 'note', 'summary', 'reason', 'query', 'stickerId'];
+  for (const key of keys) {
+    const v = args[key];
+    const s = Array.isArray(v)
+      ? v.filter((x) => typeof x === 'string' && x.trim()).join(' / ').trim()
+      : (typeof v === 'string' ? v.trim() : '');
+    if (!s) continue;
+    const flat = s.replace(/\s+/g, ' ');
+    return `("${flat.length > max ? `${flat.slice(0, max)}…` : flat}")`;
+  }
+  return '';
+}
+
 const STATUS_LABEL = { waiting: '等待中', done: '已发言', noreply: '未回复', running: '运行中', error: '出错', aborted: '中止' };
 
 // ── 启动 loading 壳：页面先渲染，等服务可用后自动隐藏 ──
@@ -936,14 +958,26 @@ function renderSessionDetail(s) {
             <div class="tool-result ${item.toolCall.isError ? 'is-error' : ''}">${esc(item.toolCall.result)}</div>
           </div>`);
       } else if (item.toolImages) {
+        // 除了"注入了几张图"，还带上模型看完图之后说了什么（reply 由编排层在下一轮
+        // 响应到达时回填）。没有 reply = 模型还没轮到开口（这轮就是最后一轮）或者
+        // 半路出错，那就只显示原来那句，不编一句话出来。
+        const reply = item.toolImages.reply || {};
+        const replyText = typeof reply.text === 'string' ? reply.text.trim() : '';
+        const calls = Array.isArray(reply.calls) ? reply.calls : [];
+        const callLine = calls.map((c) => `${c?.name || '?'}${argsHint(c?.args)}`).join('、');
+        const body = [];
+        if (replyText) body.push(`模型读图后说：${esc(replyText)}`);
+        if (callLine) body.push(`<span class="muted">同一轮还调用了：${esc(callLine)}</span>`);
         html.push(`
           <div class="tool-card">
             <div class="tool-head"><span class="tool-name">${esc(item.toolImages.tool)}</span>
             <span class="muted">→ ${item.toolImages.count} 张图片已作为图像输入注入模型</span></div>
+            ${body.length ? `<div class="tool-result">${body.join('<br>')}</div>` : ''}
           </div>`);
       } else if (item.role === 'assistant') {
         const text = typeof item.content === 'string' ? item.content : '';
         if (item.tool_calls && item.tool_calls.length && !text.trim()) continue; // 纯工具调用轮，卡片已展示
+        if (item.imageReply) continue;   // 读图那一轮的话已经显示在上面的读图卡片里了，不重复
         html.push(`
           <div class="bubble bubble-assistant">
             <div class="asr-label">思考（不发送）</div>
