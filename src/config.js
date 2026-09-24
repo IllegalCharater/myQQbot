@@ -159,6 +159,20 @@ export const DEFAULT_CONFIG = {
     maxChatsPerSweep: 1,        // 一次巡检最多处理几个会话（控成本）
     compactMemory: true         // 顺带触发一次记忆整理（走它自己的冷却）
   },
+  // 历史摘要注入：压缩产物的**消费端**。与 compact 分开是有意的 —— compact 管
+  // "怎么生成摘要"，这里管"摘要怎么进提示词"。定时压缩关着、只用面板「立即压缩」
+  // 压过的用户，同样要这里的设置生效。
+  digest: {
+    injectEveryRound: false,  // true = 不管这轮读不读历史都带上摘要；false = 只在读历史的那轮带
+    merge: true,              // true = 多条摘要拼成一段；false = 每条各成一小节
+    // 注入字数上限。**0 = 不注入**。
+    // ⚠️ 这里故意偏离本文件「0 = 不限制」的惯例（见 maxMessagesPerChat/maxContextMessages）：
+    //    摘要永不归档、只会越攒越多，"不限"等于无上限的 token 成本，没人想要；
+    //    而 0 落在"静默不注入"这个安全方向，写错了也只是不说话，不会失控。
+    maxChars: 8000,
+    unified: true,            // true = 全部会话用上面三个值；false = 白名单群可按群覆盖
+    perChat: {}               // { [群号]: { injectEveryRound, merge, maxChars } }，仅 unified=false 时生效
+  },
   // 发送保护
   send: {
     minGapMs: 1000,         // 相邻两条消息最小间隔
@@ -327,6 +341,40 @@ export function storeConfigForChat(chatKey) {
   if (pos === undefined || pos === null) return store;
   const { tier, randomPercent } = sliderToTier(Number(pos));
   return { ...store, contextTier: tier, randomPercent };
+}
+
+/**
+ * 取某个会话实际生效的历史摘要注入配置。
+ * unified 开启 → 全局值；关闭 → 群聊查 perChat，有单独设置就覆盖，缺哪个字段就沿用全局。
+ * 私聊永远跟随全局（和 storeConfigForChat 一致）。
+ *
+ * 返回的一定是**三个都有值**的对象：调用方（提示词与面板）不该各自再兜一遍默认值，
+ * 那样两边就会漂移。
+ */
+export function digestConfigForChat(chatKey) {
+  const d = getConfig().digest || {};
+  const num = (v, fallback) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(200000, Math.max(0, Math.round(n))) : fallback;
+  };
+  const base = {
+    injectEveryRound: d.injectEveryRound === true,
+    merge: d.merge !== false,
+    maxChars: num(d.maxChars, 8000)
+  };
+  if (d.unified !== false) return base;
+  const [kind, id] = String(chatKey || '').split(':');
+  if (kind !== 'group' || !id) return base;
+  const o = d.perChat?.[id];
+  if (!o || typeof o !== 'object') return base;
+  // 覆盖项里**没写的字段沿用全局**（逐字段判断，而不是"有覆盖项就整份替换"）。
+  // 面板每次都会写全三个字段，所以这里主要挡的是手改 config.json 写出半份覆盖的情况：
+  // 那种情况下"缺的字段回到默认值"会让用户觉得"我就改了个字数上限，每轮注入怎么被关了"。
+  return {
+    injectEveryRound: o.injectEveryRound === undefined ? base.injectEveryRound : o.injectEveryRound === true,
+    merge: o.merge === undefined ? base.merge : o.merge !== false,
+    maxChars: num(o.maxChars, base.maxChars)
+  };
 }
 
 /** 防抖保存：高频小改动合并写盘。 */

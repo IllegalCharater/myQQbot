@@ -194,6 +194,24 @@ export class ChatStore {
   }
 
   /**
+   * 该会话的全部压缩摘要（kind:'digest'），**新的在前**（ts 降序，同 ts 按 id 降序）。
+   *
+   * 顺序是契约不是巧合：提示词的【历史印象】段按"新的优先"吃字数预算，
+   * 越旧越先被挤掉；面板反过来自己倒序显示。两边都不必再排一次。
+   *
+   * ⚠️ filter 出来的是**新数组**，排序它不会动到 st.messages。绝不能对
+   *    st.messages 原地排序 —— 那会重排整个存档，连带把 recent() 的窗口改掉。
+   * 摘要按 ts 堆在存档头部（commitCompaction 按 ts 插入），但这里仍显式排序，
+   * 不依赖插入顺序（老存档、手工修过的数据都可能不守规矩）。
+   */
+  digests(chatKey) {
+    const st = this.#state(chatKey);
+    return st.messages
+      .filter((m) => m && m.kind === 'digest')
+      .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0) || (Number(b.id) || 0) - (Number(a.id) || 0));
+  }
+
+  /**
    * 按 QQ 消息 id 更新一条已存档消息（文本/补媒体），并落盘。
    * 用途：read_forward 工具把"合并转发占位符"永久升级成展开后的文本
    * —— 一次展开，以后谁（模型/存档页）都直接读到内容。

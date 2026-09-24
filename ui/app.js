@@ -38,6 +38,14 @@ const state = {
   stickerBusy: false,     // 弹窗/请求进行中：SSE 刷新时先让路
   // 存档页的查找词。切会话时清空 —— 为一个群写的词拿到另一个群里没有意义。
   chatQuery: '',
+  // 存档页顶部「历史印象」块（压缩摘要）的状态。
+  // chatDigests 是接口给的 digestStatus，跟 chatMessages 一起存 —— 面板是照着它
+  // 标"已注入/未注入"的，不是前端自己按预算猜的（两边口径必须一致）。
+  // chatDigestSig 是 memo 签名：轮询每 15 秒来一次，内容没变就不重写 innerHTML，
+  // 否则 <details> 的展开状态和滚动位置每轮都被冲一次。
+  chatDigests: null,
+  chatDigestOpen: true,
+  chatDigestSig: '',
   // 记忆页的查找词
   memQuery: '',
   // 记忆整理状态：按 chatKey 存，不依赖 DOM。
@@ -1165,6 +1173,9 @@ async function selectChat(key) {
   // 查找词跟着会话走：为一个群写的词拿到另一个群里没有意义，留着只会让人
   // 打开新会话时看到一张莫名其妙空掉的表，还以为是存档坏了。
   state.chatQuery = '';
+  // 顶部「历史印象」的注入状态也是上一个会话的：接口回来之前若有什么触发渲染，
+  // 宁可整块不显示，也不要显示别的群的段数/字数（那是"面板在说假话"）。
+  state.chatDigests = null;
   renderChatList();
   $('#chat-detail').innerHTML = '<div class="empty-hint">加载中…</div>';
   await loadChatMessages(key);
@@ -1188,6 +1199,9 @@ async function loadChatMessages(key, { keepView = false } = {}) {
     // 期间用户可能切走了会话，那就别覆盖当前视图
     if (state.currentChatKey !== key) return;
     state.chatMessages = data.messages || [];
+    // 历史印象的注入状态：哪些摘要会进提示词、哪些被字数预算挤掉了。
+    // 必须和 messages 一起存 —— 顶部那块是照着它标注的，不是前端自己猜的。
+    state.chatDigests = data.digestStatus || null;
 
     if (keepView && (state.chatMsgLimit || 0) > 0 && $('#chat-msg-body')) {
       // 只更新表格内容：分页不变、滚动位置不变
@@ -1231,6 +1245,19 @@ function renderChatMessages() {
     <div class="detail-header">
       <h2>${esc(name)} ${meta.unread ? `<span class="unread-pill">${meta.unread} 未读</span>` : ''}</h2>
       <div class="sub"><span data-field="chat-msg-count"></span></div>
+    </div>
+    <!-- 历史印象（压缩摘要）：bot 对这个会话"更早的聊天"的印象，也是每轮（或读历史
+         那一轮）真正被注入提示词的那段。骨架只在这里建一次，内容由
+         updateChatDigestBlock() 填 —— 轮询/SSE/查找最终都汇到 updateChatMessagesBody，
+         在那里面刷这一块，才能保证任何刷新路径它都不会变成旧的。
+         没有摘要、或正在查找时不显示（hidden 由那个函数管）。 -->
+    <div id="chat-digest-panel" hidden>
+      <details id="chat-digest-details" class="digest-panel"${state.chatDigestOpen === false ? '' : ' open'}>
+        <summary id="chat-digest-summary"></summary>
+        <div class="hint" id="chat-digest-meta"></div>
+        <div id="chat-digest-list"></div>
+        <div class="hint" id="chat-digest-more"></div>
+      </details>
     </div>
     <div class="chat-toolbar">
       <button class="btn btn-small" id="chat-wake-btn">唤醒一次处理</button>
@@ -1341,7 +1368,11 @@ function renderChatMessages() {
   // ── 每行的 改 / 删 ──
   // 用事件委托挂在 tbody 上：updateChatMessagesBody 每次轮询都会换掉 innerHTML，
   // 逐行绑定的话几百个监听器转瞬就失效。tbody 元素本身不重建，委托能活很久。
-  $('#chat-msg-body').addEventListener('click', async (e) => {
+  //
+  // 顶部历史印象块的行也走这同一个处理函数（摘要允许删、不允许改，判据在行渲染里）。
+  // 委托分别挂在各自容器上 —— 不要挂 #chat-detail：#chat-detail 的元素从不重建
+  // （只换 innerHTML），每切一次会话就往上叠一个监听器，表现是"删一条弹两次确认框"。
+  const onRowOp = async (e) => {
     const btn = e.target.closest('button[data-op]');
     if (!btn) return;
     const tr = btn.closest('tr[data-midrow]');
@@ -1408,6 +1439,14 @@ function renderChatMessages() {
         alert('删除失败：' + (err.message || err));
       }
     }
+  };
+  $('#chat-msg-body').addEventListener('click', onRowOp);
+  $('#chat-digest-list').addEventListener('click', onRowOp);
+  // 折叠状态记在 state 里：切换会话会重建骨架，靠它还原，否则用户每切回来都被展开。
+  // （轮询不会冲掉它 —— 那块内容只在 updateChatDigestBlock 里按 memo 重写。）
+  const digDetails = $('#chat-digest-details');
+  if (digDetails) digDetails.addEventListener('toggle', (ev) => {
+    state.chatDigestOpen = ev.currentTarget.open === true;
   });
 
   updateChatMessagesBody();
@@ -1439,7 +1478,10 @@ function chatMessagesNewestFirst() {
 }
 
 /** 单行消息 HTML（全量渲染与滚动追加共用同一个模板，保证两处长得一样）。 */
-function chatMsgRowHtml(m) {
+function chatMsgRowHtml(m, opts) {
+  // ⚠️ 调用方有 `.map(chatMsgRowHtml)` 这种写法，那样第二个参数会是数组下标（数字）而不是
+  //    选项对象。这里挡一下：不挡的话下标会被当成 previewChars，除第一行以外全被截断。
+  const { previewChars = 0, badge = '' } = (opts && typeof opts === 'object') ? opts : {};
   // 压缩摘要（kind:'digest'）与人工备注（kind:'note'）都不是某个人说的话，
   // 各自用一种弱化样式区分：多行文本靠 .text 已有的 white-space: pre-wrap 换行。
   const isDigest = m.kind === 'digest';
@@ -1454,13 +1496,111 @@ function chatMsgRowHtml(m) {
     ? '<span class="muted" title="摘要由模型生成，不能手改">—</span>'
     : '<button class="btn btn-small" data-op="edit" title="改这条的正文">改</button>')
     + '<button class="btn btn-small btn-danger" data-op="del" title="真删除这条存档">删</button>';
+  // 顶部历史印象块只给预览（previewChars）：一条摘要正文可达 4000 字，整段铺在最上面
+  // 会把表格挤到屏幕外。完整正文在下方表格里本来就有（摘要自己也是一行）。
+  const raw = String(m.text || '');
+  const body = previewChars > 0 && raw.length > previewChars
+    ? `${esc(raw.slice(0, previewChars))}…`
+    : esc(raw);
   return `
     <tr class="${m.read ? '' : 'unread'}${isDigest ? ' digest-row' : ''}${isNote ? ' note-row' : ''}" data-midrow="${m.id}">
       <td class="t">${fmtTime(m.ts)}</td>
       <td class="w ${m.self ? 'self' : ''}">${who}</td>
-      <td class="text">${esc(m.text)}${m.read ? '' : ' <span class="unread-pill">未读</span>'}</td>
+      <td class="text">${body}${badge}${m.read ? '' : ' <span class="unread-pill">未读</span>'}</td>
       <td class="ops">${ops}</td>
     </tr>`;
+}
+
+/**
+ * 顶部「历史印象」块：这个会话被压缩出来的摘要，以及**哪些真的会进提示词**。
+ *
+ * 数据全部来自接口的 digestStatus，而后端那个字段是 collectInjectedDigests 算的
+ * —— 和 buildUserPrompt 用的是同一个函数，所以这里标的"已注入/未注入"
+ * 和模型实际收到的不会打架（这条是整套改动的验收点）。
+ *
+ * 措辞边界：只说"会带上"，不说"本轮已注入"。面板不知道某一轮实际用了哪个档位，
+ * 所以它给的是"按当前设置，下一轮会怎样"。
+ */
+function updateChatDigestBlock() {
+  const panel = $('#chat-digest-panel');
+  if (!panel) return;
+  const status = state.chatDigests;
+  // 面板按时间正序展示，和提示词里【历史印象】的顺序一致（那条通道也是正序）
+  const all = (state.chatMessages || [])
+    .filter((m) => m.kind === 'digest')
+    .sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0));
+  // 查找态整块收起：查找是行级操作，上面挂一块不跟着过滤的纪要看像"结果集不肯缩"。
+  // 摘要本身在下方表格里也是一行、也会被搜到，所以收起不等于信息没了。
+  // 没有摘要（= 从未压缩过）时也收起：勾了什么设置都不该在这里显示一个空块。
+  if (!all.length || !status || String(state.chatQuery || '').trim()) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  // memo：轮询每 15 秒来一次，内容没变就别重写 innerHTML —— 否则 <details> 的展开/
+  // 收起状态、用户正在看的滚动位置，每轮都被冲一次。chatKey 必须进签名：
+  // 两个会话的摘要 id 完全可能重合成一样的数组。
+  const sig = JSON.stringify([state.currentChatKey, all.map((m) => m.id),
+    status.injectedIds, status.droppedIds, status.truncatedId, status.chars, status.budget, status.config]);
+  if (state.chatDigestSig === sig) return;
+  state.chatDigestSig = sig;
+
+  const cfg = status.config || {};
+  const closed = Number(cfg.maxChars) <= 0;
+  const injIds = new Set(status.injectedIds || []);
+  // 未注入的按"没进注入名单"算，而不是按服务端的 droppedIds 算：这样列表一定是完整的
+  // 二分，不会因为两边口径哪天不一致而凭空少一段（少的那段用户以为删掉了）。
+  const inj = all.filter((m) => injIds.has(m.id));
+  const dropped = all.filter((m) => !injIds.has(m.id));
+  const stampOf = (m, which, fallback) => {
+    const v = Number(m?.digest?.[which]);
+    return fmtTime(Number.isFinite(v) && v > 0 ? v : fallback);
+  };
+  const first = all[0];
+  const last = all[all.length - 1];
+  const lo = stampOf(first, 'from', first.ts);
+  const hi = stampOf(last, 'to', last.ts);
+  const totalRaw = all.reduce((n, m) => n + (Number(m.digest?.count) || 0), 0);
+
+  const summary = $('#chat-digest-summary');
+  if (summary) {
+    summary.textContent = closed
+      ? `历史印象 · 已关闭注入 · 共 ${all.length} 段`
+      : `历史印象 · 已注入 ${inj.length}/${all.length} 段 · ${status.chars}/${status.budget} 字`
+        + ` · 覆盖 ${lo} ~ ${hi}${totalRaw ? `（共 ${totalRaw} 条原始消息）` : ''}`;
+  }
+  const meta = $('#chat-digest-meta');
+  if (meta) {
+    const when = closed
+      ? '设置里已关闭注入（设置 › 聊天设置 › 历史摘要：字数上限填 0 就是关掉）。'
+      : (cfg.injectEveryRound
+        ? '按当前设置：<b>每一轮</b>运行都会带上这一段 —— 也包括那些不读历史的唤醒。'
+        : '按当前设置：只在<b>读历史</b>的那一轮带上（档 1/2/3 都没命中、一条历史都不读的唤醒不带）。');
+    meta.innerHTML = `${when}<br />这是"按当前设置，下一轮会怎样"，不是"上一轮实际读到了什么"；`
+      + '注入时它排在提示词的【过去状态】之前，两者互不挤占。完整正文在下方表格里也有。';
+  }
+  const rowOpts = (isIn) => (m) => ({
+    previewChars: 200,
+    badge: isIn
+      ? `<span class="digest-badge is-in" title="会进提示词的【历史印象】段">${m.id === status.truncatedId ? '已注入（已截断）' : '已注入'}</span>`
+      : '<span class="digest-badge is-out" title="超出字数预算，模型看不到这一段">未注入</span>'
+  });
+  const table = (list, isIn) => `<table class="archive-table digest-table"><tbody>`
+    + list.map((m) => chatMsgRowHtml(m, rowOpts(isIn)(m))).join('') + '</tbody></table>';
+  const list = $('#chat-digest-list');
+  if (list) {
+    list.innerHTML = table(inj, true) + (dropped.length
+      ? `<details class="digest-dropped"><summary>未注入 ${dropped.length} 段（超出字数预算，模型看不到）</summary>`
+        + table(dropped, false) + '</details>'
+      : '');
+  }
+  const more = $('#chat-digest-more');
+  if (more) {
+    more.textContent = dropped.length
+      ? '未注入的那些并没有丢，还在存档里；提示词里已经告诉模型可以自行往前翻（get_recent_messages）。'
+      : '';
+  }
 }
 
 /**
@@ -1524,7 +1664,9 @@ function appendChatMessageRows(prevShown) {
   const newestFirst = chatVisibleMessages();
   const limit = Math.min(state.chatMsgLimit, newestFirst.length);
   const rows = newestFirst.slice(prevShown, limit);
-  if (rows.length) tbody.insertAdjacentHTML('beforeend', rows.map(chatMsgRowHtml).join(''));
+  // 显式包一层箭头函数：直接写 `.map(chatMsgRowHtml)` 的话第二个参数是下标，
+  // chatMsgRowHtml 的选项参数会收到一个数字（它内部挡了，但别依赖那个）。
+  if (rows.length) tbody.insertAdjacentHTML('beforeend', rows.map((m) => chatMsgRowHtml(m)).join(''));
   state.chatMsgRendered = limit;
   updateChatMessagesMeta(newestFirst);
 }
@@ -1555,9 +1697,14 @@ function updateChatMessagesBody(keepScroll = false) {
     : Math.max(CHAT_MSG_PAGE, Number(state.chatMsgLimit) || CHAT_MSG_PAGE);
   const shown = newestFirst.slice(0, state.chatMsgLimit);
 
-  tbody.innerHTML = shown.map(chatMsgRowHtml).join('');
+  tbody.innerHTML = shown.map((m) => chatMsgRowHtml(m)).join('');
   state.chatMsgRendered = shown.length;   // 行数账本：滚动追加靠它判断该不该走增量
   updateChatMessagesMeta(newestFirst);
+  // 顶部「历史印象」块在这里刷 —— 只有这一处。轮询 / chat-update SSE / 查找 /
+  // 翻页最终都会走到 updateChatMessagesBody，所以挂在这里所有刷新路径都覆盖到了。
+  // （它其实不在 tbody 里，不会随 tbody.innerHTML 自动更新，漏了这一步就是
+  //    "摘要删了、面板还挂着一条"或者"刚压完、面板还是旧的"。）
+  updateChatDigestBlock();
 
   // 保险：若内容高度变了导致视口跳动，按增量补偿回来
   if (keepScroll) {
@@ -3481,7 +3628,10 @@ function renderMemorySettingsSection(c) {
     <div class="hint" style="margin-bottom:8px">
       长期运行的群里存档只增不减。压缩把最老的一段交给模型摘要成一段纪要写回存档，
       <b>原文不会被删除</b>，只是移到 <code>data/messages/archive/&lt;会话&gt;.jsonl</code> 冷归档。
-      摘要在存档页显示为一条「历史摘要」，模型在【过去状态】里也能看到它。
+      摘要在存档页显示为一条「历史摘要」，页顶还会单独列出它有没有进提示词。<br />
+      <b>它默认进不了提示词</b>：压缩把它插在"最近 N 条"之前（N = 下方「最近多少条原样保留」，默认 300），
+      而【过去状态】只按响应档位读几十条，摘要压根够不着。要不要带上、带多少，
+      去「聊天设置 › 历史摘要」里开。
     </div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-compact-enabled" ${comp?.enabled ? 'checked' : ''} />
       <label for="cfg-compact-enabled">启用定时压缩（会调用模型，产生费用）</label></div>
@@ -3781,6 +3931,67 @@ return `
       </div>
     </div>
 
+    <h3>历史摘要</h3>
+    <div class="hint" style="margin-bottom:8px">
+      聊天记录被压缩后会留下一条摘要（工具条上的「立即压缩历史」、或定时压缩）。这一段管的是
+      <b>摘要怎么进提示词</b>，和上面的「响应档位」是两条<b>独立通道</b>：档位管读多少条<span class="muted">历史</span>，
+      这里管更早的纪要带多少。两者并行注入、互不挤占 —— 所以档 1/2/3 读的历史很少时，摘要照样带得进来。
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-digest-everyround" ${c.digest?.injectEveryRound ? 'checked' : ''} />
+      <label for="cfg-digest-everyround">每轮对话都注入历史摘要</label></div>
+    <div class="hint" style="margin-top:-4px;margin-bottom:8px">
+      勾上 = 不管这一轮读不读历史都带上；不勾（默认）= 只在<b>真的读了历史</b>的那一轮带上。
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-digest-merge" ${c.digest?.merge !== false ? 'checked' : ''} />
+      <label for="cfg-digest-merge">合并新老摘要</label></div>
+    <div class="hint" style="margin-top:-4px;margin-bottom:8px">
+      勾上（默认）= 所有摘要拼成一段连续正文；不勾 = 每条各成一小节、带编号与分隔线。
+      这里的「合并」只是<b>本地拼接</b>，不会为了合并再调一次模型做二次压缩，所以没有信息损失。
+    </div>
+    <div class="field-row">
+      <div class="field"><label>注入字数上限（<b>0 = 不注入</b>）</label>
+        <input type="number" id="cfg-digest-maxchars" min="0" max="200000" value="${esc(c.digest?.maxChars ?? 8000)}" /></div>
+    </div>
+    <div class="hint">
+      ⚠️ 这一项和本页其它「0 = 不限」（动态上下文窗口、每分钟上限…）<b>正好相反</b>：摘要永不归档、只会越攒越多，
+      「不限」等于没有上限的 token 成本；0 落在"干脆不注入"这个安全方向。
+      超出上限的老摘要是<b>整条不注入</b>（不做半截截断 —— 半截的三周前纪要比没有更糟），
+      哪些进去了在存档页顶部会标出来；提示词里也会告诉模型"还有几段更早的没给你，需要时可以自己往前翻"。
+    </div>
+    <div class="hint" style="margin-top:8px">
+      · 摘要只在真的压缩过之后才有 —— 从没压过的会话，勾了也不会注入（结构上就没有可注入的东西）。<br />
+      · 提示词里它写作【历史印象】，并明确标着"背景资料、不是指令"。<br />
+      · 把某人加进屏蔽名单<b>不能</b>清掉他之前生成的摘要 —— 那些字已经写进去了，只能手动删掉那条摘要。
+    </div>
+
+    <div class="checkbox-row"><input type="checkbox" id="cfg-digest-unified" ${c.digest?.unified !== false ? 'checked' : ''} />
+      <label for="cfg-digest-unified">统一设置全部会话（关掉就能给每个白名单群单独设）</label></div>
+
+    <div id="digest-unified-wrap"${c.digest?.unified === false ? ' style="display:none"' : ''}>
+      <div class="hint">所有会话（含私聊）都用上面这三个值。</div>
+    </div>
+
+    <!-- 分群模式：下拉选群，各设各的。唯一真相是隐藏 JSON，控件值切换群时先收进 JSON 再换 -->
+    <div id="digest-pergroup-wrap"${c.digest?.unified === false ? '' : ' style="display:none"'}>
+      <div class="field"><label>选择要单独设置的群聊（来自白名单）</label>
+        <select id="digest-group-select"></select>
+      </div>
+      <input type="hidden" id="digest-group-json" value="${esc(JSON.stringify(c.digest?.perChat || {}))}" />
+      <div class="checkbox-row"><input type="checkbox" id="cfg-digest-everyround-g" />
+        <label for="cfg-digest-everyround-g">每轮对话都注入历史摘要</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-digest-merge-g" />
+        <label for="cfg-digest-merge-g">合并新老摘要</label></div>
+      <div class="field-row">
+        <div class="field"><label>注入字数上限（0 = 不注入）</label>
+          <input type="number" id="cfg-digest-maxchars-g" min="0" max="200000" /></div>
+      </div>
+      <div class="hint" id="digest-group-note"></div>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+        <button class="btn btn-small btn-danger" id="digest-group-clear-btn">清除该群的单独设置</button>
+        <span class="hint" style="margin:0">没单独设置过的群聊和所有私聊，跟随上面的统一设置。</span>
+      </div>
+    </div>
+
     <h3>屏蔽名单</h3>
     <div class="field">
       <button class="btn btn-small" id="blocklist-btn">管理屏蔽名单</button>
@@ -4039,6 +4250,91 @@ function bindSettingsEvents(c) {
       const m = readMap(); delete m[gid]; writeMap(m); loadGroup();
     });
     loadGroup();
+  }
+
+  // ── 分群「历史摘要」：下拉选群 + 每组三个控件 ──
+  // 与上面分群档位同一套做法（那个的注释里写着这个坑踩过两次）：唯一真相是隐藏 input
+  // 里的 JSON，控件改动即时写回，不引全局变量。
+  // ⚠️ 写入时必须一次写全三个字段：解析函数（digestConfigForChat）对"缺字段"是按
+  //    默认值兜底的，只写一个字段会让另外两个悄悄回到默认值，而不是跟随全局 ——
+  //    用户会觉得"我只是改了这个群的字数上限，怎么每轮注入被关了"。
+  const digUnified = $('#cfg-digest-unified');
+  if (digUnified) digUnified.addEventListener('change', () => {
+    const on = digUnified.checked;
+    const uw = $('#digest-unified-wrap'); if (uw) uw.style.display = on ? '' : 'none';
+    const pw = $('#digest-pergroup-wrap'); if (pw) pw.style.display = on ? 'none' : '';
+  });
+  const digGroupSel = $('#digest-group-select');
+  if (digGroupSel) {
+    const jsonEl = $('#digest-group-json');
+    const gEvery = $('#cfg-digest-everyround-g');
+    const gMerge = $('#cfg-digest-merge-g');
+    const gMax = $('#cfg-digest-maxchars-g');
+    const gNote = $('#digest-group-note');
+    if (jsonEl && gEvery && gMerge && gMax) {
+      const readMap = () => { try { return JSON.parse(jsonEl.value || '{}'); } catch { return {}; } };
+      const writeMap = (m) => { jsonEl.value = JSON.stringify(m); };
+      // 全局那三个控件必然同区渲染：没单独设过的群从它们起步，所见即所得
+      // —— 切过去看到的就是这个群此刻实际生效的值。
+      const globalVals = () => ({
+        injectEveryRound: !!$('#cfg-digest-everyround')?.checked,
+        merge: $('#cfg-digest-merge') ? !!$('#cfg-digest-merge').checked : true,
+        maxChars: clampInt($('#cfg-digest-maxchars')?.value, 0, 200000, 8000)
+      });
+      const syncNote = () => {
+        if (!gNote) return;
+        const gid = digGroupSel.value;
+        gNote.innerHTML = (gid && readMap()[gid])
+          ? '这个群<b>已单独设置</b>（改完点保存生效）。'
+          : '这个群还没单独设置过 —— 现在显示的是跟随全局的值；动任意一项就会为它建一份单独设置。';
+      };
+      const loadGroup = () => {
+        const gid = digGroupSel.value;
+        const o = (gid && readMap()[gid]) || null;
+        const base = globalVals();
+        gEvery.checked = o ? o.injectEveryRound === true : base.injectEveryRound;
+        gMerge.checked = o ? o.merge !== false : base.merge;
+        gMax.value = String(o && Number.isFinite(Number(o.maxChars)) ? Number(o.maxChars) : base.maxChars);
+        syncNote();
+      };
+      const storeGroup = () => {
+        const gid = digGroupSel.value;
+        if (!gid) return;
+        const m = readMap();
+        m[gid] = {
+          injectEveryRound: !!gEvery.checked,
+          merge: !!gMerge.checked,
+          maxChars: clampInt(gMax.value, 0, 200000, 8000)
+        };
+        writeMap(m);
+        syncNote();
+      };
+      // 群列表 = 白名单群 ∪ 已单独设置过的群（后者标"已不在白名单"，留着让用户能清理）
+      const allowIds = (c.allow?.groups || []).map(String);
+      const extraIds = Object.keys(readMap()).filter((id) => !allowIds.includes(id));
+      const ids = [...allowIds, ...extraIds];
+      digGroupSel.innerHTML = ids.length
+        ? ids.map((id) => `<option value="${esc(id)}">${esc(id)}${extraIds.includes(id) ? '（已不在白名单）' : ''}</option>`).join('')
+        : '<option value="">（白名单为空，先去「白名单」页签加群）</option>';
+      api('/api/onebot/groups').then((d) => {
+        const names = new Map((d.groups || []).map((g) => [String(g.id), g.name]));
+        digGroupSel.querySelectorAll('option').forEach((o) => {
+          const n = names.get(o.value);
+          if (n) o.textContent = `${n}（${o.value}）${extraIds.includes(o.value) ? ' · 已不在白名单' : ''}`;
+        });
+      }).catch(() => {});
+
+      digGroupSel.addEventListener('change', loadGroup);
+      gEvery.addEventListener('change', storeGroup);
+      gMerge.addEventListener('change', storeGroup);
+      gMax.addEventListener('input', storeGroup);
+      $('#digest-group-clear-btn')?.addEventListener('click', () => {
+        const gid = digGroupSel.value;
+        if (!gid) return;
+        const m = readMap(); delete m[gid]; writeMap(m); loadGroup();
+      });
+      loadGroup();
+    }
   }
 
   // ── 屏蔽名单 ──
@@ -5234,6 +5530,22 @@ async function saveConfig({ quiet = false } = {}) {
       maxWaitMs: clampInt(val('#cfg-reply-maxwait', c.reply?.maxWaitMs), 0, 3600000, 0),
       maxPerMinute: clampInt(val('#cfg-reply-maxpermin', c.reply?.maxPerMinute), 0, 1000, 0),
       maxLimitWaitMs: clampInt(val('#cfg-reply-limitwait', c.reply?.maxLimitWaitMs), 0, 300000, 20000)
+    };
+
+    // 历史摘要注入（压缩产物的消费端）。注意它不是 store 的子项 —— 生成摘要是
+    // compact 的事，怎么把摘要送进提示词是独立的一件事，定时压缩关着也要生效。
+    patch.digest = {
+      ...(c.digest || {}),
+      injectEveryRound: chk('#cfg-digest-everyround', c.digest?.injectEveryRound === true),
+      merge: chk('#cfg-digest-merge', c.digest?.merge !== false),
+      // 0 = 不注入（不是"不限"，理由见设置页那段 hint）
+      maxChars: clampInt(val('#cfg-digest-maxchars', c.digest?.maxChars), 0, 200000, 8000),
+      unified: chk('#cfg-digest-unified', c.digest?.unified !== false),
+      // 分群覆盖表。__replace__ 才能真删群设置（普通深合并删不掉键）——
+      // 「清除该群的单独设置」正是靠它把键从 config.json 里抹掉。
+      perChat: {
+        __replace__: (() => { try { return JSON.parse($('#digest-group-json')?.value || '{}'); } catch { return {}; } })()
+      }
     };
   }
 

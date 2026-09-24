@@ -17,6 +17,9 @@ import { detectMime } from './tools.js';
 import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
 import { Orchestrator } from './orchestrator.js';
+// 历史摘要的注入结果：面板顶部那块要显示"模型实际看到的"，就必须和提示词走同一个函数。
+// prompt.js 只依赖 config/util/stickers/tier-slider，引它不会成环。
+import { collectInjectedDigests } from './prompt.js';
 import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from './llm.js';
 import { resolveOfficialPrice, listOfficialPrices, isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from './model-prices.js';
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from './price-feed.js';
@@ -1510,7 +1513,22 @@ export function createApp({ log = console.log } = {}) {
           kind: m.kind || '',
           digest: m.digest || null
         }));
-        return json(res, 200, { chatKey, messages });
+        // 历史印象：面板顶部要如实标注"哪些会被注入"。值全部来自 collectInjectedDigests
+        // —— 和 buildUserPrompt 同一个函数，所以面板标注不可能和实际注入打架。
+        // 注意措辞边界：面板不知道某轮实际用了哪个档位，所以它只能说
+        // "预算内/超出预算" + 这个会话是否勾了「每轮都注入」，不能说"本轮已注入"。
+        const dig = collectInjectedDigests(store, chatKey);
+        const digestStatus = {
+          config: dig.config,
+          injectedIds: dig.injected.map((x) => x.entry.id),
+          truncatedId: (dig.injected.find((x) => x.truncated) || {}).entry?.id ?? null,
+          droppedIds: dig.dropped.map((m) => m.id),
+          chars: dig.chars,
+          budget: dig.budget,
+          total: dig.total,
+          totalChars: dig.totalChars
+        };
+        return json(res, 200, { chatKey, messages, digestStatus });
       }
 
       // ── 存档单条改 / 删 / 插备注（存档页每行的小按钮） ────────────────────

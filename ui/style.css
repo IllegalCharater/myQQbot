@@ -470,6 +470,58 @@ body {
 .archive-table .ops { white-space: nowrap; width: 1%; }
 .archive-table .ops .btn { padding: 2px 7px; font-size: 11.5px; }
 
+/* ── 存档页顶部「历史印象」（压缩摘要 + 它有没有进提示词）─────────────────
+   整块挂在 .detail-header 之后、.chat-toolbar 之前，是会话页最上面的一块。
+   配色沿用上面的 .digest-row 那一组：这里列的就是摘要条目本身，看起来应当同族。 */
+.digest-panel {
+  margin: 0 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(91,140,255,.04);
+}
+.digest-panel > summary {
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--muted);
+  user-select: none;
+}
+.digest-panel > summary:hover { color: var(--text); }
+/* summary 里的计数用等宽数字，轮询刷新时不会因为数字宽度变化而抖一下 */
+.digest-panel #chat-digest-summary { font-family: var(--mono); font-size: 12px; }
+.digest-panel > .hint,
+.digest-panel > div { padding: 0 10px 6px; }
+.digest-panel #chat-digest-list { padding: 0; }
+/* 块内的表格不再画外框：它就在面板里，再套一圈线会显得像两个嵌套的卡片 */
+.digest-panel .archive-table td { border-bottom: 1px dashed var(--border); }
+/* 面板里的行只读（正文是预览用的截断版），所以整行不强调 hover */
+.digest-panel .archive-table tr:last-child td { border-bottom: none; }
+
+/* 注入状态徽标：一眼看出哪几段真的会进提示词 */
+.digest-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 16px;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+.digest-badge.is-in { background: rgba(91,140,255,.18); color: var(--accent); }
+.digest-badge.is-out { background: rgba(255,180,84,.16); color: #d9a24a; }
+
+/* 未注入那组默认收起：它们是"模型看不到"的，不该抢占最上面的注意力 */
+.digest-dropped { border-top: 1px solid var(--border); }
+.digest-dropped > summary {
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+  user-select: none;
+}
+.digest-dropped > summary:hover { color: var(--text); }
+
 /* ── 表情包 ── */
 .sticker-toolbar { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .sticker-toolbar input {
