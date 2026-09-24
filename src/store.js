@@ -212,6 +212,55 @@ export class ChatStore {
   }
 
   /**
+   * 摘要**存档**的总量回收：把最旧的摘要整条删掉，直到摘要正文总量不超过 maxChars。
+   *
+   * 为什么需要它：摘要永不归档、也绝不被二次摘要（见 selectArchiveRange 的注释），
+   * 所以每压一轮就多一条。单条 ≤4000 字看着不多，但长期运行的群攒几年仍然是无界增长
+   * —— 提示词侧的 maxChars 只决定"带多少进提示词"，拦不住存档本身的膨胀。
+   *
+   * 三条规则（每条都对应一种难看的失败）：
+   *  1. **永远保留最新的一条**，哪怕它自己就超上限。否则把上限设得比单条还小，
+   *     就变成"纪要一生成就被删掉"的静默清空 —— 比不设上限更糟（用户会以为压缩坏了）。
+   *  2. **整条删，不做半截截断**：半截的三周前纪要比没有更糟（与提示词侧同一取舍）。
+   *  3. **先备份，且用独立后缀**（`.digestgc.bak`）：绝不能冲掉 `.panel.bak` 和
+   *     压缩回滚点 `.json.bak` —— 一次自动回收不该把用户的后悔药吃掉。
+   *
+   * 与 commitCompaction 一脉相承：按显式 id 过滤，绝不按下标；绝不回退 nextLocalId
+   * （回收掉的 id 不重用，否则会与已归档条目撞车）；改完立刻 saveChat，中间不夹 await。
+   *
+   * 字数按**条目文本长度**算（不是渲染后的长度）：渲染只在注入时发生，而这里管的是
+   * 存档里躺着多少字 —— 用它当尺子，用户在面板上看到的就是实际占据的量。
+   *
+   * @param {number} maxChars 0 / 非正数 / 非数字 = 不限（什么都不做）
+   * @returns {{dropped:Array, keptChars:number, totalChars:number, backup?:string}}
+   *          dropped 是被删掉的条目（最旧→新），供调用方写日志/回执
+   */
+  dropOldestDigests(chatKey, { maxChars = 0 } = {}) {
+    const cap = Number(maxChars);
+    const st = this.#state(chatKey);
+    // digests() 是"新的在前"的副本；倒过来就是回收顺序（最旧的先走）
+    const newestFirst = this.digests(chatKey);
+    const totalChars = newestFirst.reduce((n, m) => n + String(m.text || '').length, 0);
+    if (!Number.isFinite(cap) || cap <= 0 || totalChars <= cap) {
+      return { dropped: [], keptChars: totalChars, totalChars };
+    }
+    const dropped = [];
+    let chars = totalChars;
+    for (let i = newestFirst.length - 1; i >= 0; i--) {
+      // 规则 1：剩最后一条就收手，不管它超不超过上限
+      if (chars <= cap || newestFirst.length - dropped.length <= 1) break;
+      dropped.push(newestFirst[i]);
+      chars -= String(newestFirst[i].text || '').length;
+    }
+    if (!dropped.length) return { dropped: [], keptChars: chars, totalChars };
+    const backup = this.backupChatFileTo(chatKey, 'digestgc');
+    const kill = new Set(dropped.map((m) => m.id));
+    st.messages = st.messages.filter((m) => !kill.has(m.id));
+    saveChat(st);
+    return { dropped, keptChars: chars, totalChars, backup };
+  }
+
+  /**
    * 按 QQ 消息 id 更新一条已存档消息（文本/补媒体），并落盘。
    * 用途：read_forward 工具把"合并转发占位符"永久升级成展开后的文本
    * —— 一次展开，以后谁（模型/存档页）都直接读到内容。

@@ -1541,7 +1541,9 @@ function updateChatDigestBlock() {
   // memo：轮询每 15 秒来一次，内容没变就别重写 innerHTML —— 否则 <details> 的展开/
   // 收起状态、用户正在看的滚动位置，每轮都被冲一次。chatKey 必须进签名：
   // 两个会话的摘要 id 完全可能重合成一样的数组。
-  const sig = JSON.stringify([state.currentChatKey, all.map((m) => m.id),
+  // 签名里带正文长度：下面要报"摘要存档共多少字"，只盯 id 的话字数变了也不刷新。
+  const sig = JSON.stringify([state.currentChatKey,
+    all.map((m) => `${m.id}:${String(m.text || '').length}`),
     status.injectedIds, status.droppedIds, status.truncatedId, status.chars, status.budget, status.config]);
   if (state.chatDigestSig === sig) return;
   state.chatDigestSig = sig;
@@ -1577,7 +1579,15 @@ function updateChatDigestBlock() {
       : (cfg.injectEveryRound
         ? '按当前设置：<b>每一轮</b>运行都会带上这一段 —— 也包括那些不读历史的唤醒。'
         : '按当前设置：只在<b>读历史</b>的那一轮带上（档 1/2/3 都没命中、一条历史都不读的唤醒不带）。');
-    meta.innerHTML = `${when}<br />这是"按当前设置，下一轮会怎样"，不是"上一轮实际读到了什么"；`
+    // 存档量单独说一句：它和"注入多少"是两笔账（存档大、注入小是常态 —— 预算会把老的挤掉）
+    const storedChars = all.reduce((n, m) => n + String(m.text || '').length, 0);
+    const keep = Number(cfg.maxKeepChars) || 0;
+    const storeLine = `摘要存档共 ${storedChars} 字`
+      + (keep > 0
+        ? `（上限 ${keep} 字：每次压缩成功后会丢掉最旧的整条纪要，但永远留最新的一条）`
+        : '（上限为 0 = 不限；想自动清最旧的，去设置 › 聊天设置 › 历史摘要里设一个）');
+    meta.innerHTML = `${when}<br />${storeLine}<br />`
+      + '这是"按当前设置，下一轮会怎样"，不是"上一轮实际读到了什么"；'
       + '注入时它排在提示词的【过去状态】之前，两者互不挤占。完整正文在下方表格里也有。';
   }
   const rowOpts = (isIn) => (m) => ({
@@ -3964,6 +3974,20 @@ return `
       · 把某人加进屏蔽名单<b>不能</b>清掉他之前生成的摘要 —— 那些字已经写进去了，只能手动删掉那条摘要。
     </div>
 
+    <div class="field-row">
+      <div class="field"><label>摘要存档最多保留多少字（<b>0 = 不限</b>）</label>
+        <input type="number" id="cfg-digest-keepchars" min="0" max="200000" step="1000" value="${esc(c.digest?.maxKeepChars ?? 0)}" />
+        <div class="hint">
+          这一项管的不是提示词，而是<b>存档本身</b>：摘要永不归档、也绝不被二次摘要，所以每压一轮就多一条，
+          不刹车就是无界增长。填一个上限后，<b>每次压缩成功</b>都会把最旧的纪要<b>整条</b>丢掉，
+          直到总量降回上限以内（<b>永远保留最新的一条</b>，哪怕它自己就超上限 —— 否则把上限设小了会变成
+          "纪要一生成就被删"，那比不设上限更糟）。<br />
+          丢之前会先备份存档（<code>.digestgc.bak</code>），不会动压缩回滚点 <code>.json.bak</code> 与
+          面板的 <code>.panel.bak</code>。按会话各自计算，但对所有会话用同一个上限（它管磁盘占用，不参与下面的按群覆盖）。
+        </div>
+      </div>
+    </div>
+
     <div class="checkbox-row"><input type="checkbox" id="cfg-digest-unified" ${c.digest?.unified !== false ? 'checked' : ''} />
       <label for="cfg-digest-unified">统一设置全部会话（关掉就能给每个白名单群单独设）</label></div>
 
@@ -5540,6 +5564,9 @@ async function saveConfig({ quiet = false } = {}) {
       merge: chk('#cfg-digest-merge', c.digest?.merge !== false),
       // 0 = 不注入（不是"不限"，理由见设置页那段 hint）
       maxChars: clampInt(val('#cfg-digest-maxchars', c.digest?.maxChars), 0, 200000, 8000),
+      // 摘要存档的字数上限（0 = 不限）。全局限定：不参与按群覆盖，
+      // 上面那个 perChat 表里也不带它（它管磁盘占用）。
+      maxKeepChars: clampInt(val('#cfg-digest-keepchars', c.digest?.maxKeepChars), 0, 200000, 0),
       unified: chk('#cfg-digest-unified', c.digest?.unified !== false),
       // 分群覆盖表。__replace__ 才能真删群设置（普通深合并删不掉键）——
       // 「清除该群的单独设置」正是靠它把键从 config.json 里抹掉。

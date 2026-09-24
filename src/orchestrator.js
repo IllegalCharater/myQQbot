@@ -8,7 +8,7 @@
 //
 // 同一会话（群/私聊）同时最多一个运行；运行期间新消息只写 JSON（未读），不叠加触发。
 // 不同会话之间并行，受 maxConcurrentRuns 全局限流。
-import { getConfig, storeConfigForChat } from './config.js';
+import { getConfig, storeConfigForChat, digestConfigForChat } from './config.js';
 import { vendorOfConfig } from './model-prices.js';
 import { sleep, randInt, createEventBus, todayKey, formatShortTime } from './util.js';
 import { buildSystemPrompt, buildUserPrompt, resolveContextTier } from './prompt.js';
@@ -1347,7 +1347,8 @@ export class Orchestrator {
    * @param {object} [opts]
    * @param {boolean} [opts.force] 跳过门槛/冷却/未读检查（手动触发）。只跳过"该不该压"，
    *                               绝不跳过"能不能安全压"（正在回复中一律拒绝）。
-   * @returns {Promise<{ok:boolean, note:string, removed?:number, remaining?:number}>}
+   * @returns {Promise<{ok:boolean, note:string, removed?:number, remaining?:number, droppedDigests?:number}>}
+   *          droppedDigests = 本次顺带回收掉的旧纪要条数（摘要存档超出 digest.maxKeepChars 时）
    */
   async compactChat(chatKey, { force = false } = {}) {
     const cfg = getConfig();
@@ -1412,6 +1413,19 @@ export class Orchestrator {
 
       console.log(`[compact] ${chatKey} 已摘要 ${commit.removed} 条 → 1 条纪要（原文 → ${archived.file}）`);
 
+      // 摘要存档的总量回收。放在压缩**成功之后**（这是摘要集合唯一会变的时刻），
+      // 手动「立即压缩」与定时巡检都会走到这里 —— 只认"每次压缩后"，不额外看定时开关：
+      // 只认开关的话，用户设了上限却一直手动压缩时会发现它根本不生效。
+      // 上限 0 = 不限（默认），也就是与改动前完全一致。
+      let gc = { dropped: [] };
+      const keepCap = digestConfigForChat(chatKey).maxKeepChars;
+      if (keepCap > 0) {
+        gc = this.store.dropOldestDigests(chatKey, { maxChars: keepCap });
+        if (gc.dropped.length) {
+          console.log(`[compact] ${chatKey} 摘要存档 ${gc.totalChars} 字 > 上限 ${keepCap}，丢弃最旧的 ${gc.dropped.length} 条纪要（现 ${gc.keptChars} 字，备份 → ${gc.backup || '（无）'}）`);
+        }
+      }
+
       // 记忆那一半：压缩会稀释 #scanChatActivity 的证据（它在 recent(2000) 上计数），
       // 可能悄悄关掉"发现新人"。所以压完立刻让它整理一次 ——
       // #maybeConsolidateMemory 自带开关、阈值与 6 小时冷却，不满足条件时什么都不做。
@@ -1419,10 +1433,12 @@ export class Orchestrator {
 
       return {
         ok: true,
-        note: `已把 ${commit.removed} 条老消息摘要成 1 条纪要（原文归档到 ${archived.file}）`,
+        note: `已把 ${commit.removed} 条老消息摘要成 1 条纪要（原文归档到 ${archived.file}）`
+          + (gc.dropped.length ? `；摘要存档超出上限，另丢弃了最旧的 ${gc.dropped.length} 条纪要（备份 ${gc.backup ? gc.backup.split(/[\\/]/).pop() : '见数据目录'}）` : ''),
         removed: commit.removed,
         remaining: commit.remaining,
-        archiveFile: archived.file
+        archiveFile: archived.file,
+        droppedDigests: gc.dropped.length
       };
     } finally {
       this.compacting.delete(chatKey);

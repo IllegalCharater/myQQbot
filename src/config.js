@@ -170,7 +170,14 @@ export const DEFAULT_CONFIG = {
     //    摘要永不归档、只会越攒越多，"不限"等于无上限的 token 成本，没人想要；
     //    而 0 落在"静默不注入"这个安全方向，写错了也只是不说话，不会失控。
     maxChars: 8000,
-    unified: true,            // true = 全部会话用上面三个值；false = 白名单群可按群覆盖
+    // 摘要**存档**的字数上限。**0 = 不限**（默认，与改动前完全一致）。
+    // 与上面的 maxChars 是两件事：那个管"带多少进提示词"，这个管"存档里留多少"。
+    // 摘要永不归档、也绝不被二次摘要（见 store.selectArchiveRange 的注释），
+    // 所以每压一轮就多一条，长期跑下去存档本身会无界增长 —— 提示词的预算拦不住它。
+    // 超上限时在**每次压缩成功后**整条丢掉最旧的（永远保留最新的一条，理由见
+    // store.dropOldestDigests）。这是全局限定，不参与按群覆盖：它管的是磁盘占用。
+    maxKeepChars: 0,
+    unified: true,            // true = 全部会话用上面几个值；false = 白名单群可按群覆盖
     perChat: {}               // { [群号]: { injectEveryRound, merge, maxChars } }，仅 unified=false 时生效
   },
   // 发送保护
@@ -348,8 +355,10 @@ export function storeConfigForChat(chatKey) {
  * unified 开启 → 全局值；关闭 → 群聊查 perChat，有单独设置就覆盖，缺哪个字段就沿用全局。
  * 私聊永远跟随全局（和 storeConfigForChat 一致）。
  *
- * 返回的一定是**三个都有值**的对象：调用方（提示词与面板）不该各自再兜一遍默认值，
- * 那样两边就会漂移。
+ * 返回的一定是**每个字段都有值**的对象（注入三项 + 存档回收上限）：调用方（提示词与面板）
+ * 不该各自再兜一遍默认值，那样两边就会漂移。
+ *
+ * maxKeepChars 是唯一的例外：它**不参与按群覆盖**，永远是全局值（见下面 base 里的注释）。
  */
 export function digestConfigForChat(chatKey) {
   const d = getConfig().digest || {};
@@ -360,7 +369,9 @@ export function digestConfigForChat(chatKey) {
   const base = {
     injectEveryRound: d.injectEveryRound === true,
     merge: d.merge !== false,
-    maxChars: num(d.maxChars, 8000)
+    maxChars: num(d.maxChars, 8000),
+    // 存档回收上限：全局限定，不参与按群覆盖（它管的是磁盘占用，不是"这个群怎么说话"）
+    maxKeepChars: num(d.maxKeepChars, 0)
   };
   if (d.unified !== false) return base;
   const [kind, id] = String(chatKey || '').split(':');
@@ -368,12 +379,13 @@ export function digestConfigForChat(chatKey) {
   const o = d.perChat?.[id];
   if (!o || typeof o !== 'object') return base;
   // 覆盖项里**没写的字段沿用全局**（逐字段判断，而不是"有覆盖项就整份替换"）。
-  // 面板每次都会写全三个字段，所以这里主要挡的是手改 config.json 写出半份覆盖的情况：
+  // 面板每次都会写全三项，所以这里主要挡的是手改 config.json 写出半份覆盖的情况：
   // 那种情况下"缺的字段回到默认值"会让用户觉得"我就改了个字数上限，每轮注入怎么被关了"。
   return {
     injectEveryRound: o.injectEveryRound === undefined ? base.injectEveryRound : o.injectEveryRound === true,
     merge: o.merge === undefined ? base.merge : o.merge !== false,
-    maxChars: num(o.maxChars, base.maxChars)
+    maxChars: num(o.maxChars, base.maxChars),
+    maxKeepChars: base.maxKeepChars   // 不按群覆盖，见上面 base 里的注释
   };
 }
 

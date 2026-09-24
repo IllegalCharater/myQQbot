@@ -603,7 +603,13 @@ export function collectInjectedDigests(store, chatKey, { config = null } = {}) {
     merge: dgc.merge,
     // 把解析后的策略一并带出来：面板要说清"为什么某几条没进去"，就得知道
     // 这个会话实际生效的 maxChars/每轮开关（它可能来自按群覆盖，不是全局值）。
-    config: { injectEveryRound: dgc.injectEveryRound, merge: dgc.merge, maxChars: dgc.maxChars },
+    // maxKeepChars 是存档回收上限（全局），面板用它提示"超出后会自动丢最旧的"。
+    config: {
+      injectEveryRound: dgc.injectEveryRound,
+      merge: dgc.merge,
+      maxChars: dgc.maxChars,
+      maxKeepChars: Number(dgc.maxKeepChars) || 0
+    },
     sectionText,
     enabled: dgc.maxChars > 0
   };
