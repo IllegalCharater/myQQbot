@@ -55,6 +55,7 @@
     <button class="tab active" data-tab="sessions" data-page-node-id="QA2pcdHYdARJK2APBNKZmC">会话</button>
     <button class="tab" data-tab="chats" data-page-node-id="AdXD0D2NiWH5UBfpPQqzQ2">存档</button>
     <button class="tab" data-tab="memory" data-page-node-id="vXS9OY6wG4MkJlzQ2aLADZ">记忆</button>
+    <button class="tab" data-tab="stickers" data-page-node-id="st1ck3rTabNode0001">表情包</button>
     <button class="tab" data-tab="usage" data-page-node-id="hcZzcXuMojNoiE7UcRVYfR">用量</button>
     <button class="tab" data-tab="snowluma" data-page-node-id="xFOx4aoCGOuX8g3AXNrBPj">SnowLuma</button>
     <button class="tab" data-tab="settings" data-page-node-id="4cXbRBtGmcpcL272eKvHPV">设置</button>
@@ -97,6 +98,23 @@
       </aside>
       <div id="memory-detail" class="detail-pane" data-page-node-id="fXph3DU6yHzmzVZOtXuAii">
         <div class="empty-hint" data-page-node-id="BSa8XGxI6gVbgsfrKC7QAq">← 选择会话查看记忆</div>
+      </div>
+    </section>
+
+    <!-- 表情包视图 -->
+    <section id="view-stickers" class="view" data-page-node-id="st1ck3rViewNode001">
+      <aside id="sticker-list" class="list-pane" data-page-node-id="st1ck3rListAside1">
+        <div class="list-head muted" data-page-node-id="st1ck3rListHead01"><span id="sticker-count"></span></div>
+        <!-- 搜索框放在静态骨架里（不在 #sticker-items 之内）：列表重绘不会碰它，
+             否则 SSE 每次推 sticker-update 都会把用户正在输入的词和光标抹掉。 -->
+        <div class="sticker-toolbar" data-page-node-id="st1ck3rToolbar01">
+          <input type="text" id="sticker-search" placeholder="搜索备注 / 标签 / 场景 / id" data-page-node-id="st1ck3rSearch01" />
+          <button class="btn btn-small" id="sticker-sync-btn" title="立刻从 QQ 拉一次收藏表情。QQ 图床取不到图时只是显示不出来，不影响库里已有的条目。">刷新 QQ 收藏</button>
+        </div>
+        <div id="sticker-items" data-page-node-id="st1ck3rItemsNod"></div>
+      </aside>
+      <div id="sticker-detail" class="detail-pane" data-page-node-id="st1ck3rDetail01">
+        <div class="empty-hint" data-page-node-id="st1ck3rHintNode">← 从左侧选择一个表情查看</div>
       </div>
     </section>
 

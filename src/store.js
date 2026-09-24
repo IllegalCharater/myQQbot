@@ -36,6 +36,16 @@ function archiveFile(chatKey) {
   return path.join(ARCHIVE_DIR, `${safeName(chatKey)}.jsonl`);
 }
 
+/**
+ * "不是某人说的话"的条目：压缩摘要（kind:'digest'）与面板插的人工备注（kind:'note'）。
+ *
+ * 凡是要按"人"来统计/取样的地方都得先用它过滤 —— 否则摘要的 senderId('digest')
+ * 或备注的空 senderId 会变成群里一个查无此人的幽灵成员。
+ */
+export function isSystemRecord(m) {
+  return m?.kind === 'digest' || m?.kind === 'note';
+}
+
 function loadChat(chatKey) {
   try {
     let text = fs.readFileSync(chatFile(chatKey), 'utf8');
@@ -210,15 +220,105 @@ export class ChatStore {
     return st.messages.find((m) => m.id === Number(localId)) || null;
   }
 
+  // ── 面板管理端：单条改 / 删 / 插备注 ────────────────────────────────────
+  //
+  // 三条约束与 commitCompaction 一脉相承，每一条都对应一类难以察觉的损坏：
+  //  1. **按显式 id 找，绝不用下标** —— 一次运行/一条新消息随时会改动数组，
+  //     面板拿到的下标一转眼就是错的。
+  //  2. **绝不回退 nextLocalId** —— 它被持久化，回退会让 UI 的 data-midrow、
+  //     findByLocalId 与已归档条目撞车。
+  //  3. **读改写之间不夹 await** —— 下面每个方法都是同步改完立刻 saveChat。
+  //     Node 单线程下这就是原子的；一旦中间让出事件循环，bot 的追加就会挤进来。
+
+  /**
+   * 备份存档文件，文件名带 tag（`.panel.bak`）。
+   *
+   * **不要复用 backupChatFile**：那个固定写 `${file}.bak`，是压缩的回滚点
+   * （"永远保存着最近一次重写之前的完整状态"）。面板删一条消息就把它冲掉，
+   * 等于用一次小操作毁掉了整轮压缩的后悔药。同样是只保留最近一次。
+   */
+  backupChatFileTo(chatKey, tag = 'panel') {
+    try {
+      const src = chatFile(chatKey);
+      if (!fs.existsSync(src)) return '';
+      const dest = `${src}.${tag}.bak`;
+      fs.copyFileSync(src, dest);
+      return dest;
+    } catch (error) {
+      console.warn(`[store] 备份失败(${tag}):`, error?.message ?? error);
+      return '';
+    }
+  }
+
+  /**
+   * 按本地 id 改一条存档的文本（面板编辑）。
+   *
+   * 只允许改 text：senderId/self/mid/ts/read 一概不动 —— 面板换个说法可以，
+   * 改"这话是谁说的/什么时候说的"会直接伪造历史，而且会让 mid 与消息对不上。
+   */
+  updateByLocalId(chatKey, localId, { text } = {}) {
+    const st = this.#state(chatKey);
+    const m = st.messages.find((x) => x.id === Number(localId));
+    if (!m) return null;
+    if (text != null) m.text = String(text);
+    saveChat(st);
+    return m;
+  }
+
+  /**
+   * 按本地 id 真删一条存档。删掉的 id 不回收（nextLocalId 不动）。
+   * @returns {{removed:object, backup:string}|null}
+   */
+  deleteByLocalId(chatKey, localId) {
+    const st = this.#state(chatKey);
+    const idx = st.messages.findIndex((x) => x.id === Number(localId));
+    if (idx < 0) return null;
+    const backup = this.backupChatFileTo(chatKey, 'panel');   // 与下面之间不夹 await
+    const [removed] = st.messages.splice(idx, 1);
+    saveChat(st);
+    return { removed, backup };
+  }
+
+  /**
+   * 插一条**人工备注**：kind:'note'，不是群友说的话，也不冒充 bot 自己。
+   *
+   * read:true 是关键 —— drainUnread/unreadCount/markAllRead 过滤的都是
+   * `!m.read && !m.self`，置 true 它才不会变成一次运行的触发批。
+   *
+   * 按 ts 找位置插入（同 commitCompaction）：给几天前那段对话补一句更正，
+   * 它应该落在当时的位置，而不是漂在末尾。
+   */
+  insertNote(chatKey, { text, ts = Date.now() } = {}) {
+    const st = this.#state(chatKey);
+    const entry = {
+      id: st.nextLocalId++,
+      mid: null,
+      ts: Number(ts) || Date.now(),
+      senderId: '',
+      senderName: '',
+      text: String(text ?? ''),
+      self: false,
+      read: true,
+      reply: null,
+      media: [],
+      kind: 'note'
+    };
+    const at = st.messages.findIndex((m) => m.ts > entry.ts);
+    st.messages.splice(at < 0 ? st.messages.length : at, 0, entry);
+    saveChat(st);
+    return entry;
+  }
+
   /** 最近 senderId 出现过的活跃成员（带最后发言时间）。 */
   activeMembers(chatKey, limit = 10) {
     const st = this.#state(chatKey);
     const map = new Map();
     for (const m of st.messages) {
       if (m.self) continue;
-      // 压缩产生的摘要条目是系统生成的，不是人：它的 senderId 为 'digest'，
-      // 不跳过就会在"活跃成员"里凭空多出一个幻影成员（进而污染群友印象）。
-      if (m.kind === 'digest') continue;
+      // 压缩摘要 / 人工备注都是系统生成的，不是人：不跳过就会在"活跃成员"里
+      // 凭空多出幻影成员（摘要的 senderId 是 'digest'，备注是空串），
+      // 进而污染群友印象。
+      if (isSystemRecord(m)) continue;
       const prev = map.get(m.senderId);
       if (!prev || prev.lastTs < m.ts) {
         map.set(m.senderId, { userId: m.senderId, name: m.senderName, lastTs: m.ts, count: (prev?.count || 0) + 1 });
@@ -249,6 +349,7 @@ export class ChatStore {
    *     上做有损压缩，几轮之后那段历史就退化成一句空话。这条保证让每一条纪要
    *     永远直接来自原文。代价是纪要会缓慢累积（每条 ≤4000 字），
    *     相比原文的增长量级可以忽略。
+   *     （人工备注同样跳过：它是给人看的批注，摘要它的成本换不来信息。）
    *
    * ⚠️ 返回的是原数组的切片（元素是**引用**）：调用方只能读，不能改内容。
    *    "按字符预算再裁一刀"由调用方在拼完提示词后做 —— 只有拼提示词的那一步
@@ -266,7 +367,7 @@ export class ChatStore {
     const entries = [];
     for (let i = 0; i < end && entries.length < cap; i++) {
       const m = st.messages[i];
-      if (m.kind === 'digest') continue;
+      if (isSystemRecord(m)) continue;
       entries.push(m);
     }
     return { entries, end, total: st.messages.length };

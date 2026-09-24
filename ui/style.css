@@ -437,8 +437,8 @@ body {
 .member-table td, .member-table th { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; }
 .member-table th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--bg-2); }
 
-.chat-toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
-#test-send-text {
+.chat-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+#test-send-text, #chat-search, #mem-search {
   background: var(--bg-2);
   border: 1px solid var(--border);
   color: var(--text);
@@ -447,7 +447,10 @@ body {
   font-size: 12.5px;
   outline: none;
 }
-#test-send-text:focus { border-color: var(--accent); }
+#test-send-text:focus, #chat-search:focus, #mem-search:focus { border-color: var(--accent); }
+/* 查找框要跟着工具栏换行一起伸缩 */
+#chat-search { flex: 1; min-width: 180px; }
+#mem-search { min-width: 180px; margin: 0 6px; }
 
 .archive-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .archive-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -460,6 +463,106 @@ body {
 .archive-table .digest-row td { background: rgba(91,140,255,.06); }
 .archive-table .digest-row .w { color: var(--muted); font-style: italic; }
 .archive-table .digest-row .text { color: var(--muted); }
+/* 人工备注（kind:'note'）：也不是群友说的话，但换一种色调与摘要区分开
+   —— 摘要是模型生成的、备注是人写的，两者的可操作范围不一样（摘要不能手改） */
+.archive-table .note-row td { background: rgba(120,200,140,.07); }
+.archive-table .note-row .w { color: var(--green); font-style: italic; }
+.archive-table .ops { white-space: nowrap; width: 1%; }
+.archive-table .ops .btn { padding: 2px 7px; font-size: 11.5px; }
+
+/* ── 表情包 ── */
+.sticker-toolbar { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.sticker-toolbar input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 5px 9px;
+  font-size: 12.5px;
+  outline: none;
+}
+.sticker-toolbar input:focus { border-color: var(--accent); }
+
+.sticker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; padding: 10px; }
+.sticker-card {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+  background: var(--bg);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-in-out);
+}
+.sticker-card:hover { border-color: var(--accent); }
+.sticker-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.sticker-card img {
+  display: block;
+  width: 100%;
+  height: 96px;
+  object-fit: contain;
+  background: var(--bg-2);
+}
+.sticker-card-body { padding: 6px 8px; }
+.sticker-card-note {
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sticker-card-meta { margin-top: 3px; font-size: 11px; color: var(--muted); display: flex; gap: 6px; }
+.sticker-src {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+
+.sticker-detail-body { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+.sticker-preview {
+  flex-shrink: 0;
+  width: 220px;
+  height: 220px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sticker-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.sticker-fields { flex: 1; min-width: 260px; }
+.sticker-field-static {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  word-break: break-word;
+}
+.sticker-field-static.mono { font-family: var(--mono); font-size: 11.5px; }
+.sticker-tag {
+  display: inline-block;
+  font-size: 11.5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 6px;
+  margin-right: 4px;
+}
+
+/* 单条印象：一行一条 + 行内 改/删 */
+.imp-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.imp-row:last-child { border-bottom: none; }
+.imp-text { flex: 1; word-break: break-word; }
+.imp-row .btn { padding: 1px 7px; font-size: 11.5px; }
 
 /* ── 设置 ── */
 .settings-sidebar {

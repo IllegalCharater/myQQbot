@@ -4,7 +4,7 @@
 //
 // 工具命名去掉了 qq_ 前缀（更短，省 token）。
 import { getConfig } from './config.js';
-import { normalizeMessageList, unquoteJsonString } from './util.js';
+import { normalizeMessageList, unquoteJsonString, formatShortTime } from './util.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 import { webSearch, webFetch } from './web-search.js';
@@ -19,7 +19,7 @@ async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
   return `data:${mime};base64,${buffer.toString('base64')}`;
 }
 
-function detectMime(buf) {
+export function detectMime(buf) {
   if (!buf || buf.length < 12) return null;
   if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
   if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
@@ -35,6 +35,10 @@ function ok(payload) {
 function err(message) {
   return { content: `错误：${message}`, isError: true };
 }
+
+// read_group_notice 一次返回的正文总预算。单条上限在 onebot.js 的 NOTICE_TEXT_MAX，
+// 但 10 条叠起来照样能吃掉大块上下文，这里再兜一层。
+const NOTICE_BATCH_CHARS = 6000;
 
 // 找不到消息 id 时，把当前会话真实可见的 id 告诉模型，避免它继续瞎猜。
 function midHint(ctx) {
@@ -74,6 +78,33 @@ function memberHint(ctx) {
   return `请从当前会话成员里选一个 QQ 号填进去：\n${lines}`;
 }
 
+/**
+ * 公告发布者的显示名：先看群友备注，再在最近的聊天记录里找同名 QQ 号。
+ * 找不到就返回 ''（调用方回退成 QQ 号）—— 公告常常是很久以前发的，
+ * 那个人的消息早滚出视野了，这很正常。
+ */
+function senderNameFor(ctx, userId) {
+  const uid = String(userId || '');
+  if (!uid) return '';
+  const noted = (getConfig().memberNotes || {})[uid];
+  if (noted) return String(noted);
+  const hit = ctx.store.recent(ctx.chatKey, { limit: 500 }).find((m) => String(m.senderId) === uid);
+  return hit ? String(hit.senderName || '') : '';
+}
+
+/** 群公告取不到时的提示：区分"协议端没这个接口"、"结构不认识"和"这次请求失败"，都要给出下一步。 */
+function noticeHint(error) {
+  const msg = String(error?.message ?? error);
+  const tail = '如实告诉群友你读不到公告就行，不要编内容。';
+  if (/无法识别的结构/.test(msg)) {
+    return `协议端返回的群公告结构不认识（${msg}）。多半是协议端版本差异导致的字段不同，${tail}`;
+  }
+  if (/HTTP 404|unsupported|unknown action|not (found|implemented)|retcode=1404/i.test(msg)) {
+    return `协议端没有群公告接口（${msg}）。可能是 SnowLuma / NapCat 版本较旧，或该协议端没实现 get_group_notice。${tail}`;
+  }
+  return `读群公告失败：${msg}。可以稍后再试一次；再失败就${tail}`;
+}
+
 function imageParts(text, dataUrls) {
   const parts = [{ type: 'text', text }];
   for (const url of dataUrls) parts.push({ type: 'image_url', image_url: { url } });
@@ -97,7 +128,7 @@ export function buildToolDefs() {
         type: 'object',
         properties: {
           messages: { description: '要发送的内容：字符串=一条；数组=分多条', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
-          replyToMessageId: { type: ['integer', 'string'], description: '要引用/回复的消息 id（聊天记录里每条消息前的 #数字，可选）' },
+          replyToMessageId: { type: ['integer', 'string'], description: '要引用/回复的消息 id（聊天记录里每条消息前的 #数字，可选）。没有 #数字 的消息（如 [拍一拍]）引用不了，别硬填，宁可不引用也不要拿别的消息的 id 凑' },
           atUserId: { type: ['integer', 'string'], description: '要 @ 的群成员 QQ 号（可选，与引用二选一，不要滥用）' }
         },
         required: ['messages']
@@ -185,7 +216,7 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         try {
           const sticker = await ctx.stickers.find(args.stickerId);
-          if (!sticker) return err(`找不到表情 ${args.stickerId}`);
+          if (!sticker) return err(`找不到表情 ${args.stickerId}，请先用 list_stickers 获取有效 id`);
           if (!sticker.url) return err('该表情没有图片地址');
           const dataUrl = await downloadImageAsDataUrl(sticker.url);
           return { content: imageParts(`表情 ${sticker.id}（备注：${sticker.desc || '无'}）：`, [dataUrl]) };
@@ -196,11 +227,11 @@ export function buildToolDefs() {
     },
     {
       name: 'sticker_note',
-      description: '给一个表情记下你的理解（含义/用法/标签），下次能更准地选用。',
+      description: '给一个表情记下你的理解（含义/用法/标签），以后选得更准。stickerId 可以填 list_stickers 给出的 id，也可以直接填【可用表情包】里那个表情的备注/标签（唯一命中时）。',
       parameters: {
         type: 'object',
         properties: {
-          stickerId: { type: 'string' },
+          stickerId: { type: 'string', description: '表情 id，或该表情的备注/标签（如"蕾米的凝"）；来自 list_stickers 或【可用表情包】' },
           note: { type: 'string', description: '你的理解/含义' },
           tags: { type: 'array', items: { type: 'string' }, description: '标签列表（可选）' },
           usage: { type: 'string', description: '适用场景（可选）' }
@@ -209,9 +240,14 @@ export function buildToolDefs() {
       },
       async execute(ctx, args) {
         try {
-          const entry = ctx.stickers.note(String(args.stickerId), { note: args.note, tags: args.tags, usage: args.usage });
-          if (!entry) return err(`找不到表情 ${args.stickerId}`);
-          return ok({ updated: true, id: entry.id, localNote: entry.localNote, tags: entry.tags });
+          const ref = unquoteJsonString(args.stickerId);
+          const result = ctx.stickers.noteVerbose(String(ref), { note: args.note, tags: args.tags, usage: args.usage });
+          if (!result.entry && result.ambiguous?.length) {
+            const ids = result.ambiguous.slice(0, 5).map((e) => e.id).join('、');
+            return err(`"${ref}" 对应 ${result.ambiguous.length} 个表情，说不清是哪个，请改用 id 指定：${ids}${result.ambiguous.length > 5 ? ' …' : ''}（id 用 list_stickers 查）`);
+          }
+          if (!result.entry) return err(`找不到表情 ${ref}，请先用 list_stickers 获取有效 id。也可以直接填【可用表情包】或 list_stickers 里那个表情的备注/标签。`);
+          return ok({ updated: true, id: result.entry.id, localNote: result.entry.localNote, tags: result.entry.tags });
         } catch (error) {
           return err(error?.message ?? error);
         }
@@ -235,7 +271,8 @@ export function buildToolDefs() {
           const imageMedia = (entry.media || []).find((m) => m.kind === 'image' && m.url);
           if (!imageMedia) return err('该消息没有可收藏的图片');
           const saved = ctx.stickers.collect(args.messageId, { url: imageMedia.url, note: String(args.note ?? '') });
-          return ok({ collected: true, id: saved.id, note: saved.localNote });
+          // hint 不能叫 note —— note 这个键已经被上面那条备注占了
+          return ok({ collected: true, id: saved.id, note: saved.localNote, hint: '顺手用 sticker_note 给这个表情补一句标签和适用场景（内容/什么场合发），以后才选得准。' });
         } catch (error) {
           return err(error?.message ?? error);
         }
@@ -271,7 +308,7 @@ export function buildToolDefs() {
     },
     {
       name: 'get_recent_messages',
-      description: '往前翻当前会话的更多历史消息（提示词里只带了最近一段；需要更早的上下文时用）。返回带 messageId（就是聊天记录里的 #数字），可用于引用或看图。消息文本出现 [合并转发聊天记录] 时，用 read_forward 展开看内容。',
+      description: '往前翻当前会话的更多历史消息（提示词里只带了最近一段；需要更早的上下文时用）。返回带 messageId（就是聊天记录里的 #数字），可用于引用或看图。消息文本出现 [合并转发聊天记录] 时，用 read_forward 展开看内容；出现 [群公告] 时，用 read_group_notice 读公告正文。',
       parameters: {
         type: 'object',
         properties: {
@@ -288,7 +325,9 @@ export function buildToolDefs() {
           messages: messages.map((m) => ({
             messageId: m.mid ?? undefined,
             time: new Date(m.ts).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
-            sender: m.self ? '我' : m.senderName,
+            // 摘要/人工备注不是群友：不给 sender 就会渲染成"一条没有发送者的消息"，
+            // 模型只能瞎猜是谁说的。显式标出来，与提示词里 formatEntry 的口径一致。
+            sender: m.kind === 'digest' ? '历史摘要' : (m.kind === 'note' ? '人工备注' : (m.self ? '我' : m.senderName)),
             text: m.text
           }))
         });
@@ -339,6 +378,47 @@ export function buildToolDefs() {
           return ok({ messageId: entry.mid, text: ex.text, images: (ex.media || []).length });
         } catch (error) {
           return err(`展开失败：${error?.message ?? error}`);
+        }
+      }
+    },
+    {
+      name: 'read_group_notice',
+      description: '读取当前群的群公告正文（群规、活动、约定通常都写在里面）。消息里出现 [群公告] 时用 —— 那种卡片本身不含正文，只有这个工具能拿到。返回的是该群当前全部公告，按发布时间从新到旧排；群友问"公告写了啥""群规是什么"时先读再答，别凭印象编。',
+      parameters: {
+        type: 'object',
+        properties: { limit: { type: 'integer', description: '最多返回几条，默认 3，最大 10（按发布时间从新到旧）' } }
+      },
+      async execute(ctx, args) {
+        if (ctx.kind !== 'group') return err('群公告只在群聊里有，私聊没有公告可读。');
+        const limit = Math.min(10, Math.max(1, Number(args.limit) || 3));
+        try {
+          const notices = await ctx.onebot.getGroupNotice(ctx.chatId);
+          if (!notices.length) return ok({ count: 0, note: '这个群还没发过群公告' });
+          const sorted = notices.slice().sort((a, b) => (b.publishTime || 0) - (a.publishTime || 0));
+          // 整批预算：单条已在 getGroupNotice 里截到 NOTICE_TEXT_MAX，但 10 条 ×1500
+          // 仍能吃掉一大块上下文。超预算的条目直接不返回，用 note 说明，别静默丢。
+          const picked = [];
+          let budget = NOTICE_BATCH_CHARS;
+          for (const n of sorted.slice(0, limit)) {
+            if (n.text.length > budget) break;
+            budget -= n.text.length;
+            picked.push(n);
+          }
+          const dropped = Math.min(sorted.length, limit) - picked.length;
+          return ok({
+            count: picked.length,
+            total: sorted.length,
+            note: dropped > 0 ? `内容太长，省略了更早的 ${dropped} 条；需要的话缩小 limit 或让我只说最新那条` : undefined,
+            notices: picked.map((n) => ({
+              time: n.publishTime ? formatShortTime(n.publishTime) : '',
+              sender: senderNameFor(ctx, n.senderId) || n.senderId || '',
+              senderId: n.senderId || undefined,
+              text: n.text,
+              images: n.imageCount || undefined
+            }))
+          });
+        } catch (error) {
+          return err(noticeHint(error));
         }
       }
     },

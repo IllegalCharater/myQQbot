@@ -100,15 +100,86 @@ export function findSticker(entries, ref) {
   const raw = String(ref ?? '').trim();
   if (!raw) return null;
   const md5 = raw.toUpperCase();
+  // URL 只做"看起来像 URL（带 / ）"的匹配：否则一个纯标签（库里的 desc 就有 "9"、"AA"
+  // 这种）会先被 URL 子串命中，静默指到别的表情上，比报错更糟。
+  const wantUrl = raw.includes('/');
   const urlNormalized = raw.replace(/\/+$/, '').replace(/^https?:\/\//i, '');
   return (Array.isArray(entries) ? entries : []).find((e) => {
     if (!e) return false;
     if (e.id === raw || e.resId === raw) return true;
     if (e.md5 && e.md5 === md5) return true;
+    if (!wantUrl) return false;
     const eUrl = String(e.url || '').replace(/\/+$/, '').replace(/^https?:\/\//i, '');
     if (eUrl && urlNormalized && (eUrl === urlNormalized || eUrl.includes(urlNormalized) || urlNormalized.includes(eUrl))) return true;
     return false;
   }) || null;
+}
+
+/**
+ * 按"人话标签"找表情：desc / localNote / usage / tags 全等命中（大小写与首尾空白不敏感）。
+ * 提示词里的【可用表情包】只给标签不给 id，模型手上唯一的"源"就是标签 —— 这里认它，
+ * 那个参数才不是无源之水。全等而非子串：子串会让"可爱"匹配一大片，歧义直接爆掉。
+ */
+export function matchStickerLabel(entries, ref) {
+  const raw = String(ref ?? '').trim().toLowerCase();
+  if (!raw) return [];
+  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+  return list.filter((e) => {
+    const fields = [e.desc, e.localNote, e.usage, ...(e.tags || [])];
+    return fields.some((v) => {
+      const s = String(v ?? '').trim().toLowerCase();
+      return s !== '' && s === raw;
+    });
+  });
+}
+
+/**
+ * 从本地库删掉一条表情。
+ *
+ * **只用 findSticker 精确匹配，不做标签兜底** —— 与 applyStickerNote 的关键区别。
+ * 改错备注可以再改回来，删错条目删掉的可能是别人偷来的图：不可逆的操作宁可失败也不猜。
+ *
+ * ⚠️ source === 'qq' 的条目删了也会回来：mergeStickerLibrary 结尾会把"还在 QQ 收藏里"
+ * 的条目重新并进来。这个判断留给调用方（HTTP 层要回一句人话的 409），纯函数只管删。
+ */
+export function removeSticker(entries, ref) {
+  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+  const target = findSticker(list, ref);
+  if (!target) return { entries: list, removed: null };
+  return { entries: list.filter((e) => e.id !== target.id), removed: target };
+}
+
+/**
+ * 管理页用的完整列表：比 formatStickerList 多带 url / usage / source / 使用统计。
+ *
+ * 单独一个函数而不给 formatStickerList 加开关：那个是给 list_stickers **工具**吃的，
+ * 返回体积直接进模型上下文，不能顺手变大。
+ */
+export function formatStickerAdminList(entries, query = '', limit = 500) {
+  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+  const q = String(query ?? '').trim().toLowerCase();
+  const filtered = q
+    ? list.filter((e) => {
+        const haystack = [e.desc, e.localNote, e.usage, e.id, e.resId, e.md5, ...(e.tags || [])].join(' ').toLowerCase();
+        return haystack.includes(q);
+      })
+    : list;
+  const max = Math.max(1, Math.min(500, Number(limit) || 500));
+  const items = filtered.slice(0, max).map((e) => ({
+    id: e.id,
+    url: e.url || '',
+    desc: e.desc || '',
+    localNote: e.localNote || '',
+    tags: e.tags || [],
+    usage: e.usage || '',
+    source: e.source || 'qq',
+    useCount: e.useCount || 0,
+    lastUsedAt: e.lastUsedAt || 0,
+    createdAt: e.createdAt || '',
+    // 让前端不必自己判断"这个能不能删"：QQ 收藏是源，删了下次同步就回来
+    deletable: e.source !== 'qq'
+  }));
+  return { total: list.length, matched: filtered.length, truncated: filtered.length > max, stickers: items };
 }
 
 export function formatStickerList(entries, query = '', limit = 48) {
@@ -169,10 +240,20 @@ export function buildStickerStrategyHint(level = 1) {
   ].join('\n');
 }
 
-export function applyStickerNote(entries, id, patch = {}) {
+/**
+ * 改一条表情的本地认知。ref 先按 id/resId/md5/url 精确认；认不出来再按标签认。
+ * 标签命中多个时**不猜**（改备注改错对象比不改还糟），返回 ambiguous 让调用方报错。
+ * 返回值里的 ambiguous 是候选条目数组（未命中为 []）。
+ */
+export function applyStickerNote(entries, ref, patch = {}) {
   const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
-  const target = findSticker(list, id);
-  if (!target) return { entries: list, entry: null };
+  let target = findSticker(list, ref);
+  if (!target) {
+    const matches = matchStickerLabel(list, ref);
+    if (matches.length > 1) return { entries: list, entry: null, ambiguous: matches };
+    target = matches[0] || null;
+  }
+  if (!target) return { entries: list, entry: null, ambiguous: [] };
   const idx = list.findIndex((e) => e.id === target.id);
   const next = normalizeStickerEntry({
     ...target,
@@ -182,9 +263,9 @@ export function applyStickerNote(entries, id, patch = {}) {
     source: patch.source || target.source || 'ai',
     updatedAt: nowIso()
   });
-  if (!next) return { entries: list, entry: null };
+  if (!next) return { entries: list, entry: null, ambiguous: [] };
   list[idx] = next;
-  return { entries: list, entry: next };
+  return { entries: list, entry: next, ambiguous: [] };
 }
 
 export function markStickerUsed(entries, id, context = '') {

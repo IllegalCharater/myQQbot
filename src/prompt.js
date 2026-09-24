@@ -116,6 +116,7 @@ function quoteAndAt() {
   return [
     '【引用与点名：只在必要时用】',
     '- 群聊里需要明确"我在回谁/回哪句"时，用 send_message 的 replyToMessageId 引用那条消息；需要直接叫某人时用 atUserId 传对方 QQ 号（可在 get_active_members 或消息里看到）。',
+    '- 只有带 #数字 的消息能引用；没有 #数字 的引用不了 —— 典型就是 [拍一拍]（拍一拍事件在 QQ 侧根本没有消息 id）。这种改用 atUserId 点名，或直接说话、用 send_poke 拍回去。⚠️ 绝对不要拿别的消息的 #数字 去凑：引错人比不引用难堪得多，群里一眼就能看出来。',
     '- 判断标准：只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续几句话指代不同的消息/人时才需要引用。真人不会每条都点。',
     '- 普通对话、上下文唯一、刚在接同一句话时，不要引用也不要 @。',
     '- 引用和 @ 不要叠满：已经引用就不必再 @，已经 @ 也不必再引用。'
@@ -178,8 +179,8 @@ function qqSceneRules() {
   } else {
     lines.push('- 你没有联网能力：遇到不了解的新梗/实时话题，坦白说不知道或含糊带过，不要编造。');
   }
-  lines.push('- 消息里的 [语音] [视频] [文件] 是占位符，无法查看内容；[合并转发聊天记录] / [转发消息 …] 是合并转发，用 read_forward 工具 + 那条消息前的 #数字 就能展开看全文，别直接说看不了。');
-  lines.push('- 分享卡片（形如 `[卡片 网易云音乐] 标题：… ｜ 链接：…`）已经把标题/描述/链接解析出来了，封面图也能用 get_message_images 看；群友在问卡片里的内容时，直接用 web_fetch 打开那个链接读正文。只有光秃秃的 [卡片消息] 是解析失败，那种才如实说看不到。');
+  lines.push('- 消息里的 [语音] [视频] [文件] 是占位符，无法查看内容；[合并转发聊天记录] / [转发消息 …] 是合并转发，用 read_forward 工具 + 那条消息前的 #数字 就能展开看全文；[群公告] 是群公告卡片，卡片里只有"有新公告"这件事、没有正文，用 read_group_notice 读正文。别直接说看不了。');
+  lines.push('- 分享卡片（形如 `[卡片 网易云音乐] 标题：… ｜ 链接：…`）已经把标题/描述/链接解析出来了，封面图也能用 get_message_images 看；群友在问卡片里的内容时，直接用 web_fetch 打开那个链接读正文。只有光秃秃的 [卡片消息] 是解析失败，那种才如实说看不到。⚠️ 唯一的例外是群公告：它虽然也是卡片，但走的是上面那个 [群公告] 标记，链接里不是正文，正文必须用 read_group_notice 取。');
   return lines.join('\n');
 }
 
@@ -243,6 +244,12 @@ function formatEntry(m, { withId = true } = {}) {
   // 这里只需前置时间戳，不要再套一层"某人："。
   if (m.kind === 'digest') {
     return `[${formatShortTime(m.ts)}] ${String(m.text || '')}`;
+  }
+  // 面板插的人工备注（kind:'note'）：同样是"不是某人说的话"，但来源是人不是模型。
+  // 必须和群友发言一眼可分 —— 否则模型会把它当成某个群友的原话，
+  // 而这类备注的用途恰恰是"纠正/补充"历史，被误读成发言就完全反了。
+  if (m.kind === 'note') {
+    return `[${formatShortTime(m.ts)}] 【人工备注】${String(m.text || '')}`;
   }
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');
@@ -386,6 +393,17 @@ export function resolveContextTier({ triggerEntries = [], selfNickname = '', bot
   return { tier: 0, count: 0, reason: '未触发', shouldRespond: false };
 }
 
+// 【过去状态】里"最近这几行一律显示 #id"的窗口大小。
+//
+// 为什么不是"只有带图的消息才给 id"（旧规则）：模型想引用的几乎总是眼前刚发生的
+// 那几条，而带图消息跟"想引用谁"毫无关系。旧规则下 id 极其稀疏 —— 实测本群最近
+// 60 次运行里，17% 的【过去状态】一个 id 都没有、30% 只有一个，平均 10 行历史只有
+// 1.6 个。于是"想引用一条没有 id 的消息"（典型：拍一拍，它压根没有消息 id）时，
+// 提示词里唯一可见的那个 id 往往是一张**别人的图**，模型只能拿它去填，结果就是
+// 引用错人。给最近一段固定加 id，让"能引用的"覆盖住"想引用的"。
+// 更早的消息仍有 id 可查：get_recent_messages 每条都返回 messageId。
+const RECENT_ID_LINES = 12;
+
 /**
  * 组装"过去状态"文本：消息 JSON 的最近一段（带时间与已读语义）。
  * 读取条数由**上下文档位**决定（见 resolveContextTier），不再是固定值。
@@ -404,7 +422,9 @@ export function buildPastState(store, chatKey, { excludeIds = [], limit = null }
     if (blocked.size) messages = messages.filter((m) => m.self || !blocked.has(String(m.senderId)));
   }
   messages = messages.slice(-maxLimit);
-  const lines = messages.map((m) => formatEntry(m, { withId: (m.media || []).length > 0 }));
+  // 带媒体的消息一律给 id（看图/收藏表情要用它），最近 RECENT_ID_LINES 行也一律给。
+  const idFrom = Math.max(0, messages.length - RECENT_ID_LINES);
+  const lines = messages.map((m, i) => formatEntry(m, { withId: i >= idFrom || (m.media || []).length > 0 }));
   // 一并把选中的消息返回：调用方要用它判定"记忆该带哪些群友"，
   // 避免模型看到历史里根本没出现的群友印象（那样显得莫名其妙）。
   return { text: lines.join('\n'), count: lines.length, messages };
@@ -485,7 +505,7 @@ export function buildUserPrompt(ctx) {
 
   // 过去状态
   if (past.text) {
-    parts.push(`【过去状态】以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；带图的消息前有 #消息id，看图/收藏表情工具要用它）：\n${past.text}`);
+    parts.push(`【过去状态】以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；最近的消息和带图的消息前有 #消息id，引用/看图/收藏表情要用它）：\n${past.text}`);
   } else {
     parts.push('【过去状态】（暂无历史记录，这是你第一次参与这个会话）');
   }
@@ -529,7 +549,7 @@ export function buildUserPrompt(ctx) {
   parts.push([
     '【引导说明】',
     '- 扫一眼【过去状态】和【本次唤醒】，判断：有没有人在找你？有没有你能接的话题？值不值得说话？',
-    '- 想说话：调用 send_message（要分条就传数组）。想引用就带 replyToMessageId：id 见【本次唤醒】每条前的 #数字、历史里带图消息的 #数字，或用 get_recent_messages 查，不要自己编。',
+    '- 想说话：调用 send_message（要分条就传数组）。想引用就带 replyToMessageId：id 见【本次唤醒】每条前的 #数字、【过去状态】里的 #数字，或用 get_recent_messages 查，不要自己编。没有 #数字 的消息（拍一拍就是）引用不了，那就别引用 —— 直接说话，或用 atUserId 点名。宁可不用引用，也不要拿别的消息的 id 凑。',
     '- 不想说话：直接结束或调用 finish（一句话说明原因）。不回是正常选项，不是失职。',
     '- 记得：你的普通文本输出不会发到 QQ，只有工具调用会。'
   ].join('\n'));

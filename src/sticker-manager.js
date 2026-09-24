@@ -4,16 +4,28 @@ import { OneBotClient } from './onebot.js';
 import { getConfig } from './config.js';
 import {
   loadStickerStore, saveStickerStore, mergeStickerLibrary,
-  findSticker, formatStickerList, applyStickerNote, markStickerUsed
+  findSticker, formatStickerList, formatStickerAdminList, applyStickerNote, markStickerUsed,
+  removeSticker
 } from './stickers.js';
 
 export class StickerManager {
-  constructor(onebot) {
+  /**
+   * @param {object} onebot
+   * @param {{onChange?: () => void}} [opts] onChange：库被改动时回调（面板推 SSE 用）。
+   *   可选参数——不传就是个纯粹的库管理器，测试里的 `new StickerManager(fake)` 照旧。
+   */
+  constructor(onebot, { onChange = null } = {}) {
     this.onebot = onebot;
     this.entries = loadStickerStore();
     this.syncedAt = 0;
     this.syncing = null;
     this.collectTimes = [];
+    this.onChange = typeof onChange === 'function' ? onChange : null;
+  }
+
+  /** 库有变动（改/删/收藏/发过）时通知外面一次。绝不抛错出去影响写盘。 */
+  #changed() {
+    try { this.onChange?.(); } catch { /* 通知失败不影响库本身 */ }
   }
 
   get enabled() {
@@ -39,6 +51,7 @@ export class StickerManager {
         this.entries = mergeStickerLibrary(this.entries, fetched);
         this.syncedAt = Date.now();
         saveStickerStore(this.entries);
+        this.#changed();
         return { entries: this.entries, fromCache: false };
       } catch (error) {
         // 同步失败不致命：本地缓存继续用
@@ -55,22 +68,50 @@ export class StickerManager {
     return formatStickerList(synced.entries, query, limit);
   }
 
+  /** 面板管理页：完整字段（含图片地址）。force 用于"从 QQ 刷新"按钮。 */
+  async adminList(query = '', limit = 500, force = false) {
+    const synced = await this.sync(force);
+    return { ...formatStickerAdminList(synced.entries, query, limit), fromCache: !!synced.fromCache, syncError: synced.error || '' };
+  }
+
+  /**
+   * 删除一条表情。返回 { removed, refused }。
+   *
+   * refused 专指 source === 'qq'：QQ 收藏是真正的源，本地删掉下次 sync 就并回来了
+   * （mergeStickerLibrary 会按 fetchedIds 重新收编），所以这里不装作能删 —— 让
+   * 调用方回一句"去 QQ 里取消收藏"。删除交给用户自己做，比给个假按钮诚实。
+   */
+  remove(ref) {
+    const result = removeSticker(this.entries, ref);
+    if (!result.removed) return { removed: null, refused: '' };
+    if (result.removed.source === 'qq') return { removed: null, refused: 'qq' };
+    this.entries = result.entries;
+    saveStickerStore(this.entries);
+    this.#changed();
+    return { removed: result.removed, refused: '' };
+  }
+
   async find(ref) {
     const synced = await this.sync(false);
     return findSticker(synced.entries, ref);
   }
 
-  note(id, patch) {
-    const result = applyStickerNote(this.entries, id, patch);
+  /** 改备注。ref 可以是 id，也可以是备注/标签（唯一命中时）。返回整个结果，供工具报歧义。 */
+  noteVerbose(ref, patch) {
+    const result = applyStickerNote(this.entries, ref, patch);
     this.entries = result.entries;
-    if (result.entry) saveStickerStore(this.entries);
-    return result.entry;
+    if (result.entry) { saveStickerStore(this.entries); this.#changed(); }
+    return result;
+  }
+
+  note(id, patch) {
+    return this.noteVerbose(id, patch).entry;
   }
 
   markUsed(id, context = '') {
     const result = markStickerUsed(this.entries, id, context);
     this.entries = result.entries;
-    if (result.entry) saveStickerStore(this.entries);
+    if (result.entry) { saveStickerStore(this.entries); this.#changed(); }
     return result.entry;
   }
 
@@ -109,6 +150,7 @@ export class StickerManager {
     this.entries.push(entry);
     this.collectTimes.push(now);
     saveStickerStore(this.entries);
+    this.#changed();
     return entry;
   }
 }

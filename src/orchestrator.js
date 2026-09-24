@@ -17,6 +17,7 @@ import { buildToolDefs, toOpenAiTools, executeTool } from './tools.js';
 import { modelImageVerdict } from './vision-scan.js';
 import { currentProviders } from './providers.js';
 import { initializeJmcomicQueue } from './jmcomic.js';
+import { isSystemRecord } from './store.js';
 
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null }) {
@@ -1055,11 +1056,11 @@ export class Orchestrator {
     const uidToName = new Map();
     for (const m of this.store.recent(chatKey, { limit: 2000 })) {
       if (m.self || !m.senderId) continue;
-      // 压缩摘要的 senderId 是 'digest'，不跳过就会造出一个幻影成员
+      // 压缩摘要 / 人工备注都不是群友发言，不跳过就会造出幻影成员
       // （名字"聊天记录摘要"），进而生成"对聊天记录摘要的印象"这种幻觉。
-      // 这里跳过而不是加进 PLACEHOLDER_NAMES：那个表是按**名字**匹配的，
-      // 而问题出在条目类型，用 kind 判定才准确。
-      if (m.kind === 'digest') continue;
+      // 这里用条目类型判定，而不是往 PLACEHOLDER_NAMES 里塞名字：那个表是按
+      // **名字**匹配的，而问题出在 kind。
+      if (isSystemRecord(m)) continue;
       const uid = String(m.senderId);
       memberMsgCount.set(uid, (memberMsgCount.get(uid) || 0) + 1);
       const nm = String(m.senderName || '').trim();

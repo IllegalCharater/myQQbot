@@ -29,6 +29,17 @@ const state = {
   currentMemoryChatKey: null,
   groupMembers: [],
   groupMembersLoaded: false,
+  // 表情包页
+  stickers: [],
+  stickerQuery: '',
+  stickerTotal: 0,
+  stickerSync: null,      // { fromCache, error, at }
+  stickerSelectedId: null,
+  stickerBusy: false,     // 弹窗/请求进行中：SSE 刷新时先让路
+  // 存档页的查找词。切会话时清空 —— 为一个群写的词拿到另一个群里没有意义。
+  chatQuery: '',
+  // 记忆页的查找词
+  memQuery: '',
   // 记忆整理状态：按 chatKey 存，不依赖 DOM。
   // 切页签会导致记忆页 DOM 重建，状态若只存在按钮/文本节点里就会丢失，
   // 用户切回来时看不出整理是在跑还是已经结束了。
@@ -77,6 +88,8 @@ const TOOL_META = {
   get_message_detail:  { name: '看消息详情', cat: '查看', icon: '🔍' },
   get_message_images:  { name: '看图片',     cat: '查看', icon: '🖼️' },
   get_active_members:  { name: '看活跃群友', cat: '查看', icon: '👥' },
+  read_forward:        { name: '展开转发',   cat: '查看', icon: '📨' },
+  read_group_notice:   { name: '看群公告',   cat: '查看', icon: '📢' },
   // 表情包
   list_stickers:     { name: '列表情库',   cat: '表情',   icon: '📚' },
   get_sticker_image: { name: '看表情图',   cat: '表情',   icon: '🖼️' },
@@ -354,6 +367,7 @@ function switchTab(name) {
   if (name === 'sessions') loadSessions();
   if (name === 'chats') loadChats();
   if (name === 'memory') loadMemoryView();
+  if (name === 'stickers') loadStickerView();
   if (name === 'usage') loadUsageView({ force: true });
   if (name === 'snowluma') loadSnowlumaPage();
   if (name === 'settings') loadSettings();
@@ -545,7 +559,7 @@ function connectSSE() {
       const status = $('#mem-consolidate-status');
       if (btn) btn.disabled = false;
       if (status) status.textContent = data.note || '整理完成';
-      loadMemoryView();
+      refreshMemoryViewSoon();
     } else if (phase === 'consolidate-error') {
       const btn = $('#mem-consolidate-btn');
       const status = $('#mem-consolidate-status');
@@ -553,8 +567,14 @@ function connectSSE() {
       if (status) status.textContent = `整理失败：${data.error || '未知错误'}`;
       renderMemoryList();
     } else {
-      loadMemoryView();
+      // 面板自己改一条印象也会走到这里（后端 emit 的是无 phase 的事件）
+      refreshMemoryViewSoon();
     }
+  });
+  es.addEventListener('sticker-update', () => {
+    // 机器人自己收藏/改备注/发过表情也会推这个事件，群里热闹时可能很频繁。
+    // 弹窗开着时不动列表 —— 否则用户正在改备注，背后的卡片被重建，保存回来对不上。
+    if (state.tab === 'stickers' && !state.stickerBusy) loadStickerView({ quiet: true });
   });
   es.addEventListener('onebot-status', () => {
     refreshStatus();
@@ -604,6 +624,8 @@ async function loadSessions({ quiet = false } = {}) {
 // 间隔取自配置的 ui.refreshMs（设置页「界面刷新间隔」）；此前这里硬编码 4000，
 // 配置项从未被读取 —— 用户改了完全没效果。
 let listPoller = null;
+let memSearchTimer = null;      // 记忆页查找框的输入防抖
+let stickerSearchTimer = null;  // 表情包页搜索框的输入防抖
 function refreshIntervalMs() {
   const n = Number(state.config?.ui?.refreshMs);
   return Number.isFinite(n) && n >= 1000 ? n : 4000;
@@ -684,7 +706,10 @@ function initSessionScrollLoader() {
  */
 function initChatScrollLoader() {
   attachScrollLoader('chat-detail', () => {
-    const total = (state.chatMessages || []).length;
+    // ⚠️ 必须用过滤后的列表：有查找词时，updateChatMessagesBody 已经把命中项
+    // 一次全显示了。这里若还按 state.chatMessages 的全量长度算，滚动加载器会
+    // 永远认为"后面还有"，一直触发加载。
+    const total = chatVisibleMessages().length;
     const prev = Math.max(CHAT_MSG_PAGE, Number(state.chatMsgLimit) || CHAT_MSG_PAGE);
     if (prev >= total) return;                     // 已经全显示了
     state.chatMsgLimit = Math.min(total, prev + CHAT_MSG_MORE);
@@ -1137,6 +1162,9 @@ function renderChatList() {
 
 async function selectChat(key) {
   state.currentChatKey = key;
+  // 查找词跟着会话走：为一个群写的词拿到另一个群里没有意义，留着只会让人
+  // 打开新会话时看到一张莫名其妙空掉的表，还以为是存档坏了。
+  state.chatQuery = '';
   renderChatList();
   $('#chat-detail').innerHTML = '<div class="empty-hint">加载中…</div>';
   await loadChatMessages(key);
@@ -1208,6 +1236,8 @@ function renderChatMessages() {
       <button class="btn btn-small" id="chat-wake-btn">唤醒一次处理</button>
       <button class="btn btn-small" id="chat-read-btn">全部标为已读</button>
       <button class="btn btn-small" id="chat-compact-btn" title="把最老的一段聊天记录交给模型摘要成一条纪要，原文移到 data/messages/archive/ 冷归档（不删除）。不等定时巡检，立刻压一次。">立即压缩历史</button>
+      <input type="text" id="chat-search" placeholder="在本会话存档里查找（内容 / 发言人 / 时间）" />
+      <button class="btn btn-small" id="chat-note-btn" title="插一条人工备注。它不是任何人说的话，会以【人工备注】出现在提示词里，供机器人下一轮参考。">加备注</button>
       <input type="text" id="test-send-text" placeholder="手动发一条测试消息" style="flex:1" />
       <button class="btn btn-small" id="chat-testsend-btn">发送</button>
     </div>
@@ -1264,6 +1294,122 @@ function renderChatMessages() {
     loadChatMessages(key, { keepView: true });
   });
 
+  // ── 查找（纯前端：loadChatMessages 一次拿的是整个会话，过滤比再跑一趟网络快） ──
+  const search = $('#chat-search');
+  search.value = state.chatQuery || '';
+  let searchTimer = null;
+  search.addEventListener('input', () => {
+    // 去掉防抖就是在输入法里每敲一个字母全量过滤 + 重排一次 innerHTML，
+    // 几万条的行数下会明显卡顿。
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.chatQuery = search.value;
+      state.chatMsgLimit = CHAT_MSG_PAGE;   // 换词 = 重新分页
+      updateChatMessagesBody();
+    }, 120);
+  });
+
+  // ── 加备注：插一条"不是任何人说的话" ──
+  $('#chat-note-btn').addEventListener('click', () => {
+    const overlay = modelModalShell({
+      head: '插入人工备注',
+      body: `<div class="field">
+          <label>备注内容</label>
+          <textarea id="cm-note-text" rows="4" placeholder="例：张三说的那个活动改到周五了"></textarea>
+          <div class="hint">这条会以【人工备注】的形式进入机器人的提示词，<b>不会</b>被当成任何群友说的话，
+            也不会触发它主动回应。改动只影响<b>下一轮</b>运行 —— 正在进行的那一轮提示词已经拼好了。</div>
+        </div>`,
+      foot: '<button class="btn" id="cm-note-cancel">取消</button><button class="btn btn-primary" id="cm-note-save">插入</button>'
+    });
+    overlay.querySelector('#cm-note-cancel').addEventListener('click', () => closeModelModal(overlay));
+    overlay.querySelector('#cm-note-save').addEventListener('click', async (e) => {
+      const text = overlay.querySelector('#cm-note-text').value.trim();
+      if (!text) { alert('备注内容不能为空'); return; }
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        await api(`/api/chats/${key.replace(':', '_')}/notes`, { method: 'POST', body: JSON.stringify({ text }) });
+        closeModelModal(overlay);
+        loadChatMessages(key, { keepView: true });
+      } catch (err) {
+        btn.disabled = false;
+        alert('插入失败：' + (err.message || err));
+      }
+    });
+  });
+
+  // ── 每行的 改 / 删 ──
+  // 用事件委托挂在 tbody 上：updateChatMessagesBody 每次轮询都会换掉 innerHTML，
+  // 逐行绑定的话几百个监听器转瞬就失效。tbody 元素本身不重建，委托能活很久。
+  $('#chat-msg-body').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-op]');
+    if (!btn) return;
+    const tr = btn.closest('tr[data-midrow]');
+    if (!tr) return;
+    // 按 id 找，不按下标：过滤/排序之后屏幕上的位置和 state 里的位置对不上
+    const m = (state.chatMessages || []).find((x) => String(x.id) === tr.dataset.midrow);
+    if (!m) return;
+    const url = `/api/chats/${key.replace(':', '_')}/messages/${m.id}`;
+
+    if (btn.dataset.op === 'edit') {
+      const overlay = modelModalShell({
+        head: `改第 ${m.id} 条 · ${esc(m.senderName || '我')} · ${fmtTime(m.ts)}`,
+        body: `<div class="field">
+            <label>正文</label>
+            <textarea id="cm-edit-text" rows="6">${esc(m.text)}</textarea>
+            <div class="hint">只能改正文。是谁说的、什么时候说的、引用关系都不会动 ——
+              改这些等于伪造历史。改完存档页立刻生效，但<b>正在进行的那一轮</b>提示词已经拼好了，
+              要下一轮才会读到新内容。</div>
+          </div>`,
+        foot: '<button class="btn" id="cm-edit-cancel">取消</button><button class="btn btn-primary" id="cm-edit-save">保存</button>'
+      });
+      const ta = overlay.querySelector('#cm-edit-text');
+      ta.focus();
+      overlay.querySelector('#cm-edit-cancel').addEventListener('click', () => closeModelModal(overlay));
+      overlay.querySelector('#cm-edit-save').addEventListener('click', async (ev) => {
+        const text = ta.value;
+        if (!text.trim()) { alert('内容不能为空'); return; }
+        ev.currentTarget.disabled = true;
+        try {
+          await api(url, { method: 'PATCH', body: JSON.stringify({ text }) });
+          closeModelModal(overlay);
+          // 重拉而不是就地改本地数组：排序缓存与 SSE 推送都按"新数组引用"失效，
+          // 就地打补丁会让缓存的旧排序把改动盖回去。
+          loadChatMessages(key, { keepView: true });
+        } catch (err) {
+          ev.currentTarget.disabled = false;
+          alert('保存失败：' + (err.message || err));
+        }
+      });
+      return;
+    }
+
+    if (btn.dataset.op === 'del') {
+      const snip = String(m.text || '').replace(/\s+/g, ' ').slice(0, 60);
+      // 摘要 / 人工备注都不是某个人说的话。套 senderName || '我' 会把它们说成"我"
+      // 发的 —— 与行渲染里的 who 用同一套判定。
+      const who = m.kind === 'digest' ? '摘要'
+        : (m.kind === 'note' ? '备注' : (m.self ? '我' : (m.senderName || '某人')));
+      let warn = `确定要永久删除这条存档吗？\n\n${fmtTime(m.ts)}  ${who}：${snip}\n\n`;
+      warn += '· 会在 data/messages/ 下留一份 .panel.bak 备份（只保留最近一次）\n';
+      // 人工备注是从没收发过的记录，对它说"原文可能仍在冷归档"是误导
+      if (m.kind !== 'note') warn += '· 消息原文可能仍留在冷归档 data/messages/archive/ 里（那份只追加，面板不搜它）\n';
+      warn += m.kind === 'digest'
+        ? '· 这是压缩摘要，删掉后下次触发压缩会重新生成一段（不会和这段一样）\n'
+        : '· 已经生成的摘要不会被改动\n';
+      if (!m.read) warn += '\n⚠️ 这条还是未读：删掉后机器人不会再把它当作要回应的消息。\n';
+      if (!confirm(warn)) return;
+      btn.disabled = true;
+      try {
+        await api(url, { method: 'DELETE' });
+        loadChatMessages(key, { keepView: true });
+      } catch (err) {
+        btn.disabled = false;
+        alert('删除失败：' + (err.message || err));
+      }
+    }
+  });
+
   updateChatMessagesBody();
   // 滚动加载只挂一次（attachScrollLoader 内部有防重复）
   initChatScrollLoader();
@@ -1294,20 +1440,56 @@ function chatMessagesNewestFirst() {
 
 /** 单行消息 HTML（全量渲染与滚动追加共用同一个模板，保证两处长得一样）。 */
 function chatMsgRowHtml(m) {
-  // 压缩摘要（kind:'digest'）不是某个人说的话，用弱化样式区分：
-  // 多行文本靠 .text 已有的 white-space: pre-wrap 正常换行显示。
+  // 压缩摘要（kind:'digest'）与人工备注（kind:'note'）都不是某个人说的话，
+  // 各自用一种弱化样式区分：多行文本靠 .text 已有的 white-space: pre-wrap 换行。
   const isDigest = m.kind === 'digest';
+  const isNote = m.kind === 'note';
+  const who = isDigest ? '摘要' : (isNote ? '备注' : (m.self ? '我' : esc(m.senderName)));
+  // 摘要由模型生成，手改会让它与 digest.summary/count 对不上（后端也会 400）。
+  // 这里直接不给「改」，而不是给一个点了报错的按钮。
+  // 但「删」必须给：删掉一条摘要本身完全合法 —— 后端只拦 PATCH，不拦 DELETE，
+  // 它的 400 文案本身写的就是"不能手改；可以删除"。早先这里两项一起吞掉了，
+  // 结果用户想清掉一段误生成的摘要时无路可走（工具提示还写着"可以删除"）。
+  const ops = (isDigest
+    ? '<span class="muted" title="摘要由模型生成，不能手改">—</span>'
+    : '<button class="btn btn-small" data-op="edit" title="改这条的正文">改</button>')
+    + '<button class="btn btn-small btn-danger" data-op="del" title="真删除这条存档">删</button>';
   return `
-    <tr class="${m.read ? '' : 'unread'}${isDigest ? ' digest-row' : ''}" data-midrow="${m.id}">
+    <tr class="${m.read ? '' : 'unread'}${isDigest ? ' digest-row' : ''}${isNote ? ' note-row' : ''}" data-midrow="${m.id}">
       <td class="t">${fmtTime(m.ts)}</td>
-      <td class="w ${m.self ? 'self' : ''}">${isDigest ? '摘要' : (m.self ? '我' : esc(m.senderName))}</td>
+      <td class="w ${m.self ? 'self' : ''}">${who}</td>
       <td class="text">${esc(m.text)}${m.read ? '' : ' <span class="unread-pill">未读</span>'}</td>
+      <td class="ops">${ops}</td>
     </tr>`;
+}
+
+/**
+ * 查找词过滤后的"新的在上"列表（带记忆化）。
+ *
+ * 必须另开一个缓存而不是改 chatMessagesNewestFirst() 的 key：排序是对全量做的，
+ * 加个词就重排一遍几万条，光标每敲一下都卡。这里排序结果照旧复用，
+ * 只在 query 变化时重做一次 O(n) 过滤。
+ *
+ * 匹配 text / senderName / 时间（这样"谁说的"和"哪天的"都能找）。
+ */
+let chatMsgViewCache = { src: null, q: '', list: [] };
+function chatVisibleMessages() {
+  const q = String(state.chatQuery || '').trim().toLowerCase();
+  const all = chatMessagesNewestFirst();
+  if (!q) return all;
+  if (chatMsgViewCache.src === all && chatMsgViewCache.q === q) return chatMsgViewCache.list;
+  const list = all.filter((m) => {
+    const hay = `${m.text || ''}\n${m.senderName || ''}\n${fmtTime(m.ts)}`.toLowerCase();
+    return hay.includes(q);
+  });
+  chatMsgViewCache = { src: all, q, list };
+  return list;
 }
 
 /** 更新底部"还有 N 条"与顶部计数文案（全量渲染与追加都要刷这两处）。 */
 function updateChatMessagesMeta(newestFirst) {
   const total = newestFirst.length;
+  const filtered = !!String(state.chatQuery || '').trim();
   const shownCount = Math.min(Math.max(CHAT_MSG_PAGE, Number(state.chatMsgLimit) || CHAT_MSG_PAGE), total);
   const rest = total - shownCount;
   const more = $('#chat-msg-more');
@@ -1319,10 +1501,15 @@ function updateChatMessagesMeta(newestFirst) {
   const cnt = $('#chat-detail')?.querySelector('[data-field="chat-msg-count"]');
   if (cnt) {
     const meta = state.chats.find((c) => c.key === state.currentChatKey) || {};
-    const t = meta.total || total || 0;
-    cnt.textContent = t
-      ? `共 ${t} 条 · 已显示 ${shownCount} 条 · 存储于 data/messages/`
-      : '暂无消息';
+    const t = meta.total || 0;
+    if (filtered) {
+      // 过滤态下"共 N 条"要两个数都给：只报命中数会让人以为存档里就这么多
+      cnt.textContent = `匹配 ${total} 条 / 共 ${t || total} 条 · 已显示 ${shownCount} 条`;
+    } else {
+      cnt.textContent = t
+        ? `共 ${t} 条 · 已显示 ${shownCount} 条 · 存储于 data/messages/`
+        : '暂无消息';
+    }
   }
 }
 
@@ -1334,7 +1521,7 @@ function updateChatMessagesMeta(newestFirst) {
 function appendChatMessageRows(prevShown) {
   const tbody = $('#chat-msg-body');
   if (!tbody) return;
-  const newestFirst = chatMessagesNewestFirst();
+  const newestFirst = chatVisibleMessages();
   const limit = Math.min(state.chatMsgLimit, newestFirst.length);
   const rows = newestFirst.slice(prevShown, limit);
   if (rows.length) tbody.insertAdjacentHTML('beforeend', rows.map(chatMsgRowHtml).join(''));
@@ -1360,8 +1547,12 @@ function updateChatMessagesBody(keepScroll = false) {
   const prevHeight = keepScroll ? detail.scrollHeight : 0;
 
   // 倒序后取前 N 条 = 最新的 N 条（排序结果走引用缓存，数据没变不重排）
-  const newestFirst = chatMessagesNewestFirst();
-  state.chatMsgLimit = Math.max(CHAT_MSG_PAGE, Number(state.chatMsgLimit) || CHAT_MSG_PAGE);
+  const newestFirst = chatVisibleMessages();
+  // 有查找词时一次性显示全部命中：命中通常是几十条，分页只会让"还有 N 条"的
+  // 账目和旁边的"匹配 K 条"对不上，用户还得滚到底才发现后面还有。
+  state.chatMsgLimit = String(state.chatQuery || '').trim()
+    ? Math.max(newestFirst.length, 1)
+    : Math.max(CHAT_MSG_PAGE, Number(state.chatMsgLimit) || CHAT_MSG_PAGE);
   const shown = newestFirst.slice(0, state.chatMsgLimit);
 
   tbody.innerHTML = shown.map(chatMsgRowHtml).join('');
@@ -1904,16 +2095,42 @@ async function loadMemoryDetail(chatKey) {
     const membersHtml = kind === 'group'
       ? `<div class="field" style="margin:8px 0"><button class="btn btn-small" id="mem-load-members-btn">拉取群成员列表（编辑备注）</button><span id="mem-members-status" class="muted"></span></div><div id="mem-members"></div>`
       : '';
+    // 查找：命中成员名/QQ/备注名，或命中任意一条印象的文字。命中时不隐藏成员，
+    // 只把该成员下不匹配的印象折起来 —— 否则搜一个词会连带看不到"这个人还有别的什么印象"。
+    const mq = String(state.memQuery || '').trim().toLowerCase();
+    const memberHit = (m, who) => `${who}\n${m.name || ''}\n${m.userId || ''}`.toLowerCase().includes(mq);
+    let shownImps = 0;
     const rows = members.map((m) => {
       const who = notes[String(m.userId)] || m.name || m.userId || '某人';
+      const hitMember = !mq || memberHit(m, who);
+      const imps = m.impressions || [];
+      const matched = hitMember ? imps : imps.filter((e) => String(e.content || '').toLowerCase().includes(mq));
+      if (mq && !matched.length) return '';
+      shownImps += matched.length;
+      // 每行一条 + 改/删。寻址用 data-uid + data-idx：
+      // idx 只在这个渲染快照里定位，正文从闭包里的 members 取 —— 不走 DOM 属性，
+      // 省掉转义/换行归一化的坑；服务端仍按 (userId, content) 校验，对不上就 404。
+      const impRows = matched.map((e) => {
+        const idx = imps.indexOf(e);
+        return `<div class="imp-row">
+            <span class="imp-text">${esc(e.content)}</span>
+            <button class="btn btn-small imp-edit" data-uid="${esc(m.userId)}" data-idx="${idx}" title="改这条印象（保留原本的记录时间）">改</button>
+            <button class="btn btn-small btn-danger imp-del" data-uid="${esc(m.userId)}" data-idx="${idx}" title="删掉这条印象">删</button>
+          </div>`;
+      }).join('');
       const qq = m.userId ? ` <span class="muted">(QQ ${esc(m.userId)})</span>` : '';
-      const imps = m.impressions.map((e) => `- ${e.content}`).join('\n');
+      const countLabel = mq ? `匹配 ${matched.length} / ${imps.length} 条` : `${imps.length} 条`;
       return `<div class="collapsible" open>
-        <summary>${esc(who)}${qq}（${m.impressions.length} 条）
-          <button class="btn btn-small mem-edit-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:8px">编辑</button>
+        <summary>${esc(who)}${qq}（${countLabel}）
+          <button class="btn btn-small mem-add-one" data-uid="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:8px" title="给这个人再加一条印象">＋</button>
+          <button class="btn btn-small mem-edit-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px">批量编辑</button>
           <button class="btn btn-small mem-refresh-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px" title="让模型重新分析这个人：有印象则整理合并，没印象则从聊天记录里提炼">更新记忆</button>
         </summary>
-        <div class="coll-body">${esc(imps)}</div>
+        <div class="coll-body">
+          ${impRows || '<div class="muted">（没有印象）</div>'}
+          <div class="hint">单条「改」保留原本的记录时间；「批量编辑」是把整份印象重写一遍，
+            会把所有条目的时间刷成当下 —— 想让"这条印象是什么时候形成的"保持准确，用单条改。</div>
+        </div>
       </div>`;
     }).join('');
     // 整理状态从 state 恢复：切页签回来 / 刷新页面后依然可见
@@ -1936,16 +2153,156 @@ async function loadMemoryDetail(chatKey) {
         <h2>${esc(formatChatTitle(chatKey, chatNameOf(chatKey)))} 的记忆</h2>
         <div class="sub">
           <span>每个群友一个文件：data/memory/${esc(chatKey.replace(':', '_'))}/&lt;QQ&gt;.json</span>
+          <input type="text" id="mem-search" placeholder="查找群友 / 印象内容" />
           <button class="btn btn-small" id="mem-add-imp-btn">＋ 添加印象</button>
           <button class="btn btn-small" id="mem-consolidate-btn" ${busy ? 'disabled' : ''}>${busy ? '整理中…' : '整理本群记忆'}</button>
           ${consolidateStatusHtml}
         </div>
       </div>
       ${membersHtml}
-      ${rows || '<div class="muted" style="padding:10px">还没有任何群友印象（可点右上角「＋ 添加印象」手动记，或点「整理本群记忆」让模型从聊天记录里提炼）。</div>'}
+      ${rows || (mq
+        ? `<div class="muted" style="padding:10px">没有匹配「${esc(state.memQuery)}」的群友或印象。</div>`
+        : '<div class="muted" style="padding:10px">还没有任何群友印象（可点右上角「＋ 添加印象」手动记，或点「整理本群记忆」让模型从聊天记录里提炼）。</div>')}
     `;
     const loadMembersBtn = $('#mem-load-members-btn');
     if (loadMembersBtn) loadMembersBtn.addEventListener('click', () => loadGroupMembers(chatId, chatKey));
+
+    // ── 查找框 ──
+    // 重新渲染会把整块 innerHTML 换掉，所以要先恢复词、再把光标放回原处 ——
+    // 否则整理流程每推一条 memory-update，用户正在敲的字就被清空了。
+    const search = $('#mem-search');
+    if (search) {
+      search.value = state.memQuery || '';
+      search.addEventListener('input', () => {
+        state.memQuery = search.value;
+        clearTimeout(memSearchTimer);
+        memSearchTimer = setTimeout(() => {
+          const caret = search.selectionStart;
+          loadMemoryDetail(chatKey).then(() => {
+            const again = $('#mem-search');
+            if (again) { again.focus(); try { again.setSelectionRange(caret, caret); } catch { /* 忽略 */ } }
+          });
+        }, 150);
+      });
+    }
+
+    // ── 单条印象的 改 / 删 ──
+    // 定位走 data-idx → 闭包里的 members：正文从渲染时的快照对象上取，
+    // 而不是从 DOM 属性回读（省掉转义与换行归一化的坑）。服务端仍按
+    // (userId|target, content) 校验，对不上就 404 让用户刷新。
+    const impTarget = (el) => {
+      const uid = String(el.dataset.uid || '');
+      const idx = Number(el.dataset.idx);
+      const m = members.find((x) => String(x.userId) === uid);
+      const entry = m?.impressions?.[idx];
+      if (!m || !entry) return null;
+      // 有 QQ 号按号寻址；没有的（整理时没能确定 QQ）只能按名字 —— 与后端一致
+      return { m, entry, address: uid ? { userId: uid } : { target: m.name || m.userId } };
+    };
+    $$('.imp-edit', detail).forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();   // 不拦的话这次点击会顺手把 <details> 折叠了
+        const t = impTarget(el);
+        if (!t) return;
+        const overlay = modelModalShell({
+          head: `改印象 · ${esc(t.m.name || t.m.userId)}`,
+          body: `<div class="field">
+              <label>印象内容</label>
+              <textarea id="mi-single" rows="3">${esc(t.entry.content)}</textarea>
+              <div class="hint">原记录时间（${fmtTime(t.entry.createdAt)}）会保留。
+                改成与这个人已有的某条一字不差会被拒绝 —— 那样以后删一条会连另一条一起删掉。</div>
+            </div>`,
+          foot: '<button class="btn" id="mi-cancel">取消</button><button class="btn btn-primary" id="mi-save">保存</button>'
+        });
+        const ta = overlay.querySelector('#mi-single');
+        ta.focus();
+        overlay.querySelector('#mi-cancel').addEventListener('click', () => closeModelModal(overlay));
+        overlay.querySelector('#mi-save').addEventListener('click', async (ev) => {
+          const next = ta.value.trim();
+          if (!next) { alert('印象内容不能为空'); return; }
+          ev.currentTarget.disabled = true;
+          try {
+            await api(`/api/memory-files/${chatKey.replace(':', '_')}/impressions`, {
+              method: 'PATCH',
+              body: JSON.stringify({ ...t.address, content: t.entry.content, next })
+            });
+            closeModelModal(overlay);
+            loadMemoryDetail(chatKey);
+          } catch (err) {
+            ev.currentTarget.disabled = false;
+            alert('保存失败：' + (err.message || err));
+            // 404 = 这份数据已经被模型整理流程改写过了，刷新让用户看到真实现状
+            if (/刷新/.test(err.message || '')) { closeModelModal(overlay); loadMemoryDetail(chatKey); }
+          }
+        });
+      });
+    });
+    $$('.imp-del', detail).forEach((el) => {
+      el.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const t = impTarget(el);
+        if (!t) return;
+        const last = (t.m.impressions || []).length === 1;
+        let warn = `确定删掉这条印象吗？\n\n${t.m.name || t.m.userId}：${t.entry.content}\n\n`;
+        if (last) warn += '⚠️ 这是此人最后一条印象：删掉后他的记忆文件（data/memory/…/' + (t.address.userId || t.m.name) + '.json）也会被删除。\n';
+        else warn += '（会在 data/memory/backups/ 留一份备份，保留最近一次）\n';
+        if (!confirm(warn)) return;
+        el.disabled = true;
+        try {
+          const r = await api(`/api/memory-files/${chatKey.replace(':', '_')}/impressions`, {
+            method: 'DELETE',
+            body: JSON.stringify({ ...t.address, content: t.entry.content })
+          });
+          if (r?.memberGone) alert('已删除。这是最后一条，这个人的记忆文件也一并删掉了。');
+          loadMemoryDetail(chatKey);
+        } catch (err) {
+          el.disabled = false;
+          alert('删除失败：' + (err.message || err));
+          if (/刷新/.test(err.message || '')) loadMemoryDetail(chatKey);
+        }
+      });
+    });
+
+    // ── 给某个人单加一条印象（不重写他现有的印象） ──
+    $$('.mem-add-one', detail).forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const uid = String(el.dataset.uid || '');
+        const nm = String(el.dataset.name || '');
+        const overlay = modelModalShell({
+          head: `添加印象 · ${esc(nm || uid)}`,
+          body: `<div class="field">
+              <label>印象内容</label>
+              <textarea id="mi-add" rows="3" placeholder="例：说话喜欢带感叹号"></textarea>
+              <div class="hint">只追加这一条，不动这个人已有的印象。</div>
+            </div>`,
+          foot: '<button class="btn" id="mia-cancel">取消</button><button class="btn btn-primary" id="mia-save">添加</button>'
+        });
+        overlay.querySelector('#mi-add').focus();
+        overlay.querySelector('#mia-cancel').addEventListener('click', () => closeModelModal(overlay));
+        overlay.querySelector('#mia-save').addEventListener('click', async (ev) => {
+          const content = overlay.querySelector('#mi-add').value.trim();
+          if (!content) { alert('印象内容不能为空'); return; }
+          ev.currentTarget.disabled = true;
+          try {
+            const r = await api(`/api/memory-files/${chatKey.replace(':', '_')}/impressions`, {
+              method: 'POST',
+              body: JSON.stringify({ userId: uid, target: nm, content })
+            });
+            closeModelModal(overlay);
+            if (r?.duplicate) alert('这个人已经有一条一字不差的印象了，没有重复添加。');
+            loadMemoryDetail(chatKey);
+          } catch (err) {
+            ev.currentTarget.disabled = false;
+            alert('添加失败：' + (err.message || err));
+          }
+        });
+      });
+    });
+
     $$('.mem-edit-imp', detail).forEach((el) => {
       el.addEventListener('click', (e) => {
         e.preventDefault();
@@ -2018,6 +2375,180 @@ async function loadMemoryDetail(chatKey) {
     if (state.consolidating[chatKey]) startConsolidateTicker();
   } catch (e) {
     detail.innerHTML = `<div class="empty-hint">加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+// ── 表情包页 ────────────────────────────────────────────────────────────────
+//
+// 库里既有 QQ 收藏（source='qq'，源在 QQ 那边）也有 AI 收藏（source='ai'，
+// collect_sticker 偷来的）。**删 qq 来源的删不掉** —— mergeStickerLibrary 每次
+// 同步都会按 fetchedIds 把它收编回来，所以后端直接 409，这里也不给能点的按钮。
+
+const STICKER_SOURCE_LABEL = { qq: 'QQ收藏', ai: 'AI收藏', manual: '手工' };
+
+async function loadStickerView({ quiet = false } = {}) {
+  const box = $('#sticker-items');
+  if (!box) return;
+  if (!quiet) box.innerHTML = '<div class="muted" style="padding:10px">加载中…</div>';
+  try {
+    const q = encodeURIComponent(state.stickerQuery || '');
+    const data = await api(`/api/stickers?q=${q}&limit=200`);
+    state.stickers = data.stickers || [];
+    state.stickerTotal = data.total || 0;
+    state.stickerSync = { fromCache: !!data.fromCache, error: data.syncError || '', at: Date.now() };
+    renderStickerItems();
+    // 选中的那条可能已经被删/被过滤掉了：还在就重画详情，不在就退回提示
+    if (state.stickerSelectedId && state.stickers.some((s) => s.id === state.stickerSelectedId)) {
+      renderStickerDetail(state.stickers.find((s) => s.id === state.stickerSelectedId));
+    } else if (state.stickerSelectedId) {
+      state.stickerSelectedId = null;
+      const d = $('#sticker-detail');
+      if (d) d.innerHTML = '<div class="empty-hint">← 从左侧选择一个表情查看</div>';
+    }
+  } catch (e) {
+    if (!quiet) box.innerHTML = `<div class="muted" style="padding:10px">加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+function renderStickerItems() {
+  const box = $('#sticker-items');
+  if (!box) return;
+  const cnt = $('#sticker-count');
+  if (cnt) {
+    const sync = state.stickerSync;
+    const q = String(state.stickerQuery || '').trim();
+    let note = q ? `匹配 ${state.stickers.length} / ${state.stickerTotal} 张` : `共 ${state.stickerTotal} 张`;
+    // QQ 同步失败时必须说出来：否则用户看着的是本地缓存，却以为那是 QQ 里真实的收藏
+    if (sync?.error) note += ' · ⚠️ 同步 QQ 失败，显示本地缓存';
+    else if (sync?.fromCache) note += ' · 缓存';
+    cnt.textContent = note;
+  }
+  if (!state.stickers.length) {
+    box.innerHTML = `<div class="muted" style="padding:10px">${
+      String(state.stickerQuery || '').trim() ? '没有匹配的表情。' : '表情库是空的（在设置里启用表情包后，同步一次 QQ 收藏即可）。'
+    }</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="sticker-grid">${state.stickers.map((s) => {
+    // ⚠️ src 指向后端代理，**不是** s.url：QQ 图床有防盗链，而本地库一旦被
+    // 污染成内网地址，直连就是用户浏览器去打内网（代理那边有 validateImageUrl 把关）。
+    const src = `/api/stickers/${encodeURIComponent(s.id)}/image`;
+    const label = s.localNote || s.desc || '';
+    return `<div class="sticker-card ${s.id === state.stickerSelectedId ? 'selected' : ''}" data-id="${esc(s.id)}" title="${esc(label || s.id)}">
+        <img loading="lazy" alt="${esc(label || s.id)}" src="${esc(src)}" />
+        <div class="sticker-card-body">
+          <div class="sticker-card-note">${label ? esc(label) : '<span class="muted">（未标注）</span>'}</div>
+          <div class="sticker-card-meta">
+            <span class="sticker-src">${esc(STICKER_SOURCE_LABEL[s.source] || s.source)}</span>
+            ${s.useCount ? `<span>用过 ${s.useCount} 次</span>` : ''}
+          </div>
+        </div>
+      </div>`;
+  }).join('')}</div>`;
+  $$('.sticker-card', box).forEach((el) => {
+    el.addEventListener('click', () => {
+      state.stickerSelectedId = el.dataset.id;
+      renderStickerItems();
+      renderStickerDetail(state.stickers.find((s) => s.id === el.dataset.id));
+    });
+  });
+}
+
+function renderStickerDetail(s) {
+  const d = $('#sticker-detail');
+  if (!d || !s) return;
+  const src = `/api/stickers/${encodeURIComponent(s.id)}/image`;
+  d.innerHTML = `
+    <div class="detail-header">
+      <h2>${esc(s.localNote || s.desc || s.id)}</h2>
+      <div class="sub">
+        <span class="sticker-src">${esc(STICKER_SOURCE_LABEL[s.source] || s.source)}</span>
+        ${s.useCount ? `<span>用过 ${s.useCount} 次</span>` : '<span class="muted">还没用过</span>'}
+        ${s.lastUsedAt ? `<span class="muted">最后 ${fmtTime(s.lastUsedAt)}</span>` : ''}
+      </div>
+    </div>
+    <div class="sticker-detail-body">
+      <div class="sticker-preview"><img src="${esc(src)}" alt="${esc(s.desc || s.id)}" /></div>
+      <div class="sticker-fields">
+        <div class="field"><label>QQ 备注名（自动同步，不可编辑）</label>
+          <div class="sticker-field-static">${s.desc ? esc(s.desc) : '<span class="muted">（QQ 里没有名字）</span>'}</div></div>
+        <div class="field"><label>备注</label>
+          <div class="sticker-field-static">${s.localNote ? esc(s.localNote) : '<span class="muted">（未标注）</span>'}</div></div>
+        <div class="field"><label>标签</label>
+          <div class="sticker-field-static">${(s.tags || []).length ? (s.tags || []).map((t) => `<span class="sticker-tag">${esc(t)}</span>`).join(' ') : '<span class="muted">（无）</span>'}</div></div>
+        <div class="field"><label>适用场景</label>
+          <div class="sticker-field-static">${s.usage ? esc(s.usage) : '<span class="muted">（未标注）</span>'}</div></div>
+        <div class="field"><label>id / md5</label>
+          <div class="sticker-field-static mono">${esc(s.id)}<br /><span class="muted">${esc(s.md5 || '（无）')}</span></div></div>
+        <div class="chat-toolbar">
+          <button class="btn btn-small" id="sticker-edit-btn">编辑备注 · 标签 · 场景</button>
+          ${s.deletable
+            ? '<button class="btn btn-small btn-danger" id="sticker-del-btn">删除</button>'
+            : '<button class="btn btn-small" disabled title="这是 QQ 收藏里的表情，本地删不掉（下次同步就会回来）。想删请到 QQ 里取消收藏。">QQ 收藏不能在这里删</button>'}
+        </div>
+        <div class="hint">「备注 / 标签 / 适用场景」是机器人挑表情时看的依据（提示词里的【可用表情包】）。
+          改完备注后，标注相同的两个表情会让它挑不出来 —— 那种情况它会明确报错并列出候选 id，不会乱挑一个。
+          改动只影响<b>下一轮</b>运行。</div>
+        ${s.deletable ? '' : '<div class="hint">删除按钮被禁用的原因：这张图来自 QQ 收藏本身，本地删掉下次同步就会重新出现。'}</div>'}
+      </div>
+    </div>`;
+  $('#sticker-edit-btn')?.addEventListener('click', () => openStickerEditModal(s));
+  $('#sticker-del-btn')?.addEventListener('click', () => deleteSticker(s));
+}
+
+function openStickerEditModal(s) {
+  state.stickerBusy = true;
+  const overlay = modelModalShell({
+    head: `编辑表情 · ${esc(s.localNote || s.desc || s.id)}`,
+    body: `<div class="field">
+        <label>QQ 备注名（只读）</label>
+        <div class="sticker-field-static">${s.desc ? esc(s.desc) : '<span class="muted">（QQ 里没有名字）</span>'}</div>
+        <div class="hint">这个名字来自 QQ 收藏，每次同步都会被源数据盖回来，所以在面板上改不了。</div>
+      </div>
+      <div class="field"><label>备注</label>
+        <input type="text" id="sc-note" value="${esc(s.localNote || '')}" placeholder="这张图是什么梗 / 什么情绪" /></div>
+      <div class="field"><label>标签（逗号或空格分隔）</label>
+        <input type="text" id="sc-tags" value="${esc((s.tags || []).join(', '))}" placeholder="可爱, 无语, 猫" /></div>
+      <div class="field"><label>适用场景</label>
+        <input type="text" id="sc-usage" value="${esc(s.usage || '')}" placeholder="被夸的时候 / 深夜闲聊" /></div>`,
+    foot: '<button class="btn" id="sc-cancel">取消</button><button class="btn btn-primary" id="sc-save">保存</button>'
+  });
+  overlay.querySelector('#sc-note').focus();
+  const done = () => { state.stickerBusy = false; };
+  overlay.querySelector('#sc-cancel').addEventListener('click', () => { done(); closeModelModal(overlay); });
+  overlay.querySelector('#sc-save').addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      await api(`/api/stickers/${encodeURIComponent(s.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          note: overlay.querySelector('#sc-note').value,
+          tags: overlay.querySelector('#sc-tags').value,
+          usage: overlay.querySelector('#sc-usage').value
+        })
+      });
+      done();
+      closeModelModal(overlay);
+      loadStickerView({ quiet: true });
+    } catch (err) {
+      e.currentTarget.disabled = false;
+      alert('保存失败：' + (err.message || err));
+    }
+  });
+}
+
+async function deleteSticker(s) {
+  state.stickerBusy = true;
+  try {
+    if (!confirm(`确定从本地表情库里删掉这一张吗？\n\n${s.localNote || s.desc || s.id}\n\n· 只是本地认知层，不会动 QQ 收藏\n· 这是 AI 收藏（偷来的图），删了就真没了`)) return;
+    await api(`/api/stickers/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
+    state.stickerSelectedId = null;
+    $('#sticker-detail').innerHTML = '<div class="empty-hint">← 从左侧选择一个表情查看</div>';
+    loadStickerView({ quiet: true });
+  } catch (err) {
+    alert('删除失败：' + (err.message || err));
+  } finally {
+    state.stickerBusy = false;
   }
 }
 
@@ -4865,6 +5396,57 @@ function openBlocklistModal() {
 //    两条路径各维护一份必然再次分叉，所以这里只准调 switchTab。
 $$('.tab').forEach((tab) => {
   tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+});
+
+// ── 记忆页：正在输入时先别重绘 ──
+// 整理流程会一连推很多条 memory-update，每次都 loadMemoryView() → loadMemoryDetail()
+// 把整块 innerHTML 换掉。用户这时正在查找框或某条印象的编辑框里打字，字就没了。
+// 做法：输入中先挂起，等焦点离开再补一次刷新（否则页面会一直停在旧数据上）。
+let memRefreshPending = false;
+function memTyping() {
+  const d = $('#memory-detail');
+  const a = document.activeElement;
+  return !!(d && a && d.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA'));
+}
+function refreshMemoryViewSoon() {
+  if (memTyping()) { memRefreshPending = true; return; }
+  memRefreshPending = false;
+  loadMemoryView();
+}
+$('#memory-detail')?.addEventListener('focusout', () => {
+  if (!memRefreshPending) return;
+  // focusout 在切换焦点那一刻触发：等一拍再判断，避免"从 A 框点到 B 框"被当成离开
+  setTimeout(() => { if (!memTyping()) refreshMemoryViewSoon(); }, 60);
+});
+
+// ── 表情包页：搜索框（静态骨架里的那个，列表重绘不会动它） ──
+$('#sticker-search')?.addEventListener('input', (e) => {
+  state.stickerQuery = e.target.value;
+  clearTimeout(stickerSearchTimer);
+  // 服务端过滤：库里可能有几百条，没必要一次全发过来再在本地筛
+  stickerSearchTimer = setTimeout(() => loadStickerView({ quiet: true }), 200);
+});
+
+// 刷新 QQ 收藏：结果写进状态行。失败也要写清楚 —— 显示的是缓存，
+// 不是"QQ 里就这些"，两者混淆会让人以为收藏丢了。
+$('#sticker-sync-btn')?.addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  if (btn.disabled) return;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '同步中…';
+  try {
+    const r = await api('/api/stickers/sync', { method: 'POST', body: '{}' });
+    const cnt = $('#sticker-count');
+    if (cnt) cnt.textContent = r.ok ? `已同步，共 ${r.count} 张` : `同步失败：${r.error || '未知错误'}（显示本地缓存）`;
+  } catch (err) {
+    const cnt = $('#sticker-count');
+    if (cnt) cnt.textContent = `同步失败：${err.message || err}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+    loadStickerView({ quiet: true });
+  }
 });
 
 // ── 启动 ──

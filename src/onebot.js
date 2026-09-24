@@ -242,6 +242,72 @@ export class OneBotClient {
     }
     throw lastError ?? new Error('展开合并转发失败');
   }
+
+  /**
+   * 取群公告列表（正文在这里，不在卡片里）。
+   *
+   * ⚠️ action 名要回退：go-cqhttp 是 `get_group_notice`，更老的实现叫 `_get_group_notice`
+   *   （带下划线的私有动作名）。SnowLuma 认哪一个没有实测过，所以两个都试。
+   *   与 getForwardNodes 同理：接口成功就以它为准，不再往下试 —— 换名字重试只会拿到
+   *   更含糊的错误，把真正的原因盖掉（"这个群没有公告" 和 "协议端不支持" 是两回事）。
+   *
+   * 返回统一成 [{ id, senderId, publishTime, text, imageCount }]：
+   *   publishTime 是毫秒时间戳（各实现对秒/毫秒不一致，这里统一归一化）。
+   * 取不到内容的条目会被丢掉（有的实现会给一堆只有 id 的空壳）。
+   *
+   * 正文与聊天记录同等不可信（公告是群管理员发的，但接口返回的内容仍当作外部输入处理）：
+   * 过一遍 sanitizeUserText、去掉控制字符、按 NOTICE_TEXT_MAX 截断。
+   */
+  async getGroupNotice(groupId) {
+    let lastError = null;
+    // "接口答了但字段对不上" 要单独记：它和 "协议端不支持这个 action" 是两回事，
+    // 而且更接近真相 —— 后者只是别名没试对，前者说明版本有差异。若共用 lastError，
+    // 第二个 action 的 1404 会把结构错误覆盖掉，最后报出去的就是最没用的那句话。
+    let shapeError = null;
+    for (const action of ['get_group_notice', '_get_group_notice']) {
+      let data;
+      try {
+        data = await this.call(action, { group_id: Number(groupId) });
+      } catch (error) {
+        lastError = error;
+        continue;
+      }
+      // 见过的三种形态：直接数组 / { notices: [...] } / 再套一层 data。
+      // ⚠️ "认不出结构" 必须和 "确实是空列表" 分开：前者若也返回 []，调用方会当成
+      //    "这个群没有公告" 自信地答错。认不出就换下一个 action 试，都认不出才报错。
+      const list = Array.isArray(data) ? data
+        : (Array.isArray(data?.notices) ? data.notices
+          : (Array.isArray(data?.data) ? data.data : null));
+      if (list === null) {
+        const shape = (data && typeof data === 'object') ? Object.keys(data).join(',') || '空对象' : typeof data;
+        shapeError ??= new Error(`OneBot ${action} 返回了无法识别的结构（字段：${shape}）`);
+        continue;
+      }
+      return list.map((n) => {
+        const rawField = isTextValue(n?.message?.text) ? n.message.text
+          : (isTextValue(n?.content) ? n.content : '');
+        const raw = decodeBase64Text(rawField) || String(rawField);
+        // 控制字符（\u0000 之类）会污染提示词；换行保留（公告常是条目式的），
+        // 但三个以上连续换行折成两个，免得一大段空行把上下文撑开。
+        const text = clipText(
+          sanitizeUserText(raw).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').replace(/\n{3,}/g, '\n\n'),
+          NOTICE_TEXT_MAX
+        );
+        // 有的实现时间是秒，有的是毫秒；小于 1e12 当秒处理（2026 年的毫秒时间戳远大于它）
+        let ts = Number(n?.publish_time ?? n?.publishTime ?? 0) || 0;
+        if (ts > 0 && ts < 1e12) ts *= 1000;
+        const images = n?.message?.images ?? n?.images;
+        return {
+          id: String(n?.notice_id ?? n?.id ?? ''),
+          senderId: String(n?.sender_id ?? n?.senderId ?? ''),
+          publishTime: ts,
+          text,
+          imageCount: Array.isArray(images) ? images.length : 0
+        };
+      }).filter((n) => n.text);
+    }
+    throw shapeError ?? lastError ?? new Error('取群公告失败');
+  }
 }
 
 // ── 入站事件 → 文本（移植自原版 segmentsToText） ─────────────────────────
@@ -326,10 +392,54 @@ const CARD_MAX_CHARS = 32 * 1024;   // 超过就不解析了，走 prompt 兜底
 const CARD_FIELD_MAX = 120;
 const CARD_URL_MAX = 300;
 const CARD_TEXT_MAX = 300;
+// base64 解码命中时的上限，比 CARD_FIELD_MAX 宽得多：群公告的正文经常直接躺在
+// 卡片 title 里（几百字），用 120 截掉就只剩个开头。普通字段仍走 CARD_FIELD_MAX。
+const CARD_DECODED_MAX = 800;
+// 单条群公告正文的上限。接口返回的内容长度完全由服务端决定，不设限的话一条超大公告
+// 就能把一次运行的上下文吃掉。
+const NOTICE_TEXT_MAX = 1500;
 
 /** 只认字符串/数字，挡掉对象（否则 String({}) 会把 [object Object] 塞进提示词）。 */
 function isTextValue(v) {
   return typeof v === 'string' || typeof v === 'number';
+}
+
+// 判断"解码出来是不是中文文本"用的 CJK 区间（含全角标点，公告正文里 、。： 很常见）。
+const CJK_RE = /[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]/;
+
+/**
+ * 把"看起来是 UTF-8 base64 的字符串"解回明文，解不出来返回 ''。
+ *
+ * 为什么需要它：QQ 的 Ark 卡片（尤其是群公告）把中文字段用 base64 塞在 title/desc 里。
+ * 不解码的话，存档和系统提示词里看到的是 `标题：576k5YWs5ZGK` 这种东西 —— 人和模型都读不懂。
+ *
+ * 判定刻意收得很紧，宁可漏判也不能误伤普通标题：
+ *   1. 长度 ≥8 且是 4 的倍数，字符集就是标准 base64
+ *   2. 解码后**再编回 base64 必须与原文一致** —— Buffer.from 对非法输入是宽松的
+ *      （会静默丢弃不认识的字符），不校验的话 "abc!!" 之类的垃圾也会被"解出"东西
+ *   3. 严格 UTF-8 解码（fatal），拒绝任何非法字节序列
+ *   4. **必须含 CJK 字符** —— QQ 里被 base64 的都是中文内容；这道门挡掉"恰好是合法
+ *      base64 的英文串"（实测 "aGVsbG8gd29ybGQ=" 解出来是 "hello world"，会被正确拒绝）
+ *   5. 不含控制字符（会污染提示词格式）
+ *
+ * @param {*} s 待判定的值（非字符串直接放弃）
+ * @returns {string} 解码后的明文；未命中返回 ''
+ */
+export function decodeBase64Text(s) {
+  if (!isTextValue(s)) return '';
+  const t = String(s).trim();
+  if (t.length < 8 || t.length % 4 !== 0) return '';
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(t)) return '';
+  let buf;
+  try { buf = Buffer.from(t, 'base64'); } catch { return ''; }
+  if (!buf.length) return '';
+  // 往返校验：不这样写的话非法输入会被宽松解码成别的东西
+  if (buf.toString('base64').replace(/=+$/, '') !== t.replace(/=+$/, '')) return '';
+  let out;
+  try { out = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return ''; }
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(out)) return '';
+  if (!CJK_RE.test(out)) return '';
+  return out;
 }
 
 /** 取文本字段：折叠空白 + 按码点截断（避免把代理对切成乱码）。 */
@@ -338,6 +448,31 @@ function textField(value, max) {
   const s = String(value).replace(/\s+/g, ' ').trim();
   if (s.length <= max) return s;
   return Array.from(s).slice(0, max).join('') + '…';
+}
+
+/**
+ * 只截断、**不折叠空白**（按码点，避免切坏代理对）。
+ *
+ * 与 textField 的区别是保留换行。给群公告正文用：公告常是条目式的，折成一行会读不懂；
+ * 而它进的是工具结果的 JSON（`JSON.stringify(payload, null, 1)` 会把换行转义成 \n），
+ * 伪造不出"整行假历史"，所以这里不需要 textField 那道折叠防线的保护。
+ */
+function clipText(value, max) {
+  const s = String(value ?? '').trim();
+  if (s.length <= max) return s;
+  return Array.from(s).slice(0, max).join('') + '…';
+}
+
+/**
+ * 卡片文本字段：**先解码再截断**。
+ *
+ * ⚠️ 顺序不能反。textField 会按 CARD_FIELD_MAX 截断，而 base64 一旦被截断就再也不是
+ *    合法编码（长度不是 4 的倍数）—— 先截后解等于永远解不开。所以这里先拿原始值去解码，
+ *    命中就用解密文（放宽到 CARD_DECODED_MAX），未命中才回退原值按 CARD_FIELD_MAX 处理。
+ */
+function cardTextField(value, max = CARD_FIELD_MAX) {
+  const decoded = decodeBase64Text(value);
+  return decoded ? textField(decoded, CARD_DECODED_MAX) : textField(value, max);
 }
 
 /** 只收 http/https：mqqapi:// 小程序链接、javascript: 等一律丢弃。 */
@@ -393,15 +528,44 @@ export function parseCardSegment(data) {
   const app = textField(card.app, 60);
   const view = textField(card.view, 40);
   const body = firstCardBody(card.meta);
-  const title = textField(body?.title, CARD_FIELD_MAX);
-  const desc = textField(body?.desc, CARD_FIELD_MAX);
+  // title/desc 走 cardTextField：QQ 的群公告卡片把它们做成了 UTF-8 的 base64
+  // （title 通常是 "576k5YWs5ZGK" = "群公告"），直接显示就是一段乱码。
+  const title = cardTextField(body?.title);
+  const desc = cardTextField(body?.desc);
   const tag = textField(body?.tag, 40);
   const url = httpUrlField(body?.jumpUrl);
   const preview = httpUrlField(body?.preview);
+  // 协议端给的兜底文字，两种形态都见过：明文 "[群公告]"，或同样被 base64 过
+  const prompt = cardTextField(card.prompt);
+
+  // 群公告走独立分支：它虽然也是卡片，但**正文根本不在卡片里**（title 解出来只有
+  // "群公告"三个字，那只是个标签）。正文得靠 read_group_notice 调 OneBot 接口去取，
+  // 所以这里必须给出一个可辨认的占位符，不能落进下面通用的 [卡片 xxx] 渲染 ——
+  // 否则模型会以为卡片里的链接就是全部内容，跑去 web_fetch 白跑一趟。
+  // 识别按"从确定到宽松"：app 模板名最可靠，退到 prompt，再退到标题恰好是"群公告"。
+  //
+  // ⚠️ prompt 的实际形态是 "[群公告]"（带方括号），同族卡片还见过【群公告】/（群公告）。
+  //    不剥掉外层括号直接比 '群公告' 的话，这级兜底永远不会命中（实测），所以先归一化。
+  const promptPlain = prompt.replace(/^[\s[【（(]+/, '').replace(/[\s\]】）)]+$/, '');
+  const isAnnounce = /announce/i.test(String(card.app ?? ''))
+    || promptPlain === '群公告'
+    || title === '群公告';
+  // 封面单独作为 image 并存（两条分支共用同一份）：get_message_images 的筛选条件就是
+  // kind==='image' && url，不改一行代码模型就能看到卡片封面。
+  const media = [{ kind: 'card', app, view, title, desc, url, tag }];
+  if (preview) media.push({ kind: 'image', url: preview, summary: '卡片封面' });
+  if (isAnnounce) {
+    // title 解出来往往就是"群公告"这个标签本身，带上它只会得到"标题：群公告"这种废话；
+    // 只有当它确实多说了点什么（少数协议端会把正文塞进 title）才附上。
+    const extra = [title, desc].filter((v) => v && v !== '群公告');
+    return {
+      text: textField(`[群公告] 检测到一条群公告${extra.length ? `：${extra.join(' ｜ ')}` : ''}（正文用 read_group_notice 查看）`, CARD_TEXT_MAX),
+      media
+    };
+  }
 
   if (!title && !desc && !url) {
     // 白名单字段全空 → 退回 prompt（协议端准备的"无法展示卡片时的文字"，形如 [QQ小程序]xxx）
-    const prompt = textField(card.prompt, CARD_FIELD_MAX);
     return prompt ? { text: `[卡片 ${prompt}]`, media: [] } : fallback;
   }
 
@@ -411,11 +575,6 @@ export function parseCardSegment(data) {
   if (title) bits.push(`标题：${title}`);
   if (desc && desc !== title) bits.push(`描述：${desc}`);
   if (url) bits.push(`链接：${url}`);
-  // 封面单独作为 image 并存：get_message_images 的筛选条件就是 kind==='image' && url，
-  // 不改一行代码模型就能看到卡片封面；顺带让这条消息在提示词里带上 #id。
-  const media = [{ kind: 'card', app, view, title, desc, url, tag }];
-  if (preview) media.push({ kind: 'image', url: preview, summary: '卡片封面' });
-
   return { text: textField(`[卡片${label ? ' ' + label : ''}] ${bits.join(' ｜ ')}`, CARD_TEXT_MAX), media };
 }
 

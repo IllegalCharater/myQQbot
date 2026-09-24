@@ -339,16 +339,7 @@ export class MemoryStore {
       lastConsolidatedAt: old.lastConsolidatedAt || 0
     };
     // 单个成员替换也备份原文件（保留最近一次）
-    try {
-      const backupDir = path.join(MEMORY_DIR, 'backups', chatDirName(chatKey));
-      fs.mkdirSync(backupDir, { recursive: true });
-      const src = memberFile(chatKey, uid, finalName);
-      if (fs.existsSync(src)) {
-        const dst = path.join(backupDir, path.basename(src));
-        if (fs.existsSync(dst)) fs.rmSync(dst, { force: true });
-        fs.copyFileSync(src, dst);
-      }
-    } catch { /* 备份失败不阻塞 */ }
+    this.#backupMember(chatKey, uid, finalName);
     writeJson(memberFile(chatKey, uid, finalName), member);
     map.set(uid, member);
     return {
@@ -368,6 +359,73 @@ export class MemoryStore {
     map.delete(uid);
     try { fs.rmSync(memberFile(chatKey, uid, m.name), { force: true }); } catch { /* ignore */ }
     return true;
+  }
+
+  /**
+   * 改**单条**印象（面板管用）。定位用 (userId, content)，返回更新后的成员或 null。
+   *
+   * 为什么不用现成的 editMemberImpression：那个是"整列表重写"，会把所有条目的
+   * createdAt 刷成当下 —— 时间线（这条印象是什么时候形成的）全丢。单条改必须保住它。
+   *
+   * 为什么按 content 定位而不是数组下标：印象条目**没有 id 字段**（只有 content 与
+   * createdAt），而 #appendRaw 是 push 到末尾、且按 content 去重 —— 所以
+   * (userId, content) 在单个成员内实际就是唯一键，bot 并发追加也不会让已有条目错位。
+   * 与既有的 remove() 同一套约定，也跟 store 那边"绝不按下标"是同一条原则。
+   */
+  updateImpression(chatKey, { userId = '', target: targetName = '', content = '', next = '' } = {}) {
+    const uid = String(userId ?? '').trim();
+    const name = String(targetName ?? '').trim();
+    // 两条寻址路径与 remove() 严格一致：有 QQ 号按号找，没有的（`_n_` 那种
+    // 整理时没能确定 QQ 的成员）按名字找 —— 只认 userId 会让这些成员永远改不了。
+    if (!uid && !name) throw new Error('缺少 userId 或 target');
+    if (uid && !/^\d{1,15}$/.test(uid)) throw new Error('userId 必须是数字 QQ 号');
+    const from = String(content ?? '');
+    const to = String(next ?? '').trim();
+    if (!from) throw new Error('缺少 content（要改的那条原文）');
+    if (!to) throw new Error('新内容不能为空');
+    const map = this.#ensureChat(chatKey);
+    let m = null;
+    if (uid) {
+      m = map.get(uid) || loadMember(chatKey, uid);
+    } else {
+      for (const cand of map.values()) {
+        if (String(cand.name || cand.userId) === name) { m = cand; break; }
+      }
+      if (!m) m = loadMember(chatKey, name);
+    }
+    if (!m || !Array.isArray(m.impressions) || !m.impressions.length) return null;
+    const target = m.impressions.find((e) => String(e.content) === from);
+    if (!target) return null;
+    // 撞车要报错而不是静默合并：#appendRaw 的去重是按 content 的，
+    // 真存成两条一模一样的，以后 remove({content}) 会一次删掉两条。
+    if (m.impressions.some((e) => e !== target && String(e.content) === to)) {
+      throw new Error('已有一条一模一样的印象，不能改成重复的');
+    }
+    this.#backupMember(chatKey, uid, m.name);
+    target.content = to.slice(0, 300);   // createdAt 原样保留
+    m.updatedAt = Date.now();
+    writeJson(memberFile(chatKey, uid, m.name), m);
+    map.set(uid, m);
+    return {
+      userId: String(m.userId || uid),
+      name: String(m.name || ''),
+      impressions: m.impressions.map((e) => ({ ...e })),
+      updatedAt: m.updatedAt
+    };
+  }
+
+  /** 改成员文件之前留一份备份（保留最近一次），与 replaceMember 的做法一致。 */
+  #backupMember(chatKey, userId, name = '') {
+    try {
+      const backupDir = path.join(MEMORY_DIR, 'backups', chatDirName(chatKey));
+      fs.mkdirSync(backupDir, { recursive: true });
+      const src = memberFile(chatKey, userId, name);
+      if (!fs.existsSync(src)) return '';
+      const dst = path.join(backupDir, path.basename(src));
+      if (fs.existsSync(dst)) fs.rmSync(dst, { force: true });
+      fs.copyFileSync(src, dst);
+      return dst;
+    } catch { return ''; }   // 备份失败不阻塞
   }
 
   remove(chatKey, category, { userId = '', target = '', content = '' } = {}) {

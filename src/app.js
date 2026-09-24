@@ -12,6 +12,8 @@ import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNo
 import { ChatStore } from './store.js';
 import { MemoryStore } from './memory.js';
 import { StickerManager } from './sticker-manager.js';
+import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
+import { detectMime } from './tools.js';
 import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
 import { Orchestrator } from './orchestrator.js';
@@ -313,7 +315,9 @@ export function createApp({ log = console.log } = {}) {
     httpToken: cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken,
     onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
   });
-  const stickers = new StickerManager(onebot);
+  // onChange：bot 自己改库（收藏/改备注/发过）时也让面板那页刷新 —— 否则用户正看着
+  // 表情页，模型在群里偷偷收藏了一张，页面不会动。
+  const stickers = new StickerManager(onebot, { onChange: () => emit('sticker-update', {}) });
   const sender = new SendQueue({
     onebot, store,
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`)
@@ -1361,6 +1365,82 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, { ok: true });
       }
 
+      // 单条印象的增 / 改 / 删（记忆页每行的小按钮）。
+      //
+      // 为什么寻址信息走 body 而不是路径/query：一条印象的地址是 (成员, 原文)，
+      // 而原文最长 300 字、天然含 / ? # 换行与引号 —— 塞进 URL 既难编码又容易截断。
+      //
+      // 为什么"改"不能用现成的成员级 PUT：editMemberImpression 是整个列表重写、
+      // 把所有条目的 createdAt 刷成当下，拿它改一条会毁掉全部时间线（memory.js:288）。
+      const memoryImpMatch = /^\/api\/memory-files\/(group|private)_(\d+)\/impressions$/.exec(pathname);
+      if (memoryImpMatch && ['POST', 'PATCH', 'PUT', 'DELETE'].includes(method)) {
+        const chatKey = `${memoryImpMatch[1]}:${memoryImpMatch[2]}`;
+        const body = await readBody(req).catch(() => ({}));
+        const userId = String(body.userId ?? '').trim();
+        const target = String(body.target ?? '').trim();
+        const content = String(body.content ?? '').trim();
+        // 成员定位：QQ 号优先，其次备注名（整理时没能确定 QQ 号的成员只有名字）
+        if (!userId && !target) return json(res, 400, { ok: false, error: '缺少 userId 或 target' });
+        if (userId && !/^\d{1,15}$/.test(userId)) return json(res, 400, { ok: false, error: 'userId 必须是数字 QQ 号' });
+
+        if (method === 'POST') {
+          if (!content) return json(res, 400, { ok: false, error: '印象内容不能为空' });
+          if (content.length > 300) return json(res, 400, { ok: false, error: '印象最长 300 字' });
+          const before = userId
+            ? memory.getMember(chatKey, userId).impressions.length
+            : (memory.members(chatKey).find((m) => String(m.name) === target)?.impressions.length ?? 0);
+          const created = memory.append(chatKey, 'memberImpression', content, { userId, target });
+          if (!created) return json(res, 400, { ok: false, error: '无法写入印象' });
+          const after = userId
+            ? memory.getMember(chatKey, userId)
+            : memory.members(chatKey).find((m) => String(m.name) === target);
+          emit('memory-update', { chatKey });
+          // #appendRaw 对"一字不差"的重复是静默跳过的（memory.js:211），
+          // 不比对条数的话前端会以为加成功了。
+          return json(res, 200, { ok: true, duplicate: (after?.impressions?.length ?? 0) === before, member: after || null });
+        }
+
+        // 改单条。**必须用 else if 把 PATCH 圈在这里**：漏掉的话 PATCH 会掉进
+        // 下面的删除分支，一个"改备注"的请求把印象删了（t-admin 抓到过这个）。
+        if (method === 'PATCH' || method === 'PUT') {
+          const next = String(body.next ?? body.nextContent ?? '').trim();
+          if (!content) return json(res, 400, { ok: false, error: '缺少 content（要改的那条原文）' });
+          if (!next) return json(res, 400, { ok: false, error: '新内容不能为空' });
+          if (next.length > 300) return json(res, 400, { ok: false, error: '印象最长 300 字' });
+          try {
+            const member = memory.updateImpression(chatKey, { userId, target, content, next });
+            // 对不上 = 面板显示的那份内容已经被整理流程改写过了。宁可 404 让用户刷新，
+            // 也绝不能猜一条来改（静默改错条目比报错糟得多）。
+            if (!member) return json(res, 404, { ok: false, error: '找不到这条印象，可能已被整理流程改写，请刷新' });
+            emit('memory-update', { chatKey });
+            return json(res, 200, { ok: true, member });
+          } catch (error) {
+            return json(res, 409, { ok: false, error: String(error?.message ?? error) });
+          }
+        }
+
+        // DELETE
+        if (!content) return json(res, 400, { ok: false, error: '缺少 content（要删的那条原文）' });
+        const memberKey = userId || target;
+        const beforeCount = userId
+          ? memory.getMember(chatKey, userId).impressions.length
+          : (memory.members(chatKey).find((m) => String(m.name) === target)?.impressions.length ?? 0);
+        const removed = memory.remove(chatKey, 'memberImpression', { userId, target, content });
+        if (!removed) return json(res, 404, { ok: false, error: '找不到这条印象，可能已被整理流程改写，请刷新' });
+        const left = userId
+          ? memory.getMember(chatKey, userId).impressions.length
+          : (memory.members(chatKey).find((m) => String(m.name) === target)?.impressions.length ?? 0);
+        emit('memory-update', { chatKey });
+        // memberGone：删掉最后一条时 memory.remove 会连成员文件一起删（memory.js:433），
+        // 前端得如实告诉用户，不能只报"已删除"。
+        return json(res, 200, {
+          ok: true,
+          memberGone: left === 0 && beforeCount > 0,
+          memberKey,
+          member: userId ? memory.getMember(chatKey, userId) : null
+        });
+      }
+
       // 手动整理某个群的记忆：遍历聊天记录中出现的成员，逐人整理直到收敛
       if (pathname === '/api/memory-files/consolidate' && method === 'POST') {
         try {
@@ -1433,6 +1513,56 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, { chatKey, messages });
       }
 
+      // ── 存档单条改 / 删 / 插备注（存档页每行的小按钮） ────────────────────
+      //
+      // 三个都是一次写入 + 一条 SSE：面板上任何一处改完都靠 chat-update 全体刷新，
+      // 不做"前端本地打补丁"——bot 随时在追加，本地数组一转眼就是旧的。
+      const chatMsgItemMatch = /^\/api\/chats\/(group|private)_(\d+)\/messages\/(\d+)$/.exec(pathname);
+      if (chatMsgItemMatch && method === 'PATCH') {
+        const chatKey = `${chatMsgItemMatch[1]}:${chatMsgItemMatch[2]}`;
+        const localId = Number(chatMsgItemMatch[3]);
+        const body = await readBody(req).catch(() => ({}));
+        const text = typeof body.text === 'string' ? body.text : null;
+        if (text == null) return json(res, 400, { ok: false, error: '缺少 text' });
+        if (!text.trim()) return json(res, 400, { ok: false, error: '内容不能为空' });
+        if (text.length > 8000) return json(res, 400, { ok: false, error: '内容过长' });
+        const rec = store.findByLocalId(chatKey, localId);
+        if (!rec) return json(res, 404, { ok: false, error: '找不到这条记录' });
+        // 摘要是模型生成的，手改会让它与 digest.summary/count 对不上（变成一段
+        // 没有任何来源的假纪要）；删掉后让它重新生成才是正路。
+        if (rec.kind === 'digest') return json(res, 400, { ok: false, error: '摘要由模型生成，不能手改；可以删除' });
+        const message = store.updateByLocalId(chatKey, localId, { text });
+        emit('chat-update', chatKey);
+        return json(res, 200, { ok: true, message });
+      }
+      if (chatMsgItemMatch && method === 'DELETE') {
+        const chatKey = `${chatMsgItemMatch[1]}:${chatMsgItemMatch[2]}`;
+        const localId = Number(chatMsgItemMatch[3]);
+        const result = store.deleteByLocalId(chatKey, localId);
+        if (!result) return json(res, 404, { ok: false, error: '找不到这条记录（可能已在别处删掉）' });
+        emit('chat-update', chatKey);
+        return json(res, 200, {
+          ok: true,
+          removed: { id: result.removed.id, senderName: result.removed.senderName, ts: result.removed.ts },
+          // 备份文件名回给前端，UI 上写清"改坏了能在哪找回"，删除才敢让用户点
+          backup: result.backup ? path.basename(result.backup) : '',
+          remaining: store.getChatMeta(chatKey).total
+        });
+      }
+
+      const chatNoteMatch = /^\/api\/chats\/(group|private)_(\d+)\/notes$/.exec(pathname);
+      if (chatNoteMatch && method === 'POST') {
+        const chatKey = `${chatNoteMatch[1]}:${chatNoteMatch[2]}`;
+        const body = await readBody(req).catch(() => ({}));
+        const text = String(body.text ?? '').trim();
+        if (!text) return json(res, 400, { ok: false, error: '备注内容不能为空' });
+        if (text.length > 2000) return json(res, 400, { ok: false, error: '备注过长（上限 2000 字）' });
+        const ts = Number(body.ts) || Date.now();
+        const note = store.insertNote(chatKey, { text, ts });
+        emit('chat-update', chatKey);
+        return json(res, 200, { ok: true, note });
+      }
+
       // 群成员列表（OneBot get_group_member_list），用于备注与记忆页成员展示
       const groupMembersMatch = /^\/api\/groups\/(\d+)\/members$/.exec(pathname);
       if (groupMembersMatch && method === 'GET') {
@@ -1499,6 +1629,118 @@ export function createApp({ log = console.log } = {}) {
         }
         emit('chat-update', '*');
         return json(res, 200, { ok: true, paused: false, marked });
+      }
+
+      // ── 表情包管理（面板"表情"页） ────────────────────────────────────────
+      //
+      // 库里 48 条表情以前只能靠 `data/stickers.json` 手改，这是第一个入口。
+      const stickerListMatch = pathname === '/api/stickers' && method === 'GET';
+      if (stickerListMatch) {
+        const q = String(url.searchParams.get('q') ?? '');
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 200));
+        const force = url.searchParams.get('force') === '1';
+        try {
+          const data = await stickers.adminList(q, limit, force);
+          return json(res, 200, { ok: true, ...data });
+        } catch (error) {
+          return json(res, 502, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
+      if (pathname === '/api/stickers/sync' && method === 'POST') {
+        try {
+          const data = await stickers.adminList('', 500, true);
+          emit('sticker-update', {});
+          // fromCache / syncError 必须原样回：QQ 同步失败时页面上还显示着本地缓存，
+          // 不说清楚的话用户会以为"我明明删了/改了的那个怎么又回来了"。
+          return json(res, 200, { ok: !data.syncError, count: data.total, fromCache: data.fromCache, error: data.syncError || '' });
+        } catch (error) {
+          return json(res, 502, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
+      // 缩略图代理。**必须**走这里，页面上绝不能写 <img src="qpic…">：
+      //  ① 图床有防盗链，直连大概率裂图；
+      //  ② stickers.json 一旦被污染成内网地址，直连就是"用户的浏览器"去打内网 ——
+      //     发送路径有 validateImageUrl 把关（tools.js:172），浏览器直连等于绕开它。
+      // 复用现成的两道闸，不在这里另开 allowPrivate 口子。
+      const stickerImageMatch = /^\/api\/stickers\/([^/]+)\/image$/.exec(pathname);
+      if (stickerImageMatch && method === 'GET') {
+        let ref;
+        try { ref = decodeURIComponent(stickerImageMatch[1]); } catch { return json(res, 400, { error: '表情 id 编码错误' }); }
+        const entry = await stickers.find(ref).catch(() => null);
+        if (!entry) return json(res, 404, { error: '找不到这个表情' });
+        if (!entry.url) return json(res, 404, { error: '该表情没有图片地址' });
+        try {
+          const safeUrl = await validateImageUrl(entry.url);
+          const { buffer, contentType } = await safeFetchBinary(safeUrl);
+          // 只认真正探测到的图片魔数，content-type 仅作兜底且必须在 image/ 之内。
+          // 否则一个指向 text/html 的 URL 就能把 HTML 注入面板同源页面（本页首次
+          // 渲染远程图片，这道闸不能省）。
+          const mime = detectMime(buffer) || (/^image\//i.test(String(contentType || '')) ? String(contentType).split(';')[0] : '');
+          if (!mime) return json(res, 415, { error: '取回的内容不是图片' });
+          res.writeHead(200, {
+            'content-type': mime,
+            'content-length': buffer.length,
+            // 图床 URL 可能过期，缓存别太激进；private 防止共享代理串味
+            'cache-control': 'private, max-age=600',
+            'x-content-type-options': 'nosniff',
+            'content-security-policy': "default-src 'none'"
+          });
+          return res.end(buffer);
+        } catch (error) {
+          return json(res, 502, { error: String(error?.message ?? error) });
+        }
+      }
+
+      const stickerItemMatch = /^\/api\/stickers\/([^/]+)$/.exec(pathname);
+      if (stickerItemMatch && method === 'PATCH') {
+        let ref;
+        try { ref = decodeURIComponent(stickerItemMatch[1]); } catch { return json(res, 400, { ok: false, error: '表情 id 编码错误' }); }
+        const body = await readBody(req).catch(() => ({}));
+        // desc 是 QQ 那边的收藏名，mergeStickerLibrary 每次同步都会用源数据盖回来
+        // （stickers.js:74），所以它**只读**：这里不收 body.desc，前端也只展示。
+        // ⚠️ 传给 applyStickerNote 的键必须是 note（它对外的字段名是 localNote，
+        //    但 patch 的键叫 note —— 见 stickers.js:260）。
+        const patch = {};
+        if (body.note !== undefined) patch.note = String(body.note ?? '').trim().slice(0, 200);
+        if (body.usage !== undefined) patch.usage = String(body.usage ?? '').trim().slice(0, 200);
+        if (body.tags !== undefined) {
+          const raw = Array.isArray(body.tags) ? body.tags : String(body.tags ?? '').split(/[,，\s]+/);
+          patch.tags = [...new Set(raw.map((t) => String(t ?? '').trim().slice(0, 30)).filter(Boolean))].slice(0, 20);
+        }
+        if (!Object.keys(patch).length) return json(res, 400, { ok: false, error: '没有可改的字段（note / tags / usage）' });
+        // 走 noteVerbose（认标签）而不是精确 id：与 sticker_note 工具的行为一致。
+        // 歧义就报歧义并列出候选——静默挑一个改错表情，比失败糟得多。
+        const result = stickers.noteVerbose(ref, patch);
+        if (result.ambiguous?.length) {
+          return json(res, 409, {
+            ok: false,
+            error: `「${ref}」对应 ${result.ambiguous.length} 个表情，请用 id 指定：${result.ambiguous.map((e) => e.id).join(' / ')}`,
+            candidates: result.ambiguous.map((e) => ({ id: e.id, desc: e.desc, url: e.url }))
+          });
+        }
+        if (!result.entry) return json(res, 404, { ok: false, error: '找不到这个表情' });
+        emit('sticker-update', { id: result.entry.id });
+        return json(res, 200, {
+          ok: true,
+          sticker: {
+            id: result.entry.id, localNote: result.entry.localNote || '', tags: result.entry.tags || [],
+            usage: result.entry.usage || '', desc: result.entry.desc || ''
+          }
+        });
+      }
+
+      if (stickerItemMatch && method === 'DELETE') {
+        let ref;
+        try { ref = decodeURIComponent(stickerItemMatch[1]); } catch { return json(res, 400, { ok: false, error: '表情 id 编码错误' }); }
+        const result = stickers.remove(ref);
+        if (result.refused === 'qq') {
+          return json(res, 409, { ok: false, error: '这是 QQ 收藏里的表情，本地删不掉（下次同步就会回来）。请到 QQ 里取消收藏。' });
+        }
+        if (!result.removed) return json(res, 404, { ok: false, error: '找不到这个表情（删除只认 id / resId / md5 / 图片地址，不按备注名猜）' });
+        emit('sticker-update', {});
+        return json(res, 200, { ok: true, removed: { id: result.removed.id, desc: result.removed.desc || '' } });
       }
 
       return json(res, 404, { error: `未知 API：${method} ${pathname}` });
