@@ -5,6 +5,10 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+// 跑的是 tsc 产物 dist/，行号和 src/ 对不上——开了源地图，堆栈里的行号才指回
+// 原始源码（options 里带了 inlineSources，所以便携包里没装 src/ 也看得到）。
+process.setSourceMapsEnabled?.(true);
+
 // Windows 上部分显卡驱动会导致渲染进程黑屏；禁用硬件加速是最稳妥的修复
 app.disableHardwareAcceleration();
 
@@ -153,7 +157,7 @@ app.whenReady().then(async () => {
     // 应用只访问本机回环地址：强制直连，防止系统代理（Clash/加速器等）劫持 127.0.0.1 导致白/黑屏
     await session.defaultSession.setProxy({ mode: 'direct' });
     console.log('[window] 代理模式：direct（绕过系统代理）');
-    const { createApp } = await import('../src/app.js');
+    const { createApp } = await import('../dist/app.js');
     core = createApp({ log: (...args) => console.log(...args) });
     // 先启动服务拿到真实端口，再开窗口。
     // 原先是 createWindow(core.lastPort ?? 3210) 在前、core.start() 在后 ——

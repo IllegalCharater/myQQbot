@@ -1,7 +1,7 @@
 // 一次性应用：把联网调研（官方文档/权威报道）得出的图片输入结论写入 config.modelVision。
 // 用法：先停应用，然后 node scripts/apply-vision-docs.mjs，再启动应用。
 // verdict 判的是"该目录项实际能否看图"：模型能力 + 该网关链路是否透传。
-import { updateConfig, getConfig } from '../src/config.js';
+import { updateConfig, getConfig } from '../dist/config.js';
 
 const DOC_ENTRIES = {
   'qwen-token-plan-cn|||qwen3.8-max': {

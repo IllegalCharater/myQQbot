@@ -1,15 +1,16 @@
 // 配置管理：data/config.json，UI 可写。所有字段都有默认值。
 import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { PERSONAS } from './personas.js';
 import { sliderToTier } from './tier-slider.js';   // 零依赖模块，避免循环依赖
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const ROOT = path.resolve(__dirname, '..');
-// 测试/便携场景可重定向数据目录
-export const DATA_DIR = process.env.QQ_AGENT_DATA_DIR || path.join(ROOT, 'data');
-export const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+// 路径常量集中在 paths.ts（向上找 package.json，对目录深度免疫）。
+// 这里只是**转出**给老调用点用——仓库里另有 10 个模块从 config.js 取 DATA_DIR/ROOT，
+// 一次性改它们会把 S3 和 S4 混成一件事；等 S4/S5 再让它们直接找 paths。
+//
+// ⚠️ 转出必须"先 import 再 export"，不能写 `export { ROOT } from './paths.js'`：
+// 后者只转出、不给本文件引入绑定，下面用 DATA_DIR/CONFIG_FILE 时会 `is not defined`
+// ——2026-09-24 的 `detectMime is not defined` 就是这么炸的。
+import { ROOT, DATA_DIR, CONFIG_FILE } from './paths.js';
+export { ROOT, DATA_DIR, CONFIG_FILE };
 
 export const DEFAULT_CONFIG = {
   // OpenAI 兼容 API（必填才能跑）

@@ -5,8 +5,8 @@ import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
+import { getConfig, updateConfig } from './config.js';
+import { ROOT, DATA_DIR, UI_DIR } from './paths.js';
 import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, forwardIdFromData } from './onebot.js';
 import { ChatStore } from './store.js';
@@ -39,9 +39,6 @@ try {
 } catch (error) {
   console.warn('[net] 全局连接超时设置失败（使用 undici 默认值 10s）:', error?.message ?? error);
 }
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const UI_DIR = path.resolve(__dirname, '..', 'ui');
 
 // ── 白名单判断（移植自原版 allowed()） ───────────────────────────────────
 function allowed(kind, id, cfg) {

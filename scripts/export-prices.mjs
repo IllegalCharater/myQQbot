@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OFFICIAL_PRICES } from '../src/model-prices.js';
+import { OFFICIAL_PRICES } from '../dist/model-prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const out = path.resolve(process.argv[2] || path.join(__dirname, '..', 'prices.json'));

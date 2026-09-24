@@ -48,10 +48,11 @@ SnowLuma 可作为协议端使用，但它是独立第三方项目，不包含�
 
 ## 安装与启动
 
-安装依赖：
+安装依赖 + 首次编译（源码在 `src/`，运行时跑的是 `tsc` 的编译产物 `dist/`）：
 
 ```bash
 npm install
+npm run build
 ```
 
 启动桌面端：
@@ -60,7 +61,11 @@ npm install
 npm start
 ```
 
-也可以双击项目根目录中的 `启动QQ机器人.bat`。
+`npm start` / `npm run server` 会自动先编译一次（npm 的 `pre*` 钩子），所以日常不必手动 build。
+
+也可以双击项目根目录中的 `启动QQ机器人.bat`（它直接起 `node_modules` 里的 Electron，
+跑的就是 `dist/`——所以**首次双击前要先 `npm install && npm run build`**，
+或者用 `npm start` 让它自己编译）。
 
 仅启动 Web 服务：
 
@@ -69,6 +74,16 @@ npm run server
 ```
 
 随后访问 `http://127.0.0.1:3210`。
+
+改了源码要重新编译（开发时建议开 watch，它会一直盯着 `src/`）：
+
+```bash
+npm run dev          # tsc --watch
+npm run typecheck    # 只检查类型，不产物
+npm test             # 先 build，再跑 tests/ 下的套件
+```
+
+依赖：Node ≥ 20，`npm install` 需要能访问 npm 源（会装 Electron，约 300MB）。
 
 ## 基本配置
 

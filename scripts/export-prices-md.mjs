@@ -4,9 +4,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OFFICIAL_PRICES } from '../src/model-prices.js';
+import { OFFICIAL_PRICES } from '../dist/model-prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// 读的是**源码**不是 dist：下面解析的是文件里的分组注释，源码才是那个注释的出处。
+// （tsc 保留了注释，dist 里也有，但产物可能是旧的；S5 之后这个文件会变成 .ts。）
 const srcPath = path.join(__dirname, '..', 'src', 'model-prices.js');
 const outPath = path.join(__dirname, '..', 'docs', 'model-prices.md');
 

@@ -1,6 +1,7 @@
 # TypeScript 重构方案（qq-agent / myQQbot）
 
-> 状态：**计划已批准，尚未开工**。S0 已落库（就是这份文档）；S1 及之后每步都要单独确认再动。
+> 状态：**S0、S1、S2、S3 已完成**，S4 及之后待单独确认再动。
+> 目前有 **1 个 `.ts` 文件**（`src/paths.ts`），其余仍是 `src/*.js`。
 > 写作日期：2026-09-24
 
 ## Context
@@ -9,8 +10,8 @@
 
 - `src/` 28 个文件平铺在一起、13107 行；`src/app.js` 一个文件 2258 行，里面是 ~65 条 `if (pathname === …)` 路由分支。
 - `ui/app.js` 5924 行、单文件经典脚本、90 个顶层函数共享一个全局作用域，改动一处要通读一片。
-- 仓库里**没有任何构建/类型检查/lint/CI**：没有 `tsconfig`、没有 ESLint、没有 `.github/`，`package.json` 只有 `start` 和 `server` 两条脚本；`node_modules` 目前是空的。
-- 唯一的安全网是 `%TEMP%` 下的 21 个断言套件（约 1000 条断言），不在版本库里，清一次临时目录就全没。
+- 仓库里**没有任何构建/类型检查/lint/CI**：没有 `tsconfig`、没有 ESLint、没有 `.github/`，`package.json` 只有 `start` 和 `server` 两条脚本。→ **S2 已补上 `tsconfig` + `build`/`typecheck`/`dev`/`check`/`test` 脚本；ESLint 与 CI 仍不做**（见第七节）。
+- 唯一的安全网是 `%TEMP%` 下的 22 个套件（约 1000 条断言），不在版本库里，清一次临时目录就全没。→ **S1 已把 22 个全部搬进 `tests/`**。
 - 代价已经真实发生过：`detectMime` 被搬到 `safe-fetch.js` 后用 `export { … } from` 转出，漏了本地 import，**整条读图链路**在生产上炸成 `detectMime is not defined`（2026-09-24）。同一类事故还有 `normalizeStickerEntry` 的字段白名单——新字段不加进去就静默丢失（注释里专门写了警告）。这两类问题 TypeScript 都能在 `npm run typecheck` 时就拦住。
 
 **目标**：把扁平结构拆成按域分的目录，逐步迁到 TypeScript，并补上类型检查与仓库内测试这两道闸门；**运行行为、HTTP 接口、数据格式一律不变**。
@@ -66,53 +67,87 @@ T4 web          ← 只有它 import 所有人，没人 import 它
 **已做**：仅新增本文件。
 **未做**：任何源码、配置、依赖改动。
 
-### S1 安全网进仓库（仍是 `src/*.js`，零风险）
+### S1 安全网进仓库（✅ 已完成 2026-09-24，仍是 `src/*.js`，零风险）
+
+实际落地的形状（与最初的草图略有出入，以仓库里为准）：
 
 ```
 tests/
-├─ run.mjs            一条命令跑全部：先 build（若需要），再逐个套件起子进程，最后汇总，失败非零退出
-├─ register.mjs       loader hook（顶掉 ws/js-yaml，照搬 %TEMP% 那份）
-├─ lib/harness.mjs    ok() / mkdtemp+QQ_AGENT_DATA_DIR / 假图床 / 假模型端点 / vm 假 DOM
-└─ t-*.mjs            21 个套件原样搬入
+├─ run.mjs            一条命令跑全部：先 build、逐个起子进程、汇总，失败非零退出
+├─ README.md          怎么跑、两条规矩、每个套件守着什么
+├─ lib/src.mjs        被测代码在哪 —— 全仓库只有这一处写死（S2 起默认 `dist/`）
+├─ lib/harness.mjs    checker / dataDir / 假图床 / 假模型端点 / vm 假 DOM
+└─ t-*.mjs            22 个套件（12 断言 + 10 诊断）
 ```
 
-- **关键设计：所有套件不再硬写源码路径**，统一走 `tests/lib/src.mjs`：
-  ```js
-  // 只在这一处决定"被测代码在哪"，S4/S5 之后改成 dist 就是一行
-  const BASE = process.env.QQ_AGENT_SRC ?? new URL('../dist/', import.meta.url);
-  export const load = (rel) => import(new URL(rel, BASE).href);
-  ```
-  ⚠️ `QQ_AGENT_DATA_DIR` 必须在任何 `import` 之前设好（`config.js` 在模块加载时就把 `DATA_DIR` 定死了），所以 `load()` 必须是**动态** import，helper 本身不能在顶层 import 被测模块。
-- 21 个套件里 10 个（t-cfg/t-compact/t-orch/t-orch2/t-diag/t-final/t-final2/t-reentry/t-stall/t-fire）是**打印式诊断脚本**、不是断言套件，runner 要单独分组（默认跑断言套件，`--all` 才带上它们）。
-- 首次入库要跑一遍、把已经腐烂的套件**要么修好要么明确删掉**，不留"红的也照样跑"的习惯。
-- 顺手加质量闸门脚本：`"check": "npm run typecheck && node tests/run.mjs"`（没有 CI，就靠它）。
-- 验证：`node tests/run.mjs` 全绿。
+初版还有 `register.mjs` / `hook.mjs` / `ws-stub.mjs` / `yaml-stub.mjs` 一套 loader hook
+（`node_modules` 为空时顶掉 `ws` / `js-yaml`）；S2 装完真依赖后**已整套删除**，理由见 S2。
 
-### S2 工具链与 `dist` 切换（此时 **0 个 `.ts` 文件**）
+- **关键设计：所有套件不再硬写源码路径**，统一走 `load(rel)`（动态 import，理由见 README「两条必须知道的规矩」）。
+- 22 个套件里 10 个（t-cfg/t-compact/t-diag/t-fire/t-final/t-final2/t-orch/t-orch2/t-reentry/t-stall）是**打印式诊断脚本**、没有断言也不退非零，runner 单独分组（默认跑断言套件，`--all` 才带上）。
+- `run.mjs` 会检查"磁盘上的 `t-*.mjs` 都被归类过"，漏一个就直接报错退出——不留"红的也照样跑"的习惯。
+- 顺手加了 `npm test` / `npm run test:all`。`check`（typecheck + test）要等 S2 有 tsc 了再加，现在加会指向一条不存在的脚本。
 
-1. devDependencies 加 `typescript@~5.6`、`@types/node@^20`（`ws` 若在 `.ts` 里 import 需 `@types/ws`；`undici` / `electron` 自带类型）。首次要 `npm ci`——**注意会拉 Electron（约 100MB+）**，这台机器现在 `node_modules` 是空的。
+**结果**：22/22 绿。断言数与搬迁前逐一核对一致（admin 113、digest 89、notice 42、panel-wiring 125、reply 12、smoke 65、sticker 129、ui-render 118、vision-log 15、window-http 15）。默认 12 个断言套件 3.7s，带诊断 45.6s。
+
+**顺手做的**：`lib/harness.mjs` 收走了两份套件里各写一遍的假模型端点/假图床/假 DOM 壳（`t-vision-log` 与 `t-ui-render` 已改用它）。其余 20 个老套件的 `ok()` 没有回改——它们是从 `%TEMP%` 原样搬进来的，这道安全网本身不值得为了好看再动一遍。
+
+### S2 工具链与 `dist` 切换（✅ 已完成 2026-09-24，此时 **0 个 `.ts` 文件**）
+
+1. devDependencies 加 `typescript@~5.6`、`@types/node@^20`（`ws` 若在 `.ts` 里 import 需 `@types/ws`；`undici` / `electron` 自带类型）。首次要 `npm install`——**注意会拉 Electron（约 100MB+）**，这台机器现在 `node_modules` 是空的。
 2. `tsconfig.json`：
    ```jsonc
    {
      "compilerOptions": {
        "module": "NodeNext", "moduleResolution": "NodeNext", "target": "ES2022",
+       "lib": ["ES2022"], "types": ["node"],
        "rootDir": "src", "outDir": "dist",
        "allowJs": true, "checkJs": false,        // ← 增量迁移的关键：只查 .ts
        "strict": true, "isolatedModules": true,
-       "sourceMap": true, "removeComments": false,  // 注释是这个仓库的文档，必须保留
-       "skipLibCheck": true, "esModuleInterop": true, "incremental": true
+       "sourceMap": true, "inlineSources": true, "removeComments": false,  // 注释是这个仓库的文档，必须保留
+       "skipLibCheck": true, "esModuleInterop": true,
+       "incremental": true, "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
      },
-     "include": ["src/**/*.ts", "src/**/*.js"], "exclude": ["dist", "node_modules"]
+     "include": ["src/**/*.ts", "src/**/*.js"], "exclude": ["dist", "node_modules", "tests", "ui"]
    }
    ```
    **禁止 `baseUrl`/`paths` 别名**：Node 直接跑 `dist` 时不认别名，除非再引 loader/打包器——显式相对路径是这里唯一安全的选择。同理，`.ts` 里的 import 说明符**继续写 `.js` 后缀**（NodeNext 约定），这样编译产物的说明符一个字符都不用变。
-3. `package.json` scripts：`build` / `typecheck` / `dev`（`tsc -w`）/ `check`，`server` 改成 `node dist/server.js`，并加 `prestart`/`preserver` 自动 build（防"改了源码忘了 build，跑的是旧 dist"）。
+3. `package.json` scripts：`build`（`tsc -p`）/ `typecheck`（`--noEmit`）/ `dev`（`-w`）/ `check`（`typecheck && node tests/run.mjs`），`server` 改成 `node dist/server.js`，并加 `prestart`/`preserver` 自动 build（防"改了源码忘了 build，跑的是旧 dist"）。
 4. 入口改指 `dist`（见第四节清单）。
-5. 两个入口顶部调 `process.setSourceMapsEnabled?.(true)`，否则日志里的 `at async Orchestrator.wake (…:558:11)` 会指到 `dist` 的行号。
+5. 两个入口顶部调 `process.setSourceMapsEnabled?.(true)`，否则日志里的 `at async Orchestrator.wake (…:558:11)` 会指到 `dist` 的行号。（`server.js` 里要写在 import 之后——ESM import 会被提升；`electron/main.js` 里同理。）
 6. **为什么必须先做这步**：一旦有文件改成 `.ts`，Node 20 就跑不了它（`--experimental-strip-types` 是 22.6+，Electron 33 内嵌的是 Node 20），运行时只能靠 `dist`。所以构建必须排在第一个 `.ts` 之前。先在全 `.js` 状态下把工具链跑通，出问题就百分百是工具链的问题，跟类型无关。
-7. 验证：`npm run build` 无错 → `node dist/server.js` 起服务、浏览器开 `127.0.0.1:3210` 面板正常 → `npx electron .` 窗口正常 → `node tests/run.mjs` 全绿（此时 `QQ_AGENT_SRC=dist`）。
 
-### S3 路径锚点集中（第一个 `.ts` 文件）
+**实际落地的东西**：
+
+- 装完 75 个包（`node_modules` 301MB，tsc 5.6.3）；`dist/` 57 个文件，注释原样保留。
+  `tsc` 在 `allowJs` 下是**重新打印** JS 而不是原样拷贝：4 空格缩进、空行被吃掉、
+  单行 `if (x) y()` 被展开、CRLF 归一成 LF。所以 `dist/*.js` 与 `src/*.js` **不是逐字节相同**
+  ——"行为等价"是靠 22 个套件验的，不是靠 diff 眼看的。
+- `tests/lib/src.mjs` 的默认值从 `src/` 切到 `dist/`；`run.mjs` 开跑前先 `tsc`（失败就报错退出），
+  `--no-build` 可跳过。（当时还留了个 `QQ_AGENT_SRC=src` 逃生口，**S3 已删**——见下。）
+- 删掉了 S1 那套 loader hook（`register.mjs` / `hook.mjs` / `ws-stub.mjs` / `yaml-stub.mjs`）：
+  依赖已经真装上了，留着只会让"用 yaml 读配置"和"真的构造 WebSocket"这两条路在套件里继续是假的。
+- `scripts/export-prices.mjs` / `apply-vision-docs.mjs` 改指 `dist`；`export-prices-md.mjs`
+  仍然把 `src/model-prices.js` 当文本读（理由见 S8）；`electron/main.js` → `../dist/app.js`。
+- `src/server.js` 只加了 sourcemap 开关和一句注释，**没有实质改动**——它 import 的 `./app.js`
+  在 `dist` 里相对关系不变。
+- `scripts/*.mjs` 保持 `.mjs`（plan 里"不搬 scripts"），只改 import 指向 `dist`。
+- `dist/` 与 `*.tsbuildinfo` 都在 `.gitignore` 里；`git status` 干净（只有预期的 10 个改动文件 + 新增 `tests/`、`tsconfig.json`）。
+- `README.md`「安装与启动」重写：`npm install` → `npm run build` → `npm start`；
+  `启动QQ机器人.bat` 的说明补上"首次双击前要先 build"（`.bat` 本身不动）。
+  `pre*` 钩子让日常不必手动 build。
+
+**结果**：22/22 绿，断言数与 S1 基线**逐条一致**（admin 113、digest 89、notice 42、
+panel-wiring 125、reply 12、smoke 65、sticker 129、ui-render 118、vision-log 15、window-http 15）。
+默认 12 个断言套件 3.6s（含 build）；`npm run check` 绿。
+
+**没做的一步（留给用户）**：验证矩阵里的 `npx electron .` 我没有跑——它会弹窗、
+会碰真实 `data/`、还可能撞上已经占着 3210 端口的那个实例。
+替代检查是 `node -e "import('./dist/app.js')"` 能拿到 `createApp`。
+**真机冒烟（`npm start` / 连 SnowLuma 收发一条真实消息）仍需用户自己走一遍。**
+
+
+### S3 路径锚点集中（✅ 已完成 2026-09-24，第一个 `.ts` 文件）
 
 现状是**深度敏感**的，这是搬迁前必须拆掉的地雷：
 
@@ -120,27 +155,60 @@ tests/
 - `src/app.js`：`UI_DIR = resolve(__dirname, '..', 'ui')`
 - 两者都基于 `fileURLToPath(import.meta.url)`，**文件下沉一层就会指错**（编到 `dist/core/config.js` 后 `..` 变成 `dist/`，`python-tools/`、`assets/`、`ui/`、`data/` 全找不到）。
 
-新增 `src/paths.ts`（先平铺，S4 再随大流搬进 `core/`）：
+**实际落地**：
+
+新增 `src/paths.ts`（**零依赖**，不然和 config.js 成环）：
 
 ```ts
-/** 从本文件向上找 package.json，找到就是项目根。不数 `..`，因此对目录深度免疫。 */
-export const ROOT: string;         // 向上最多 6 层找 package.json
+export const ROOT: string;         // 从本文件向上最多找 6 层 package.json
 export const DATA_DIR: string;     // process.env.QQ_AGENT_DATA_DIR || ROOT/data
 export const UI_DIR: string;       // ROOT/ui
 export const CONFIG_FILE: string;  // DATA_DIR/config.json
 ```
 
-`config.js` / `app.js` / `jmcomic.js` / `price-feed.js` 改成从它取；`config.js` 暂时**转出**这三个常量以免一次改太多调用点（转出时记得同时 import 进来——就是 2026-09-24 那个坑）。
+- 向上找不到 `package.json` 时**不抛错**，退回旧行为（上一层）。理由写在文件里：
+  路径算不准只该让某些功能不好用，不该让整个程序起不来。
+- `config.js` 改成 `import { ROOT, DATA_DIR, CONFIG_FILE } from './paths.js'` + `export { … }`
+  （**先 import 再 export**，不是 `export { … } from`——后者只转出、不引入本文件作用域，
+  正是 2026-09-24 `detectMime` 那个坑）。同时删掉了它已经用不上的 `path` / `fileURLToPath` import。
+  仓库里另有 10 个模块从 `config.js` 取 `DATA_DIR`/`ROOT`，S3 不动它们（那属于 S4/S5）。
+- `app.js` 改成 `import { ROOT, DATA_DIR, UI_DIR } from './paths.js'`，删掉本地 `__dirname` / `UI_DIR`。
+- **与计划的一处出入**：原计划还要改 `jmcomic.js` / `price-feed.js`。实际看了源码，它们
+  从来没自己算锚点（只是 `import { DATA_DIR } from './config.js'`），所以没动——那两处
+  的改动会是纯粹的噪音。
+- **`QQ_AGENT_SRC=src` 逃生口删掉了**（`tests/lib/src.mjs`、`tests/run.mjs`）：从 `src/` 里
+  出现第一个 `.ts` 起它就必然跑不通（`src/config.js` import 不到 `./paths.js`），
+  一个"看起来有、其实一定失败"的开关比没有更糟。`SRC_KIND` 随之消失，`run.mjs` 改成无条件先 build。
 
-新增 `tests/t-paths.mjs`：断言 `ROOT` 下有 `package.json`、`DATA_DIR` 指向 `QQ_AGENT_DATA_DIR`、`UI_DIR/index.html` 存在；**并且从 `src/` 与 `dist/` 两个位置各跑一次**。
+新增 `tests/t-paths.mjs`（10 条断言）。原计划是"从 `src/` 与 `dist/` 各跑一次"，
+但 `src/` 里没有 `paths.js`（它是 `.ts`），所以换成了**更有针对性**的做法：
 
-验证：`npm run build && node tests/run.mjs` 全绿。
+1. 验今天的四个常量（含 `UI_DIR/index.html` 真的在）；
+2. 验 `config.js` 转出的那份与 `paths.js` 一致，并**真的调一次 `updateConfig({})`**
+   ——只在值上比较抓不住"漏 import"，得让用到 `DATA_DIR`/`CONFIG_FILE` 的那行代码真的执行（它无保护）；
+3. **下沉验证**：把编译产物拷到 `%TEMP%/<夹具>/pkg/dist/core/paths.js`（`<夹具>/pkg` 下有 `package.json`），
+   import 后断言 `ROOT` 仍是 `<夹具>/pkg`。已确认旧写法（`resolve(__dirname,'..')`）在这里会算出
+   `<夹具>/pkg/dist` ——**这条断言是有牙的**，不是摆样子；
+4. 找不到 `package.json` 时退回上一层而不是抛错（夹具刻意放 6 层深，保证爬不出夹具范围，
+   结果不受机器 TEMP 目录里有没有 `package.json` 影响；改 `MAX_UP` 要跟着数层数）。
+
+**结果**：13/13 绿（新增的 t-paths 10 条断言全过），断言数与 S2 基线逐条一致，
+`npm run check` 绿。另验：`node dist/server.js` 在临时 `QQ_AGENT_DATA_DIR` 上起得来
+（`/` 、`/app.js`、`/api/config` 均 200，验完 kill）、`node scripts/apply-vision-docs.mjs`
+仍能写进临时 config（21 条）。
 
 ### S4 目录搬迁（`git mv`，全是 `.js`）
 
 - 按第一节的树 `git mv`，**只改路径、不改代码语义**；import 说明符从 `'./x.js'` 改成 `'../core/x.js'` 之类（约 100 条边），全部机械可验。
-- 跨界引用只有 5 处（见第四节），一次改到位。
-- `tests/lib/src.mjs` 的 `BASE` 仍是 `dist`，套件里改成 `load('chat/store.js')` 这种相对路径。
+- 跨界引用只有 5 处（见第四节），一次改到位。**S4 特有的三处别忘**：
+  - **`paths.ts` 搬进 `core/` 后，`config.js` / `app.js` 里的 `'./paths.js'` 要改成 `'./core/paths.js'`。**
+    这两行的症状最隐蔽（`ROOT` 会算成 `dist/core/`），好在这正是 `t-paths` 盯着的东西——它会先红。
+  - `electron/main.js` 的 `await import('../dist/app.js')` → **`'../dist/web/app.js'`**（`app.js` 搬到 `web/` 了）。这一处漏了不会编译报错，只在启动桌面端时才炸。
+  - `tests/t-digest.mjs` 用 `git show <baseline>:src/prompt.js` 取旧版提示词逐字对比，再靠一条正则把它内部的 `from './x.js'` 重写成绝对 URL。搬迁后那条正则要对上**新的相对路径**（`'../core/util.js'` 之类），所以需要一个"旧扁平文件名 → 新路径"的映射表；否则 `t-digest` 会因为旧文件 import 不到而红，而不是因为提示词真的变了。
+- `tests/lib/src.mjs` 仍然只指 `dist`（这次变化的是套件里的**相对**路径，`load('chat/store.js')` 这种），
+  所以搬迁对套件的影响同样集中在那一个文件 + 各套件里 `load()` 的实参。
+  （`lib/src.mjs` 里 `SRC_DIR` 的注释已经写明：`SRC_DIR` 是"运行时从哪加载"，`SOURCE_REL` 恒为 `'src'`
+  是"git 历史里那棵源码树"——`t-digest` 取旧版本文件用后者，别混。）
 - 验证：`npm run build && node tests/run.mjs` 全绿；`node dist/server.js` 起得来；`node scripts/*.mjs` 三个脚本仍能跑。搬迁后顺手跑一下 `git log --follow` 确认历史跟得住（`git mv` 的目的就是这个）。
 - 回滚：整体 revert 一个提交即可。
 
@@ -206,34 +274,47 @@ type Route = { method: 'GET'|'POST'|'DELETE'; path: string | RegExp; handle(ctx:
 
 ## 四、需要改的跨界引用（S2 一次改到位）
 
-| 位置 | 现在 | 改成 |
+| 位置 | 原计划 | 实际落地 |
 |---|---|---|
-| `package.json` scripts | `"server": "node src/server.js"` | `"server": "node dist/server.js"` + `build`/`typecheck`/`dev`/`check` + `prestart`/`preserver` |
-| `electron/main.js` | `await import('../src/app.js')` | `await import('../dist/app.js')` |
-| `scripts/export-prices.mjs` | `import '../src/model-prices.js'` | `import '../dist/llm/model-prices.js'` |
-| `scripts/apply-vision-docs.mjs` | `import '../src/config.js'` | `import '../dist/core/config.js'` |
-| `scripts/export-prices-md.mjs` | 把 `src/model-prices.js` 当文本读 | `src/llm/model-prices.ts` |
-| `tests/lib/src.mjs` | —（S1 新建） | `dist/`（可 `QQ_AGENT_SRC` 覆盖） |
-| `README.md` `启动QQ机器人.bat` | 直接起 electron | 文档补 build；`.bat` 不动 |
-| `.gitignore` | 已有 `dist/` | 再补 `*.tsbuildinfo` |
-| `scripts/sanitize-release.mjs` | `TEXT_EXT` 无 `.ts` | 补 `.ts` |
+| `package.json` scripts | `"server": "node src/server.js"` | ✅ `node dist/server.js` + `build`/`typecheck`/`dev`/`check` + `prestart`/`preserver` |
+| `electron/main.js` | `await import('../src/app.js')` | ✅ `await import('../dist/app.js')`（S4 后再改成 `dist/web/app.js`） |
+| `scripts/export-prices.mjs` | `import '../src/model-prices.js'` | ✅ `../dist/model-prices.js`（S4 后随 `llm/` 变深） |
+| `scripts/apply-vision-docs.mjs` | `import '../src/config.js'` | ✅ `../dist/config.js`（S4 后随 `core/` 变深） |
+| `scripts/export-prices-md.mjs` | 把 `src/model-prices.js` 当文本读 | ⏳ 仍读 `src/model-prices.js`（**必须读源码**，`dist` 里是重打印过的）→ S8 改 `src/llm/model-prices.ts` |
+| `tests/lib/src.mjs` | —（S1 新建） | ✅ `dist/`；另有恒为 `'src'` 的 `SOURCE_REL` 给 `git show` 用（`SRC_DIR` 是"运行时从哪加载"，两件事别混）。`QQ_AGENT_SRC` 覆盖已在 S3 删除 |
+| `README.md` `启动QQ机器人.bat` | 直接起 electron | ✅ 文档补了 build；`.bat` 不动 |
+| `.gitignore` | 已有 `dist/` | ✅ 补 `*.tsbuildinfo` |
+| `scripts/sanitize-release.mjs` | `TEXT_EXT` 无 `.ts` | ⏳ S8（现在源码里还没有 `.ts`，补了也没用） |
 
-`src/server.js` 内部 `import './app.js'` **不用改**（两者都在 `dist` 里，相对关系不变）。
+`src/server.js` 内部 `import './app.js'` **不用改**（两者都在 `dist` 里，相对关系不变）——实际也没改。
+
+**S2 之后仍要在 S4 再动一次的三处**：`electron/main.js`、`scripts/export-prices.mjs`、
+`scripts/apply-vision-docs.mjs`（都只是路径变深，不是逻辑变化）。
+`scripts/export-prices-md.mjs` 与 `sanitize-release.mjs` 留到 S8。
 
 ---
 
 ## 五、风险与对策
 
-1. **路径锚点深度敏感**（最大的一颗雷）：必须排在搬迁**之前**（S3），并且用"向上找 package.json"而不是数 `..`，否则 `dist/core/config.js` 会把 `ROOT` 算成 `dist/`，`data/`、`ui/`、`python-tools/` 全部失联——而且症状是运行时才炸。
+1. **路径锚点深度敏感**（最大的一颗雷）→ **S3 已拆**：锚点集中在 `src/paths.ts`，
+   用"向上找 package.json"而不是数 `..`，并有 `t-paths` 的"下沉一层仍算得对"守着。
+   搬迁后 `paths.ts` 跟着进 `core/`，`config.js` / `app.js` 的 import 改成 `./core/paths.js` 即可
+   （**S4 最容易漏的就是这两行**：改完 `ROOT` 会指回 `dist/core/`，`data/`、`ui/` 全失联，
+   而且是运行时才炸——但 `t-paths` 会先红给你看）。
 2. **`.js` 后缀必须保留在 `.ts` 的 import 里**（NodeNext 约定）：这是 `dist` 与 `src` 说明符 1:1 的前提，随手"清理"成无后缀会让编译产物在 Node 里解析失败。
 3. **忘了 build 就跑**：改 `src/*.ts` 后不加 `prestart`/`preserver`，`node dist/server.js` 跑的是旧产物，排查成本极高。用 npm 生命周期钩子 + `tsc -w` 兜住。发出去的便携包本来就只带 `dist`，不受影响。
-4. **`%TEMP%` 套件是全部分安全网，且不在版本库**：S1 必须先把它们搬进 `tests/` 并跑绿，否则 S4/S5 是在盲改。
-5. **入口清单漏改**（第四节表格）：漏一处不会编译报错，只在运行时表现为"改的地方没生效"。建议 S2 提交时按表逐条打勾。
-6. **`scripts/*.mjs` 读源码文本**：`export-prices-md.mjs` 解析的是注释横幅，路径/后缀变更会静默产出空文档——S8 改完要跑一次 `node scripts/export-prices-md.mjs` 并 diff `docs/model-prices.md`。
+4. **`%TEMP%` 套件是全部分安全网，且不在版本库**（S1 已解决：22 个全部搬进 `tests/` 并跑绿）。
+5. **入口清单漏改**（第四节表格）：漏一处不会编译报错，只在运行时表现为"改的地方没生效"。S2 已按表逐条核对过（表格里带 ✅ / ⏳ 状态）。
+6. **`scripts/*.mjs` 读源码文本**：`export-prices-md.mjs` 解析的是注释横幅，路径/后缀变更会静默产出空文档——S8 改完要跑一次 `node scripts/export-prices-md.mjs` 并 diff `docs/model-prices.md`。（S2 期间跑过一次，只动了 `数据核对时间` 那行，已 revert 掉以免混进 S2 的提交。）
 7. **循环依赖**：今天一个都没有（`tier-slider` 被特意做成零依赖就是为了这个）。搬迁可能诱使人写出 `core → agent` 这种反向依赖，用 `scripts/check-layers.mjs` 钉住分层。
 8. **`tsc` 编到 `dist` 会让"就地改、就地跑"的手感消失**（替代方案是 `outDir: src` 与源码同目录，代价是 `src/` 里混入生成物、`git status` 噪音、容易改错文件——已确认不走这条）。开发期用 `tsc -w` 缓解。
-9. **首次 `npm ci` 会拉 Electron（100MB+）**，这台机器现在 `node_modules` 是空的；只想要类型检查的话先装运行时会失败，得接受一次性成本。
+   实证补充：`tsc` 在 `allowJs` 下是**重新打印** `.js`（4 空格缩进、空行被吃、单行 `if` 展开、CRLF→LF），
+   所以别拿 `dist/*.js` 跟 `src/*.js` 做 diff 判断"有没有改坏"——行为等价靠套件验。
+9. ~~**首次 `npm ci` 会拉 Electron（100MB+）**~~（S2 已装：75 个包、`node_modules` 301MB，一次性成本已付）。
 10. **UI 拆模块后，`t-ui-render` 的 `vm` 假壳方案失效**：要改成"装假 DOM 到 `globalThis` 再动态 import"，并把每个 UI 套件放进独立进程（S7 已写明）。
+11. **`dist/` 是产物，不是源码树**（S2 新增）：`SRC_DIR`（运行时从哪加载）与 `SOURCE_REL`（git 里的源码树）是两件事，
+    写套件时容易混。`t-digest` 一度用 `SRC_REL` 去 `git show`，报 `path 'dist/prompt.js' exists on disk, but not in <commit>`
+    ——凡是要碰 git 历史的地方一律用 `SOURCE_REL`。
 
 ---
 
@@ -242,13 +323,20 @@ type Route = { method: 'GET'|'POST'|'DELETE'; path: string | RegExp; handle(ctx:
 每阶段收尾都跑：
 
 ```bash
+npm install              # 只在 node_modules 变了时跑（S2 起是必须的前提）
 npm run typecheck        # tsc --noEmit
 npm run build            # tsc -p tsconfig.json
-node tests/run.mjs       # 仓库内套件（断言组全绿；--all 带诊断组）
+node tests/run.mjs       # 仓库内套件（默认就会先 build；断言组全绿，--all 带诊断组）
 node dist/server.js      # 起服务，浏览器开 127.0.0.1:3210 逐个标签页点一遍
 npx electron .           # 窗口 / 托盘 / 单实例锁正常
 node scripts/sanitize-release.mjs --dry-run   # 发布清理流程没被破坏
 ```
+
+**`npx electron .` 这一步要人来做**：它会弹窗、会碰真实 `data/`、还会撞上单实例锁，
+不该由 agent 在用户的桌面上替跑。S2 用的替代检查是
+`node -e "import('./dist/app.js').then(m => console.log(typeof m.createApp))"`。
+起服务那条则是在临时 `QQ_AGENT_DATA_DIR` 上验的（面板 200 / `/api/config` 返回 JSON / `/app.js` 200），
+验完就 kill——**不要**对着真实 `data/` 起一遍。
 
 外加一次**真机冒烟**（只有它能验的地方）：连 SnowLuma 收到一条真实群消息 → 机器人回复 → 会话记录面板里能看到这次运行。
 
@@ -261,4 +349,7 @@ node scripts/sanitize-release.mjs --dry-run   # 发布清理流程没被破坏
 - 不升级已有依赖，不动 Electron 版本，不碰 `snowluma/`（第三方）。
 - 不搬 `electron/`、`assets/`、`python-tools/`、`scripts/`（`scripts/*.mjs` 保持 `.mjs`，只改 import 指向）。
 - 不做 `noUncheckedIndexedAccess`、品牌类型、路径别名（`@core/*`）这类"好看但会挡住增量迁移"的收紧——留到结构稳定之后。
-- S0 不动 `ui/` 与 `src/` 的**任何**代码。
+- S0 不动 `ui/` 与 `src/` 的**任何**代码。S1/S2 同样一行源码没改（改动全在 `tests/`、`tsconfig.json`、
+  `package.json`、`README.md`、`.gitignore` 和三个入口/脚本的 import 指向上）。
+  **S3 动了源码，但只动了"路径从哪来"这一件事**：新增 `src/paths.ts`，`config.js` / `app.js`
+  各改两处 import、删掉自己那份数 `..` 的代码——没有任何行为、接口、数据格式变化。

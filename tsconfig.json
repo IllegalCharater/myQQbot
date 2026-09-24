@@ -1,0 +1,37 @@
+{
+  // 迁移期的编译器配置。核心思路：只检查 .ts，未转换的 .js 原样搬运到 dist/，
+  // 这样每次提交都能保持绿，不会出现"几万个错误糊在一起"（见 docs/ts-migration-plan.md）。
+  "compilerOptions": {
+    // Node ESM + "type": "module"。说明符里的 .js 后缀必须保留：Node 直接跑 dist
+    // 时不会做后缀补全，而且这样 src ↔ dist 的说明符才能一个字符都不用改。
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"],
+
+    // 输入 src/，镜像输出 dist/。
+    "rootDir": "src",
+    "outDir": "dist",
+
+    // 增量迁移的关键：只查 .ts。等某个文件转成 .ts 了，它自然进入检查范围。
+    "allowJs": true,
+    "checkJs": false,
+
+    "strict": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+
+    // 注释是这个仓库的文档（提示词、警告、"别改这里"的说明都写在注释里），不能删。
+    // 源地图带上 inlineSources：便携包里不装 src/ 也能在堆栈里看到原始代码。
+    "removeComments": false,
+    "sourceMap": true,
+    "inlineSources": true,
+
+    "incremental": true,
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts", "src/**/*.js"],
+  "exclude": ["dist", "node_modules", "tests", "ui"]
+}
