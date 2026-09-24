@@ -2645,7 +2645,7 @@ function renderStickerDetail(s) {
         <div class="hint">「备注 / 标签 / 适用场景」是机器人挑表情时看的依据（提示词里的【可用表情包】）。
           改完备注后，标注相同的两个表情会让它挑不出来 —— 那种情况它会明确报错并列出候选 id，不会乱挑一个。
           改动只影响<b>下一轮</b>运行。</div>
-        ${s.deletable ? '' : '<div class="hint">删除按钮被禁用的原因：这张图来自 QQ 收藏本身，本地删掉下次同步就会重新出现。'}</div>'}
+        ${s.deletable ? '' : '<div class="hint">删除按钮被禁用的原因：这张图来自 QQ 收藏本身，本地删掉下次同步就会重新出现。</div>'}
       </div>
     </div>`;
   $('#sticker-edit-btn')?.addEventListener('click', () => openStickerEditModal(s));
