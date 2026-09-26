@@ -6,13 +6,34 @@
 import { getConfig, DEFAULT_CONFIG } from '../core/config.js';
 import { sleep, randInt, createSendChain, escapeCqText, formatClockTime } from '../core/util.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
+interface SendOptions { replyToMessageId?: unknown; atUserId?: unknown; file?: string }
+interface StickerLike extends Record<string, unknown> { id: string; url: string; desc?: string; localNote?: string }
+interface OneBotSender {
+  sendText(kind: string, id: string, text: string, options: SendOptions): Promise<Record<string, unknown>>;
+  sendSticker(kind: string, id: string, file: string, options: SendOptions): Promise<Record<string, unknown>>;
+  sendPoke(kind: string, id: string, targetUserId: unknown): Promise<Record<string, unknown>>;
+}
+interface ChatStoreWriter { appendSelf(chatKey: string, input: { text: unknown; ts?: number; mid?: string | number | null }): unknown }
+type SendChain = <T>(task: () => Promise<T>) => Promise<T>;
+function messageIdOf(data: Record<string, unknown>): string | number | null {
+  const value = data.message_id;
+  return typeof value === 'string' || typeof value === 'number' ? value : null;
+}
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
 const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
 const DEFAULT_MAX_PER_HOUR = DEFAULT_CONFIG.send.maxPerHour;
 
 export class SendQueue {
-  constructor({ onebot, store, onSent = null }) {
+  onebot: OneBotSender;
+  store: ChatStoreWriter;
+  onSent: ((event: Record<string, unknown>) => void) | null;
+  chains: Map<string, SendChain>;
+  minuteTimes: Map<string, number[]>;
+  hourTimes: Map<string, number[]>;
+  replying: Set<string>;
+
+  constructor({ onebot, store, onSent = null }: { onebot: OneBotSender; store: ChatStoreWriter; onSent?: ((event: Record<string, unknown>) => void) | null }) {
     this.onebot = onebot;
     this.store = store;
     this.onSent = onSent;
@@ -25,7 +46,7 @@ export class SendQueue {
   }
 
   /** 由编排器在进入/退出回复态时调用（幂等）。 */
-  setReplying(chatKey, on) {
+  setReplying(chatKey: string, on: boolean) {
     if (on) this.replying.add(chatKey);
     else this.replying.delete(chatKey);
   }
@@ -34,16 +55,16 @@ export class SendQueue {
     this.replying.clear();
   }
 
-  #chain(chatKey) {
+  #chain(chatKey: string): SendChain {
     if (!this.chains.has(chatKey)) this.chains.set(chatKey, createSendChain());
-    return this.chains.get(chatKey);
+    return this.chains.get(chatKey)!;
   }
 
   /**
    * 限频检查。**async**：回复态内命中分钟限频时会有界等待一个空位再放行
    * （见下面 maxLimitWaitMs 的说明），所以调用方必须 await。
    */
-  async #checkRate(chatKey) {
+  async #checkRate(chatKey: string) {
     const now = Date.now();
     const cfg = getConfig().send;
     const rep = getConfig().reply || {};
@@ -95,7 +116,7 @@ export class SendQueue {
     this.hourTimes.set(chatKey, hour);
   }
 
-  #gap(text, isLast) {
+  #gap(text: unknown, isLast: boolean) {
     const cfg = getConfig().send;
     const min = Math.max(200, Number(cfg.minGapMs) || 1000);
     const max = Math.max(min, Number(cfg.maxGapMs) || 3000);
@@ -109,13 +130,13 @@ export class SendQueue {
    * options: { replyToMessageId, atUserId }
    * 返回 { sent: [{text, messageId}], failed: [{text, error}] }；全部失败时抛错。
    */
-  async sendTextBatch(chatKey, messages, options = {}) {
+  async sendTextBatch(chatKey: string, messages: unknown[] | unknown, options: SendOptions = {}) {
     const [kind, id] = String(chatKey).split(':');
     if (kind !== 'group' && kind !== 'private') throw new Error(`非法会话 key：${chatKey}`);
     const list = Array.isArray(messages) ? messages : [messages];
     if (!list.length) throw new Error('消息列表为空');
     const hardSplitAt = Number(getConfig().send?.hardSplitAt) || 0;
-    const parts = [];
+    const parts: string[] = [];
     for (const m of list) {
       const plain = mdToPlain(String(m ?? ''));
       if (!plain) continue;
@@ -128,7 +149,7 @@ export class SendQueue {
     if (!parts.length) throw new Error('消息内容为空');
 
     const chain = this.#chain(chatKey);
-    const promises = [];
+    const promises: Array<Promise<Record<string, unknown>>> = [];
     for (let i = 0; i < parts.length; i++) {
       const text = parts[i];
       const isLast = i === parts.length - 1;
@@ -141,15 +162,15 @@ export class SendQueue {
           atUserId: i === 0 ? options.atUserId : null
         });
         const ts = Date.now();
-        this.store.appendSelf(chatKey, { text, ts, mid: data?.message_id ?? null });
+        this.store.appendSelf(chatKey, { text, ts, mid: messageIdOf(data) });
         this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });
         return { text, messageId: data?.message_id ?? null, at: formatClockTime(ts) };
       }));
     }
 
     const settled = await Promise.allSettled(promises);
-    const sent = [];
-    const failed = [];
+    const sent: Array<Record<string, unknown>> = [];
+    const failed: Array<{ index: number; text: string; error: string }> = [];
     for (let i = 0; i < settled.length; i++) {
       const r = settled[i];
       if (r.status === 'fulfilled') sent.push(r.value);
@@ -171,7 +192,7 @@ export class SendQueue {
    * options.file 覆盖用哪张图：默认 sticker.url，工具层会传 bot 收藏条目在
    * data/sticker-cache/ 里的**本机绝对路径**（协议端与本机同进程树，读得到）。
    */
-  sendSticker(chatKey, sticker, options = {}) {
+  sendSticker(chatKey: string, sticker: StickerLike, options: SendOptions = {}) {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
@@ -182,14 +203,14 @@ export class SendQueue {
         atUserId: options.atUserId ?? null
       });
       const ts = Date.now();
-      this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: data?.message_id ?? null });
+      this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: messageIdOf(data) });
       this.onSent?.({ chatKey, text: `[表情包]`, messageId: data?.message_id ?? null, sticker: sticker.id });
       return { message_id: data?.message_id ?? null };
     });
   }
 
   /** 拍一拍。发送成功后留档（self 记录），否则下一次运行不知道自己拍过。 */
-  poke(chatKey, targetUserId) {
+  poke(chatKey: string, targetUserId: unknown) {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
@@ -199,7 +220,7 @@ export class SendQueue {
       const data = await this.onebot.sendPoke(kind, id, targetUserId);
       const ts = Date.now();
       const target = kind === 'group' && targetUserId != null ? ` ${targetUserId}` : '对方';
-      this.store.appendSelf(chatKey, { text: `[拍一拍] 你拍了拍${target}`, ts, mid: data?.message_id ?? null });
+      this.store.appendSelf(chatKey, { text: `[拍一拍] 你拍了拍${target}`, ts, mid: messageIdOf(data) });
       this.onSent?.({ chatKey, text: `[拍一拍]${target}`, messageId: null });
       return data;
     });

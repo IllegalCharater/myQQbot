@@ -80,3 +80,11 @@ export interface OpenAiResponse extends JsonObject {
   data?: Array<{ id?: string; model?: string }>;
   error?: { message?: string; detail?: string };
 }
+
+export interface ChatCompletionResult {
+  message: ChatResponseMessage;
+  finishReason: string | null;
+  usage: TokenUsage | null;
+  model: string;
+  raw: OpenAiResponse;
+}

@@ -4,8 +4,31 @@
 import { getConfig } from '../core/config.js';
 import { safeFetch } from './safe-fetch.js';
 
+interface SearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+interface SearchResponse {
+  query: string;
+  results: SearchResult[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function recordArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
 /** 查询词清洗：去 CQ 码、控制字符、超长截断。 */
-export function sanitizeQuery(query) {
+export function sanitizeQuery(query: unknown): string {
   return String(query ?? '')
     .replace(/\[CQ:[^\]]*\]/gi, ' ')
     .replace(/[\u0000-\u001f\u007f]/g, ' ')
@@ -14,7 +37,7 @@ export function sanitizeQuery(query) {
     .slice(0, 120);
 }
 
-function decodeHtml(s) {
+function decodeHtml(s: unknown): string {
   return String(s ?? '')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&amp;/g, '&')
@@ -28,7 +51,7 @@ function decodeHtml(s) {
 }
 
 /** Bing 搜索（解析 b_algo 结果块）。searchUrl 可在配置中替换（测试/换引擎）。 */
-export async function bingSearch(query) {
+export async function bingSearch(query: string): Promise<SearchResponse> {
   const cfg = getConfig().webSearch ?? {};
   const searchUrl = String(cfg.searchUrl || 'https://cn.bing.com/search');
   const maxResults = Math.max(1, Math.min(10, Number(cfg.maxResults) || 6));
@@ -43,7 +66,7 @@ export async function bingSearch(query) {
   });
   if (!res.ok) throw new Error(`搜索服务 HTTP ${res.status}`);
   const html = await res.text();
-  const results = [];
+  const results: SearchResult[] = [];
   const blocks = html.split('<li class="b_algo"').slice(1);
   for (const block of blocks) {
     const hrefMatch = block.match(/<a[^>]+href="(https?:\/\/[^"]+)"/i);
@@ -60,7 +83,7 @@ export async function bingSearch(query) {
 }
 
 /** 给工具用的统一入口：搜索 + 紧凑序列化。 */
-export async function webSearch(query) {
+export async function webSearch(query: unknown): Promise<SearchResponse> {
   const clean = sanitizeQuery(query);
   if (!clean) throw new Error('查询词为空');
   const cfg = getConfig().webSearch ?? {};
@@ -84,7 +107,7 @@ export async function webSearch(query) {
  * 搜索结果生成的最终回答；URL/标题/摘要为黑盒，拿不到结构化来源。适合
  * “只要能搜到并总结”的场景；需要引用列表时请用 Bing / 其他搜索 API。
  */
-export async function deepSeekSearch(query) {
+export async function deepSeekSearch(query: string): Promise<SearchResponse> {
   const cfg = getConfig().webSearch?.deepseek ?? {};
   const apiKey = String(cfg.apiKey || process.env.DEEPSEEK_API_KEY || '').trim();
   if (!apiKey) throw new Error('DeepSeek 搜索需要 API Key（设置里填，或环境变量 DEEPSEEK_API_KEY）');
@@ -109,12 +132,13 @@ export async function deepSeekSearch(query) {
     const text = await res.text().catch(() => '');
     throw new Error(`DeepSeek 搜索 HTTP ${res.status}：${text.slice(0, 300)}`);
   }
-  const data = await res.json().catch(() => { throw new Error('DeepSeek 搜索返回了无法解析的 JSON'); });
-  const outputText = String(data?.output_text ?? '').trim();
+  const raw: unknown = await res.json().catch(() => { throw new Error('DeepSeek 搜索返回了无法解析的 JSON'); });
+  const data = asRecord(raw);
+  const outputText = String(data.output_text ?? '').trim();
   if (!outputText) {
     // 兼容不同字段位置
-    const alt = data?.output?.find?.((item) => item?.type === 'message' && item?.content?.length)
-      ?.content?.map((c) => c?.text ?? '').join('') ?? '';
+    const message = recordArray(data.output).find((item) => item.type === 'message' && recordArray(item.content).length);
+    const alt = message ? recordArray(message.content).map((content) => String(content.text ?? '')).join('') : '';
     if (!alt) throw new Error('DeepSeek 搜索没有返回文本（可能是模型不支持 web_search 工具）');
     return { query, results: [{ title: 'DeepSeek 搜索', url: '', snippet: alt }] };
   }
@@ -122,13 +146,13 @@ export async function deepSeekSearch(query) {
 }
 
 /** 抓取网页正文（走 safe-fetch 的 SSRF 全防护）。 */
-export async function webFetch(url) {
+export async function webFetch(url: unknown) {
   const result = await safeFetch(url);
   return result;
 }
 
 /** 智谱 Web Search API（结构化结果：标题/链接/摘要/网站名/日期）。 */
-export async function zhipuSearch(query) {
+export async function zhipuSearch(query: string): Promise<SearchResponse> {
   const cfg = getConfig().webSearch?.zhipu ?? {};
   const apiKey = String(cfg.apiKey || process.env.ZHIPU_API_KEY || '').trim();
   if (!apiKey) throw new Error('智谱搜索需要 API Key（设置里填，或环境变量 ZHIPU_API_KEY）');
@@ -149,8 +173,8 @@ export async function zhipuSearch(query) {
     const text = await res.text().catch(() => '');
     throw new Error(`智谱搜索 HTTP ${res.status}：${text.slice(0, 300)}`);
   }
-  const data = await res.json().catch(() => { throw new Error('智谱搜索返回了无法解析的 JSON'); });
-  const arr = Array.isArray(data?.search_result) ? data.search_result : [];
+  const raw: unknown = await res.json().catch(() => { throw new Error('智谱搜索返回了无法解析的 JSON'); });
+  const arr = recordArray(asRecord(raw).search_result);
   const results = arr
     .filter((r) => r?.link || r?.url)
     .map((r) => ({
@@ -164,7 +188,7 @@ export async function zhipuSearch(query) {
 }
 
 /** 博查 Web Search API（国内中文优化，网页结果在 data.webPages.value）。 */
-export async function bochaSearch(query) {
+export async function bochaSearch(query: string): Promise<SearchResponse> {
   const cfg = getConfig().webSearch?.bocha ?? {};
   const apiKey = String(cfg.apiKey || process.env.BOCHA_API_KEY || '').trim();
   if (!apiKey) throw new Error('博查搜索需要 API Key（设置里填，或环境变量 BOCHA_API_KEY）');
@@ -184,11 +208,12 @@ export async function bochaSearch(query) {
     const text = await res.text().catch(() => '');
     throw new Error(`博查搜索 HTTP ${res.status}：${text.slice(0, 300)}`);
   }
-  const data = await res.json().catch(() => { throw new Error('博查搜索返回了无法解析的 JSON'); });
-  if (data?.code && Number(data.code) !== 200) {
+  const raw: unknown = await res.json().catch(() => { throw new Error('博查搜索返回了无法解析的 JSON'); });
+  const data = asRecord(raw);
+  if (data.code && Number(data.code) !== 200) {
     throw new Error(`博查搜索 API 错误（code ${data.code}）：${data.message || data.msg || '未知'}`);
   }
-  const arr = Array.isArray(data?.data?.webPages?.value) ? data.data.webPages.value : [];
+  const arr = recordArray(asRecord(asRecord(data.data).webPages).value);
   const results = arr
     .filter((r) => r?.url)
     .map((r) => ({
@@ -202,7 +227,7 @@ export async function bochaSearch(query) {
 }
 
 /** 百度千帆 AI Search（web_search，返回 references）。 */
-export async function baiduSearch(query) {
+export async function baiduSearch(query: string): Promise<SearchResponse> {
   const cfg = getConfig().webSearch?.baidu ?? {};
   const apiKey = String(cfg.apiKey || process.env.BAIDU_SEARCH_API_KEY || '').trim();
   if (!apiKey) throw new Error('百度搜索需要 API Key（设置里填，或环境变量 BAIDU_SEARCH_API_KEY）');
@@ -226,11 +251,12 @@ export async function baiduSearch(query) {
     const text = await res.text().catch(() => '');
     throw new Error(`百度搜索 HTTP ${res.status}：${text.slice(0, 300)}`);
   }
-  const data = await res.json().catch(() => { throw new Error('百度搜索返回了无法解析的 JSON'); });
-  if (data?.error_code && Number(data.error_code) !== 0) {
+  const raw: unknown = await res.json().catch(() => { throw new Error('百度搜索返回了无法解析的 JSON'); });
+  const data = asRecord(raw);
+  if (data.error_code && Number(data.error_code) !== 0) {
     throw new Error(`百度搜索 API 错误（code ${data.error_code}）：${data.error_msg || data.message || '未知'}`);
   }
-  const arr = Array.isArray(data?.references) ? data.references : [];
+  const arr = recordArray(data.references);
   const results = arr
     .filter((r) => r?.url || r?.link)
     .map((r) => ({
@@ -244,7 +270,7 @@ export async function baiduSearch(query) {
 }
 
 /** 秘塔 AI 搜索（metaso.cn，每天 100 次免费）。 */
-export async function metasoSearch(query) {
+export async function metasoSearch(query: string): Promise<SearchResponse> {
   const cfg = getConfig().webSearch?.metaso ?? {};
   const apiKey = String(cfg.apiKey || process.env.METASO_API_KEY || '').trim();
   const endpoint = String(cfg.baseUrl || 'https://metaso.cn/api/open/v1/search').replace(/\/+$/, '');
@@ -262,10 +288,11 @@ export async function metasoSearch(query) {
     const text = await res.text().catch(() => '');
     throw new Error(`秘塔搜索 HTTP ${res.status}：${text.slice(0, 300)}`);
   }
-  const data = await res.json().catch(() => { throw new Error('秘塔搜索返回了无法解析的 JSON'); });
-  const arr = Array.isArray(data?.results) ? data.results
-    : Array.isArray(data?.data) ? data.data
-    : Array.isArray(data?.sources) ? data.sources
+  const raw: unknown = await res.json().catch(() => { throw new Error('秘塔搜索返回了无法解析的 JSON'); });
+  const data = asRecord(raw);
+  const arr = Array.isArray(data.results) ? recordArray(data.results)
+    : Array.isArray(data.data) ? recordArray(data.data)
+    : Array.isArray(data.sources) ? recordArray(data.sources)
     : [];
   const results = arr
     .filter((r) => r?.url || r?.link)
@@ -284,15 +311,15 @@ export async function metasoSearch(query) {
  * providerId 形如 'custom:abc123' 时从 webSearch.providers 数组里取对应项；
  * 否则退回旧的单槽位 webSearch.custom（兼容早期配置）。
  */
-function resolveCustomConfig(providerId = null) {
+function resolveCustomConfig(providerId: string | null = null): Record<string, unknown> {
   const ws = getConfig().webSearch ?? {};
   if (providerId && String(providerId).startsWith('custom:')) {
     const id = String(providerId).slice('custom:'.length);
-    const found = (Array.isArray(ws.providers) ? ws.providers : []).find((p) => String(p?.id) === id);
+    const found = recordArray(ws.providers).find((provider) => String(provider.id) === id);
     if (found) return found;
     // 列表里找不到 → 回退单槽位，避免配置丢失后完全搜不了
   }
-  return ws.custom ?? {};
+  return asRecord(ws.custom);
 }
 
 /**
@@ -304,7 +331,7 @@ function resolveCustomConfig(providerId = null) {
  *     适合 SearXNG、Tavily、自建聚合搜索等。
  *   - 'bing'：GET 一个搜索页并用 b_algo 块解析（兼容 Bing 结果格式的引擎，如部分 SearXNG 实例）。
  */
-export async function customSearch(query, providerId = null) {
+export async function customSearch(query: string, providerId: string | null = null): Promise<SearchResponse> {
   const cfg = resolveCustomConfig(providerId);
   const type = String(cfg.type || 'openai').toLowerCase();
 
@@ -319,7 +346,7 @@ export async function customSearch(query, providerId = null) {
   const topK = Math.min(10, Math.max(1, Number(cfg.count) || 6));
 
   // 兼容多种请求体：优先 query / q，带 model 时额外附上 messages（Responses API 风格）
-  const body = { query, q: query, top_k: topK, count: topK };
+  const body: Record<string, unknown> = { query, q: query, top_k: topK, count: topK };
   if (model) {
     body.model = model;
     body.messages = [{ role: 'user', content: query }];
@@ -338,15 +365,16 @@ export async function customSearch(query, providerId = null) {
     const text = await res.text().catch(() => '');
     throw new Error(`自定义搜索 HTTP ${res.status}：${text.slice(0, 300)}`);
   }
-  const data = await res.json().catch(() => { throw new Error('自定义搜索返回了无法解析的 JSON'); });
+  const raw: unknown = await res.json().catch(() => { throw new Error('自定义搜索返回了无法解析的 JSON'); });
+  const data = asRecord(raw);
 
   // 兜住各家字段名
-  const arr = Array.isArray(data?.results) ? data.results
-    : Array.isArray(data?.data) ? data.data
-    : Array.isArray(data?.sources) ? data.sources
-    : Array.isArray(data?.references) ? data.references
-    : Array.isArray(data?.webPages?.value) ? data.webPages.value
-    : Array.isArray(data) ? data
+  const arr = Array.isArray(data.results) ? recordArray(data.results)
+    : Array.isArray(data.data) ? recordArray(data.data)
+    : Array.isArray(data.sources) ? recordArray(data.sources)
+    : Array.isArray(data.references) ? recordArray(data.references)
+    : Array.isArray(asRecord(data.webPages).value) ? recordArray(asRecord(data.webPages).value)
+    : Array.isArray(raw) ? recordArray(raw)
     : [];
 
   const results = arr
@@ -364,7 +392,7 @@ export async function customSearch(query, providerId = null) {
 }
 
 /** 用指定 URL 跑一次 Bing 结果的 HTML 解析（供自定义 bing 类型复用）。 */
-async function bingSearchWithUrl(query, searchUrl) {
+async function bingSearchWithUrl(query: string, searchUrl: string): Promise<SearchResponse> {
   const cfg = getConfig().webSearch ?? {};
   const url = String(searchUrl || cfg.searchUrl || 'https://cn.bing.com/search');
   const maxResults = Math.max(1, Math.min(10, Number(cfg.maxResults) || 6));
@@ -379,7 +407,7 @@ async function bingSearchWithUrl(query, searchUrl) {
   });
   if (!res.ok) throw new Error(`自定义搜索（bing 类型）HTTP ${res.status}`);
   const html = await res.text();
-  const results = [];
+  const results: SearchResult[] = [];
   for (const block of html.split('<li class="b_algo"').slice(1)) {
     const hrefMatch = block.match(/<a[^>]+href="(https?:\/\/[^"]+)"/i);
     if (!hrefMatch) continue;

@@ -30,9 +30,21 @@
 //    （orchestrator 的 #consumeWindow）一次性写进存档的 read 字段。窗口自己从不读 read
 //    （唯一例外：首次播种时用它还原游标）。
 import { isSystemRecord } from '../chat/store.js';
+import type { ChatStore } from '../chat/store.js';
+import type { ChatMessage } from '../chat/types.js';
+
+type Capacity = number | (() => number) | null;
+interface WindowOptions { chatKey?: string; capacity?: Capacity }
+interface RegistryOptions { store?: ChatStore | null; capacity?: Capacity; windows?: Map<string, ContextWindow> | null }
 
 export class ContextWindow {
-  #capacityOf;
+  #capacityOf: () => number;
+  chatKey: string;
+  win: ChatMessage[];
+  sunk: ChatMessage[];
+  lastSeenId: number;
+  settled: number[];
+  maxPushedId: number;
 
   /**
    * @param {object} opts
@@ -40,7 +52,7 @@ export class ContextWindow {
    * @param {number|(() => number)} [opts.capacity] 容量，0 = 不限。
    *        传**函数**而不是数值：设置页改上限要即时生效，不能在构造时固化。
    */
-  constructor({ chatKey = '', capacity = null } = {}) {
+  constructor({ chatKey = '', capacity = null }: WindowOptions = {}) {
     this.chatKey = chatKey;
     this.#capacityOf = typeof capacity === 'function'
       ? capacity
@@ -64,7 +76,7 @@ export class ContextWindow {
    *
    * @returns {boolean} 是否真的收进来了
    */
-  push(entry) {
+  push(entry: ChatMessage | null | undefined): boolean {
     if (!entry || entry.self || isSystemRecord(entry)) return false;
     const id = Number(entry.id) || 0;
     if (id <= 0 || id <= this.maxPushedId) return false;
@@ -87,7 +99,7 @@ export class ContextWindow {
     if (cap <= 0) return;
     while (this.win.length > cap) {
       const e = this.win.shift();
-      if ((Number(e.id) || 0) > this.lastSeenId) this.sunk.push(e);
+      if (e && (Number(e.id) || 0) > this.lastSeenId) this.sunk.push(e);
     }
   }
 
@@ -95,8 +107,8 @@ export class ContextWindow {
    * 「还没被任何一次运行看过」的全部消息（旧→新，**不设上限**）。
    * 触发判定（被艾特/关键词）用它 —— 见文件头那条警告。
    */
-  pending() {
-    const out = [];
+  pending(): ChatMessage[] {
+    const out: ChatMessage[] = [];
     for (const e of this.sunk) if ((Number(e.id) || 0) > this.lastSeenId) out.push(e);
     for (const e of this.win) if ((Number(e.id) || 0) > this.lastSeenId) out.push(e);
     return out;
@@ -106,12 +118,12 @@ export class ContextWindow {
    * 本次运行要带进【本次唤醒】的那批：窗口内还没看过的（≤ 容量）。
    * 与 pending() 的差集就是这次被折进【过去状态】的条数，见 foldedCount()。
    */
-  batch() {
+  batch(): ChatMessage[] {
     return this.win.filter((e) => (Number(e.id) || 0) > this.lastSeenId);
   }
 
   /** 被折走的条数（窗外、且还没消费）—— 喂提示词的 foldedAway。 */
-  foldedCount() {
+  foldedCount(): number {
     let n = 0;
     for (const e of this.sunk) if ((Number(e.id) || 0) > this.lastSeenId) n++;
     return n;
@@ -128,7 +140,7 @@ export class ContextWindow {
    *
    * @returns {object[]} 本次跨过的条目（旧→新）
    */
-  seen() {
+  seen(): ChatMessage[] {
     const crossed = this.pending();
     let maxId = this.lastSeenId;
     for (const e of crossed) {
@@ -142,7 +154,7 @@ export class ContextWindow {
   }
 
   /** 取走并清空"待写进存档 read 的 id"。 */
-  takeSettled() {
+  takeSettled(): number[] {
     if (!this.settled.length) return [];
     const out = this.settled;
     this.settled = [];
@@ -154,7 +166,7 @@ export class ContextWindow {
    * 不动游标 —— 游标是"看到哪了"的水位线，删一条不该让它退回去
    * （id 由存档单调发放，水位线只需要单调）。
    */
-  remove(id) {
+  remove(id: unknown): boolean {
     const target = Number(id) || 0;
     if (!target) return false;
     const before = this.win.length + this.sunk.length;
@@ -175,7 +187,7 @@ export class ContextWindow {
    * @param {object[]} winEntries 窗口内容（最新 N 条对方消息，旧→新）
    * @param {object[]} sunkEntries 比窗口更老、且 still 未读的对方消息（旧→新）
    */
-  seed(winEntries = [], sunkEntries = []) {
+  seed(winEntries: ChatMessage[] = [], sunkEntries: ChatMessage[] = []): this {
     this.win = Array.isArray(winEntries) ? [...winEntries] : [];
     this.sunk = Array.isArray(sunkEntries) ? [...sunkEntries] : [];
     // 全是已读 → 游标停在最后一条（窗口内容全部算"看过"）；
@@ -219,9 +231,11 @@ export class ContextWindow {
  *    例如测试直接写 store、或将来新增的入口）就顺手补齐。
  */
 export class ContextWindowRegistry {
-  #store;
+  #store: ChatStore | null;
+  #capacityOf: () => number;
+  windows: Map<string, ContextWindow>;
 
-  constructor({ store, capacity = null, windows = null } = {}) {
+  constructor({ store = null, capacity = null, windows = null }: RegistryOptions = {}) {
     this.#store = store;
     this.#capacityOf = typeof capacity === 'function'
       ? capacity
@@ -229,18 +243,16 @@ export class ContextWindowRegistry {
     this.windows = windows instanceof Map ? windows : new Map();
   }
 
-  #capacityOf;
-
   get capacity() {
     return Math.max(0, Number(this.#capacityOf()) || 0);
   }
 
-  has(chatKey) {
+  has(chatKey: string): boolean {
     return this.windows.has(chatKey);
   }
 
   /** 取窗口（不存在就播种建出来）。所有访问都从它进。 */
-  ensure(chatKey) {
+  ensure(chatKey: string): ContextWindow {
     let w = this.windows.get(chatKey);
     if (!w) {
       w = new ContextWindow({ chatKey, capacity: () => this.capacity });
@@ -252,33 +264,33 @@ export class ContextWindowRegistry {
   }
 
   /** 只看不建（用于"这个会话有没有窗口"这类判断）。 */
-  get(chatKey) {
+  get(chatKey: string): ContextWindow | null {
     return this.windows.get(chatKey) || null;
   }
 
   /** 收消息进窗（唯一的入窗入口，见类注释）。 */
-  push(chatKey, entry) {
+  push(chatKey: string, entry: ChatMessage | null | undefined): boolean {
     if (!entry) return false;
     return this.ensure(chatKey).push(entry);
   }
 
-  pending(chatKey) { return this.ensure(chatKey).pending(); }
-  batch(chatKey) { return this.ensure(chatKey).batch(); }
-  foldedCount(chatKey) { return this.ensure(chatKey).foldedCount(); }
-  seen(chatKey) { return this.ensure(chatKey).seen(); }
-  takeSettled(chatKey) { return this.ensure(chatKey).takeSettled(); }
+  pending(chatKey: string) { return this.ensure(chatKey).pending(); }
+  batch(chatKey: string) { return this.ensure(chatKey).batch(); }
+  foldedCount(chatKey: string) { return this.ensure(chatKey).foldedCount(); }
+  seen(chatKey: string) { return this.ensure(chatKey).seen(); }
+  takeSettled(chatKey: string) { return this.ensure(chatKey).takeSettled(); }
 
-  remove(chatKey, id) {
+  remove(chatKey: string, id: unknown): boolean {
     const w = this.windows.get(chatKey);
     return w ? w.remove(id) : false;
   }
 
   /** 未消费条数（门禁用：它还有几批没处理）。 */
-  pendingCount(chatKey) {
+  pendingCount(chatKey: string): number {
     return this.ensure(chatKey).pending().length;
   }
 
-  stats(chatKey) {
+  stats(chatKey: string) {
     const w = this.windows.get(chatKey);
     return w ? w.stats() : null;
   }
@@ -291,7 +303,7 @@ export class ContextWindowRegistry {
    *
    * 容量 0（不限）时窗口即全部，sunk 恒空。
    */
-  #seed(w) {
+  #seed(w: ContextWindow): void {
     const cap = this.capacity;
     const all = this.#store?.recentIncoming
       ? this.#store.recentIncoming(w.chatKey, { limit: 0 })
@@ -309,7 +321,7 @@ export class ContextWindowRegistry {
    * 兜底补齐：存档里出现了窗口没见过的对方消息（id 比窗口最大的还大）就补收进来。
    * 正常情况下 onIncoming 的 push 已经收过了，这里是"漏了 push 也不会静默分叉"的保险。
    */
-  #sync(w) {
+  #sync(w: ContextWindow): void {
     const store = this.#store;
     if (!store?.lastIncomingId) return;
     const last = store.lastIncomingId(w.chatKey);

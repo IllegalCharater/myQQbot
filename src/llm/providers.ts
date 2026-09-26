@@ -6,13 +6,28 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { getConfig, updateConfig } from '../core/config.js';
+import type { AppConfig } from '../core/config.js';
+
+interface Provider {
+  id: string; displayName?: string; api?: string; anthropicOrigin?: boolean; baseURL?: string;
+  apiKey?: string; apiKeyFrom?: string; models: string[]; modelNames?: Record<string, string>;
+  needsBaseUrl?: boolean; [key: string]: unknown;
+}
+interface ModelInput { id: string; name: string }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+function errorMessage(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  return error.cause instanceof Error ? error.cause.message : error.message;
+}
 
 // DSH 未写 baseURL 的提供商，按官方默认端点补全（可在 UI 修改）。
 // 来源：
 // - mimo.mi.com/docs Token Plan 快速接入（tp- 密钥专用网关，与 sk- 开放平台相互独立不可混用）
 // - help.aliyun.com/zh/model-studio/token-plan-personal-quick-start（sk-sp- 密钥专用网关，与按量付费 sk- 不可混用）
 // - opencode.ai/docs/go（OpenCode Go 订阅网关）
-const PROVIDER_URL_DEFAULTS = {
+const PROVIDER_URL_DEFAULTS: Record<string, string> = {
   openrouter: 'https://openrouter.ai/api/v1',
   nvidia: 'https://integrate.api.nvidia.com/v1',
   'qwen-token-plan-cn': 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
@@ -22,11 +37,11 @@ const PROVIDER_URL_DEFAULTS = {
 };
 
 // 密钥环境变量的常见别名（如 DSH 写 A6API_API_KEY，本机实际是 A6API_APIKEY）
-const KEY_ENV_ALIASES = {
+const KEY_ENV_ALIASES: Record<string, string[]> = {
   A6API_API_KEY: ['A6API_API_KEY', 'A6API_APIKEY']
 };
 
-function envApiKey(envName) {
+function envApiKey(envName: string) {
   for (const name of KEY_ENV_ALIASES[envName] || [envName]) {
     const value = process.env[name];
     if (value) return { key: String(value), from: `环境变量 ${name}` };
@@ -35,18 +50,18 @@ function envApiKey(envName) {
 }
 
 /** 读取 DSH 的 .credentials.yaml（refs.<环境变量名> = 密钥）。 */
-export function readDshCredentials(yamlPath) {
+export function readDshCredentials(yamlPath: string): Record<string, unknown> {
   const credPath = path.join(path.dirname(yamlPath), '.credentials.yaml');
   try {
     const doc = loadYaml(fs.readFileSync(credPath, 'utf8'));
-    const refs = doc?.refs;
-    return refs && typeof refs === 'object' ? refs : {};
+    const refs = isRecord(doc) ? doc.refs : undefined;
+    return isRecord(refs) ? refs : {};
   } catch {
     return {};
   }
 }
 
-function normalizeBaseURL(raw, { wasAnthropic, providerId }) {
+function normalizeBaseURL(raw: unknown, { wasAnthropic, providerId }: { wasAnthropic: boolean; providerId: string }) {
   let url = String(raw || '').trim();
   if (!url) url = PROVIDER_URL_DEFAULTS[providerId] || '';
   if (!url) return '';
@@ -55,20 +70,23 @@ function normalizeBaseURL(raw, { wasAnthropic, providerId }) {
 }
 
 /** 解析 DSH settings.yaml，返回规范化的提供商数组。 */
-export function parseDshSettings(yamlPath) {
+export function parseDshSettings(yamlPath: string): Provider[] {
   const text = fs.readFileSync(yamlPath, 'utf8');
   const doc = loadYaml(text);
-  const providers = doc?.['llm-pi-ai']?.providers ?? {};
+  const root = isRecord(doc) ? doc : {};
+  const llmPi = isRecord(root['llm-pi-ai']) ? root['llm-pi-ai'] : {};
+  const providers = isRecord(llmPi.providers) ? llmPi.providers : {};
   const creds = readDshCredentials(yamlPath);
-  const out = [];
+  const out: Provider[] = [];
   for (const [id, p] of Object.entries(providers)) {
-    const rawModels = Array.isArray(p?.models) ? p.models : [];
+    const item = isRecord(p) ? p : {};
+    const rawModels = Array.isArray(item.models) ? item.models : [];
     const models = rawModels
-      .map((m) => (typeof m === 'string' ? m : String(m?.id || m?.model || '')))
+      .map((m) => (typeof m === 'string' ? m : String(isRecord(m) ? m.id || m.model || '' : '')))
       .filter(Boolean);
     if (!models.length) continue;
-    const wasAnthropic = String(p?.api || '').includes('anthropic');
-    const envName = String(p?.apiKeyEnv || '');
+    const wasAnthropic = String(item.api || '').includes('anthropic');
+    const envName = String(item.apiKeyEnv || '');
     // 密钥优先级：DSH 凭据文件 > 环境变量
     let key = '';
     let keyFrom = '';
@@ -80,10 +98,10 @@ export function parseDshSettings(yamlPath) {
     }
     const entry = {
       id,
-      displayName: String(p?.displayName || id),
+      displayName: String(item.displayName || id),
       api: 'openai',
       anthropicOrigin: wasAnthropic,
-      baseURL: normalizeBaseURL(p?.baseURL, { wasAnthropic, providerId: id }),
+      baseURL: normalizeBaseURL(item.baseURL, { wasAnthropic, providerId: id }),
       apiKey: key,
       apiKeyFrom: keyFrom,
       models,
@@ -95,9 +113,9 @@ export function parseDshSettings(yamlPath) {
 }
 
 /** 从 DSH 导入并写入配置（整体替换 providers，并把密钥拆到 dshProviderKeys）。返回导入摘要。 */
-export function importFromDsh(yamlPath) {
+export function importFromDsh(yamlPath: string) {
   const providers = parseDshSettings(yamlPath);
-  const dshProviderKeys = {};
+  const dshProviderKeys: Record<string, string> = {};
   const providersWithoutKeys = providers.map((p) => {
     if (p.apiKey) dshProviderKeys[p.id] = p.apiKey;
     const { apiKey, ...rest } = p;
@@ -119,7 +137,7 @@ export function currentProviders() {
 }
 
 /** 给指定提供商设置 API Key（存进配置的 dshProviderKeys，不动 providers 数组）。 */
-export function setProviderKey(providerId, apiKey) {
+export function setProviderKey(providerId: string, apiKey: unknown) {
   const key = String(apiKey ?? '').trim();
   const keys = { ...(getConfig().dshProviderKeys || {}) };
   if (key) keys[providerId] = key;
@@ -130,11 +148,11 @@ export function setProviderKey(providerId, apiKey) {
 
 // ── 手动管理提供商/模型（设置页“模型 API”） ──────────────────────────────
 
-function normalizeBaseUrl(raw) {
+function normalizeBaseUrl(raw: unknown) {
   return String(raw || '').trim().replace(/\/+$/, '');
 }
 
-function hostDisplayName(baseUrl) {
+function hostDisplayName(baseUrl: string) {
   try {
     const u = new URL(baseUrl);
     return u.hostname || '自定义提供商';
@@ -143,14 +161,14 @@ function hostDisplayName(baseUrl) {
   }
 }
 
-function normalizeModelInput(models) {
-  const out = [];
+function normalizeModelInput(models: unknown): ModelInput[] {
+  const out: ModelInput[] = [];
   for (const m of Array.isArray(models) ? models : []) {
     if (!m) continue;
     if (typeof m === 'string') {
       const id = m.trim();
       if (id) out.push({ id, name: id });
-    } else if (typeof m === 'object') {
+    } else if (isRecord(m)) {
       const id = String(m.id ?? m.model ?? '').trim();
       if (id) out.push({ id, name: String(m.name ?? m.id ?? id).trim() || id });
     }
@@ -159,7 +177,7 @@ function normalizeModelInput(models) {
 }
 
 /** 从当前配置里取 provider.apiKey 对应的真实值（含旧版 top-level key 回退）。 */
-function providerKeyValue(provider, cfg) {
+function providerKeyValue(provider: Provider, cfg: AppConfig) {
   if (provider && typeof provider === 'object') {
     const top = String(provider.apiKey ?? '').trim();
     if (top && top !== '******') return top;
@@ -170,20 +188,20 @@ function providerKeyValue(provider, cfg) {
 }
 
 /** 提供商对象里 apiKey 可能是掩码/引用，请求前必须解出真实 key。 */
-function withResolvedKey(p, cfg = getConfig()) {
+function withResolvedKey(p: Provider, cfg = getConfig()): Provider {
   const real = providerKeyValue(p, cfg);
   return { ...p, apiKey: real };
 }
 
 /** OpenCode Go 路由头：omen alpha 等模型缺 x-opencode-session 直接 400。
  *  中转站转发时域名不是 opencode.ai，要靠模型 id 的 opencode-go/ 前缀识别。 */
-function opencodeHeaders(baseUrl, model = '') {
+function opencodeHeaders(baseUrl: unknown, model = ''): Record<string, string> {
   if (!/opencode\.ai/i.test(String(baseUrl)) && !/^opencode-go\//i.test(String(model || ''))) return {};
   return { 'x-opencode-session': `qqagent-probe-${process.pid}`, 'user-agent': 'qq-agent/0.3' };
 }
 
 /** 用指定 baseUrl/key 获取模型列表（OpenAI /models）。 */
-export async function fetchModelsFrom(baseUrl, apiKey, timeoutMs = 15000) {
+export async function fetchModelsFrom(baseUrl: unknown, apiKey: unknown, timeoutMs = 15000) {
   const base = normalizeBaseUrl(baseUrl);
   if (!base) throw new Error('请先填写 Base URL');
   const res = await fetch(`${base}/models`, {
@@ -191,13 +209,13 @@ export async function fetchModelsFrom(baseUrl, apiKey, timeoutMs = 15000) {
     signal: AbortSignal.timeout(timeoutMs)
   });
   if (!res.ok) throw new Error(`获取模型列表失败：HTTP ${res.status}`);
-  const data = await res.json();
-  const list = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
-  return list.map((m) => String(m.id ?? m.model ?? m)).filter(Boolean);
+  const data: unknown = await res.json();
+  const list: unknown[] = isRecord(data) && Array.isArray(data.data) ? data.data : (Array.isArray(data) ? data : []);
+  return list.map((m) => String(isRecord(m) ? m.id ?? m.model ?? m : m)).filter(Boolean);
 }
 
 /** 用用户提供的 baseUrl + apiKey + modelId 发送一次最小 chat 测试请求。 */
-export async function testModelChat({ baseUrl, apiKey, model }) {
+export async function testModelChat({ baseUrl, apiKey, model }: { baseUrl: unknown; apiKey?: unknown; model: unknown }) {
   const base = normalizeBaseUrl(baseUrl);
   if (!base) throw new Error('请先填写 Base URL');
   if (!String(model || '').trim()) throw new Error('请先填写模型 ID');
@@ -210,7 +228,7 @@ export async function testModelChat({ baseUrl, apiKey, model }) {
       headers: {
         'content-type': 'application/json',
         ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-        ...opencodeHeaders(base, model)
+        ...opencodeHeaders(base, String(model || ''))
       },
       body: JSON.stringify({
         model: String(model).trim(),
@@ -221,16 +239,21 @@ export async function testModelChat({ baseUrl, apiKey, model }) {
       signal: controller.signal
     });
     const latencyMs = Date.now() - startedAt;
-    const body = await res.json().catch(() => ({}));
+    const body: unknown = await res.json().catch(() => ({}));
+    const root = isRecord(body) ? body : {};
     if (!res.ok) {
-      const errText = String(body?.error?.message ?? body?.message ?? '').slice(0, 200);
+      const apiError = isRecord(root.error) ? root.error : {};
+      const errText = String(apiError.message ?? root.message ?? '').slice(0, 200);
       return { ok: false, httpStatus: res.status, latencyMs, note: `HTTP ${res.status}${errText ? `：${errText}` : ''}` };
     }
-    const reply = String(body?.choices?.[0]?.message?.content ?? '').trim().slice(0, 60);
+    const choices = Array.isArray(root.choices) ? root.choices : [];
+    const choice = isRecord(choices[0]) ? choices[0] : {};
+    const message = isRecord(choice.message) ? choice.message : {};
+    const reply = String(message.content ?? '').trim().slice(0, 60);
     return { ok: true, httpStatus: res.status, latencyMs, note: reply ? `模型回复：「${reply}」` : '请求成功（无文本返回）' };
-  } catch (error) {
+  } catch (error: unknown) {
     const latencyMs = Date.now() - startedAt;
-    const msg = String(error?.cause?.message ?? error?.message ?? error);
+    const msg = errorMessage(error);
     return { ok: false, latencyMs, note: msg === '超时' ? '连接超时' : `网络错误：${msg}` };
   } finally {
     clearTimeout(timer);
@@ -238,7 +261,7 @@ export async function testModelChat({ baseUrl, apiKey, model }) {
 }
 
 /** 测试一个提供商端点（按 providerId 查目录，或直接给 baseUrl/apiKey）。 */
-export async function testOneProvider({ providerId = '', baseUrl = '', apiKey = '' } = {}) {
+export async function testOneProvider({ providerId = '', baseUrl = '', apiKey = '' }: { providerId?: string; baseUrl?: string; apiKey?: string } = {}) {
   let p = currentProviders().find((x) => x.id === providerId);
   if (!p) {
     const base = normalizeBaseUrl(baseUrl);
@@ -251,7 +274,7 @@ export async function testOneProvider({ providerId = '', baseUrl = '', apiKey = 
 }
 
 /** 新建提供商；若同 baseURL 已存在则合并模型。返回 { provider, created }。 */
-export function upsertProvider({ baseUrl, apiKey, models = [] }) {
+export function upsertProvider({ baseUrl, apiKey, models = [] }: { baseUrl: unknown; apiKey?: unknown; models?: unknown[] }) {
   const base = normalizeBaseUrl(baseUrl);
   if (!base) throw new Error('Base URL 不能为空');
   const providers = currentProviders().map((p) => { const { apiKey: _ak, ...rest } = p; return { ...rest, models: [...(p.models || [])] }; });
@@ -273,7 +296,7 @@ export function upsertProvider({ baseUrl, apiKey, models = [] }) {
     return { provider: withResolvedKey(existing), created: false };
   }
   const id = `custom_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  const modelNames = {};
+  const modelNames: Record<string, string> = {};
   for (const m of entries) modelNames[m.id] = m.name;
   const provider = {
     id,
@@ -295,7 +318,7 @@ export function upsertProvider({ baseUrl, apiKey, models = [] }) {
 }
 
 /** 给指定提供商追加模型（合并 modelNames）。 */
-export function addModelsToProvider(providerId, models = []) {
+export function addModelsToProvider(providerId: string, models: unknown[] = []) {
   const entries = normalizeModelInput(models);
   const providers = currentProviders().map((p) => ({ ...p, models: [...(p.models || [])] }));
   const p = providers.find((x) => x.id === providerId);
@@ -310,7 +333,7 @@ export function addModelsToProvider(providerId, models = []) {
 }
 
 /** 从提供商移除一个模型。 */
-export function removeModelFromProvider(providerId, modelId) {
+export function removeModelFromProvider(providerId: string, modelId: string) {
   const providers = currentProviders().map((p) => ({ ...p, models: [...(p.models || [])] }));
   const p = providers.find((x) => x.id === providerId);
   if (!p) return null;
@@ -330,7 +353,7 @@ export function removeModelFromProvider(providerId, modelId) {
  * 返回 { ok, httpStatus, modelCount, latencyMs, verdict, note }。
  * verdict: ok（可用）/ bad-key（密钥被拒）/ no-models-route（端点可达但无 /models 路由）/ no-endpoint / error
  */
-export async function testProvider(p, timeoutMs = 12000) {
+export async function testProvider(p: Provider, timeoutMs = 12000) {
   if (!p.baseURL) return { ok: false, verdict: 'no-endpoint', note: '没有端点地址', latencyMs: 0 };
   const startedAt = Date.now();
   const controller = new AbortController();
@@ -347,8 +370,8 @@ export async function testProvider(p, timeoutMs = 12000) {
     if (res.ok) {
       let count = 0;
       try {
-        const data = await res.json();
-        const list = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
+        const data: unknown = await res.json();
+        const list = isRecord(data) && Array.isArray(data.data) ? data.data : (Array.isArray(data) ? data : []);
         count = list.length;
       } catch { /* body 不是 JSON */ }
       return { ok: true, httpStatus: res.status, modelCount: count, latencyMs, verdict: 'ok', note: count ? `列到 ${count} 个模型` : '端点可用（未返回模型列表）' };
@@ -360,9 +383,9 @@ export async function testProvider(p, timeoutMs = 12000) {
       return { ok: false, httpStatus: 404, latencyMs, verdict: 'no-models-route', note: '端点可达但没有 /models 路由（chat/completions 未必不可用）' };
     }
     return { ok: false, httpStatus: res.status, latencyMs, verdict: 'error', note: `HTTP ${res.status}` };
-  } catch (error) {
+  } catch (error: unknown) {
     const latencyMs = Date.now() - startedAt;
-    const msg = String(error?.cause?.message ?? error?.message ?? error);
+    const msg = errorMessage(error);
     return { ok: false, latencyMs, verdict: 'error', note: msg === '超时' ? '连接超时' : `网络错误：${msg}` };
   } finally {
     clearTimeout(timer);
@@ -370,12 +393,13 @@ export async function testProvider(p, timeoutMs = 12000) {
 }
 
 /** 并发测试全部提供商（限 4 并发）。 */
-export async function testAllProviders(providers, limit = 4) {
-  const results = {};
+export async function testAllProviders(providers: Provider[], limit = 4) {
+  const results: Record<string, Record<string, unknown>> = {};
   const queue = [...providers];
   const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
     while (queue.length) {
       const p = queue.shift();
+      if (!p) continue;
       results[p.id] = { ...(await testProvider(p)), displayName: p.displayName };
     }
   });

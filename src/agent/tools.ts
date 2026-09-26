@@ -11,8 +11,18 @@ import { webSearch, webFetch } from '../media/web-search.js';
 import { expandForwardNodes, forwardIdFromData } from '../qq/onebot.js';
 import { enqueueJmcomicDownload } from '../media/jmcomic.js';
 import { cachedDataUrl, isCacheFile, sendTarget } from '../stickers/sticker-cache.js';
+import type { ChatMessage } from '../chat/types.js';
+import type { ToolArguments, ToolContentPart, ToolContext, ToolDefinition, ToolResult } from './types.js';
 
-async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function downloadImageAsDataUrl(url: unknown, timeoutMs = 30000): Promise<string> {
   const safeUrl = await validateImageUrl(url);
   const { buffer, contentType } = await safeFetchBinary(safeUrl);
   if (!buffer || !buffer.length) throw new Error('图片内容为空');
@@ -27,11 +37,11 @@ async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
 // get_message_images 整条读图路径全灭，报 `detectMime is not defined`）。
 export { detectMime };
 
-function ok(payload) {
+function ok(payload: unknown): ToolResult {
   return { content: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 1) };
 }
 
-function err(message) {
+function err(message: unknown): ToolResult {
   return { content: `错误：${message}`, isError: true };
 }
 
@@ -40,7 +50,7 @@ function err(message) {
 const NOTICE_BATCH_CHARS = 6000;
 
 // 找不到消息 id 时，把当前会话真实可见的 id 告诉模型，避免它继续瞎猜。
-function midHint(ctx) {
+function midHint(ctx: ToolContext): string {
   const mids = ctx.store.recent(ctx.chatKey, { limit: 60 })
     .map((m) => m.mid)
     .filter((v) => v !== null && v !== undefined && String(v) !== '');
@@ -51,14 +61,14 @@ function midHint(ctx) {
 }
 
 /** 从存档的 media 里取转发 res_id（入库时 extractMediaFromSegments 存下的）。 */
-function forwardResIdFromMedia(entry) {
+function forwardResIdFromMedia(entry: ChatMessage | null | undefined): string {
   const hit = (entry?.media || []).find((x) => x && x.kind === 'forward' && x.id);
   return hit ? String(hit.id) : '';
 }
 
 // 模型指错 id 时（典型：拿了"引用了某条转发"的那条普通消息的 id），把当前会话里确实
 // 是合并转发的消息列出来，让它下一轮能改对 —— 只报一句"失败"模型只会换着 id 瞎试。
-function forwardHint(ctx) {
+function forwardHint(ctx: ToolContext): string {
   const ids = ctx.store.recent(ctx.chatKey, { limit: 200 })
     .filter((m) => m.mid !== null && m.mid !== undefined && String(m.mid) !== '')
     .filter((m) => /\[合并转发|\[转发消息/.test(String(m.text || '')) || forwardResIdFromMedia(m))
@@ -70,7 +80,7 @@ function forwardHint(ctx) {
 }
 
 // 需要数字 QQ 号但模型传了名字时，把当前会话真实可见的成员列出来，让它选一个。
-function memberHint(ctx) {
+function memberHint(ctx: ToolContext): string {
   const members = ctx.store.activeMembers(ctx.chatKey, 8);
   if (!members.length) return '当前没有可用的成员列表，请先等有群友发言后再试';
   const lines = members.map((m) => `- ${m.name}：${m.userId}`).join('\n');
@@ -82,7 +92,7 @@ function memberHint(ctx) {
  * 找不到就返回 ''（调用方回退成 QQ 号）—— 公告常常是很久以前发的，
  * 那个人的消息早滚出视野了，这很正常。
  */
-function senderNameFor(ctx, userId) {
+function senderNameFor(ctx: ToolContext, userId: unknown): string {
   const uid = String(userId || '');
   if (!uid) return '';
   const noted = (getConfig().memberNotes || {})[uid];
@@ -92,8 +102,8 @@ function senderNameFor(ctx, userId) {
 }
 
 /** 群公告取不到时的提示：区分"协议端没这个接口"、"结构不认识"和"这次请求失败"，都要给出下一步。 */
-function noticeHint(error) {
-  const msg = String(error?.message ?? error);
+function noticeHint(error: unknown): string {
+  const msg = errorMessage(error);
   const tail = '如实告诉群友你读不到公告就行，不要编内容。';
   if (/无法识别的结构/.test(msg)) {
     return `协议端返回的群公告结构不认识（${msg}）。多半是协议端版本差异导致的字段不同，${tail}`;
@@ -104,8 +114,8 @@ function noticeHint(error) {
   return `读群公告失败：${msg}。可以稍后再试一次；再失败就${tail}`;
 }
 
-function imageParts(text, dataUrls) {
-  const parts = [{ type: 'text', text }];
+function imageParts(text: string, dataUrls: string[]): ToolContentPart[] {
+  const parts: ToolContentPart[] = [{ type: 'text', text }];
   for (const url of dataUrls) parts.push({ type: 'image_url', image_url: { url } });
   return parts;
 }
@@ -118,7 +128,7 @@ function imageParts(text, dataUrls) {
  *   emit  (事件上报给 UI/日志)
  * }
  */
-export function buildToolDefs() {
+export function buildToolDefs(): ToolDefinition[] {
   return [
     {
       name: 'send_message',
@@ -146,7 +156,7 @@ export function buildToolDefs() {
           if (result.failed.length) note.push(`（另有 ${result.failed.length} 条发送失败：${result.failed.map((f) => f.error).join('；')}——成功的不需要重发，失败的请稍后再试或减少条数）`);
           return ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), note: note.join('') });
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(errorMessage(error));
         }
       }
     },
@@ -183,7 +193,7 @@ export function buildToolDefs() {
             try {
               await validateImageUrl(target); // 只允许公网 http(s)，防止本地库被污染后诱导 OneBot 抓内网
             } catch (error) {
-              return err(`表情 ${sticker.id} 的图片地址不合法，已拒绝发送：${error?.message ?? error}`);
+          return err(`表情 ${sticker.id} 的图片地址不合法，已拒绝发送：${errorMessage(error)}`);
             }
           }
           const options = {
@@ -198,7 +208,7 @@ export function buildToolDefs() {
             // 本地路径是"协议端认不认"这件事唯一没法在本机验证的地方，所以留一步兜底：
             // 只有在协议端**明确拒绝**（错误里带 retcode=）时才退回原链接重发。
             // 超时那类错误说不清消息到底发出去没有，重发就可能是刷屏 —— 不冒这个险。
-            const refused = /retcode=/.test(String(error?.message || ''));
+            const refused = /retcode=/.test(errorMessage(error));
             if (!local || !refused || !sticker.url) throw error;
             console.warn(`[tools] 本机图片路径被协议端拒绝，退回原链接重发：${sticker.id}`);
             result = await ctx.sender.sendSticker(ctx.chatKey, sticker, { ...options, file: sticker.url });
@@ -206,9 +216,9 @@ export function buildToolDefs() {
           ctx.stickers.markUsed(sticker.id, String(ctx.session.triggerText || '').slice(0, 100));
           ctx.session.sent.push({ type: 'sticker', text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
           ctx.emit('session-update', ctx.session.id);
-          return ok({ sent: true, messageId: result?.message_id ?? null, note: '表情已发送。' });
+          return ok({ sent: true, messageId: isRecord(result) ? result.message_id ?? null : null, note: '表情已发送。' });
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(errorMessage(error));
         }
       }
     },
@@ -227,7 +237,7 @@ export function buildToolDefs() {
           const result = await ctx.stickers.list(String(args.query ?? ''), Math.min(100, Math.max(1, Number(args.limit) || 24)));
           return ok(result);
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(errorMessage(error));
         }
       }
     },
@@ -254,7 +264,7 @@ export function buildToolDefs() {
           if (!dataUrl) return err('该表情既没有本地缓存图片，也没有可下载的图片地址');
           return { content: imageParts(`表情 ${sticker.id}（备注：${sticker.desc || '无'}）：`, [dataUrl]) };
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(errorMessage(error));
         }
       }
     },
@@ -282,7 +292,7 @@ export function buildToolDefs() {
           if (!result.entry) return err(`找不到表情 ${ref}，请先用 list_stickers 获取有效 id。也可以直接填【可用表情包】或 list_stickers 里那个表情的备注/标签。`);
           return ok({ updated: true, id: result.entry.id, localNote: result.entry.localNote, tags: result.entry.tags });
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(errorMessage(error));
         }
       }
     },
@@ -304,6 +314,7 @@ export function buildToolDefs() {
           const imageMedia = (entry.media || []).find((m) => m.kind === 'image' && m.url);
           if (!imageMedia) return err('该消息没有可收藏的图片');
           const saved = await ctx.stickers.collect(args.messageId, { url: imageMedia.url, note: String(args.note ?? '') });
+          if (!saved) throw new Error('收藏表情失败');
           // 上限淘汰是真删数据，必须在回执里说出来 —— 静默删收藏是最吓人的那种行为
           const dropped = ctx.stickers.lastEvicted || [];
           const droppedTip = dropped.length
@@ -317,7 +328,7 @@ export function buildToolDefs() {
             hint: `顺手用 sticker_note 给这个表情补一句标签和适用场景（内容/什么场合发），以后才选得准。${droppedTip}`
           });
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(errorMessage(error));
         }
       }
     },
@@ -333,9 +344,9 @@ export function buildToolDefs() {
           if (ctx.kind === 'group' && (args.targetUserId === undefined || args.targetUserId === null || String(args.targetUserId).trim() === '')) {
             return err(`群聊拍一拍必须传 targetUserId（数字 QQ 号）。${memberHint(ctx)}`);
           }
-          let target = args.targetUserId;
-          if (target !== undefined && target !== null && String(target).trim() !== '') {
-            target = Number(target);
+          const rawTarget = args.targetUserId;
+          if (rawTarget !== undefined && rawTarget !== null && String(rawTarget).trim() !== '') {
+            const target = Number(rawTarget);
             if (!Number.isInteger(target) || target <= 0) {
               return err(`targetUserId 必须是正整数的 QQ 号（收到：${JSON.stringify(args.targetUserId)}）。${memberHint(ctx)}`);
             }
@@ -345,7 +356,7 @@ export function buildToolDefs() {
           }
           return ok({ poked: true });
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(errorMessage(error));
         }
       }
     },
@@ -396,13 +407,13 @@ export function buildToolDefs() {
           }
           // res_id 优先取入库时存下的（省一次 get_msg）；老存档没存就问协议端要 ——
           // 顺便用它确认这条到底是不是转发，模型指错 id 时能给出可执行的提示。
-          let resId = forwardResIdFromMedia(entry);
+          let resId: string | null = forwardResIdFromMedia(entry) || null;
           if (!resId) {
             let msg = null;
             try { msg = await ctx.onebot.getMsg(entry.mid); } catch { /* 老消息可能已超出服务端保留范围 */ }
-            if (msg) {
-              const segs = Array.isArray(msg.message) ? msg.message : null;
-              const fwdSeg = segs ? segs.find((s) => s?.type === 'forward') : null;
+            if (isRecord(msg)) {
+              const segs = Array.isArray(msg.message) ? msg.message.filter(isRecord) : null;
+              const fwdSeg = segs ? segs.find((segment) => segment.type === 'forward') : null;
               if (!fwdSeg) {
                 const preview = String(entry.text || '').replace(/\s+/g, ' ').slice(0, 60);
                 return err(`消息 ${args.messageId} 不是合并转发，是一条普通消息（内容：${preview}）。${forwardHint(ctx)}`);
@@ -417,10 +428,11 @@ export function buildToolDefs() {
           const ex = await expandForwardNodes(nodes);
           if (!ex || !ex.text) return err('转发内容为空或已被 QQ 服务端丢弃（发送时间太久）');
           // 写回存档：一次展开，永久升级这条记录（模型/存档页都受益）
-          ctx.store.updateByMid(ctx.chatKey, entry.mid, { text: ex.text, appendMedia: ex.media || [] });
+          const media = (ex.media || []).map((item) => ({ ...item, kind: String(item.kind ?? '') }));
+          ctx.store.updateByMid(ctx.chatKey, entry.mid, { text: ex.text, appendMedia: media });
           return ok({ messageId: entry.mid, text: ex.text, images: (ex.media || []).length });
         } catch (error) {
-          return err(`展开失败：${error?.message ?? error}`);
+          return err(`展开失败：${errorMessage(error)}`);
         }
       }
     },
@@ -519,16 +531,16 @@ export function buildToolDefs() {
           if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
           const urls = (entry.media || []).filter((m) => m.kind === 'image' && m.url).map((m) => m.url);
           if (!urls.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);
-          const dataUrls = [];
-          const failed = [];
+          const dataUrls: string[] = [];
+          const failed: string[] = [];
           for (const url of urls) {
-            try { dataUrls.push(await downloadImageAsDataUrl(url)); } catch (e) { failed.push(String(e?.message ?? e)); }
+            try { dataUrls.push(await downloadImageAsDataUrl(url)); } catch (error) { failed.push(errorMessage(error)); }
           }
           if (!dataUrls.length) return err(`图片获取失败：${failed.join('；')}`);
           const note = failed.length ? `（另有 ${failed.length} 张获取失败）` : '';
           return { content: imageParts(`消息 ${args.messageId} 的图片内容${note}：`, dataUrls) };
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(errorMessage(error));
         }
       }
     },
@@ -569,9 +581,10 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         const mem = ctx.memory.query(ctx.chatKey);
         const userId = String(args.userId ?? '').trim();
+        const impressions = Array.isArray(mem.memberImpression) ? mem.memberImpression : [];
         const list = userId
-          ? mem.memberImpression.filter((e) => String(e.userId) === userId)
-          : mem.memberImpression;
+          ? impressions.filter((entry) => isRecord(entry) && String(entry.userId) === userId)
+          : impressions;
         return ok({ memberImpression: list });
       }
     },
@@ -609,7 +622,8 @@ export function buildToolDefs() {
         required: ['message']
       },
       async execute(ctx, args) {
-        const level = ['info', 'warning', 'error'].includes(args.level) ? args.level : 'info';
+        const rawLevel = String(args.level ?? '');
+        const level = ['info', 'warning', 'error'].includes(rawLevel) ? rawLevel : 'info';
         ctx.session.feedbacks.push({ level, message: String(args.message ?? '').slice(0, 500), at: Date.now() });
         ctx.emit('feedback', { sessionId: ctx.session.id, chatKey: ctx.chatKey, level, message: String(args.message ?? '') });
         return ok({ reported: true });
@@ -631,7 +645,7 @@ export function buildToolDefs() {
           }
           return ok(result);
         } catch (error) {
-          return err(`搜索失败：${error?.message ?? error}`);
+          return err(`搜索失败：${errorMessage(error)}`);
         }
       }
     },
@@ -654,7 +668,7 @@ export function buildToolDefs() {
             content: body.slice(0, 20000)
           });
         } catch (error) {
-          return err(`抓取失败：${error?.message ?? error}`);
+          return err(`抓取失败：${errorMessage(error)}`);
         }
       }
     },
@@ -674,7 +688,7 @@ export function buildToolDefs() {
           const result = enqueueJmcomicDownload(ctx, args.comicId);
           return ok({ ...result, note: `已加入下载队列，当前位置：${result.position}。完成后会自动发送 PDF。` });
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(errorMessage(error));
         }
       }
     },
@@ -695,7 +709,7 @@ export function buildToolDefs() {
 }
 
 /** 转成 OpenAI tools 参数格式。 */
-export function toOpenAiTools(defs) {
+export function toOpenAiTools(defs: ToolDefinition[]): Array<Record<string, unknown>> {
   return defs.map((d) => ({
     type: 'function',
     function: {
@@ -707,19 +721,20 @@ export function toOpenAiTools(defs) {
 }
 
 /** 找到并执行一个工具调用。返回 { content, isError }，content 为 string 或 parts 数组。 */
-export async function executeTool(defs, ctx, name, argsJson) {
+export async function executeTool(defs: ToolDefinition[], ctx: ToolContext, name: string, argsJson: unknown): Promise<ToolResult> {
   const def = defs.find((d) => d.name === name);
   if (!def) return { content: `错误：未知工具 ${name}`, isError: true };
-  let args = {};
+  let args: ToolArguments = {};
   const raw = argsJson ?? '{}';
   try {
-    args = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const parsed: unknown = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    args = isRecord(parsed) ? parsed : {};
   } catch {
     return { content: `错误：工具 ${name} 的参数不是合法 JSON：${String(raw).slice(0, 200)}`, isError: true };
   }
   try {
     return await def.execute(ctx, args ?? {});
   } catch (error) {
-    return { content: `错误：${error?.message ?? error}`, isError: true };
+    return { content: `错误：${errorMessage(error)}`, isError: true };
   }
 }

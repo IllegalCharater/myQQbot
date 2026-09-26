@@ -15,11 +15,87 @@ const LOG_DIR = path.join(JM_DIR, 'logs');
 const DOWNLOAD_RETRY_MS = [5_000, 30_000, 120_000];
 const UPLOAD_RETRY_MS = [10_000, 60_000, 300_000, 900_000, 1_800_000];
 
-let runtime = null;
-let jobs = [];
+type JobStatus = 'queued' | 'downloading' | 'downloaded' | 'uploading' | 'upload_failed' | 'failed' | 'completed';
+
+interface JmJob {
+  id: string;
+  key: string;
+  comicId: string;
+  requesterId: string;
+  kind: string;
+  chatId: string;
+  chatKey: string;
+  status: JobStatus;
+  downloadAttempts: number;
+  uploadAttempts: number;
+  pdfPath: string;
+  lastError: string;
+  nextAttemptAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  heartbeatAt?: number;
+  downloadedAt?: number;
+  failedAt?: number;
+  uploadedAt?: number;
+  cached?: boolean;
+}
+
+interface JmRuntime {
+  onebot: { call(action: string, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown> };
+  sender: { sendTextBatch(chatKey: string, messages: unknown[]): Promise<unknown> };
+  store: { appendSelf(chatKey: string, input: { text: unknown; ts?: number; mid?: string | number | null }): unknown };
+}
+
+interface JmContext extends JmRuntime {
+  requesterId: string | number;
+  kind: string;
+  chatId: string | number;
+  chatKey: string;
+}
+
+interface PythonResult {
+  ok: true;
+  pdfPath: string;
+  cached?: boolean;
+  [key: string]: unknown;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorCode(error: unknown): string {
+  return isRecord(error) ? String(error.code ?? '') : '';
+}
+
+function normalizeJob(value: unknown): JmJob | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.comicId !== 'string') return null;
+  const status = String(value.status ?? 'queued') as JobStatus;
+  return {
+    id: value.id,
+    key: String(value.key ?? ''), comicId: value.comicId, requesterId: String(value.requesterId ?? ''),
+    kind: String(value.kind ?? ''), chatId: String(value.chatId ?? ''), chatKey: String(value.chatKey ?? ''), status,
+    downloadAttempts: Number(value.downloadAttempts ?? 0), uploadAttempts: Number(value.uploadAttempts ?? 0),
+    pdfPath: String(value.pdfPath ?? ''), lastError: String(value.lastError ?? ''),
+    nextAttemptAt: value.nextAttemptAt === null ? null : Number(value.nextAttemptAt ?? 0),
+    createdAt: Number(value.createdAt ?? 0), updatedAt: Number(value.updatedAt ?? 0),
+    ...(typeof value.heartbeatAt === 'number' ? { heartbeatAt: value.heartbeatAt } : {}),
+    ...(typeof value.downloadedAt === 'number' ? { downloadedAt: value.downloadedAt } : {}),
+    ...(typeof value.failedAt === 'number' ? { failedAt: value.failedAt } : {}),
+    ...(typeof value.uploadedAt === 'number' ? { uploadedAt: value.uploadedAt } : {}),
+    ...(typeof value.cached === 'boolean' ? { cached: value.cached } : {})
+  };
+}
+
+let runtime: JmRuntime | null = null;
+let jobs: JmJob[] = [];
 let loaded = false;
 let workerRunning = false;
-let wakeTimer = null;
+let wakeTimer: ReturnType<typeof setTimeout> | null = null;
 
 function ensureDirs() {
   fs.mkdirSync(JM_DIR, { recursive: true });
@@ -40,10 +116,10 @@ function loadJobs() {
   ensureDirs();
   try {
     const raw = fs.readFileSync(JOBS_FILE, 'utf8').replace(/^\uFEFF/, '');
-    const parsed = JSON.parse(raw);
-    jobs = Array.isArray(parsed?.jobs) ? parsed.jobs : [];
+    const parsed: unknown = JSON.parse(raw);
+    jobs = isRecord(parsed) && Array.isArray(parsed.jobs) ? parsed.jobs.map(normalizeJob).filter((job): job is JmJob => job !== null) : [];
   } catch (error) {
-    if (error?.code !== 'ENOENT') console.warn('[jmcomic] 任务文件读取失败，将使用空队列:', error?.message ?? error);
+    if (errorCode(error) !== 'ENOENT') console.warn('[jmcomic] 任务文件读取失败，将使用空队列:', errorMessage(error));
     jobs = [];
   }
   let changed = false;
@@ -61,12 +137,12 @@ function loadJobs() {
   if (changed) saveJobs();
 }
 
-function updateJob(job, patch) {
+function updateJob(job: JmJob, patch: Partial<JmJob>) {
   Object.assign(job, patch, { updatedAt: Date.now() });
   saveJobs();
 }
 
-function cleanupCompletedJob(job) {
+function cleanupCompletedJob(job: JmJob) {
   const previous = jobs;
   jobs = jobs.filter((item) => item.id !== job.id);
   try {
@@ -79,15 +155,15 @@ function cleanupCompletedJob(job) {
     fs.rmSync(path.join(LOG_DIR, `${job.id}.log`), { force: true });
   } catch (error) {
     // 任务记录已经成功清除，残留日志不应导致已上传文件被重复发送。
-    console.warn(`[jmcomic] 已完成任务 ${job.id} 的日志删除失败:`, error?.message ?? error);
+    console.warn(`[jmcomic] 已完成任务 ${job.id} 的日志删除失败:`, errorMessage(error));
   }
 }
 
-function isPending(job) {
+function isPending(job: JmJob): boolean {
   return ['queued', 'downloading', 'downloaded', 'uploading', 'upload_failed'].includes(job.status);
 }
 
-function commandKey(requesterId, comicId) {
+function commandKey(requesterId: unknown, comicId: string): string {
   return `${requesterId || 'unknown'}:${comicId}`;
 }
 
@@ -101,7 +177,7 @@ function pythonCommand() {
   return { command: 'conda', prefix: ['run', '--no-capture-output', '-n', 'my_bot', 'python'] };
 }
 
-function validatePdf(pdfPath) {
+function validatePdf(pdfPath: unknown): string {
   const resolved = path.resolve(String(pdfPath || ''));
   const root = path.resolve(DOWNLOAD_DIR) + path.sep;
   if (!resolved.startsWith(root)) throw new Error('Python 返回的 PDF 路径越界');
@@ -118,11 +194,11 @@ function validatePdf(pdfPath) {
   return resolved;
 }
 
-function runPython(job) {
+function runPython(job: JmJob): Promise<PythonResult> {
   ensureDirs();
   const { command, prefix } = pythonCommand();
   const logFile = path.join(LOG_DIR, `${job.id}.log`);
-  return new Promise((resolve, reject) => {
+  return new Promise<PythonResult>((resolve, reject) => {
     const child = spawn(command, [...prefix, SCRIPT_PATH, job.comicId, DOWNLOAD_DIR], {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
@@ -130,23 +206,23 @@ function runPython(job) {
     let stdout = '';
     let stderr = '';
     let settled = false;
-    let hardTimer = null;
-    let idleTimer = null;
+    let hardTimer: ReturnType<typeof setTimeout> | null = null;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
     let lastPersistedHeartbeat = 0;
 
-    const finish = (fn, value) => {
+    const finish = <T>(fn: (value: T) => void, value: T) => {
       if (settled) return;
       settled = true;
-      clearTimeout(hardTimer);
-      clearTimeout(idleTimer);
+      if (hardTimer) clearTimeout(hardTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       fn(value);
     };
-    const stop = (message) => {
+    const stop = (message: string) => {
       try { child.kill(); } catch { /* ignore */ }
       finish(reject, new Error(message));
     };
     const heartbeat = () => {
-      clearTimeout(idleTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => stop('下载连续 5 分钟没有任何进度，已终止'), INACTIVITY_TIMEOUT_MS);
       const now = Date.now();
       if (now - lastPersistedHeartbeat >= 5_000) {
@@ -156,7 +232,7 @@ function runPython(job) {
         saveJobs();
       }
     };
-    const appendLog = (chunk) => {
+    const appendLog = (chunk: Buffer) => {
       try { fs.appendFileSync(logFile, chunk); } catch { /* ignore */ }
       heartbeat();
     };
@@ -173,14 +249,17 @@ function runPython(job) {
     child.on('close', (code) => {
       if (settled) return;
       const line = stdout.split(/\r?\n/).reverse().find((item) => item.startsWith(RESULT_PREFIX));
-      let result = null;
-      try { result = line ? JSON.parse(line.slice(RESULT_PREFIX.length)) : null; } catch { /* handled below */ }
-      if (code !== 0 || !result?.ok) {
-        finish(reject, new Error(result?.error || stderr.trim() || `Python 异常退出（${code}）`));
+      let result: Record<string, unknown> | null = null;
+      try {
+        const parsed: unknown = line ? JSON.parse(line.slice(RESULT_PREFIX.length)) : null;
+        result = isRecord(parsed) ? parsed : null;
+      } catch { /* handled below */ }
+      if (code !== 0 || result?.ok !== true) {
+        finish(reject, new Error(String(result?.error || stderr.trim() || `Python 异常退出（${code}）`)));
         return;
       }
       try {
-        finish(resolve, { ...result, pdfPath: validatePdf(result.pdfPath) });
+        finish(resolve, { ...result, ok: true, pdfPath: validatePdf(result.pdfPath) });
       } catch (error) {
         finish(reject, error);
       }
@@ -190,15 +269,15 @@ function runPython(job) {
   });
 }
 
-async function sendStatus(job, message) {
+async function sendStatus(job: JmJob, message: string) {
   try {
     await runtime?.sender?.sendTextBatch(job.chatKey, [message]);
   } catch (error) {
-    console.warn('[jmcomic] 状态消息发送失败:', error?.message ?? error);
+    console.warn('[jmcomic] 状态消息发送失败:', errorMessage(error));
   }
 }
 
-async function downloadStage(job) {
+async function downloadStage(job: JmJob) {
   const attempt = Number(job.downloadAttempts || 0) + 1;
   updateJob(job, { status: 'downloading', downloadAttempts: attempt, lastError: '', heartbeatAt: Date.now() });
   try {
@@ -208,7 +287,7 @@ async function downloadStage(job) {
       downloadedAt: Date.now(), nextAttemptAt: Date.now(), lastError: ''
     });
   } catch (error) {
-    const message = String(error?.message ?? error);
+    const message = errorMessage(error);
     const forbidden = message.includes('禁止下载');
     if (!forbidden && attempt < DOWNLOAD_RETRY_MS.length) {
       updateJob(job, { status: 'queued', lastError: message, nextAttemptAt: Date.now() + DOWNLOAD_RETRY_MS[attempt - 1] });
@@ -219,12 +298,12 @@ async function downloadStage(job) {
   }
 }
 
-async function uploadStage(job) {
+async function uploadStage(job: JmJob) {
   let pdfPath;
   try {
     pdfPath = validatePdf(job.pdfPath);
   } catch (error) {
-    updateJob(job, { status: 'queued', pdfPath: '', downloadAttempts: 0, lastError: String(error?.message ?? error), nextAttemptAt: Date.now() });
+    updateJob(job, { status: 'queued', pdfPath: '', downloadAttempts: 0, lastError: errorMessage(error), nextAttemptAt: Date.now() });
     return;
   }
   const attempt = Number(job.uploadAttempts || 0) + 1;
@@ -234,9 +313,9 @@ async function uploadStage(job) {
     : { user_id: Number(job.chatId), file: pdfPath, name: `${job.comicId}.pdf` };
   const action = job.kind === 'group' ? 'upload_group_file' : 'upload_private_file';
   try {
-    await runtime.onebot.call(action, params, 180_000);
+    await runtime?.onebot.call(action, params, 180_000);
   } catch (error) {
-    const message = String(error?.message ?? error);
+    const message = errorMessage(error);
     if (attempt < UPLOAD_RETRY_MS.length) {
       updateJob(job, { status: 'upload_failed', lastError: message, nextAttemptAt: Date.now() + UPLOAD_RETRY_MS[attempt - 1] });
       return;
@@ -250,19 +329,19 @@ async function uploadStage(job) {
   try {
     updateJob(job, { status: 'completed', uploadedAt: Date.now(), lastError: '', nextAttemptAt: null });
   } catch (error) {
-    console.warn(`[jmcomic] 文件已上传，但完成状态写入失败（${job.id}）:`, error?.message ?? error);
+    console.warn(`[jmcomic] 文件已上传，但完成状态写入失败（${job.id}）:`, errorMessage(error));
     return;
   }
   try {
-    runtime.store.appendSelf(job.chatKey, { text: `[文件:${job.comicId}.pdf]`, ts: Date.now(), mid: null });
+    runtime?.store.appendSelf(job.chatKey, { text: `[文件:${job.comicId}.pdf]`, ts: Date.now(), mid: null });
   } catch (error) {
-    console.warn(`[jmcomic] 文件已上传，但聊天存档写入失败（${job.id}）:`, error?.message ?? error);
+    console.warn(`[jmcomic] 文件已上传，但聊天存档写入失败（${job.id}）:`, errorMessage(error));
   }
   try {
     cleanupCompletedJob(job);
   } catch (error) {
     // completed 状态仍保留在磁盘中，启动恢复不会重复上传；以后可人工清理。
-    console.warn(`[jmcomic] 已完成任务 ${job.id} 的缓存清理失败:`, error?.message ?? error);
+    console.warn(`[jmcomic] 已完成任务 ${job.id} 的缓存清理失败:`, errorMessage(error));
   }
 }
 
@@ -272,7 +351,7 @@ function nextRunnableJob() {
 }
 
 function scheduleNextWake() {
-  clearTimeout(wakeTimer);
+  if (wakeTimer) clearTimeout(wakeTimer);
   wakeTimer = null;
   const times = jobs.filter(isPending).map((job) => Number(job.nextAttemptAt || 0)).filter((time) => time > Date.now());
   if (!times.length) return;
@@ -282,7 +361,7 @@ function scheduleNextWake() {
 async function runWorker() {
   if (workerRunning || !runtime) return;
   workerRunning = true;
-  clearTimeout(wakeTimer);
+  if (wakeTimer) clearTimeout(wakeTimer);
   wakeTimer = null;
   try {
     let job;
@@ -297,13 +376,13 @@ async function runWorker() {
 }
 
 /** 绑定运行时依赖，并恢复上次退出时未完成的任务。可重复调用。 */
-export function initializeJmcomicQueue({ onebot, sender, store }) {
+export function initializeJmcomicQueue({ onebot, sender, store }: JmRuntime) {
   runtime = { onebot, sender, store };
   loadJobs();
   void runWorker();
 }
 
-export function enqueueJmcomicDownload(ctx, comicId) {
+export function enqueueJmcomicDownload(ctx: JmContext, comicId: unknown) {
   loadJobs();
   if (!runtime) initializeJmcomicQueue({ onebot: ctx.onebot, sender: ctx.sender, store: ctx.store });
   const id = String(comicId ?? '').trim();
@@ -319,7 +398,7 @@ export function enqueueJmcomicDownload(ctx, comicId) {
   }
 
   const waitingBefore = jobs.filter((job) => isPending(job)).length;
-  const job = {
+  const job: JmJob = {
     id: `jm_${id}_${now}_${Math.random().toString(36).slice(2, 8)}`,
     key, comicId: id, requesterId: String(ctx.requesterId || ''), kind: ctx.kind,
     chatId: String(ctx.chatId), chatKey: ctx.chatKey, status: 'queued',

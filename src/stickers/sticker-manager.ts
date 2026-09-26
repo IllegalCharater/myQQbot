@@ -8,14 +8,35 @@ import {
   removeSticker, resolveStickerRef, selectEvictions
 } from './stickers.js';
 import { ensureCached, dropCached, cachedPath, sweepOrphans } from './sticker-cache.js';
+import type { StickerEntry, StickerPatch } from './types.js';
+
+interface ManagerOptions { onChange?: (() => void) | null }
+interface SyncResult { entries: StickerEntry[]; fromCache: boolean; disabled?: boolean; error?: string }
+interface CollectOptions { url?: unknown; note?: unknown }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export class StickerManager {
+  onebot: OneBotClient;
+  entries: StickerEntry[];
+  syncedAt: number;
+  syncing: Promise<SyncResult> | null;
+  collectTimes: number[];
+  onChange: (() => void) | null;
+  lastEvicted: StickerEntry[];
+
   /**
    * @param {object} onebot
    * @param {{onChange?: () => void}} [opts] onChange：库被改动时回调（面板推 SSE 用）。
    *   可选参数——不传就是个纯粹的库管理器，测试里的 `new StickerManager(fake)` 照旧。
    */
-  constructor(onebot, { onChange = null } = {}) {
+  constructor(onebot: OneBotClient, { onChange = null }: ManagerOptions = {}) {
     this.onebot = onebot;
     this.entries = loadStickerStore();
     this.syncedAt = 0;
@@ -36,7 +57,7 @@ export class StickerManager {
   }
 
   /** 同步 QQ 收藏表情（带 TTL 缓存；force 立即刷新）。失败时退回本地缓存。 */
-  async sync(force = false) {
+  async sync(force = false): Promise<SyncResult> {
     if (!this.enabled) return { entries: this.entries, fromCache: true, disabled: true };
     const ttl = 60000;
     const now = Date.now();
@@ -47,8 +68,8 @@ export class StickerManager {
     this.syncing = (async () => {
       try {
         const count = Math.min(500, Math.max(1, Number(getConfig().sticker?.promptMaxStickers) * 10 || 100));
-        const data = await this.onebot.call('fetch_custom_face_detail', { count });
-        const fetched = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : null);
+        const data: unknown = await this.onebot.call('fetch_custom_face_detail', { count });
+        const fetched = Array.isArray(data) ? data : (isRecord(data) && Array.isArray(data.data) ? data.data : null);
         if (!fetched) throw new Error('fetch_custom_face_detail 返回 data 不是数组');
         // 只有拿到合法数组才合并，避免异常响应清空本地库
         this.entries = mergeStickerLibrary(this.entries, fetched);
@@ -58,7 +79,7 @@ export class StickerManager {
         return { entries: this.entries, fromCache: false };
       } catch (error) {
         // 同步失败不致命：本地缓存继续用
-        return { entries: this.entries, fromCache: true, error: String(error?.message ?? error) };
+        return { entries: this.entries, fromCache: true, error: errorMessage(error) };
       } finally {
         this.syncing = null;
       }
@@ -66,13 +87,13 @@ export class StickerManager {
     return this.syncing;
   }
 
-  async list(query = '', limit = 48, force = false) {
+  async list(query: unknown = '', limit: unknown = 48, force = false) {
     const synced = await this.sync(force);
     return formatStickerList(synced.entries, query, limit);
   }
 
   /** 面板管理页：完整字段（含图片地址）。force 用于"从 QQ 刷新"按钮。 */
-  async adminList(query = '', limit = 500, force = false) {
+  async adminList(query: unknown = '', limit: unknown = 500, force = false) {
     const synced = await this.sync(force);
     return { ...formatStickerAdminList(synced.entries, query, limit), fromCache: !!synced.fromCache, syncError: synced.error || '' };
   }
@@ -84,7 +105,7 @@ export class StickerManager {
    * （mergeStickerLibrary 会按 fetchedIds 重新收编），所以这里不装作能删 —— 让
    * 调用方回一句"去 QQ 里取消收藏"。删除交给用户自己做，比给个假按钮诚实。
    */
-  remove(ref) {
+  remove(ref: unknown) {
     const result = removeSticker(this.entries, ref);
     if (!result.removed) return { removed: null, refused: '' };
     if (result.removed.source === 'qq') return { removed: null, refused: 'qq' };
@@ -95,7 +116,7 @@ export class StickerManager {
     return { removed: result.removed, refused: '' };
   }
 
-  async find(ref) {
+  async find(ref: unknown) {
     const synced = await this.sync(false);
     return findSticker(synced.entries, ref);
   }
@@ -105,7 +126,7 @@ export class StickerManager {
    * 与 find() 的区别：find 是"按 id 精确取"，返回条目或 null；这个返回 { entry, ambiguous }，
    * 让工具能把"说不清是哪个"如实报回去（多命中时报候选 id，不猜）。
    */
-  async resolve(ref) {
+  async resolve(ref: unknown) {
     const synced = await this.sync(false);
     return resolveStickerRef(synced.entries, ref);
   }
@@ -114,8 +135,9 @@ export class StickerManager {
    * 把某一条的图补进本地缓存（面板「缓存图片」按钮用）。已经有的不重下。
    * 返回 { entry, cached, error }：error 是人话，面板要照实说"哪几条没补上、为什么"。
    */
-  async cacheOne(ref) {
-    const entry = await this.find(ref);
+  async cacheOne(ref: unknown) {
+    const found = await this.find(ref);
+    const entry = found ? (this.entries.find((item) => item.id === found.id) ?? found) : null;
     if (!entry || entry.source === 'qq') return { entry: entry || null, cached: false, error: '' };
     if (cachedPath(entry)) return { entry, cached: true, error: '' };
     const error = await this.#cacheEntry(entry);
@@ -132,18 +154,18 @@ export class StickerManager {
   }
 
   /** 改备注。ref 可以是 id，也可以是备注/标签（唯一命中时）。返回整个结果，供工具报歧义。 */
-  noteVerbose(ref, patch) {
+  noteVerbose(ref: unknown, patch: StickerPatch) {
     const result = applyStickerNote(this.entries, ref, patch);
     this.entries = result.entries;
     if (result.entry) { saveStickerStore(this.entries); this.#changed(); }
     return result;
   }
 
-  note(id, patch) {
+  note(id: unknown, patch: StickerPatch) {
     return this.noteVerbose(id, patch).entry;
   }
 
-  markUsed(id, context = '') {
+  markUsed(id: unknown, context: unknown = '') {
     const result = markStickerUsed(this.entries, id, context);
     this.entries = result.entries;
     if (result.entry) { saveStickerStore(this.entries); this.#changed(); }
@@ -151,7 +173,7 @@ export class StickerManager {
   }
 
   /** 把图落到本地缓存并把文件名写回条目。返回错误信息（'' = 成功）。绝不抛 —— 收藏本身已经成了。 */
-  async #cacheEntry(entry) {
+  async #cacheEntry(entry: StickerEntry): Promise<string> {
     try {
       const cached = await ensureCached(entry);
       if (!cached) return '';
@@ -159,7 +181,7 @@ export class StickerManager {
       entry.cachedAt = new Date().toISOString();
       return '';
     } catch (error) {
-      return String(error?.message ?? error);   // 图床取不到就算了，发送时会退回原链接
+      return errorMessage(error);   // 图床取不到就算了，发送时会退回原链接
     }
   }
 
@@ -186,7 +208,7 @@ export class StickerManager {
    * 成功率最高的时机，之后发送就给协议端一个本机路径，不再看那条会过期的链接的脸色。
    * 所以要等这次下载 —— 失败也只是没有缓存，收藏本身照成。
    */
-  async collect(messageId, { url, note = '' } = {}) {
+  async collect(messageId: unknown, { url, note = '' }: CollectOptions = {}) {
     if (!getConfig().sticker?.collectEnabled) throw new Error('收藏表情功能未开启');
     // 限频
     const now = Date.now();
@@ -194,8 +216,8 @@ export class StickerManager {
     if (this.collectTimes.length >= Math.max(1, Number(getConfig().sticker?.maxCollectPerHour) || 10)) {
       throw new Error('收藏太频繁了，一小时后再试');
     }
-    url = String(url || '');
-    if (!url) throw new Error('该消息没有可收藏的图片地址');
+    const imageUrl = String(url || '');
+    if (!imageUrl) throw new Error('该消息没有可收藏的图片地址');
     const id = `collected_${messageId}`;
     const existing = this.entries.find((e) => e.id === id);
     if (existing) {
@@ -205,7 +227,7 @@ export class StickerManager {
     const entry = {
       id,
       resId: id,
-      url,
+      url: imageUrl,
       md5: '',
       desc: String(note || '').slice(0, 20),
       localNote: String(note || ''),
@@ -219,7 +241,7 @@ export class StickerManager {
       updatedAt: new Date().toISOString(),
       cacheFile: '',
       cachedAt: ''
-    };
+    } satisfies StickerEntry;
     this.entries.push(entry);
     this.collectTimes.push(now);
     await this.#cacheEntry(entry);

@@ -37,7 +37,7 @@ export const DEFAULT_CONFIG = {
     priceRemoteUrl: '',
     // 按模型单独设定的价格：{ [模型 id]: { in, out, cached } }
     // 优先级最高 —— 一旦这里有记录，就不再用内置官方表，也不受全局默认单价影响。
-    // 改动只存在这里，不会回写内置价格表（src/llm/model-prices.js）。
+    // 改动只存在这里，不会回写内置价格表（src/llm/model-prices.ts）。
     modelPrices: {}
   },
   // 多提供商模型目录（设置页手动维护）
@@ -210,7 +210,7 @@ export const DEFAULT_CONFIG = {
     //   - 只数 source !== 'qq' 的条目。QQ 收藏是"源"，本地删了下次同步就并回来，
     //     所以它们既不算进这个数、也不该被它删掉（详见 stickers.selectEvictions）。
     //   - 超上限时在**新收藏一条之后**整理：按"使用频率最低、保存时间最早"整条删掉，
-    //     连同它的本地缓存图片（sticker-cache.js）一起。把数字调小不会立刻删东西。
+    //     连同它的本地缓存图片（sticker-cache.ts）一起。把数字调小不会立刻删东西。
     //   - 全局限定，不参与按群覆盖（表情配置本来就没有按群覆盖，见 digest.maxKeepChars 的同款说明）。
     maxKeepCount: 0
   },
@@ -224,7 +224,7 @@ export const DEFAULT_CONFIG = {
     maxMessagesPerChat: 0,
     // ── 动态上下文窗口的容量 ──
     // 每个会话常驻一个"一直保持最新"的窗口：只装**对方发来的**最新 N 条消息，
-    // 消息一到就入窗、超出立刻丢最老（见 src/context-window.js）。
+    // 消息一到就入窗、超出立刻丢最老（见 src/agent/context-window.ts）。
     // 它决定一次运行最多把多少条未读放进【本次唤醒】；被挤出窗口的那些不会丢，
     // 它们降级进【过去状态】照常出现在提示词里，也照样参与"要不要回应"的判定。
     // 用途：长时间离线/被 @ 唤醒时，一次运行可能带上几百条积压，token 会失控。
@@ -275,13 +275,23 @@ export const DEFAULT_CONFIG = {
   }
 };
 
-export type AppConfig = typeof DEFAULT_CONFIG & {
+export type AppConfig = Omit<typeof DEFAULT_CONFIG, 'providers' | 'dshProviderKeys' | 'store' | 'digest' | 'memory'> & {
+  memberNotes?: Record<string, string>;
+  modelVision?: Record<string, { providerId?: string; model?: string; verdict?: string; note?: string; httpStatus?: number | null; latencyMs?: number | null; source?: string; checkedAt?: number }>;
+  dshProviderKeys: Record<string, string>;
+  providers: Array<{ id: string; displayName?: string; baseURL?: string; apiKey?: string; models: string[]; [key: string]: unknown }>;
   store: typeof DEFAULT_CONFIG.store & {
     contextSliderPos?: number;
     groupSliderPos: Record<string, number>;
   };
   digest: typeof DEFAULT_CONFIG.digest & {
     perChat: Record<string, Partial<Pick<typeof DEFAULT_CONFIG.digest, 'injectEveryRound' | 'merge' | 'maxChars'>>>;
+  };
+  memory: typeof DEFAULT_CONFIG.memory & {
+    consolidateMinImpressions?: number;
+    maxImpressionsPerMember?: number;
+    discoverMinMessages?: number;
+    discoverMaxMembers?: number;
   };
 };
 type ConfigPatch = Record<string, unknown>;
@@ -308,14 +318,14 @@ function deepMerge<T>(base: T, override: unknown): T {
   return out as T;
 }
 
-export function loadConfig() {
+export function loadConfig(): AppConfig {
   try {
     let text = fs.readFileSync(CONFIG_FILE, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     const parsed = JSON.parse(text);
-    return deepMerge(DEFAULT_CONFIG, parsed);
+    return deepMerge(DEFAULT_CONFIG, parsed) as AppConfig;
   } catch {
-    return structuredClone(DEFAULT_CONFIG);
+    return structuredClone(DEFAULT_CONFIG) as AppConfig;
   }
 }
 
@@ -323,7 +333,7 @@ let currentConfig: AppConfig | null = null;
 const saveTimers = new Map<string, NodeJS.Timeout>();
 
 /** 取当前生效配置（未初始化时从磁盘读）。 */
-export function getConfig() {
+export function getConfig(): AppConfig {
   if (!currentConfig) currentConfig = loadConfig();
   return currentConfig;
 }

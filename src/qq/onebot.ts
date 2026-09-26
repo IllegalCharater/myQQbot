@@ -2,12 +2,32 @@
 // （原版经 @snowluma/sdk 收事件；这里直接实现标准 OneBot v11，去掉 SDK 补丁依赖。）
 import WebSocket from 'ws';
 import { sanitizeUserText, escapeCqText } from '../core/util.js';
+import type { OneBotEvent, OneBotSegment } from './types.js';
+
+type EventHandler = (event: OneBotEvent) => void;
+type StatusHandler = (status: { connected: boolean; everConnected: boolean; error: string }) => void;
+type MessageKind = 'group' | 'private' | string;
+type SendOptions = { replyToMessageId?: unknown; atUserId?: unknown };
+function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
 
 export class OneBotClient {
-  constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent }) {
+  wsUrl: string;
+  httpUrl: string;
+  accessToken: string;
+  httpToken: string;
+  onEvent: EventHandler;
+  socket: WebSocket | null;
+  connected: boolean;
+  everConnected: boolean;
+  lastConnectError: string;
+  selfInfo: Record<string, unknown> | null;
+  statusListeners: Set<StatusHandler>;
+
+  constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent }: { wsUrl?: unknown; httpUrl?: unknown; accessToken?: unknown; httpToken?: unknown; onEvent?: EventHandler }) {
     this.wsUrl = String(wsUrl || 'ws://127.0.0.1:3001');
     this.httpUrl = String(httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     this.accessToken = String(accessToken || '');
@@ -25,12 +45,12 @@ export class OneBotClient {
 
   #closedByUs;
 
-  onStatus(fn) {
+  onStatus(fn: StatusHandler) {
     this.statusListeners.add(fn);
     return () => this.statusListeners.delete(fn);
   }
 
-  #setStatus(connected) {
+  #setStatus(connected: boolean) {
     this.connected = connected;
     if (connected) this.everConnected = true;
     for (const fn of this.statusListeners) {
@@ -64,7 +84,7 @@ export class OneBotClient {
         headers: this.accessToken ? { authorization: `Bearer ${this.accessToken}` } : {}
       });
     } catch (error) {
-      this.lastConnectError = String(error?.message ?? error);
+      this.lastConnectError = errorText(error);
       this.#setStatus(false);
       setTimeout(() => this.#connectLoop(), RECONNECT_MIN_MS);
       return;
@@ -72,24 +92,25 @@ export class OneBotClient {
     this.socket = socket;
     // 每个 socket 的事件处理器都先验证“我还是不是当前 socket”，
     // 旧连接被作废后其迟到事件直接忽略，避免重复重连/状态错乱。
-    const isCurrent = (s) => this.socket === s;
+    const isCurrent = (s: WebSocket) => this.socket === s;
 
     socket.on('open', async () => {
       if (!isCurrent(socket)) return;
       this.lastConnectError = '';
       this.#setStatus(true);
       try {
-        this.selfInfo = await this.call('get_login_info');
-      } catch (error) {
-        console.error('[onebot] 获取登录信息失败:', error?.message ?? error);
+        const info = await this.call('get_login_info');
+        this.selfInfo = isRecord(info) ? info : null;
+      } catch (error: unknown) {
+        console.error('[onebot] 获取登录信息失败:', errorText(error));
       }
     });
     socket.on('message', (data) => {
       if (!isCurrent(socket)) return;
-      let event = null;
+      let event: unknown = null;
       try { event = JSON.parse(String(data)); } catch { return; }
-      if (!event || typeof event !== 'object') return;
-      try { this.onEvent(event); } catch (error) { console.error('[onebot] 事件处理出错:', error); }
+      if (!isRecord(event)) return;
+      try { this.onEvent(event as OneBotEvent); } catch (error) { console.error('[onebot] 事件处理出错:', error); }
     });
     socket.on('close', () => {
       if (!isCurrent(socket)) return; // 旧连接的迟到 close：新连接已在处理
@@ -98,7 +119,7 @@ export class OneBotClient {
     });
     socket.on('error', (error) => {
       if (!isCurrent(socket)) return;
-      this.lastConnectError = String(error?.message ?? error);
+      this.lastConnectError = errorText(error);
       if (!this.everConnected) {
         // 首连失败退避得久一点，避免刷屏
         this.#setStatus(false);
@@ -115,7 +136,7 @@ export class OneBotClient {
   }
 
   /** OneBot HTTP API（发送与查询都走这里）。 */
-  async call(action, params = {}, timeoutMs = 15000) {
+  async call(action: string, params: Record<string, unknown> = {}, timeoutMs = 15000): Promise<unknown> {
     const res = await fetch(`${this.httpUrl}/${action}`, {
       method: 'POST',
       headers: {
@@ -131,7 +152,8 @@ export class OneBotClient {
         : '';
       throw new Error(`OneBot ${action} HTTP ${res.status}${hint}`);
     }
-    const body = await res.json().catch(() => ({}));
+    const value: unknown = await res.json().catch(() => ({}));
+    const body = isRecord(value) ? value : {};
     if (body.status !== 'ok' && body.retcode !== 0) {
       throw new Error(`OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`);
     }
@@ -147,7 +169,7 @@ export class OneBotClient {
   }
 
   /** 发送消息段。返回 OneBot 响应 data（含 message_id）。 */
-  async sendSegments(kind, id, segments) {
+  async sendSegments(kind: MessageKind, id: unknown, segments: OneBotSegment[]) {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private'
       ? { user_id: Number(id), message: segments }
@@ -155,8 +177,8 @@ export class OneBotClient {
     return this.call(action, params);
   }
 
-  async sendText(kind, id, text, { replyToMessageId = null, atUserId = null } = {}) {
-    const segments = [];
+  async sendText(kind: MessageKind, id: unknown, text: unknown, { replyToMessageId = null, atUserId = null }: SendOptions = {}) {
+    const segments: OneBotSegment[] = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
       const rid = String(replyToMessageId).trim();
       if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数（消息 id 可能为负数）');
@@ -171,8 +193,8 @@ export class OneBotClient {
     return this.sendSegments(kind, id, segments);
   }
 
-  async sendSticker(kind, id, imageUrl, { replyToMessageId = null, atUserId = null } = {}) {
-    const segments = [];
+  async sendSticker(kind: MessageKind, id: unknown, imageUrl: unknown, { replyToMessageId = null, atUserId = null }: SendOptions = {}) {
+    const segments: OneBotSegment[] = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
       const rid = String(replyToMessageId).trim();
       if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数');
@@ -187,7 +209,7 @@ export class OneBotClient {
     return this.sendSegments(kind, id, segments);
   }
 
-  async sendPoke(kind, id, targetUserId) {
+  async sendPoke(kind: MessageKind, id: unknown, targetUserId: unknown) {
     if (kind === 'private') {
       return this.call('friend_poke', { user_id: Number(id) }).catch(() =>
         this.call('send_poke', { user_id: Number(id) }));
@@ -196,15 +218,15 @@ export class OneBotClient {
       this.call('send_poke', { group_id: Number(id), user_id: Number(targetUserId || id) }));
   }
 
-  async getMsg(messageId) {
+  async getMsg(messageId: unknown) {
     return this.call('get_msg', { message_id: Number(messageId) });
   }
 
-  async getGroupInfo(groupId) {
+  async getGroupInfo(groupId: unknown) {
     return this.call('get_group_info', { group_id: Number(groupId) });
   }
 
-  async getGroupMemberInfo(groupId, userId) {
+  async getGroupMemberInfo(groupId: unknown, userId: unknown) {
     return this.call('get_group_member_info', { group_id: Number(groupId), user_id: Number(userId) });
   }
 
@@ -222,20 +244,22 @@ export class OneBotClient {
    * 这里 res_id 优先、message_id 兜底：别的协议端（如 NapCat）可能只认后者，
    * 代价仅是前者失败时多一次请求。
    */
-  async getForwardNodes({ resId = '', messageId = null } = {}) {
-    const attempts = [];
+  async getForwardNodes({ resId = '', messageId = null }: { resId?: unknown; messageId?: unknown } = {}) {
+    const attempts: Array<Record<string, unknown>> = [];
     if (resId) attempts.push({ id: String(resId) });
     if (messageId !== null && messageId !== undefined && String(messageId).trim() !== '') {
       attempts.push({ message_id: Number(messageId) });
     }
     if (!attempts.length) throw new Error('没有可用的转发 id（res_id 与 message_id 都没有）');
-    let lastError = null;
+    let lastError: unknown = null;
     for (const params of attempts) {
       try {
         const r = await this.call('get_forward_msg', params);
         // 接口成功就以它为准：节点为空说明这条转发确实没内容，
         // 换另一种参数重试只会拿到更含糊的错误、把真正的原因盖掉。
-        return Array.isArray(r?.messages) ? r.messages : (Array.isArray(r?.data?.messages) ? r.data.messages : []);
+        const root = isRecord(r) ? r : {};
+        const nested = isRecord(root.data) ? root.data : {};
+        return Array.isArray(root.messages) ? root.messages : (Array.isArray(nested.messages) ? nested.messages : []);
       } catch (error) {
         lastError = error;
       }
@@ -258,14 +282,14 @@ export class OneBotClient {
    * 正文与聊天记录同等不可信（公告是群管理员发的，但接口返回的内容仍当作外部输入处理）：
    * 过一遍 sanitizeUserText、去掉控制字符、按 NOTICE_TEXT_MAX 截断。
    */
-  async getGroupNotice(groupId) {
-    let lastError = null;
+  async getGroupNotice(groupId: unknown) {
+    let lastError: unknown = null;
     // "接口答了但字段对不上" 要单独记：它和 "协议端不支持这个 action" 是两回事，
     // 而且更接近真相 —— 后者只是别名没试对，前者说明版本有差异。若共用 lastError，
     // 第二个 action 的 1404 会把结构错误覆盖掉，最后报出去的就是最没用的那句话。
-    let shapeError = null;
+    let shapeError: Error | null = null;
     for (const action of ['get_group_notice', '_get_group_notice']) {
-      let data;
+      let data: unknown;
       try {
         data = await this.call(action, { group_id: Number(groupId) });
       } catch (error) {
@@ -275,17 +299,20 @@ export class OneBotClient {
       // 见过的三种形态：直接数组 / { notices: [...] } / 再套一层 data。
       // ⚠️ "认不出结构" 必须和 "确实是空列表" 分开：前者若也返回 []，调用方会当成
       //    "这个群没有公告" 自信地答错。认不出就换下一个 action 试，都认不出才报错。
+      const root = isRecord(data) ? data : {};
       const list = Array.isArray(data) ? data
-        : (Array.isArray(data?.notices) ? data.notices
-          : (Array.isArray(data?.data) ? data.data : null));
+        : (Array.isArray(root.notices) ? root.notices
+          : (Array.isArray(root.data) ? root.data : null));
       if (list === null) {
         const shape = (data && typeof data === 'object') ? Object.keys(data).join(',') || '空对象' : typeof data;
         shapeError ??= new Error(`OneBot ${action} 返回了无法识别的结构（字段：${shape}）`);
         continue;
       }
-      return list.map((n) => {
-        const rawField = isTextValue(n?.message?.text) ? n.message.text
-          : (isTextValue(n?.content) ? n.content : '');
+      return list.map((value) => {
+        const n = isRecord(value) ? value : {};
+        const message = isRecord(n.message) ? n.message : {};
+        const rawField = isTextValue(message.text) ? message.text
+          : (isTextValue(n.content) ? n.content : '');
         const raw = decodeBase64Text(rawField) || String(rawField);
         // 控制字符（\u0000 之类）会污染提示词；换行保留（公告常是条目式的），
         // 但三个以上连续换行折成两个，免得一大段空行把上下文撑开。
@@ -296,7 +323,7 @@ export class OneBotClient {
         // 有的实现时间是秒，有的是毫秒；小于 1e12 当秒处理（2026 年的毫秒时间戳远大于它）
         let ts = Number(n?.publish_time ?? n?.publishTime ?? 0) || 0;
         if (ts > 0 && ts < 1e12) ts *= 1000;
-        const images = n?.message?.images ?? n?.images;
+        const images = message.images ?? n.images;
         return {
           id: String(n?.notice_id ?? n?.id ?? ''),
           senderId: String(n?.sender_id ?? n?.senderId ?? ''),
@@ -312,8 +339,9 @@ export class OneBotClient {
 
 // ── 入站事件 → 文本（移植自原版 segmentsToText） ─────────────────────────
 
-export function forwardIdFromData(d) {
-  const raw = d?.id ?? d?.res_id ?? d?.forward_id ?? d?.data_id;
+export function forwardIdFromData(value: unknown) {
+  const d = isRecord(value) ? value : {};
+  const raw = d.id ?? d.res_id ?? d.forward_id ?? d.data_id;
   if (raw == null || String(raw).trim() === '') return null;
   return String(raw);
 }
@@ -323,13 +351,13 @@ export function forwardIdFromData(d) {
  * resolveReply: async (mid) => { sender, text } | null —— 解析引用原文。
  * resolveAtName: async (qq) => string | null —— 把 @ 的 QQ 号解析成群名片。
  */
-export async function segmentsToText(segments, { resolveReply = null, resolveAtName = null, includeReply = true } = {}) {
+export async function segmentsToText(segments: OneBotSegment[] | string | null | undefined, { resolveReply = null, resolveAtName = null, includeReply = true }: { resolveReply?: ((id: string) => Promise<{ sender?: string; text?: string } | null>) | null; resolveAtName?: ((qq: string) => Promise<string | null>) | null; includeReply?: boolean } = {}) {
   if (typeof segments === 'string') return sanitizeUserText(segments.trim());
-  const out = [];
+  const out: string[] = [];
   for (const seg of segments ?? []) {
     const d = seg?.data ?? {};
     switch (seg?.type) {
-      case 'text': out.push(d.text ?? ''); break;
+      case 'text': out.push(String(d.text ?? '')); break;
       case 'at': {
         if (d.qq === 'all') {
           out.push('@全体成员');
@@ -400,7 +428,7 @@ const CARD_DECODED_MAX = 800;
 const NOTICE_TEXT_MAX = 1500;
 
 /** 只认字符串/数字，挡掉对象（否则 String({}) 会把 [object Object] 塞进提示词）。 */
-function isTextValue(v) {
+function isTextValue(v: unknown): v is string | number {
   return typeof v === 'string' || typeof v === 'number';
 }
 
@@ -425,7 +453,7 @@ const CJK_RE = /[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]/;
  * @param {*} s 待判定的值（非字符串直接放弃）
  * @returns {string} 解码后的明文；未命中返回 ''
  */
-export function decodeBase64Text(s) {
+export function decodeBase64Text(s: unknown) {
   if (!isTextValue(s)) return '';
   const t = String(s).trim();
   if (t.length < 8 || t.length % 4 !== 0) return '';
@@ -443,7 +471,7 @@ export function decodeBase64Text(s) {
 }
 
 /** 取文本字段：折叠空白 + 按码点截断（避免把代理对切成乱码）。 */
-function textField(value, max) {
+function textField(value: unknown, max: number) {
   if (!isTextValue(value)) return '';
   const s = String(value).replace(/\s+/g, ' ').trim();
   if (s.length <= max) return s;
@@ -457,7 +485,7 @@ function textField(value, max) {
  * 而它进的是工具结果的 JSON（`JSON.stringify(payload, null, 1)` 会把换行转义成 \n），
  * 伪造不出"整行假历史"，所以这里不需要 textField 那道折叠防线的保护。
  */
-function clipText(value, max) {
+function clipText(value: unknown, max: number) {
   const s = String(value ?? '').trim();
   if (s.length <= max) return s;
   return Array.from(s).slice(0, max).join('') + '…';
@@ -470,13 +498,13 @@ function clipText(value, max) {
  *    合法编码（长度不是 4 的倍数）—— 先截后解等于永远解不开。所以这里先拿原始值去解码，
  *    命中就用解密文（放宽到 CARD_DECODED_MAX），未命中才回退原值按 CARD_FIELD_MAX 处理。
  */
-function cardTextField(value, max = CARD_FIELD_MAX) {
+function cardTextField(value: unknown, max = CARD_FIELD_MAX) {
   const decoded = decodeBase64Text(value);
   return decoded ? textField(decoded, CARD_DECODED_MAX) : textField(value, max);
 }
 
 /** 只收 http/https：mqqapi:// 小程序链接、javascript: 等一律丢弃。 */
-function httpUrlField(value) {
+function httpUrlField(value: unknown) {
   const s = textField(value, CARD_URL_MAX);
   if (!s) return '';
   try {
@@ -490,13 +518,13 @@ function httpUrlField(value) {
  * 常见形态是 meta.music / meta.news / meta.miniapp 再嵌一层；也有协议端把
  * title/desc 直接挂在 meta 上。只下探一层 —— 再深就是小程序自己的私有结构。
  */
-function firstCardBody(meta) {
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null;
-  const looksLikeBody = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
-    && (textField(v.title, 1) || textField(v.desc, 1) || textField(v.jumpUrl, 1));
+function firstCardBody(meta: unknown): Record<string, unknown> | null {
+  if (!isRecord(meta)) return null;
+  const looksLikeBody = (v: unknown): v is Record<string, unknown> => isRecord(v)
+    && Boolean(textField(v.title, 1) || textField(v.desc, 1) || textField(v.jumpUrl, 1));
   if (looksLikeBody(meta)) return meta;
   for (const key of Object.keys(meta)) {
-    if (looksLikeBody(meta[key])) return meta[key];
+    if (looksLikeBody(meta[key])) return meta[key] as Record<string, unknown>;
   }
   return null;
 }
@@ -508,20 +536,21 @@ function firstCardBody(meta) {
  * @param {object} data json 段的 data（形如 { data: <JSON字符串|对象> }）
  * @returns {{ text: string, media: Array }}
  */
-export function parseCardSegment(data) {
-  const fallback = { text: '[卡片消息]', media: [] };
-  const raw = data?.data;
-  let card = null;
+export function parseCardSegment(value: unknown): { text: string; media: Array<Record<string, unknown>> } {
+  const fallback: { text: string; media: Array<Record<string, unknown>> } = { text: '[卡片消息]', media: [] };
+  const data = isRecord(value) ? value : {};
+  const raw = data.data;
+  let card: Record<string, unknown> | null = null;
 
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    card = raw;   // 有的协议端直接给已解析好的对象
+    card = raw as Record<string, unknown>;   // 有的协议端直接给已解析好的对象
   } else {
     const str = isTextValue(raw) ? String(raw) : '';
     if (!str || str.length > CARD_MAX_CHARS) return fallback;
     try {
       const parsed = JSON.parse(str);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return fallback;
-      card = parsed;
+      card = parsed as Record<string, unknown>;
     } catch { return fallback; }
   }
 
@@ -552,7 +581,7 @@ export function parseCardSegment(data) {
     || title === '群公告';
   // 封面单独作为 image 并存（两条分支共用同一份）：get_message_images 的筛选条件就是
   // kind==='image' && url，不改一行代码模型就能看到卡片封面。
-  const media = [{ kind: 'card', app, view, title, desc, url, tag }];
+  const media: Array<Record<string, unknown>> = [{ kind: 'card', app, view, title, desc, url, tag }];
   if (preview) media.push({ kind: 'image', url: preview, summary: '卡片封面' });
   if (isAnnounce) {
     // title 解出来往往就是"群公告"这个标签本身，带上它只会得到"标题：群公告"这种废话；
@@ -571,7 +600,7 @@ export function parseCardSegment(data) {
 
   // 展示名：优先 tag（"QQ音乐"/"网易云音乐"），退到 view，再退到 app 的末段
   const label = tag || view || textField(String(app).split('.').pop(), 30);
-  const bits = [];
+  const bits: string[] = [];
   if (title) bits.push(`标题：${title}`);
   if (desc && desc !== title) bits.push(`描述：${desc}`);
   if (url) bits.push(`链接：${url}`);
@@ -579,11 +608,12 @@ export function parseCardSegment(data) {
 }
 
 /** 从消息段提取媒体定位信息（不下载）。 */
-export function extractMediaFromSegments(segments) {
-  const media = [];
-  for (const seg of segments ?? []) {
-    if (!seg || typeof seg !== 'object') continue;
-    const d = seg.data ?? {};
+export function extractMediaFromSegments(segments: unknown): Array<Record<string, unknown>> {
+  const media: Array<Record<string, unknown>> = [];
+  for (const value of Array.isArray(segments) ? segments : []) {
+    if (!isRecord(value)) continue;
+    const seg = value;
+    const d = isRecord(seg.data) ? seg.data : {};
     if (seg.type === 'image') {
       media.push({ kind: 'image', file: String(d.file ?? ''), url: String(d.url ?? ''), summary: String(d.summary ?? '') });
     } else if (seg.type === 'face') {
@@ -619,16 +649,17 @@ export function extractMediaFromSegments(segments) {
  * @param {Array} nodes get_forward_msg 返回的 messages 数组
  * @returns {{ text: string, media: Array } | null} 无可用节点返回 null
  */
-export async function expandForwardNodes(nodes, { maxNodes = 30, maxChars = 3000 } = {}) {
+export async function expandForwardNodes(nodes: unknown, { maxNodes = 30, maxChars = 3000 }: { maxNodes?: number; maxChars?: number } = {}) {
   if (!Array.isArray(nodes) || !nodes.length) return null;
-  const lines = [];
-  const media = [];
+  const lines: string[] = [];
+  const media: Array<Record<string, unknown>> = [];
   let truncated = 0;
 
   for (let i = 0; i < nodes.length; i++) {
     if (lines.length >= maxNodes) { truncated = nodes.length - i; break; }
-    const n = nodes[i] || {};
-    const name = String(n.sender?.card || n.sender?.nickname || n.user_id || '?');
+    const n = isRecord(nodes[i]) ? nodes[i] : {};
+    const sender = isRecord(n.sender) ? n.sender : {};
+    const name = String(sender.card || sender.nickname || n.user_id || '?');
     const nm = n.message ?? n.content;
     let body = '';
     if (typeof nm === 'string') {
@@ -636,7 +667,10 @@ export async function expandForwardNodes(nodes, { maxNodes = 30, maxChars = 3000
       body = nm.replace(/\[CQ:[^\]]*\]/g, '').trim();
     } else if (Array.isArray(nm)) {
       // 嵌套 forward 段清空 data → segmentsToText 输出 [转发消息] 占位（深度 1 封顶）
-      const segs = nm.map((s) => (s?.type === 'forward' ? { type: 'forward', data: {} } : s));
+      const segs: OneBotSegment[] = nm.map((value) => {
+        const segment = isRecord(value) ? value : {};
+        return segment.type === 'forward' ? { type: 'forward', data: {} } : { type: String(segment.type ?? 'unknown'), data: isRecord(segment.data) ? segment.data : {} };
+      });
       body = await segmentsToText(segs, {});
       media.push(...extractMediaFromSegments(segs));
     }

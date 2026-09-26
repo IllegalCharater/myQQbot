@@ -3,15 +3,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../core/config.js';
+import type { StickerEntry, StickerPatch } from './types.js';
 
 const STICKER_FILE = path.join(DATA_DIR, 'stickers.json');
 
-export function nowIso() {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stickerEntries(value: unknown): StickerEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(normalizeStickerEntry).filter((entry): entry is StickerEntry => entry !== null);
+}
+
+export function nowIso(): string {
   return new Date().toISOString();
 }
 
-export function normalizeStickerEntry(raw) {
-  const entry = raw && typeof raw === 'object' ? raw : {};
+export function normalizeStickerEntry(raw: unknown): StickerEntry | null {
+  const entry = isRecord(raw) ? raw : {};
   const id = String(entry.id || entry.emoji_id || entry.resId || '').trim();
   if (!id) return null;
   const tags = Array.isArray(entry.tags)
@@ -40,30 +50,30 @@ export function normalizeStickerEntry(raw) {
   };
 }
 
-export function loadStickerStore(file = STICKER_FILE) {
+export function loadStickerStore(file = STICKER_FILE): StickerEntry[] {
   try {
     let text = fs.readFileSync(file, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    const parsed = JSON.parse(text);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalizeStickerEntry).filter(Boolean);
+    const parsed: unknown = JSON.parse(text);
+    return stickerEntries(parsed);
   } catch {
     return [];
   }
 }
 
-export function saveStickerStore(entries, file = STICKER_FILE) {
+export function saveStickerStore(entries: readonly StickerEntry[], file = STICKER_FILE): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(entries, null, 2), 'utf8');
   fs.renameSync(tmp, file);
 }
 
-export function mergeStickerLibrary(existing, fetched) {
-  const out = existing.map(normalizeStickerEntry).filter(Boolean);
+export function mergeStickerLibrary(existing: unknown, fetched: unknown): StickerEntry[] {
+  const out = stickerEntries(existing);
   const byId = new Map(out.map((e) => [e.id, e]));
   const fetchedIds = new Set();
   for (const item of Array.isArray(fetched) ? fetched : []) {
+    if (!isRecord(item)) continue;
     const id = String(item?.emoji_id || item?.resId || item?.id || '').trim();
     if (id) fetchedIds.add(id);
   }
@@ -105,7 +115,7 @@ export function mergeStickerLibrary(existing, fetched) {
   return out.filter((e) => e.source !== 'qq' || fetchedIds.has(e.id));
 }
 
-export function findSticker(entries, ref) {
+export function findSticker(entries: unknown, ref: unknown): StickerEntry | null {
   const raw = String(ref ?? '').trim();
   if (!raw) return null;
   const md5 = raw.toUpperCase();
@@ -113,7 +123,7 @@ export function findSticker(entries, ref) {
   // 这种）会先被 URL 子串命中，静默指到别的表情上，比报错更糟。
   const wantUrl = raw.includes('/');
   const urlNormalized = raw.replace(/\/+$/, '').replace(/^https?:\/\//i, '');
-  return (Array.isArray(entries) ? entries : []).find((e) => {
+  return stickerEntries(entries).find((e) => {
     if (!e) return false;
     if (e.id === raw || e.resId === raw) return true;
     if (e.md5 && e.md5 === md5) return true;
@@ -129,10 +139,10 @@ export function findSticker(entries, ref) {
  * 提示词里的【可用表情包】只给标签不给 id，模型手上唯一的"源"就是标签 —— 这里认它，
  * 那个参数才不是无源之水。全等而非子串：子串会让"可爱"匹配一大片，歧义直接爆掉。
  */
-export function matchStickerLabel(entries, ref) {
+export function matchStickerLabel(entries: unknown, ref: unknown): StickerEntry[] {
   const raw = String(ref ?? '').trim().toLowerCase();
   if (!raw) return [];
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+  const list = stickerEntries(entries);
   return list.filter((e) => {
     const fields = [e.desc, e.localNote, e.usage, ...(e.tags || [])];
     return fields.some((v) => {
@@ -149,11 +159,11 @@ export function matchStickerLabel(entries, ref) {
  * 它经常就这么原样粘回来，所以这里把渲染加上去的装饰一层层剥掉。
  * 剥不干净也不要紧：resolveStickerRef 会把候选逐个试过去。
  */
-export function cleanStickerRef(raw) {
+export function cleanStickerRef(raw: unknown): string[] {
   const s = String(raw ?? '').trim();
   if (!s) return [];
-  const out = [];
-  const push = (v) => {
+  const out: string[] = [];
+  const push = (v: unknown) => {
     const t = String(v ?? '').trim();
     if (t && !out.includes(t)) out.push(t);
   };
@@ -191,9 +201,9 @@ export function cleanStickerRef(raw) {
  * 标签命中多个时**不猜**（改错备注、发错表情都比不作声更糟），返回 ambiguous 让调用方报错。
  * 返回 { entry, ambiguous }：唯一命中时 entry 有值；多命中时 entry 为 null、ambiguous 是候选数组。
  */
-export function resolveStickerRef(entries, ref) {
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
-  let ambiguous = [];
+export function resolveStickerRef(entries: unknown, ref: unknown): { entry: StickerEntry | null; ambiguous: StickerEntry[] } {
+  const list = stickerEntries(entries);
+  let ambiguous: StickerEntry[] = [];
   for (const candidate of cleanStickerRef(ref)) {
     const exact = findSticker(list, candidate);
     if (exact) return { entry: exact, ambiguous: [] };
@@ -213,8 +223,8 @@ export function resolveStickerRef(entries, ref) {
  * ⚠️ source === 'qq' 的条目删了也会回来：mergeStickerLibrary 结尾会把"还在 QQ 收藏里"
  * 的条目重新并进来。这个判断留给调用方（HTTP 层要回一句人话的 409），纯函数只管删。
  */
-export function removeSticker(entries, ref) {
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+export function removeSticker(entries: unknown, ref: unknown): { entries: StickerEntry[]; removed: StickerEntry | null } {
+  const list = stickerEntries(entries);
   const target = findSticker(list, ref);
   if (!target) return { entries: list, removed: null };
   return { entries: list.filter((e) => e.id !== target.id), removed: target };
@@ -234,8 +244,8 @@ export function removeSticker(entries, ref) {
  * 顺带一个副作用是好的：刚收藏的那条 useCount 为 0、createdAt 最新，在零使用那一组里
  * 排最后 —— 超出一条时被删的永远是更早的那条，不会"刚收就被删"。
  */
-export function selectEvictions(entries, cap) {
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+export function selectEvictions(entries: unknown, cap: unknown): { keep: StickerEntry[]; drop: StickerEntry[] } {
+  const list = stickerEntries(entries);
   const n = Number(cap);
   if (!Number.isFinite(n) || n <= 0) return { keep: list, drop: [] };
   const owned = list.filter((e) => e.source !== 'qq');
@@ -254,8 +264,8 @@ export function selectEvictions(entries, cap) {
  * 单独一个函数而不给 formatStickerList 加开关：那个是给 list_stickers **工具**吃的，
  * 返回体积直接进模型上下文，不能顺手变大。
  */
-export function formatStickerAdminList(entries, query = '', limit = 500) {
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+export function formatStickerAdminList(entries: unknown, query: unknown = '', limit: unknown = 500) {
+  const list = stickerEntries(entries);
   const q = String(query ?? '').trim().toLowerCase();
   const filtered = q
     ? list.filter((e) => {
@@ -290,8 +300,8 @@ export function formatStickerAdminList(entries, query = '', limit = 500) {
   };
 }
 
-export function formatStickerList(entries, query = '', limit = 48) {
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+export function formatStickerList(entries: unknown, query: unknown = '', limit: unknown = 48) {
+  const list = stickerEntries(entries);
   const q = String(query ?? '').trim().toLowerCase();
   const filtered = q
     ? list.filter((e) => {
@@ -334,12 +344,12 @@ export function formatStickerList(entries, query = '', limit = 48) {
  * 已标注的照旧只给标签（不带 id，省 token）；未标注的带 id=、并把已有的名字一起带着，
  * 免得"还没标注"反而比"有名字"更难用。
  */
-export function buildStickerContext(entries, max = 10) {
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+export function buildStickerContext(entries: unknown, max: unknown = 10): string {
+  const list = stickerEntries(entries);
   if (!list.length) return '';
   const limit = Math.max(1, Math.min(30, Number(max) || 10));
   const FRESH_QUOTA = 3;   // 一轮最多推几个"待标注"的（与策略段里"一轮最多标 3 个"对齐）
-  const needNote = (e) => !e.localNote;
+  const needNote = (e: StickerEntry) => !e.localNote;
   // 待标注的：用得多的先标（用得越频繁越值得知道它是什么意思），同频率里新收的优先
   const fresh = list.filter(needNote)
     .sort((a, b) => (b.useCount || 0) - (a.useCount || 0)
@@ -369,7 +379,7 @@ export function buildStickerContext(entries, max = 10) {
 }
 
 /** 发送前的表情包策略提示（软策略）。 */
-export function buildStickerStrategyHint(level = 1) {
+export function buildStickerStrategyHint(level: unknown = 1): string {
   // 活跃度引导放在系统提示的策略段里（而不是"本次输入"的【表情包用法】）——
   // 同一主题两处引导会左右脑互搏（2026-09-07）：策略讲时机、档位讲频率，
   // 合并成一处由档位直接改写频率行。
@@ -397,8 +407,8 @@ export function buildStickerStrategyHint(level = 1) {
  * 标签命中多个时**不猜**（改备注改错对象比不改还糟），返回 ambiguous 让调用方报错。
  * 返回值里的 ambiguous 是候选条目数组（未命中为 []）。
  */
-export function applyStickerNote(entries, ref, patch = {}) {
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+export function applyStickerNote(entries: unknown, ref: unknown, patch: StickerPatch = {}) {
+  const list = stickerEntries(entries);
   const { entry: target, ambiguous } = resolveStickerRef(list, ref);
   if (!target) return { entries: list, entry: null, ambiguous };
   const idx = list.findIndex((e) => e.id === target.id);
@@ -415,8 +425,8 @@ export function applyStickerNote(entries, ref, patch = {}) {
   return { entries: list, entry: next, ambiguous: [] };
 }
 
-export function markStickerUsed(entries, id, context = '') {
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+export function markStickerUsed(entries: unknown, id: unknown, context: unknown = '') {
+  const list = stickerEntries(entries);
   const target = findSticker(list, id);
   if (!target) return { entries: list, entry: null };
   const idx = list.findIndex((e) => e.id === target.id);

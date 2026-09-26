@@ -19,22 +19,34 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../core/config.js';
+import type { ChatMessage, DigestRecord, MediaEntry } from './types.js';
+
+interface ChatState {
+  chatKey: string;
+  nextLocalId: number;
+  messages: ChatMessage[];
+  lastCompactedAt?: number;
+  archivedCount?: number;
+}
+
+interface IncomingInput { mid?: string | number | null; ts?: number; senderId?: unknown; senderName?: unknown; text?: unknown; reply?: unknown; media?: MediaEntry[] }
+function errorText(error: unknown): unknown { return error instanceof Error ? error.message : error; }
 
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
 // 压缩后的原文冷归档。独立子目录 + .jsonl 后缀：listChats 的正则只认
 // group_*.json，天然扫不到这里，归档不会变成"新会话"。
 const ARCHIVE_DIR = path.join(MESSAGES_DIR, 'archive');
 
-function safeName(chatKey) {
+function safeName(chatKey: unknown) {
   // chatKey 形如 group:123 / private:456
   return String(chatKey).replace(/[^a-z0-9_]/gi, '_');
 }
 
-function chatFile(chatKey) {
+function chatFile(chatKey: string) {
   return path.join(MESSAGES_DIR, `${safeName(chatKey)}.json`);
 }
 
-function archiveFile(chatKey) {
+function archiveFile(chatKey: string) {
   return path.join(ARCHIVE_DIR, `${safeName(chatKey)}.jsonl`);
 }
 
@@ -44,21 +56,21 @@ function archiveFile(chatKey) {
  * 凡是要按"人"来统计/取样的地方都得先用它过滤 —— 否则摘要的 senderId('digest')
  * 或备注的空 senderId 会变成群里一个查无此人的幽灵成员。
  */
-export function isSystemRecord(m) {
+export function isSystemRecord(m: ChatMessage | null | undefined) {
   return m?.kind === 'digest' || m?.kind === 'note';
 }
 
-function loadChat(chatKey) {
+function loadChat(chatKey: string): ChatState {
   try {
     let text = fs.readFileSync(chatFile(chatKey), 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    const parsed = JSON.parse(text);
-    if (parsed && Array.isArray(parsed.messages)) return parsed;
+    const parsed: unknown = JSON.parse(text);
+    if (isRecord(parsed) && Array.isArray(parsed.messages)) return normalizeState(chatKey, parsed);
   } catch { /* 新会话 */ }
   return { chatKey, nextLocalId: 1, messages: [] };
 }
 
-function saveChat(state) {
+function saveChat(state: ChatState) {
   fs.mkdirSync(MESSAGES_DIR, { recursive: true });
   const tmp = `${chatFile(state.chatKey)}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(state, null, 1), 'utf8');
@@ -66,18 +78,20 @@ function saveChat(state) {
 }
 
 export class ChatStore {
+  maxPerChat: number;
+  chats: Map<string, ChatState>;
   constructor(maxPerChat = 0) {
     this.maxPerChat = Math.max(0, Number(maxPerChat) || 0);
     this.chats = new Map(); // chatKey -> state
   }
 
-  setMaxPerChat(cap) {
+  setMaxPerChat(cap: unknown) {
     this.maxPerChat = Math.max(0, Number(cap) || 0);
   }
 
-  #state(chatKey) {
+  #state(chatKey: string): ChatState {
     if (!this.chats.has(chatKey)) this.chats.set(chatKey, loadChat(chatKey));
-    return this.chats.get(chatKey);
+    return this.chats.get(chatKey)!;
   }
 
   listChats() {
@@ -92,7 +106,7 @@ export class ChatStore {
     return [...this.chats.keys()];
   }
 
-  getChatMeta(chatKey) {
+  getChatMeta(chatKey: string) {
     const st = this.#state(chatKey);
     const unread = st.messages.filter((m) => !m.read).length;
     const last = st.messages[st.messages.length - 1] || null;
@@ -100,7 +114,7 @@ export class ChatStore {
   }
 
   /** 追加一条收到的消息（未读）。返回写入的条目。 */
-  appendIncoming(chatKey, { mid, ts, senderId, senderName, text, reply = null, media = [] }) {
+  appendIncoming(chatKey: string, { mid, ts, senderId, senderName, text, reply = null, media = [] }: IncomingInput) {
     const st = this.#state(chatKey);
     const entry = {
       id: st.nextLocalId++,
@@ -121,7 +135,7 @@ export class ChatStore {
   }
 
   /** 记录机器人自己发出的消息（已读）。 */
-  appendSelf(chatKey, { text, ts, mid = null }) {
+  appendSelf(chatKey: string, { text, ts, mid = null }: { text: unknown; ts?: number; mid?: string | number | null }) {
     const st = this.#state(chatKey);
     const entry = {
       id: st.nextLocalId++,
@@ -148,7 +162,7 @@ export class ChatStore {
    *    保留给存档层的调用方 / 探针套件当 fixture 用。新代码要"看过这批"请走
    *    orchestrator 的窗口消费（它同时推进游标并下沉 read 镜像）。
    */
-  drainUnread(chatKey) {
+  drainUnread(chatKey: string) {
     const st = this.#state(chatKey);
     const unread = st.messages.filter((m) => !m.read && !m.self);
     for (const m of st.messages) m.read = true;
@@ -169,7 +183,7 @@ export class ChatStore {
    *
    * @returns {number} 被标记为已读的条数
    */
-  markAllRead(chatKey) {
+  markAllRead(chatKey: string) {
     const st = this.#state(chatKey);
     let n = 0;
     for (const m of st.messages) {
@@ -179,13 +193,13 @@ export class ChatStore {
     return n;
   }
 
-  unreadCount(chatKey) {
+  unreadCount(chatKey: string) {
     const st = this.#state(chatKey);
     return st.messages.filter((m) => !m.read && !m.self).length;
   }
 
   /** 查看当前未读消息（不置已读）。**已不是触发路径**，保留给探针套件当 fixture 用。 */
-  peekUnread(chatKey, limit = 3) {
+  peekUnread(chatKey: string, limit = 3) {
     const st = this.#state(chatKey);
     return st.messages.filter((m) => !m.read && !m.self).slice(0, Math.max(1, Number(limit) || 3));
   }
@@ -202,7 +216,7 @@ export class ChatStore {
    * @param {number[]} ids 要置为已读的本地 id
    * @returns {number} 实际被改动的条数（本来就已读的不算）
    */
-  markRead(chatKey, { ids = [] } = {}) {
+  markRead(chatKey: string, { ids = [] }: { ids?: unknown[] } = {}) {
     const targets = new Set((Array.isArray(ids) ? ids : []).map((x) => Number(x) || 0));
     targets.delete(0);
     if (!targets.size) return 0;
@@ -226,7 +240,7 @@ export class ChatStore {
    * `slice(0,0)` 吃掉、返回空数组 —— 而"不限"正是上下文窗口的默认容量
    * （见 src/context-window.js 的播种）。
    */
-  recentIncoming(chatKey, { limit = 0 } = {}) {
+  recentIncoming(chatKey: string, { limit = 0 }: { limit?: number } = {}) {
     const st = this.#state(chatKey);
     const all = st.messages.filter((m) => !m.self && !isSystemRecord(m));
     const n = Math.max(0, Number(limit) || 0);
@@ -240,7 +254,7 @@ export class ChatStore {
    * 有消息绕过 push 直接进了存档，窗口该补齐（见 ContextWindowRegistry#sync）。
    * 从尾往前扫 —— 正常情况下第一次比较就命中，是 O(1)。
    */
-  lastIncomingId(chatKey) {
+  lastIncomingId(chatKey: string) {
     const st = this.#state(chatKey);
     for (let i = st.messages.length - 1; i >= 0; i--) {
       const m = st.messages[i];
@@ -249,7 +263,7 @@ export class ChatStore {
     return 0;
   }
 
-  recent(chatKey, { limit = 80, offset = 0, includeSelf = true } = {}) {
+  recent(chatKey: string, { limit = 80, offset = 0, includeSelf = true }: { limit?: number; offset?: number; includeSelf?: boolean } = {}) {
     const st = this.#state(chatKey);
     const all = includeSelf ? st.messages : st.messages.filter((m) => !m.self);
     // offset = 跳过最近 N 条（用于工具翻页）。只读，绝不能修改 st.messages！
@@ -257,7 +271,7 @@ export class ChatStore {
     return all.slice(0, start).slice(-Math.max(1, Number(limit) || 1));
   }
 
-  findByMid(chatKey, mid) {
+  findByMid(chatKey: string, mid: unknown) {
     const st = this.#state(chatKey);
     const target = String(mid);
     return st.messages.find((m) => String(m.mid) === target) || null;
@@ -274,7 +288,7 @@ export class ChatStore {
    * 摘要按 ts 堆在存档头部（commitCompaction 按 ts 插入），但这里仍显式排序，
    * 不依赖插入顺序（老存档、手工修过的数据都可能不守规矩）。
    */
-  digests(chatKey) {
+  digests(chatKey: string) {
     const st = this.#state(chatKey);
     return st.messages
       .filter((m) => m && m.kind === 'digest')
@@ -305,7 +319,7 @@ export class ChatStore {
    * @returns {{dropped:Array, keptChars:number, totalChars:number, backup?:string}}
    *          dropped 是被删掉的条目（最旧→新），供调用方写日志/回执
    */
-  dropOldestDigests(chatKey, { maxChars = 0 } = {}) {
+  dropOldestDigests(chatKey: string, { maxChars = 0 }: { maxChars?: number } = {}) {
     const cap = Number(maxChars);
     const st = this.#state(chatKey);
     // digests() 是"新的在前"的副本；倒过来就是回收顺序（最旧的先走）
@@ -314,7 +328,7 @@ export class ChatStore {
     if (!Number.isFinite(cap) || cap <= 0 || totalChars <= cap) {
       return { dropped: [], keptChars: totalChars, totalChars };
     }
-    const dropped = [];
+    const dropped: ChatMessage[] = [];
     let chars = totalChars;
     for (let i = newestFirst.length - 1; i >= 0; i--) {
       // 规则 1：剩最后一条就收手，不管它超不超过上限
@@ -335,7 +349,7 @@ export class ChatStore {
    * 用途：read_forward 工具把"合并转发占位符"永久升级成展开后的文本
    * —— 一次展开，以后谁（模型/存档页）都直接读到内容。
    */
-  updateByMid(chatKey, mid, { text, appendMedia = [] } = {}) {
+  updateByMid(chatKey: string, mid: unknown, { text, appendMedia = [] }: { text?: unknown; appendMedia?: MediaEntry[] } = {}) {
     const st = this.#state(chatKey);
     const target = String(mid);
     const m = st.messages.find((x) => String(x.mid) === target);
@@ -352,7 +366,7 @@ export class ChatStore {
     return true;
   }
 
-  findByLocalId(chatKey, localId) {
+  findByLocalId(chatKey: string, localId: unknown) {
     const st = this.#state(chatKey);
     return st.messages.find((m) => m.id === Number(localId)) || null;
   }
@@ -374,15 +388,15 @@ export class ChatStore {
    * （"永远保存着最近一次重写之前的完整状态"）。面板删一条消息就把它冲掉，
    * 等于用一次小操作毁掉了整轮压缩的后悔药。同样是只保留最近一次。
    */
-  backupChatFileTo(chatKey, tag = 'panel') {
+  backupChatFileTo(chatKey: string, tag = 'panel') {
     try {
       const src = chatFile(chatKey);
       if (!fs.existsSync(src)) return '';
       const dest = `${src}.${tag}.bak`;
       fs.copyFileSync(src, dest);
       return dest;
-    } catch (error) {
-      console.warn(`[store] 备份失败(${tag}):`, error?.message ?? error);
+    } catch (error: unknown) {
+      console.warn(`[store] 备份失败(${tag}):`, errorText(error));
       return '';
     }
   }
@@ -393,7 +407,7 @@ export class ChatStore {
    * 只允许改 text：senderId/self/mid/ts/read 一概不动 —— 面板换个说法可以，
    * 改"这话是谁说的/什么时候说的"会直接伪造历史，而且会让 mid 与消息对不上。
    */
-  updateByLocalId(chatKey, localId, { text } = {}) {
+  updateByLocalId(chatKey: string, localId: unknown, { text }: { text?: unknown } = {}) {
     const st = this.#state(chatKey);
     const m = st.messages.find((x) => x.id === Number(localId));
     if (!m) return null;
@@ -406,7 +420,7 @@ export class ChatStore {
    * 按本地 id 真删一条存档。删掉的 id 不回收（nextLocalId 不动）。
    * @returns {{removed:object, backup:string}|null}
    */
-  deleteByLocalId(chatKey, localId) {
+  deleteByLocalId(chatKey: string, localId: unknown) {
     const st = this.#state(chatKey);
     const idx = st.messages.findIndex((x) => x.id === Number(localId));
     if (idx < 0) return null;
@@ -425,7 +439,7 @@ export class ChatStore {
    * 按 ts 找位置插入（同 commitCompaction）：给几天前那段对话补一句更正，
    * 它应该落在当时的位置，而不是漂在末尾。
    */
-  insertNote(chatKey, { text, ts = Date.now() } = {}) {
+  insertNote(chatKey: string, { text, ts = Date.now() }: { text?: unknown; ts?: number } = {}) {
     const st = this.#state(chatKey);
     const entry = {
       id: st.nextLocalId++,
@@ -447,9 +461,9 @@ export class ChatStore {
   }
 
   /** 最近 senderId 出现过的活跃成员（带最后发言时间）。 */
-  activeMembers(chatKey, limit = 10) {
+  activeMembers(chatKey: string, limit = 10) {
     const st = this.#state(chatKey);
-    const map = new Map();
+    const map = new Map<string, { userId: string; name: string; lastTs: number; count: number }>();
     for (const m of st.messages) {
       if (m.self) continue;
       // 压缩摘要 / 人工备注都是系统生成的，不是人：不跳过就会在"活跃成员"里
@@ -492,7 +506,7 @@ export class ChatStore {
    *    "按字符预算再裁一刀"由调用方在拼完提示词后做 —— 只有拼提示词的那一步
    *    知道模型**真正看到了**多少条，压缩区间必须与它严格一致。
    */
-  selectArchiveRange(chatKey, { keepRecent = 300, maxMessages = 400 } = {}) {
+  selectArchiveRange(chatKey: string, { keepRecent = 300, maxMessages = 400 }: { keepRecent?: number; maxMessages?: number } = {}) {
     const st = this.#state(chatKey);
     const keep = Math.max(0, Number(keepRecent) || 0);
     const cap = Math.max(1, Number(maxMessages) || 1);
@@ -501,7 +515,7 @@ export class ChatStore {
     // 从 0 开始取：压缩顺序严格从最老到最新，每一轮都往前推进一段。
     // 先跳过再计数（而不是先切片再过滤）：否则文件头部堆满摘要时，
     // 一块全是摘要的切片会被过滤成空区间，压缩从此永久卡住。
-    const entries = [];
+    const entries: ChatMessage[] = [];
     for (let i = 0; i < end && entries.length < cap; i++) {
       const m = st.messages[i];
       if (isSystemRecord(m)) continue;
@@ -515,7 +529,7 @@ export class ChatStore {
    *
    * 用 JSONL 而不是一个大 JSON：追加是 O(1)，且任何一行坏掉都不影响其它行。
    */
-  appendArchive(chatKey, entries) {
+  appendArchive(chatKey: string, entries: ChatMessage[]) {
     const list = Array.isArray(entries) ? entries : [];
     if (!list.length) return { file: '', count: 0 };
     const file = archiveFile(chatKey);
@@ -529,15 +543,15 @@ export class ChatStore {
    * 固定文件名（每次覆盖）：永远保存着**最近一次重写之前**的完整状态，
    * 既是有用的回滚点，又不会随压缩次数无限堆积。
    */
-  backupChatFile(chatKey) {
+  backupChatFile(chatKey: string) {
     try {
       const src = chatFile(chatKey);
       if (!fs.existsSync(src)) return '';
       const dest = `${src}.bak`;
       fs.copyFileSync(src, dest);
       return dest;
-    } catch (error) {
-      console.warn('[store] 压缩前备份失败:', error?.message ?? error);
+    } catch (error: unknown) {
+      console.warn('[store] 压缩前备份失败:', errorText(error));
       return '';
     }
   }
@@ -557,7 +571,7 @@ export class ChatStore {
    *
    * @returns {{removed:number, remaining:number, backup:string, archive:string}}
    */
-  commitCompaction(chatKey, { removeIds, digestEntry }) {
+  commitCompaction(chatKey: string, { removeIds, digestEntry }: { removeIds: Set<number> | number[]; digestEntry: ChatMessage | null }) {
     const st = this.#state(chatKey);
     const kill = removeIds instanceof Set ? removeIds : new Set(removeIds || []);
     if (!kill.size || !digestEntry) {
@@ -584,13 +598,46 @@ export class ChatStore {
   }
 
   /** 上次压缩时间（0 = 从未压缩过），供冷却判断。 */
-  lastCompactedAt(chatKey) {
+  lastCompactedAt(chatKey: string) {
     return Number(this.#state(chatKey).lastCompactedAt) || 0;
   }
 
-  #trim(st) {
+  #trim(st: ChatState) {
     if (this.maxPerChat > 0 && st.messages.length > this.maxPerChat) {
       st.messages.splice(0, st.messages.length - this.maxPerChat);
     }
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeMessage(value: unknown): ChatMessage | null {
+  if (!isRecord(value)) return null;
+  const id = Number(value.id);
+  if (!Number.isFinite(id)) return null;
+  return {
+    ...value,
+    id,
+    ts: Number(value.ts) || 0,
+    text: String(value.text ?? ''),
+    senderId: String(value.senderId ?? ''),
+    senderName: String(value.senderName ?? ''),
+    self: value.self === true,
+    read: value.read === true,
+    media: Array.isArray(value.media) ? value.media.filter(isRecord).map((m) => ({ ...m, kind: String(m.kind ?? '') })) : []
+  } as ChatMessage;
+}
+
+function normalizeState(chatKey: string, value: Record<string, unknown>): ChatState {
+  const messages = (Array.isArray(value.messages) ? value.messages : []).map(normalizeMessage).filter((m): m is ChatMessage => m !== null);
+  const maxId = messages.reduce((n, m) => Math.max(n, m.id), 0);
+  return {
+    chatKey: String(value.chatKey ?? chatKey),
+    nextLocalId: Math.max(maxId + 1, Number(value.nextLocalId) || 1),
+    messages,
+    ...(Number(value.lastCompactedAt) ? { lastCompactedAt: Number(value.lastCompactedAt) } : {}),
+    ...(Number(value.archivedCount) ? { archivedCount: Number(value.archivedCount) } : {})
+  };
 }

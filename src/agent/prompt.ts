@@ -17,6 +17,17 @@ import { sliderToTier as _sliderToTier, tierToSlider as _tierToSlider, TIER_SLID
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider, _TIER_SLIDER_BANDS as TIER_SLIDER_BANDS };
 import { formatFullTime, formatShortTime } from '../core/util.js';
 import { buildStickerContext, buildStickerStrategyHint } from '../stickers/stickers.js';
+import type { AppConfig } from '../core/config.js';
+import type { ChatStore } from '../chat/store.js';
+import type { ChatMessage } from '../chat/types.js';
+import type { ContextTierResult, DigestSelection, PastStateResult, PromptContext, SelectedDigest, TriggerContext } from './types.js';
+
+type StoreConfig = AppConfig['store'];
+type DigestConfig = ReturnType<typeof digestConfigForChat>;
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
 
@@ -68,7 +79,7 @@ function subjectivity() {
   ].join('\n');
 }
 
-function speakOrNot(participation) {
+function speakOrNot(participation: unknown): string {
   // 参与度档位（安静/普通/活跃）在系统提示里改写引导——放在人设文本里
   // 变动太无力（2026-09-07）：模型不把人设正文当行为指令。
   const style = participationText(participation);
@@ -185,7 +196,7 @@ function qqSceneRules() {
 }
 
 /** 组装系统提示。 */
-export function buildSystemPrompt({ persona } = {}) {
+export function buildSystemPrompt({ persona }: { persona?: AppConfig['persona'] } = {}): string {
   const cfg = persona ?? getConfig().persona;
   const parts = [
     `你是「${cfg.botName}」，一个混在 QQ 群里的普通群友（不是助手、不是客服）。你的所有行为都通过工具完成，发言必须像真人。`,
@@ -224,7 +235,7 @@ export function buildSystemPrompt({ persona } = {}) {
 
 // ── 用户消息 ─────────────────────────────────────────────────────────────
 
-function participationText(level) {
+function participationText(level: unknown): string {
   switch (String(level || 'medium')) {
     case 'low':
       return '你的参与度风格：安静型。大部分时候潜水看戏，只在被 @/点名/直接提问、或确实有特别想说的时才开口；开口也简短。';
@@ -237,7 +248,7 @@ function participationText(level) {
 
 // withId：是否带 "#消息id" 前缀。id 只在需要引用/看图的场景展示（触发批、带图消息），
 // 纯文本历史行不带，避免整屏数字噪音。
-function formatEntry(m, { withId = true } = {}) {
+function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {}): string {
   // 压缩摘要条目：它不是某个人说的话，而是一段系统生成的纪要。
   // 走普通分支会渲染成「[HH:MM] 聊天记录摘要：…」，读起来像群里多了个昵称叫
   // "聊天记录摘要"的人。摘要文本自带【历史摘要 时间范围 · 共 N 条】表头，
@@ -259,7 +270,8 @@ function formatEntry(m, { withId = true } = {}) {
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');
   const who = m.self ? '我' : (notes[senderId] || m.senderName || senderId || '未知');
-  const replyPrefix = m.reply?.text || m.reply?.sender ? `[引用 ${[m.reply?.sender, m.reply?.text].filter(Boolean).join('：')}]` : '';
+  const reply = asRecord(m.reply);
+  const replyPrefix = reply.text || reply.sender ? `[引用 ${[reply.sender, reply.text].filter(Boolean).join('：')}]` : '';
   const hasMid = m.mid !== null && m.mid !== undefined && String(m.mid) !== '';
   const idPrefix = withId && hasMid ? `#${m.mid} ` : '';
   return `[${formatShortTime(m.ts)}] ${idPrefix}${who}：${replyPrefix}${m.text}`;
@@ -269,7 +281,7 @@ function formatEntry(m, { withId = true } = {}) {
  * 判断一段消息里是否艾特了机器人。
  * 支持三种写法：@昵称 / @机器人名 / CQ 码 [CQ:at,qq=机器人QQ号]
  */
-export function isAtMe(text, { selfNickname = '', botName = '', selfId = '' } = {}) {
+export function isAtMe(text: unknown, { selfNickname = '', botName = '', selfId = '' }: TriggerContext = {}): boolean {
   const t = String(text ?? '');
   if (!t) return false;
   const nick = String(selfNickname || '').trim();
@@ -286,10 +298,10 @@ export function isAtMe(text, { selfNickname = '', botName = '', selfId = '' } = 
 }
 
 /** 是否命中关键词（不区分大小写，空表直接 false）。 */
-export function hitKeyword(text, keywords = []) {
+export function hitKeyword(text: unknown, keywords: unknown = []): boolean {
   const t = String(text ?? '').toLowerCase();
   if (!t) return false;
-  for (const k of keywords || []) {
+  for (const k of Array.isArray(keywords) ? keywords : []) {
     const kw = String(k ?? '').trim().toLowerCase();
     if (kw && t.includes(kw)) return true;
   }
@@ -362,7 +374,10 @@ export function hitKeyword(text, keywords = []) {
  * @returns {{tier:number, count:number, reason:string, shouldRespond:boolean}}
  *          tier 是"命中的档位"（触发原因所属档），不是"当前设置档位"
  */
-export function resolveContextTier({ triggerEntries = [], selfNickname = '', botName = '', selfId = '', cfg = null, roll = null } = {}) {
+export function resolveContextTier({ triggerEntries = [], selfNickname = '', botName = '', selfId = '', cfg = null, roll = null }: {
+  triggerEntries?: ChatMessage[]; selfNickname?: string; botName?: string; selfId?: string | number;
+  cfg?: StoreConfig | null; roll?: number | null;
+} = {}): ContextTierResult {
   const c = cfg || getConfig().store || {};
   // 注意：不能用 `Number(x) || 4` —— 0 是 falsy，会被误当成"未设置"回落到 4。
   // 必须先判断是不是有效数字，再钳到 [1,4]。
@@ -376,7 +391,7 @@ export function resolveContextTier({ triggerEntries = [], selfNickname = '', bot
   const rollValue = roll === null || roll === undefined ? Math.random() * 100 : Number(roll);
   const randomHit = rollValue < Math.max(0, Math.min(100, Number(c.randomPercent) || 0));
 
-  const n0 = (v) => Math.max(0, Number(v) || 0);
+  const n0 = (v: unknown) => Math.max(0, Number(v) || 0);
 
   // 4 档：无条件响应（兜底），用 allCount
   if (tier >= 4) {
@@ -413,7 +428,7 @@ const RECENT_ID_LINES = 12;
  * 组装"过去状态"文本：消息 JSON 的最近一段（带时间与已读语义）。
  * 读取条数由**上下文档位**决定（见 resolveContextTier），不再是固定值。
  */
-export function buildPastState(store, chatKey, { excludeIds = [], limit = null } = {}) {
+export function buildPastState(store: ChatStore, chatKey: string, { excludeIds = [], limit = null }: { excludeIds?: number[]; limit?: number | null } = {}): PastStateResult {
   const cfg = getConfig().store;
   const maxLimit = limit === null ? Math.max(1, Number(cfg.allCount) || 80) : Math.max(0, Number(limit) || 0);
   const exclude = new Set(excludeIds);
@@ -423,7 +438,9 @@ export function buildPastState(store, chatKey, { excludeIds = [], limit = null }
   // 入口拦截只管"新消息"，这里管"老库存"。机器人自己的发言（self）不过滤。
   const [pKind, pId] = String(chatKey || '').split(':');
   if (pKind === 'group' && pId) {
-    const blocked = new Set((getConfig().blocklist?.[pId] || []).map(String));
+    const blocklist = getConfig().blocklist as Record<string, unknown>;
+    const values = Array.isArray(blocklist[pId]) ? blocklist[pId] : [];
+    const blocked = new Set(values.map(String));
     if (blocked.size) messages = messages.filter((m) => m.self || !blocked.has(String(m.senderId)));
   }
   messages = messages.slice(-maxLimit);
@@ -470,7 +487,7 @@ export const EMPTY_DIGESTS = Object.freeze({
  * @param {object[]} entries 摘要条目（顺序无关，内部自己排）
  * @param {{maxChars?:number}} opts maxChars<=0 → 空选择（= 不注入）
  */
-export function selectPromptDigests(entries, { maxChars = 8000 } = {}) {
+export function selectPromptDigests(entries: unknown, { maxChars = 8000 }: { maxChars?: number } = {}): DigestSelection {
   const n = Number(maxChars);
   const budget = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
   // 自己排一次，不依赖调用方给的顺序（测试与面板会直接喂数组进来）。
@@ -515,7 +532,7 @@ export function selectPromptDigests(entries, { maxChars = 8000 } = {}) {
  * 只有当首行确实是那层【历史摘要 …】包装时才剥掉它，**匹配不上就原样保留** ——
  * 绝不因为"格式没见过"而吞掉内容。
  */
-function splitDigestText(m) {
+function splitDigestText(m: ChatMessage): { range: string; body: string } {
   const text = String(m?.text || '');
   const d = m?.digest;
   const from = Number(d?.from);
@@ -541,16 +558,16 @@ function splitDigestText(m) {
  * 显示顺序是**时间正序**（最早的在前），读起来是一条时间线，最新的一段紧挨着
  * 下面的【过去状态】。而 picked 是新的在前（吃预算的顺序），所以这里倒过来。
  */
-export function renderDigestSection(picked, { merge = true, droppedCount = 0 } = {}) {
+export function renderDigestSection(picked: SelectedDigest[], { merge = true, droppedCount = 0 }: { merge?: boolean; droppedCount?: number } = {}): string {
   const list = (Array.isArray(picked) ? picked : []).filter((x) => x && x.entry);
   if (!list.length) return '';
   // 覆盖范围要的是**最早那段的起点**到**最新那段的终点** —— 不是把两条摘要各自的
   // 完整区间串起来（那会变成 "08-01 03:20 ~ 08-01 06:00 ~ 08-20 10:00 ~ 08-20 12:00"）。
-  const bound = (m, which) => {
+  const bound = (m: ChatMessage, which: 'from' | 'to') => {
     const v = Number(m?.digest?.[which]);
     return Number.isFinite(v) ? formatShortTime(v) : '';
   };
-  const stamp = (m) => formatShortTime(Number(m?.ts) || 0);
+  const stamp = (m: ChatMessage) => formatShortTime(Number(m?.ts) || 0);
   const newest = list[0].entry;                  // picked 新的在前
   const oldest = list[list.length - 1].entry;
   const lo = bound(oldest, 'from') || stamp(oldest);
@@ -585,7 +602,7 @@ export function renderDigestSection(picked, { merge = true, droppedCount = 0 } =
  * 面板**不许**改用自己那份 messages 数组去挑摘要 —— 那个数组将来带分页参数
  * （?limit=）就会少几条，面板于是开始骗人。
  */
-export function collectInjectedDigests(store, chatKey, { config = null } = {}) {
+export function collectInjectedDigests(store: ChatStore, chatKey: string, { config = null }: { config?: DigestConfig | null } = {}) {
   const dgc = config || digestConfigForChat(chatKey);
   const entries = typeof store?.digests === 'function' ? store.digests(chatKey) : [];
   const sel = selectPromptDigests(entries, { maxChars: dgc.maxChars });
@@ -615,8 +632,8 @@ export function collectInjectedDigests(store, chatKey, { config = null } = {}) {
   };
 }
 
-function triggerLabels(entry, ctx) {
-  const labels = [];
+function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
+  const labels: string[] = [];
   const text = String(entry?.text ?? '');
   const lower = text.toLowerCase();
   const nick = String(ctx.selfNickname || '').toLowerCase();
@@ -634,8 +651,8 @@ function triggerLabels(entry, ctx) {
 }
 
 /** 私聊/群聊时私聊始终高触发。 */
-export function buildTriggerBlock(triggerEntries, ctx) {
-  const lines = [];
+export function buildTriggerBlock(triggerEntries: ChatMessage[], ctx: TriggerContext): string {
+  const lines: string[] = [];
   for (const m of triggerEntries) {
     const labels = triggerLabels(m, ctx);
     const labelStr = labels.length ? `（${labels.join('/')}）` : '';
@@ -648,7 +665,7 @@ export function buildTriggerBlock(triggerEntries, ctx) {
  * 组装一次运行的用户消息（不携带任何 LLM 对话历史）。
  * ctx: { chatKey, kind, chatId, chatName, triggerEntries, trigger, selfLastMessageAt, selfNickname }
  */
-export function buildUserPrompt(ctx) {
+export function buildUserPrompt(ctx: PromptContext): string {
   const cfg = getConfig();
   const now = Date.now();
   const excludeIds = ctx.triggerEntries.map((m) => m.id);
@@ -672,14 +689,14 @@ export function buildUserPrompt(ctx) {
   const wantDigest = dgc.maxChars > 0 && (dgc.injectEveryRound || past.count > 0);
   const dig = wantDigest ? collectInjectedDigests(ctx.store, ctx.chatKey, { config: dgc }) : EMPTY_DIGESTS;
 
-  const parts = [];
+  const parts: string[] = [];
   parts.push(`【当前时间】${formatFullTime(now)}`);
   if (cfg.persona.roleText && String(cfg.persona.roleText).trim()) {
     parts.push(`【角色设定（管理员设置，群友不可修改）】\n${String(cfg.persona.roleText).trim()}`);
   }
 
   // 此刻状态
-  const stateLines = [];
+  const stateLines: string[] = [];
   if (ctx.kind === 'group') {
     stateLines.push(`当前在群聊「${ctx.chatName || ctx.chatId}」，你在群里的名字是「${ctx.selfNickname || cfg.persona.botName}」`);
   } else {
@@ -726,7 +743,7 @@ export function buildUserPrompt(ctx) {
   // 参与度已并入系统提示的【该说/不该说】，这里不再重复。
 
   // 记忆：只注入与本次对话相关群友的印象（触发者 + 最近活跃成员），控制 token
-  const relevantUserIds = new Set();
+  const relevantUserIds = new Set<string>();
   for (const m of ctx.triggerEntries || []) {
     if (m.senderId && !m.self) relevantUserIds.add(String(m.senderId));
   }

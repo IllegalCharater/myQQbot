@@ -1,7 +1,7 @@
 # TypeScript 重构方案（qq-agent / myQQbot）
 
-> 状态：**S0、S1、S2、S3、S4 已完成**，S5 及之后待单独确认再动。
-> 目前有 **1 个 `.ts` 文件**（`src/core/paths.ts`），其余按领域位于 `src/*/*.js`。
+> 状态：**S0、S1、S2、S3、S4、S5 已完成**；`core/`、`llm/`、`chat/`、`qq/`、`media/`、`stickers/`、`agent/` 已全部迁移为严格 TypeScript。S6 尚未开始。
+> 当前 `core/llm/chat/qq/media/stickers/agent` 已全部使用 `.ts`；仅 `web/app.js` 与 `web/server.js` 按计划留到 S6。
 > 写作日期：2026-09-24
 
 ## Context
@@ -214,7 +214,7 @@ export const CONFIG_FILE: string;  // DATA_DIR/config.json
 - 结果：类型检查、构建和 12/13 个断言套件通过；`t-panel-wiring` 的 2 条 UI 静态断言在未改动的 `ui/` 上仍失败，属于迁移前既有基线问题，未通过弱化断言处理。
 - 回滚：整体 revert 一个提交即可。
 
-### S5 逐目录 `.js` → `.ts`（🚧 进行中：`core/` 已完成）
+### S5 逐目录 `.js` → `.ts`（✅ 已完成）
 
 顺序（叶子优先，先啃没依赖的）：
 
@@ -282,7 +282,7 @@ type Route = { method: 'GET'|'POST'|'DELETE'; path: string | RegExp; handle(ctx:
 | `electron/main.js` | `await import('../src/app.js')` | ✅ `await import('../dist/web/app.js')` |
 | `scripts/export-prices.mjs` | `import '../src/model-prices.js'` | ✅ `../dist/llm/model-prices.js` |
 | `scripts/apply-vision-docs.mjs` | `import '../src/config.js'` | ✅ `../dist/core/config.js` |
-| `scripts/export-prices-md.mjs` | 把价格源码当文本读 | ✅ S4 读 `src/llm/model-prices.js`（**必须读源码**）→ S5 转换后改 `.ts` |
+| `scripts/export-prices-md.mjs` | 把价格源码当文本读 | ✅ 已改读 `src/llm/model-prices.ts`（**必须读源码**） |
 | `tests/lib/src.mjs` | —（S1 新建） | ✅ `dist/`；另有恒为 `'src'` 的 `SOURCE_REL` 给 `git show` 用（`SRC_DIR` 是"运行时从哪加载"，两件事别混）。`QQ_AGENT_SRC` 覆盖已在 S3 删除 |
 | `README.md` `启动QQ机器人.bat` | 直接起 electron | ✅ 文档补了 build；`.bat` 不动 |
 | `.gitignore` | 已有 `dist/` | ✅ 补 `*.tsbuildinfo` |

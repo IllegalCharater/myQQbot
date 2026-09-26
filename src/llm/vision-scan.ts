@@ -7,16 +7,26 @@
 import { getConfig, updateConfig } from '../core/config.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 
+type VisionVerdict = 'vision' | 'no-vision' | 'unknown';
+interface VisionResult { verdict: VisionVerdict; note: string; httpStatus: number | null; latencyMs: number | null }
+interface ScanProvider { id: string; baseURL?: string; apiKey?: string; models?: string[] }
+interface ScanTask { providerId: string; model: string; baseURL: string; apiKey: string }
+type ScanEmit = (event: 'vision-scan', payload: Record<string, unknown>) => void;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 // 1×1 像素 PNG（70 字节），足够让视觉模型"看到点什么"，也不会浪费 token。
 const TINY_PNG =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
-function joinUrl(base, path) {
+function joinUrl(base: unknown, path: string) {
   return `${String(base).replace(/\/+$/, '')}${path}`;
 }
 
-function authHeaders(apiKey, baseUrl = '') {
-  const h = apiKey ? { authorization: `Bearer ${apiKey}` } : {};
+function authHeaders(apiKey: unknown, baseUrl = ''): Record<string, string> {
+  const h: Record<string, string> = apiKey ? { authorization: `Bearer ${apiKey}` } : {};
   // 与 llm.js 一致：OpenCode Go 需要 x-opencode-session 路由头
   if (/opencode\.ai/i.test(String(baseUrl))) {
     h['x-opencode-session'] = `qqagent-vision-${process.pid}`;
@@ -30,16 +40,16 @@ export function visionResults() {
 }
 
 /** 查询某个模型（providerId|||modelId）的探测结论：'vision' | 'no-vision' | 'unknown' | undefined。 */
-export function modelVisionVerdict(providerId, modelId) {
+export function modelVisionVerdict(providerId: unknown, modelId: unknown) {
   const key = `${providerId || ''}|||${modelId || ''}`;
   return getConfig().modelVision?.[key]?.verdict;
 }
 
 /** 查询某个模型的图片输入结论：优先已持久化结论，其次内置官方资料表。 */
-export function modelImageVerdict(providerId, modelId) {
+export function modelImageVerdict(providerId: unknown, modelId: unknown) {
   const saved = modelVisionVerdict(providerId, modelId);
   if (saved === 'vision' || saved === 'no-vision') return saved;
-  const doc = builtinVisionResults([{ id: providerId, models: [modelId] }]);
+  const doc = builtinVisionResults([{ id: String(providerId || ''), models: [modelId] }]);
   return doc[`${providerId || ''}|||${modelId || ''}`]?.verdict ?? saved;
 }
 
@@ -47,9 +57,9 @@ export function modelImageVerdict(providerId, modelId) {
  * 探测单个模型。返回 { verdict, note, httpStatus, latencyMs }。
  * verdict: 'vision' 接受图片内容；'no-vision' 明确拒绝图片内容；'unknown' 无法判定。
  */
-export async function detectModelVision({ baseUrl, apiKey, model }, timeoutMs = 25000) {
+export async function detectModelVision({ baseUrl, apiKey, model }: { baseUrl: string; apiKey?: string; model: string }, timeoutMs = 25000): Promise<VisionResult> {
   const started = Date.now();
-  const base = { verdict: 'unknown', note: '', httpStatus: null, latencyMs: null };
+  const base: VisionResult = { verdict: 'unknown', note: '', httpStatus: null, latencyMs: null };
   if (!baseUrl || !model) return { ...base, note: '缺端点地址或模型名' };
 
   let res;
@@ -71,15 +81,21 @@ export async function detectModelVision({ baseUrl, apiKey, model }, timeoutMs = 
       }),
       signal: AbortSignal.timeout(timeoutMs)
     });
-  } catch (error) {
-    return { ...base, note: error?.name === 'TimeoutError' ? '探测请求超时' : `网络错误：${error?.message ?? error}` };
+  } catch (error: unknown) {
+    return { ...base, note: error instanceof Error && error.name === 'TimeoutError' ? '探测请求超时' : `网络错误：${error instanceof Error ? error.message : error}` };
   }
   const latencyMs = Date.now() - started;
-  const body = await res.json().catch(() => ({}));
-  const errText = String(body?.error?.message ?? body?.message ?? body?.detail?.error?.message ?? '');
+  const body: unknown = await res.json().catch(() => ({}));
+  const root = isRecord(body) ? body : {};
+  const errorPart = isRecord(root.error) ? root.error : {};
+  const detailPart = isRecord(root.detail) ? root.detail : {};
+  const detailError = isRecord(detailPart.error) ? detailPart.error : {};
+  const errText = String(errorPart.message ?? root.message ?? detailError.message ?? '');
 
-  if (res.ok && Array.isArray(body?.choices) && body.choices.length > 0) {
-    const reply = String(body.choices[0]?.message?.content ?? '').trim();
+  if (res.ok && Array.isArray(root.choices) && root.choices.length > 0) {
+    const first = isRecord(root.choices[0]) ? root.choices[0] : {};
+    const message = isRecord(first.message) ? first.message : {};
+    const reply = String(message.content ?? '').trim();
     return { verdict: 'vision', note: reply ? `接受图片并回复：「${reply.slice(0, 30)}」` : '接受图片内容', httpStatus: res.status, latencyMs };
   }
 
@@ -100,8 +116,8 @@ export async function detectModelVision({ baseUrl, apiKey, model }, timeoutMs = 
  * 扫描目录（providerId 过滤可选）。并发受控，结果逐个写进 config 并通过 emit 汇报进度。
  * 返回 { total, results }。
  */
-export async function scanModelsVision({ providers, emit = null, limit = 3, timeoutMs = 25000, onlyProviderIds = null } = {}) {
-  const tasks = [];
+export async function scanModelsVision({ providers = [], emit = null, limit = 3, timeoutMs = 25000, onlyProviderIds = null }: { providers?: ScanProvider[]; emit?: ScanEmit | null; limit?: number; timeoutMs?: number; onlyProviderIds?: string[] | null } = {}) {
+  const tasks: ScanTask[] = [];
   for (const p of providers || []) {
     if (onlyProviderIds && !onlyProviderIds.includes(p.id)) continue;
     if (!p.baseURL || !p.apiKey) continue; // 缺端点/密钥的提供商无从探测
@@ -116,17 +132,17 @@ export async function scanModelsVision({ providers, emit = null, limit = 3, time
   // 原先每个模型都调一次 updateConfig → 每次 deepMerge + structuredClone 全量配置
   // + fs.writeFileSync 同步落盘。扫 50 个模型 = 50 次全量序列化 + 50 次阻塞写盘，
   // 扫描期间主线程被 I/O 拖住，中途崩溃还会留下半写状态。
-  const pending = new Map();
+  const pending = new Map<string, Record<string, unknown>>();
   const flushPending = () => {
     if (!pending.size) return;
-    const patch = {};
+    const patch: Record<string, Record<string, unknown>> = {};
     for (const [key, v] of pending) patch[key] = v;
     pending.clear();
     updateConfig({ modelVision: patch });
   };
   const flushTimer = setInterval(flushPending, 2000);
 
-  const runTask = async (task) => {
+  const runTask = async (task: ScanTask) => {
     const key = `${task.providerId}|||${task.model}`;
     const r = await detectModelVision({ baseUrl: task.baseURL, apiKey: task.apiKey, model: task.model }, timeoutMs);
         pending.set(key, {
@@ -149,9 +165,9 @@ export async function scanModelsVision({ providers, emit = null, limit = 3, time
   const workers = Array.from({ length: Math.max(1, Math.min(limit, tasks.length || 1)) }, async () => {
     while (index < tasks.length) {
       const task = tasks[index++];
-      await runTask(task).catch((error) => {
+      await runTask(task).catch((error: unknown) => {
         done += 1;
-        emit?.('vision-scan', { key: `${task.providerId}|||${task.model}`, providerId: task.providerId, model: task.model, verdict: 'unknown', done, total, error: String(error?.message ?? error) });
+        emit?.('vision-scan', { key: `${task.providerId}|||${task.model}`, providerId: task.providerId, model: task.model, verdict: 'unknown', done, total, error: String(error instanceof Error ? error.message : error) });
       });
     }
   });

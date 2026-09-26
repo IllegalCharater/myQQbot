@@ -16,37 +16,38 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../core/config.js';
 import { validateImageUrl, safeFetchBinary, detectMime } from '../media/safe-fetch.js';
+import type { StickerCacheResult, StickerEntry } from './types.js';
 
 export const CACHE_DIR = path.join(DATA_DIR, 'sticker-cache');
 
-const EXT_BY_MIME = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
-const MIME_BY_EXT = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+const EXT_BY_MIME: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+const MIME_BY_EXT: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
 
 /** id 的 8 位哈希：让"两个 id 净化后撞名"和"id 里塞 ../"这两类事从根上不可能发生。 */
-function shortHash(s) {
+function shortHash(s: unknown): string {
   let h = 2166136261;
   for (const ch of String(s)) {
-    h ^= ch.codePointAt(0);
+    h ^= ch.codePointAt(0) ?? 0;
     h = Math.imul(h, 16777619) >>> 0;
   }
   return h.toString(16).padStart(8, '0');
 }
 
 /** 文件名 = 净化后的 id + 短哈希 + 后缀。只存文件名（存绝对路径的话换个数据目录就全失效）。 */
-export function cacheFileName(id, mime = 'image/jpeg') {
+export function cacheFileName(id: unknown, mime = 'image/jpeg'): string {
   const base = String(id ?? '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 60) || 'sticker';
   return `${base}_${shortHash(id)}.${EXT_BY_MIME[mime] || 'jpg'}`;
 }
 
 /** 文件名 → 缓存目录内的绝对路径。越界直接抛（照 jmcomic.validatePdf 的先例）。 */
-export function cachePath(name) {
+export function cachePath(name: unknown): string {
   const p = path.resolve(CACHE_DIR, String(name ?? ''));
   if (!p.startsWith(path.resolve(CACHE_DIR) + path.sep)) throw new Error('缓存文件名越界');
   return p;
 }
 
 /** 这条表情的缓存文件绝对路径；没有记录或文件已不在 → null。 */
-export function cachedPath(entry) {
+export function cachedPath(entry: StickerEntry | null | undefined): string | null {
   const name = String(entry?.cacheFile || '').trim();
   if (!name) return null;
   let p;
@@ -58,7 +59,7 @@ export function cachedPath(entry) {
  * 把一条表情的图下载到缓存目录。返回 { name, file, mime, bytes }；QQ 收藏返回 null（不缓存）。
  * 调用方负责把 name 写回条目（entry.cacheFile）并落库。
  */
-export async function ensureCached(entry) {
+export async function ensureCached(entry: StickerEntry | null | undefined): Promise<StickerCacheResult | null> {
   if (!entry || entry.source === 'qq') return null;
   const url = String(entry.url || '').trim();
   if (!url) throw new Error('这条表情没有可缓存的图片地址');
@@ -79,7 +80,7 @@ export async function ensureCached(entry) {
 }
 
 /** 缓存文件的 data URL（看图工具用）；没有缓存文件 → null。 */
-export async function cachedDataUrl(entry) {
+export async function cachedDataUrl(entry: StickerEntry | null | undefined): Promise<string | null> {
   const file = cachedPath(entry);
   if (!file) return null;
   const buffer = await fs.promises.readFile(file);
@@ -90,18 +91,18 @@ export async function cachedDataUrl(entry) {
 }
 
 /** 删掉这条表情的缓存文件（尽力而为，绝不抛 —— 它是条目的附属品，删不掉不该拦住删条目）。 */
-export function dropCached(entry) {
+export function dropCached(entry: StickerEntry | null | undefined): boolean {
   const file = cachedPath(entry);
   if (!file) return false;
   try { fs.rmSync(file, { force: true }); return true; } catch { return false; }
 }
 
 /** 删掉没人认领的缓存文件（手改过 stickers.json、或写盘写到一半崩了的残留）。返回删了几个。 */
-export function sweepOrphans(entries) {
+export function sweepOrphans(entries: readonly StickerEntry[]): number {
   const referenced = new Set(
     (Array.isArray(entries) ? entries : []).map((e) => String(e?.cacheFile || '').trim()).filter(Boolean)
   );
-  let names;
+  let names: string[];
   try { names = fs.readdirSync(CACHE_DIR); } catch { return 0; }
   let swept = 0;
   for (const name of names) {
@@ -120,7 +121,7 @@ export function sweepOrphans(entries) {
  * 没有缓存就现下一份 —— 这也是老条目（本次改动之前收藏的）第一次被发送时补上缓存的时机。
  * 下载失败**不阻断发送**：退回原始 url，行为与改动前一致（这条链接要是还没过期就照样发得出去）。
  */
-export async function sendTarget(entry) {
+export async function sendTarget(entry: StickerEntry | null | undefined): Promise<string> {
   const url = String(entry?.url || '').trim();
   if (!entry || entry.source === 'qq') return url;
   const cached = cachedPath(entry);
@@ -134,7 +135,7 @@ export async function sendTarget(entry) {
 }
 
 /** 判断一个发送目标是不是本模块写的缓存文件（tools.js 的安全闸据此放行，不必再过 URL 校验）。 */
-export function isCacheFile(target) {
+export function isCacheFile(target: unknown): boolean {
   const p = String(target || '');
   if (!p) return false;
   if (!p.startsWith(path.resolve(CACHE_DIR) + path.sep)) return false;

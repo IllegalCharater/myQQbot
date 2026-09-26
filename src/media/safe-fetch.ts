@@ -14,13 +14,14 @@ import http from 'node:http';
 import https from 'node:https';
 import { StringDecoder } from 'node:string_decoder';
 import { getConfig } from '../core/config.js';
+import type { IncomingMessage } from 'node:http';
 
 const dnsLookup = dns.promises.lookup;
 
 // ── IP 判定 ─────────────────────────────────────────────────────────────
 
 // 解析 IPv6 中内嵌的 IPv4（::ffff:a.b.c.d、::ffff:7f00:1 等）。
-function ipv4FromLast32(lower) {
+function ipv4FromLast32(lower: unknown) {
   const parts = String(lower || '').split(':');
   if (parts.length < 2) return null;
   const last = parts[parts.length - 1];
@@ -33,7 +34,7 @@ function ipv4FromLast32(lower) {
   return null;
 }
 
-function parseEmbeddedIpv4(h) {
+function parseEmbeddedIpv4(h: unknown) {
   const lower = String(h || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!lower.includes(':')) return null;
   const dotted = lower.match(/(\d+\.\d+\.\d+\.\d+)$/);
@@ -60,7 +61,7 @@ function parseEmbeddedIpv4(h) {
   return null;
 }
 
-export function isPrivateIp(ip) {
+export function isPrivateIp(ip: unknown) {
   const h = String(ip || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!h) return true;
   const embedded = h.includes(':') ? parseEmbeddedIpv4(h) : null;
@@ -100,15 +101,15 @@ export function isPrivateIp(ip) {
 
 // ── 主机名校验（含 DNS） ────────────────────────────────────────────────
 
-async function lookupWithTimeout(hostname) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
+async function lookupWithTimeout(hostname: string): Promise<dns.LookupAddress[]> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error('DNS 解析超时')), 5000);
   });
-  return Promise.race([dnsLookup(hostname, { all: true, verbatim: true }), timeout]).finally(() => clearTimeout(timer));
+  return Promise.race([dnsLookup(hostname, { all: true, verbatim: true }), timeout]).finally(() => { if (timer) clearTimeout(timer); });
 }
 
-async function resolveSafeHost(hostname, { allowPrivate = false } = {}) {
+async function resolveSafeHost(hostname: unknown, { allowPrivate = false }: { allowPrivate?: boolean } = {}) {
   const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!h) throw new Error('主机名为空');
   if (!allowPrivate && (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local'))) {
@@ -121,8 +122,8 @@ async function resolveSafeHost(hostname, { allowPrivate = false } = {}) {
   let addresses;
   try {
     addresses = await lookupWithTimeout(h);
-  } catch (error) {
-    throw new Error(`域名解析失败：${error?.message ?? error}`);
+  } catch (error: unknown) {
+    throw new Error(`域名解析失败：${error instanceof Error ? error.message : error}`);
   }
   if (!addresses.length) throw new Error('域名没有解析结果');
   if (!allowPrivate) {
@@ -134,8 +135,8 @@ async function resolveSafeHost(hostname, { allowPrivate = false } = {}) {
 }
 
 /** 校验 URL 的 scheme 与主机（DNS 级）。返回 { url, ip }。 */
-export async function validateFetchUrl(raw, { allowPrivate = false } = {}) {
-  let url;
+export async function validateFetchUrl(raw: unknown, { allowPrivate = false }: { allowPrivate?: boolean } = {}) {
+  let url: URL;
   try {
     url = new URL(String(raw ?? '').trim());
   } catch {
@@ -149,24 +150,27 @@ export async function validateFetchUrl(raw, { allowPrivate = false } = {}) {
 
 // ── 受限请求 ────────────────────────────────────────────────────────────
 
-function sliceByCodePoints(s, max) {
+function sliceByCodePoints(s: string, max: number) {
   if (s.length <= max) return s;
   return Array.from(s).slice(0, max).join('');
 }
 
-function readBounded(res, maxBytes, asText) {
+function readBounded(res: IncomingMessage, maxBytes: number, asText: true): Promise<string>;
+function readBounded(res: IncomingMessage, maxBytes: number, asText: false): Promise<Buffer>;
+function readBounded(res: IncomingMessage, maxBytes: number, asText: boolean): Promise<string | Buffer> {
   return new Promise((resolve, reject) => {
     const decoder = new StringDecoder('utf8');
-    const chunks = [];
+    const chunks: Buffer[] = [];
     let total = 0;
     let text = '';
     let settled = false;
-    const finish = (fn, val) => {
+    const finish = (fn: (value: string | Buffer | PromiseLike<string | Buffer>) => void, val: string | Buffer) => {
       if (settled) return;
       settled = true;
       fn(val);
     };
-    res.on('data', (chunk) => {
+    res.on('data', (raw: Buffer | string) => {
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
       if (settled) return;
       total += chunk.length;
       if (asText) text += decoder.write(chunk);
@@ -189,12 +193,14 @@ function readBounded(res, maxBytes, asText) {
         }
       }
     });
-    res.on('error', (err) => finish(reject, err));
+    res.on('error', reject);
   });
 }
 
+interface RequestResult { statusCode: number; redirect?: string; body?: string | Buffer; contentType?: string }
+
 // 使用已校验的 IP 发起请求（保留 Host/SNI），从根上消除 DNS rebinding。
-function requestOnce(url, ip, { asBinary = false, maxBytes = 50000 } = {}) {  return new Promise((resolve, reject) => {
+function requestOnce(url: URL, ip: string, { asBinary = false, maxBytes = 50000 }: { asBinary?: boolean; maxBytes?: number } = {}): Promise<RequestResult> {  return new Promise((resolve, reject) => {
     const mod = url.protocol === 'https:' ? https : http;
     const port = url.port || (url.protocol === 'https:' ? 443 : 80);
     const req = mod.request({
@@ -218,9 +224,8 @@ function requestOnce(url, ip, { asBinary = false, maxBytes = 50000 } = {}) {  re
         resolve({ statusCode, redirect: String(res.headers.location || '') });
         return;
       }
-      readBounded(res, maxBytes, !asBinary)
-        .then((body) => resolve({ statusCode, body, contentType: String(res.headers['content-type'] || '') }))
-        .catch(reject);
+      const bodyPromise = asBinary ? readBounded(res, maxBytes, false) : readBounded(res, maxBytes, true);
+      bodyPromise.then((body) => resolve({ statusCode, body, contentType: String(res.headers['content-type'] || '') })).catch(reject);
     });
     req.on('timeout', () => req.destroy(new Error(`请求超时：${url.hostname}`)));
     req.on('error', reject);
@@ -231,7 +236,7 @@ function requestOnce(url, ip, { asBinary = false, maxBytes = 50000 } = {}) {  re
 const MAX_REDIRECTS = 5;
 
 /** 抓取网页文本（≤50000 字符），SSRF 全防护（不做内网例外）。 */
-export async function safeFetch(urlString) {
+export async function safeFetch(urlString: unknown) {
   let { url, ip } = await validateFetchUrl(urlString);
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     const result = await requestOnce(url, ip, { asBinary: false, maxBytes: 50000 });
@@ -241,14 +246,14 @@ export async function safeFetch(urlString) {
       ({ url, ip } = await validateFetchUrl(next));
       continue;
     }
-    const body = result.body || '';
+    const body = typeof result.body === 'string' ? result.body : '';
     return { url: url.toString(), statusCode: result.statusCode, truncated: body.length >= 50000, body };
   }
   throw new Error('重定向次数过多，已停止');
 }
 
 /** 下载二进制（图片，≤maxBytes 字节），返回 { buffer, contentType }。 */
-export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024) {
+export async function safeFetchBinary(urlString: unknown, maxBytes = 12 * 1024 * 1024) {
   const allowPrivate = getConfig().security?.allowPrivateImageHosts === true;
   let { url, ip } = await validateFetchUrl(urlString, { allowPrivate });
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
@@ -260,7 +265,7 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024) {
       continue;
     }
     if (result.statusCode !== 200) throw new Error(`HTTP ${result.statusCode}`);
-    return { buffer: result.body, contentType: result.contentType };
+    return { buffer: Buffer.isBuffer(result.body) ? result.body : Buffer.alloc(0), contentType: result.contentType || '' };
   }
   throw new Error('重定向次数过多，已停止');
 }
@@ -272,7 +277,7 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024) {
  * 而落盘缓存（sticker-cache.js）也要用它定文件后缀 —— 让那个模块去 import 整个
  * 工具集不合适。tools.js 照旧转出这个名字，调用点一行都不用改。
  */
-export function detectMime(buf) {
+export function detectMime(buf: Buffer | Uint8Array | null | undefined) {
   if (!buf || buf.length < 12) return null;
   if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
   if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
@@ -285,8 +290,8 @@ export function detectMime(buf) {
  * 图片地址校验（供 send_sticker / 图片下载使用）。
  * 默认内网地址一律拒绝；security.allowPrivateImageHosts=true 时放行（仅本地测试/自建图床）。
  */
-export async function validateImageUrl(raw) {
-  let url;
+export async function validateImageUrl(raw: unknown) {
+  let url: URL;
   try {
     url = new URL(String(raw ?? '').trim());
   } catch {

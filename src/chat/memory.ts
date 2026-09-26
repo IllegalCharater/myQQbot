@@ -10,23 +10,29 @@ import { DATA_DIR, getConfig, updateConfig } from '../core/config.js';
 
 const MEMORY_DIR = path.join(DATA_DIR, 'memory');
 
-function chatDirName(chatKey) {
+interface Impression { content: string; createdAt: number }
+interface Member { userId: string; name: string; impressions: Impression[]; updatedAt: number; lastConsolidatedAt: number }
+type MemberMap = Map<string, Member>;
+function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+function errorText(error: unknown): unknown { return error instanceof Error ? error.message : error; }
+
+function chatDirName(chatKey: unknown) {
   return String(chatKey).replace(/[^a-z0-9_]/gi, '_');
 }
 
-function legacyFile(chatKey) {
+function legacyFile(chatKey: string) {
   return path.join(MEMORY_DIR, `${chatDirName(chatKey)}.json`);
 }
 
-function chatDir(chatKey) {
+function chatDir(chatKey: string) {
   return path.join(MEMORY_DIR, chatDirName(chatKey));
 }
 
-function metaFile(chatKey) {
+function metaFile(chatKey: string) {
   return path.join(chatDir(chatKey), '_meta.json');
 }
 
-function memberFileName(userId, name = '') {
+function memberFileName(userId: unknown, name: unknown = '') {
   if (String(userId ?? '').trim()) {
     const id = String(userId).trim();
     return /^\d+$/.test(id) ? `${id}.json` : `u_${id.replace(/[^a-z0-9_]/gi, '_')}.json`;
@@ -35,46 +41,49 @@ function memberFileName(userId, name = '') {
   return `_n_${safe || 'unknown'}.json`;
 }
 
-function memberFile(chatKey, userId, name = '') {
+function memberFile(chatKey: string, userId: unknown, name: unknown = '') {
   return path.join(chatDir(chatKey), memberFileName(userId, name));
 }
 
-function readJson(file, fallback) {
+function readJson<T>(file: string, fallback: T): T {
   try {
     let text = fs.readFileSync(file, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    const parsed = JSON.parse(text);
-    return parsed && typeof parsed === 'object' ? parsed : fallback;
+    const parsed: unknown = JSON.parse(text);
+    return parsed && typeof parsed === 'object' ? parsed as T : fallback;
   } catch {
     return fallback;
   }
 }
 
-function writeJson(file, value) {
+function writeJson(file: string, value: unknown) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 1), 'utf8');
   fs.renameSync(tmp, file);
 }
 
-function loadMember(chatKey, userId, name = '') {
+function loadMember(chatKey: string, userId: unknown, name: unknown = ''): Member {
   const file = memberFile(chatKey, userId, name);
-  const raw = readJson(file, null);
+  const value = readJson<unknown>(file, null);
+  const raw = isRecord(value) ? value : {};
   return {
     userId: String(raw?.userId ?? userId ?? ''),
     name: String(raw?.name ?? name ?? ''),
-    impressions: Array.isArray(raw?.impressions) ? raw.impressions : [],
+    impressions: Array.isArray(raw.impressions) ? raw.impressions.map(normalizeImpression).filter((v): v is Impression => v !== null) : [],
     updatedAt: Number(raw?.updatedAt) || 0,
     lastConsolidatedAt: Number(raw?.lastConsolidatedAt) || 0
   };
 }
 
-function loadMeta(chatKey) {
-  const raw = readJson(metaFile(chatKey), null);
+function loadMeta(chatKey: string) {
+  const value = readJson<unknown>(metaFile(chatKey), null);
+  const raw = isRecord(value) ? value : {};
   return { lastConsolidatedAt: Number(raw?.lastConsolidatedAt) || 0 };
 }
 
 export class MemoryStore {
+  cache: Map<string, MemberMap>;
   constructor() {
     this.cache = new Map(); // chatKey -> Map(userId|_n_xx, member)
   }
@@ -97,21 +106,23 @@ export class MemoryStore {
   }
 
   /** 旧版单文件 → 新版每成员文件。迁移后旧文件移到 backups/。 */
-  #migrateLegacy(chatKey) {
+  #migrateLegacy(chatKey: string) {
     const legacy = legacyFile(chatKey);
     if (!fs.existsSync(legacy)) return;
     try {
       if (fs.statSync(legacy).isDirectory()) return;
-      const old = readJson(legacy, null);
+      const value = readJson<unknown>(legacy, null);
+      const old = isRecord(value) ? value : null;
       if (!old) return;
       const notes = getConfig().memberNotes || {};
-      const nameToQq = {};
+      const nameToQq: Record<string, string> = {};
       for (const [qq, name] of Object.entries(notes)) {
         if (name) nameToQq[String(name)] = String(qq);
       }
-      const migrated = [];
-      for (const e of Array.isArray(old.memberImpression) ? old.memberImpression : []) {
-        if (!e?.content) continue;
+      const migrated: Array<{ userId: string; name: string; content: string; createdAt: number }> = [];
+      for (const value of Array.isArray(old.memberImpression) ? old.memberImpression : []) {
+        const e = isRecord(value) ? value : {};
+        if (!e.content) continue;
         const target = String(e.target || '').trim();
         let userId = /^\d{5,15}$/.test(target) ? target : (nameToQq[target] || '');
         migrated.push({
@@ -128,19 +139,20 @@ export class MemoryStore {
       const backup = path.join(backupDir, path.basename(legacy));
       if (fs.existsSync(backup)) fs.rmSync(backup, { force: true });
       fs.renameSync(legacy, backup);
-    } catch (error) {
-      console.error('[memory] 旧记忆迁移失败:', error?.message ?? error);
+    } catch (error: unknown) {
+      console.error('[memory] 旧记忆迁移失败:', errorText(error));
     }
   }
 
-  #ensureChat(chatKey) {
+  #ensureChat(chatKey: string): MemberMap {
     this.#migrateLegacy(chatKey);
     if (!this.cache.has(chatKey)) {
-      const map = new Map();
+      const map: MemberMap = new Map();
       try {
         for (const f of fs.readdirSync(chatDir(chatKey))) {
           if (!f.endsWith('.json') || f === '_meta.json') continue;
-          const raw = readJson(path.join(chatDir(chatKey), f), null);
+          const value = readJson<unknown>(path.join(chatDir(chatKey), f), null);
+          const raw = isRecord(value) ? value : null;
           if (!raw) continue;
           const key = raw.userId ? String(raw.userId) : `_n_${f}`;
           map.set(key, loadMember(chatKey, raw.userId, raw.name));
@@ -149,7 +161,7 @@ export class MemoryStore {
       this.#mergeNameDuplicates(chatKey, map);
       this.cache.set(chatKey, map);
     }
-    return this.cache.get(chatKey);
+    return this.cache.get(chatKey)!;
   }
 
   /**
@@ -162,14 +174,14 @@ export class MemoryStore {
    * 规则：无 QQ 号的条目，只要有同名（且该名字对应的条目有 QQ 号），
    * 就把它的印象并入该 QQ 号条目，然后删除 _n_ 文件。
    */
-  #mergeNameDuplicates(chatKey, map) {
+  #mergeNameDuplicates(chatKey: string, map: MemberMap) {
     const nameToId = new Map();
     for (const m of map.values()) {
       const uid = String(m.userId || '').trim();
       const nm = String(m.name || '').trim();
       if (uid && nm) nameToId.set(nm, uid);
     }
-    const toDelete = [];
+    const toDelete: string[] = [];
     for (const [key, m] of map.entries()) {
       const uid = String(m.userId || '').trim();
       if (uid) continue;                       // 已有 QQ 号，不是兜底条目
@@ -200,7 +212,7 @@ export class MemoryStore {
     for (const k of toDelete) map.delete(k);
   }
 
-  #appendRaw(chatKey, userId, name, content, createdAt = Date.now()) {
+  #appendRaw(chatKey: string, userId: unknown, name: unknown, content: unknown, createdAt = Date.now()) {
     const map = this.#ensureChat(chatKey);
     const key = userId ? String(userId) : `_n_${memberFileName('', name)}`;
     const member = map.get(key) || loadMember(chatKey, userId, name);
@@ -220,7 +232,7 @@ export class MemoryStore {
   }
 
   /** 记一条对群友的印象。extra: { userId, target } */
-  append(chatKey, category, content, extra = {}) {
+  append(chatKey: string, category: string, content: unknown, extra: { userId?: unknown; target?: unknown } = {}) {
     if (category !== 'memberImpression') return null;
     const userId = String(extra.userId ?? '').trim();
     const target = String(extra.target ?? '').trim().slice(0, 60);
@@ -229,10 +241,10 @@ export class MemoryStore {
   }
 
   /** 所有成员的印象（扁平列表，兼容旧消费方）。 */
-  query(chatKey, category = '') {
+  query(chatKey: string, category = '') {
     if (category && category !== 'memberImpression') return { [category]: [] };
     const map = this.#ensureChat(chatKey);
-    const memberImpression = [];
+    const memberImpression: Array<{ userId: string; target: string; content: string; createdAt: number }> = [];
     for (const m of map.values()) {
       for (const e of m.impressions) {
         memberImpression.push({
@@ -248,9 +260,9 @@ export class MemoryStore {
   }
 
   /** 成员级视图（记忆页签用）。 */
-  members(chatKey) {
+  members(chatKey: string) {
     const map = this.#ensureChat(chatKey);
-    const list = [];
+    const list: Member[] = [];
     for (const m of map.values()) {
       if (!m.impressions.length) continue;
       list.push({
@@ -266,7 +278,7 @@ export class MemoryStore {
   }
 
   /** 单个成员的印象（含空成员）。 */
-  getMember(chatKey, userId) {
+  getMember(chatKey: string, userId: unknown) {
     const map = this.#ensureChat(chatKey);
     const m = map.get(String(userId)) || loadMember(chatKey, String(userId));
     return {
@@ -278,7 +290,7 @@ export class MemoryStore {
   }
 
   /** 编辑群友印象（管理端）：QQ 号由调用方提供，自动回填名字，保存备注到配置。 */
-  editMemberImpression(chatKey, { userId, name = '', note = '', impressions = [] }) {
+  editMemberImpression(chatKey: string, { userId, name = '', note = '', impressions = [] }: { userId: unknown; name?: unknown; note?: unknown; impressions?: unknown[] | unknown }) {
     const uid = String(userId ?? '').trim();
     if (!/^\d{1,15}$/.test(uid)) throw new Error('userId 必须是数字 QQ 号');
     const map = this.#ensureChat(chatKey);
@@ -318,7 +330,7 @@ export class MemoryStore {
   }
 
   /** 手动替换某成员的全部印象（管理端编辑用）。返回更新后的成员。 */
-  replaceMember(chatKey, userId, name, contents) {
+  replaceMember(chatKey: string, userId: unknown, name: unknown, contents: unknown[] | unknown) {
     const uid = String(userId ?? '').trim();
     if (!/^\d{1,15}$/.test(uid)) throw new Error('userId 必须是数字 QQ 号');
     const map = this.#ensureChat(chatKey);
@@ -351,7 +363,7 @@ export class MemoryStore {
   }
 
   /** 删除某成员的印象文件。 */
-  removeMember(chatKey, userId) {
+  removeMember(chatKey: string, userId: unknown) {
     const uid = String(userId ?? '').trim();
     if (!/^\d{1,15}$/.test(uid)) return false;
     const map = this.#ensureChat(chatKey);
@@ -372,7 +384,7 @@ export class MemoryStore {
    * (userId, content) 在单个成员内实际就是唯一键，bot 并发追加也不会让已有条目错位。
    * 与既有的 remove() 同一套约定，也跟 store 那边"绝不按下标"是同一条原则。
    */
-  updateImpression(chatKey, { userId = '', target: targetName = '', content = '', next = '' } = {}) {
+  updateImpression(chatKey: string, { userId = '', target: targetName = '', content = '', next = '' }: { userId?: unknown; target?: unknown; content?: unknown; next?: unknown } = {}) {
     const uid = String(userId ?? '').trim();
     const name = String(targetName ?? '').trim();
     // 两条寻址路径与 remove() 严格一致：有 QQ 号按号找，没有的（`_n_` 那种
@@ -384,7 +396,7 @@ export class MemoryStore {
     if (!from) throw new Error('缺少 content（要改的那条原文）');
     if (!to) throw new Error('新内容不能为空');
     const map = this.#ensureChat(chatKey);
-    let m = null;
+    let m: Member | null = null;
     if (uid) {
       m = map.get(uid) || loadMember(chatKey, uid);
     } else {
@@ -415,7 +427,7 @@ export class MemoryStore {
   }
 
   /** 改成员文件之前留一份备份（保留最近一次），与 replaceMember 的做法一致。 */
-  #backupMember(chatKey, userId, name = '') {
+  #backupMember(chatKey: string, userId: unknown, name: unknown = '') {
     try {
       const backupDir = path.join(MEMORY_DIR, 'backups', chatDirName(chatKey));
       fs.mkdirSync(backupDir, { recursive: true });
@@ -428,7 +440,7 @@ export class MemoryStore {
     } catch { return ''; }   // 备份失败不阻塞
   }
 
-  remove(chatKey, category, { userId = '', target = '', content = '' } = {}) {
+  remove(chatKey: string, category: string, { userId = '', target = '', content = '' }: { userId?: unknown; target?: unknown; content?: unknown } = {}) {
     if (category !== 'memberImpression') return false;
     const map = this.#ensureChat(chatKey);
     let removed = false;
@@ -475,7 +487,7 @@ export class MemoryStore {
     return removed;
   }
 
-  clear(chatKey) {
+  clear(chatKey: string) {
     const map = this.#ensureChat(chatKey);
     for (const m of map.values()) {
       try { fs.rmSync(memberFile(chatKey, m.userId, m.name), { force: true }); } catch { /* ignore */ }
@@ -488,7 +500,7 @@ export class MemoryStore {
    * 生成提示词里的【对群友的印象】摘要。
    * opts.userIds 提供时只包含这些成员（相关成员注入，控制 token）。
    */
-  formatForPrompt(chatKey, { userIds = null } = {}) {
+  formatForPrompt(chatKey: string, { userIds = null }: { userIds?: Iterable<unknown> | null } = {}) {
     const notes = getConfig().memberNotes || {};
     const all = this.members(chatKey);
     if (!all.length) return '';
@@ -507,11 +519,11 @@ export class MemoryStore {
 
   // ── 自动整理（consolidation）──
 
-  consolidationState(chatKey) {
+  consolidationState(chatKey: string) {
     const map = this.#ensureChat(chatKey);
     let total = 0;
     let lastConsolidatedAt = 0;
-    const members = [];
+    const members: Array<{ userId: string; name: string; count: number; lastConsolidatedAt: number }> = [];
     for (const m of map.values()) {
       total += m.impressions.length;
       lastConsolidatedAt = Math.max(lastConsolidatedAt, m.lastConsolidatedAt || 0);
@@ -534,13 +546,13 @@ export class MemoryStore {
    * 同时写会话级 _meta.json（供冷却判断）与各成员文件的 lastConsolidatedAt。
    * userIds 为空时只更新会话级时间。
    */
-  markConsolidated(chatKey, at = Date.now(), userIds = []) {
+  markConsolidated(chatKey: string, at = Date.now(), userIds: unknown[] = []) {
     try {
       fs.mkdirSync(chatDir(chatKey), { recursive: true });
       const prev = readJson(metaFile(chatKey), {}) || {};
       writeJson(metaFile(chatKey), { ...prev, lastConsolidatedAt: Number(at) || Date.now() });
-    } catch (error) {
-      console.warn('[memory] 写整理时间失败:', error?.message ?? error);
+    } catch (error: unknown) {
+      console.warn('[memory] 写整理时间失败:', errorText(error));
     }
     const map = this.#ensureChat(chatKey);
     for (const uid of userIds || []) {
@@ -557,18 +569,20 @@ export class MemoryStore {
    * 用整理结果整体替换本会话的印象（按成员写回各自文件）。
    * next.memberImpression: [{ userId?, target?, content }]
    */
-  replaceConsolidated(chatKey, next) {
-    const cut = (s, n) => String(s ?? '').trim().slice(0, n);
+  replaceConsolidated(chatKey: string, next: unknown) {
+    const cut = (s: unknown, n: number) => String(s ?? '').trim().slice(0, n);
     const now = Date.now();
-    const groups = new Map(); // key -> { userId, name, contents }
-    for (const item of Array.isArray(next?.memberImpression) ? next.memberImpression.slice(0, 15) : []) {
-      const content = cut(item?.content, 300);
+    const groups = new Map<string, { userId: string; name: string; contents: string[] }>(); // key -> { userId, name, contents }
+    const root = isRecord(next) ? next : {};
+    for (const value of Array.isArray(root.memberImpression) ? root.memberImpression.slice(0, 15) : []) {
+      const item = isRecord(value) ? value : {};
+      const content = cut(item.content, 300);
       if (!content) continue;
       const userId = cut(item?.userId, 40) || '';
       const name = cut(item?.target, 60) || userId;
       const key = userId || `_n_${memberFileName('', name)}`;
       if (!groups.has(key)) groups.set(key, { userId, name, contents: [] });
-      groups.get(key).contents.push(content);
+      groups.get(key)!.contents.push(content);
     }
     const map = this.#ensureChat(chatKey);
     // 整理前把整个会话文件夹备份到 data/memory/backups/<会话>/（保留最近一次）
@@ -603,4 +617,9 @@ export class MemoryStore {
     const totalAfter = [...map.values()].reduce((n, m) => n + m.impressions.length, 0);
     return { memberImpression: groups.size ? this.query(chatKey).memberImpression : [], count: totalAfter };
   }
+}
+
+function normalizeImpression(value: unknown): Impression | null {
+  if (!isRecord(value) || value.content == null) return null;
+  return { content: String(value.content).slice(0, 300), createdAt: Number(value.createdAt) || 0 };
 }

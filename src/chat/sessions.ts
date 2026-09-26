@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR } from '../core/config.js';
+import type { SessionRecord, SessionUsage } from './types.js';
 
 const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
 
@@ -11,11 +12,15 @@ export function newSessionId() {
   return `${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
 }
 
-export function sessionFile(id) {
+export function sessionFile(id: string) {
   return path.join(SESSIONS_DIR, `${id}.json`);
 }
 
 export class SessionRegistry {
+  keepFiles: number;
+  index: Array<Record<string, unknown>>;
+  current: Map<string, SessionRecord>;
+  _lastPersistAt?: Map<string, number>;
   /**
    * @param {number} keepFiles 保留最近多少个会话记录文件；**0 = 不限制**。
    *   注意：不能用 `x || 300` 兜底 —— 0 是 falsy 会被误当成"未设置"变回 300，
@@ -36,14 +41,15 @@ export class SessionRegistry {
       const pick = this.keepFiles > 0 ? files.slice(0, this.keepFiles) : files;
       for (const f of pick) {
         try {
-          const data = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8'));
-          if (data?.id) this.index.push(this.#summary(data));
+          const data: unknown = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8'));
+          const session = normalizeSession(data);
+          if (session) this.index.push(this.#summary(session));
         } catch { /* 跳过坏文件 */ }
       }
     } catch { /* 目录还没建 */ }
   }
 
-  #summary(s) {
+  #summary(s: SessionRecord): Record<string, unknown> {
     return {
       id: s.id,
       chatKey: s.chatKey,
@@ -62,8 +68,8 @@ export class SessionRegistry {
     };
   }
 
-  create({ chatKey, trigger, triggerSummary, status = 'running', waitUntil = null }) {
-    const session = {
+  create({ chatKey, trigger, triggerSummary, status = 'running', waitUntil = null }: { chatKey: string; trigger: unknown; triggerSummary?: unknown; status?: string; waitUntil?: number | null }) {
+    const session: SessionRecord = {
       id: newSessionId(),
       chatKey,
       startedAt: Date.now(),
@@ -92,14 +98,14 @@ export class SessionRegistry {
     return session;
   }
 
-  get(id) {
+  get(id: string): SessionRecord | null {
     if (this.current.has(id)) {
       const s = this.current.get(id);
-      return structuredClone(s);
+      return s ? structuredClone(s) : null;
     }
     try {
-      const data = JSON.parse(fs.readFileSync(sessionFile(id), 'utf8'));
-      return data;
+      const data: unknown = JSON.parse(fs.readFileSync(sessionFile(id), 'utf8'));
+      return normalizeSession(data);
     } catch {
       return null;
     }
@@ -111,16 +117,17 @@ export class SessionRegistry {
    * 会把整个会话（含每轮 raw 响应）全量复制一遍 —— 纯序列化用不到这份拷贝。
    * ⚠️ 返回的是活对象，调用方绝对不能改它；要改请用 get()。
    */
-  peek(id) {
-    if (this.current.has(id)) return this.current.get(id);
+  peek(id: string): SessionRecord | null {
+    if (this.current.has(id)) return this.current.get(id) ?? null;
     try {
-      return JSON.parse(fs.readFileSync(sessionFile(id), 'utf8'));
+      const data: unknown = JSON.parse(fs.readFileSync(sessionFile(id), 'utf8'));
+      return normalizeSession(data);
     } catch {
       return null;
     }
   }
 
-  update(id) {
+  update(id: string) {
     const s = this.current.get(id);
     if (s) {
       this.#persistThrottled(s);
@@ -131,7 +138,7 @@ export class SessionRegistry {
   }
 
   /** 设置运行中的活动状态（思考/调用工具）并广播。 */
-  setActivity(id, activity) {
+  setActivity(id: string, activity: unknown) {
     const s = this.current.get(id);
     if (!s) return null;
     s.activity = String(activity ?? '');
@@ -139,7 +146,7 @@ export class SessionRegistry {
     return s;
   }
 
-  finish(id, status) {
+  finish(id: string, status: string) {
     const s = this.current.get(id);
     if (!s) return null;
     s.status = status;
@@ -174,7 +181,7 @@ export class SessionRegistry {
    * ⚠️ 只用于从未真正运行过的会话（status='waiting'）。
    *    已经跑过并消耗了 token 的会话要走 finish，别用这个抹掉用量记录。
    */
-  discard(id) {
+  discard(id: string) {
     if (!id) return false;
     const s = this.current.get(id);
     // 已运行过的不允许丢弃（会抹掉用量/成本记录，导致对不上账）
@@ -194,7 +201,7 @@ export class SessionRegistry {
   }
 
   /** 今日 token 统计（含运行中的）。 */
-  todayUsage(dayKey) {
+  todayUsage(dayKey: string) {
     let promptTokens = 0;
     let completionTokens = 0;
     let totalTokens = 0;
@@ -225,7 +232,7 @@ export class SessionRegistry {
   }
 
   /** 在会话结束时累加今日用量。 */
-  #bumpTodayUsage(s) {
+  #bumpTodayUsage(s: SessionRecord) {
     const dayKey = localDayKey(s.startedAt);
     let data = { dayKey, promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, runs: 0, webSearchCount: 0 };
     try {
@@ -253,7 +260,7 @@ export class SessionRegistry {
    * 可靠性：finish() 仍走 #persist 直接落最终态，所以留档完整性不变；
    * 代价是进程崩溃时最多丢 2 秒的运行中进度（索引摘要不受影响，在内存里）。
    */
-  #persistThrottled(s) {
+  #persistThrottled(s: SessionRecord) {
     const now = Date.now();
     this._lastPersistAt ||= new Map();
     const last = this._lastPersistAt.get(s.id) || 0;
@@ -262,29 +269,60 @@ export class SessionRegistry {
     this.#persist(s);
   }
 
-  #persist(s) {
+  #persist(s: SessionRecord) {
     try {
       fs.mkdirSync(SESSIONS_DIR, { recursive: true });
       const tmp = `${sessionFile(s.id)}.${process.pid}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(s, null, 1), 'utf8');
       fs.renameSync(tmp, sessionFile(s.id));
       if (s.status !== 'running' && s.status !== 'waiting') this.#bumpTodayUsage(s);
-    } catch (error) {
-      console.error('[sessions] 持久化失败:', error?.message ?? error);
+    } catch (error: unknown) {
+      console.error('[sessions] 持久化失败:', error instanceof Error ? error.message : error);
     }
   }
 }
 
-function localDayKey(ts) {
+function localDayKey(ts: number) {
   const d = new Date(ts);
-  const pad = (n) => String(n).padStart(2, '0');
+  const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function triggerEntriesToText(trigger) {
+function triggerEntriesToText(trigger: unknown) {
   // trigger 在创建时是数组（触发条目），这里只做摘要展示用
   if (Array.isArray(trigger)) {
-    return trigger.map((m) => `${m.senderName || m.senderId || '?'}: ${String(m.text ?? '').slice(0, 80)}`).join(' | ');
+    return trigger.map((value) => {
+      const m = isRecord(value) ? value : {};
+      return `${m.senderName || m.senderId || '?'}: ${String(m.text ?? '').slice(0, 80)}`;
+    }).join(' | ');
   }
   return '';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeUsage(value: unknown): SessionUsage {
+  const usage = isRecord(value) ? value : {};
+  return {
+    promptTokens: Number(usage.promptTokens) || 0,
+    completionTokens: Number(usage.completionTokens) || 0,
+    totalTokens: Number(usage.totalTokens) || 0,
+    cachedTokens: Number(usage.cachedTokens) || 0,
+    calls: Number(usage.calls) || 0
+  };
+}
+
+function normalizeSession(value: unknown): SessionRecord | null {
+  if (!isRecord(value) || value.id == null) return null;
+  return {
+    ...value,
+    id: String(value.id),
+    chatKey: String(value.chatKey ?? ''),
+    startedAt: Number(value.startedAt) || 0,
+    endedAt: value.endedAt == null ? null : Number(value.endedAt) || null,
+    status: String(value.status ?? ''),
+    usage: normalizeUsage(value.usage)
+  } as SessionRecord;
 }

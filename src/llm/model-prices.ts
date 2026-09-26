@@ -398,7 +398,7 @@ export function isPeakHour(at: number | Date = Date.now()) {
  * 没有 peak 字段的模型（绝大多数）峰谷同价，直接返回基础价。
  * @returns {{in:number, out:number, cached:number, peak:boolean}}
  */
-export function priceAt(price: ModelPrice | null | undefined, at: number | Date = Date.now()) {
+export function priceAt(price: (Omit<Pick<ModelPrice, 'in' | 'out' | 'cached' | 'peak'>, 'peak'> & { peak?: ModelPrice['peak'] | null }) | null | undefined, at: number | Date = Date.now()) {
   const peak = isPeakHour(at);
   if (peak && price?.peak) {
     return {

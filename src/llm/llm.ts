@@ -2,13 +2,18 @@
 // 支持工具调用、usage 统计、可自选模型 —— 这是与 DSH 解耦后的"大脑"接口。
 import { getConfig } from '../core/config.js';
 import { resolveOfficialPrice, resolveModelPrice, priceAt } from './model-prices.js';
+import type { AppConfig } from '../core/config.js';
+import type { ChatCompletionResult, ChatRequestMessage, OpenAiResponse, TokenUsage, UsageTotals } from './types.js';
 
-function joinUrl(base, path) {
+interface ApiOverrides { baseUrl: string; apiKey?: string; model: string; timeoutMs?: number; temperature?: number }
+interface ChatArgs { messages: ChatRequestMessage[]; tools?: unknown[] | null; toolChoice?: unknown; temperature?: number | null; signal?: AbortSignal | null; overrides?: ApiOverrides | null }
+
+function joinUrl(base: unknown, path: string) {
   return `${String(base).replace(/\/+$/, '')}${path}`;
 }
 
-function authHeaders(apiKey, baseUrl = '', model = '') {
-  const h = apiKey ? { authorization: `Bearer ${apiKey}` } : {};
+function authHeaders(apiKey: unknown, baseUrl = '', model = ''): Record<string, string> {
+  const h: Record<string, string> = apiKey ? { authorization: `Bearer ${apiKey}` } : {};
   // OpenCode Go 强制要求会话头做路由（缺了直接 400）。注意不能只认域名：
   // 走中转站转发时 baseUrl 不是 opencode.ai，只能靠模型 id 的 opencode-go/ 前缀识别。
   if (/opencode\.ai/i.test(String(baseUrl)) || /^opencode-go\//i.test(String(model || ''))) {
@@ -38,7 +43,7 @@ function getOpencodeSessionId() {
  *
  * 兼容历史数据：providers[].apiKey 也可能存有明文（老配置），也认。
  */
-export function resolveApiKey(cfg) {
+export function resolveApiKey(cfg: AppConfig) {
   const pid = String(cfg?.api?.provider ?? '').trim();
   if (pid) {
     const fromDsh = String(cfg?.dshProviderKeys?.[pid] ?? '').trim();
@@ -70,8 +75,8 @@ function effectiveApi() {
  *   - HTTP 4xx：401 密钥错、400 请求体错、403 无权限、404 模型不存在
  *   - 主动中止（abort）
  */
-export function isRetryableError(error) {
-  const msg = String(error?.message ?? error ?? '');
+export function isRetryableError(error: unknown) {
+  const msg = String(error instanceof Error ? error.message : error ?? '');
 
   // 主动中止（用户/系统取消）：重试没有意义
   if (/aborted|中止|已取消|cancel/i.test(msg)) return false;
@@ -110,8 +115,8 @@ export function isRetryableError(error) {
  * @param {object} args 同 chatCompletion
  * @param {number} [retries=2] 最多额外重试几次（默认 2，即总共最多 3 次尝试）
  */
-export async function chatCompletionWithRetry(args, retries = 2) {
-  let lastError = null;
+export async function chatCompletionWithRetry(args: ChatArgs, retries = 2) {
+  let lastError: unknown = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await chatCompletion(args);
@@ -119,7 +124,7 @@ export async function chatCompletionWithRetry(args, retries = 2) {
       lastError = error;
       if (attempt >= retries || !isRetryableError(error)) throw error;
       const wait = 1000 * Math.pow(2, attempt);   // 1s, 2s
-      console.warn(`[llm] 请求失败（第 ${attempt + 1} 次尝试），${wait}ms 后重试：${error?.message ?? error}`);
+      console.warn(`[llm] 请求失败（第 ${attempt + 1} 次尝试），${wait}ms 后重试：${error instanceof Error ? error.message : error}`);
       await new Promise((r) => setTimeout(r, wait));
     }
   }
@@ -131,9 +136,9 @@ export async function chatCompletionWithRetry(args, retries = 2) {
  * 返回 { message, usage, raw }；usage 形如 { prompt_tokens, completion_tokens, total_tokens }。
  * overrides: { baseUrl, apiKey, model, timeoutMs } 可选，用于记忆整理专用模型等场景。
  */
-export async function chatCompletion({ messages, tools = null, toolChoice = 'auto', temperature = null, signal = null, overrides = null }) {
+export async function chatCompletion({ messages, tools = null, toolChoice = 'auto', temperature = null, signal = null, overrides = null }: ChatArgs): Promise<ChatCompletionResult> {
   const api = overrides || effectiveApi();
-  const body = {
+  const body: Record<string, unknown> = {
     model: api.model,
     messages,
     stream: false
@@ -161,10 +166,11 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
       body: JSON.stringify(body),
       signal: controller.signal
     });
-  } catch (error) {
+  } catch (error: unknown) {
     clearTimeout(timer);
-    if (error?.name === 'AbortError') throw new Error(`模型请求超时（${timeoutMs}ms）`);
-    throw new Error(`模型请求失败：${error?.cause?.message ?? error?.message ?? error}`);
+    if (error instanceof Error && error.name === 'AbortError') throw new Error(`模型请求超时（${timeoutMs}ms）`);
+    const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined;
+    throw new Error(`模型请求失败：${cause ?? (error instanceof Error ? error.message : error)}`);
   }
   clearTimeout(timer);
 
@@ -172,11 +178,11 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     const text = await res.text().catch(() => '');
     throw new Error(`模型 API HTTP ${res.status}：${text.slice(0, 500)}`);
   }
-  const data = await res.json().catch(() => { throw new Error('模型 API 返回了无法解析的 JSON'); });
+  const data = await res.json().catch(() => { throw new Error('模型 API 返回了无法解析的 JSON'); }) as OpenAiResponse;
   const choice = data?.choices?.[0];
   if (!choice) throw new Error(`模型 API 响应缺少 choices：${JSON.stringify(data).slice(0, 300)}`);
   return {
-    message: choice.message ?? {},
+    message: choice.message ?? { role: 'assistant', content: '' },
     finishReason: choice.finish_reason ?? null,
     usage: data.usage ?? null,
     model: data.model ?? api.model,
@@ -192,9 +198,10 @@ export async function listModels() {
     signal: AbortSignal.timeout(15000)
   });
   if (!res.ok) throw new Error(`获取模型列表失败：HTTP ${res.status}`);
-  const data = await res.json();
-  const list = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
-  return list.map((m) => ({ id: String(m.id ?? m.model ?? m) })).filter((m) => m.id);
+  const data: unknown = await res.json();
+  const list: unknown[] = Array.isArray((data as OpenAiResponse)?.data) ? (data as OpenAiResponse).data! : (Array.isArray(data) ? data : []);
+  const objectValue = (value: unknown, key: string): unknown => value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined;
+  return list.map((m) => ({ id: String(objectValue(m, 'id') ?? objectValue(m, 'model') ?? m) })).filter((m) => m.id);
 }
 
 /**
@@ -202,7 +209,7 @@ export async function listModels() {
  * 同时累计 cachedTokens（命中前缀缓存的 prompt 部分）—— 中转站会在
  * usage.prompt_tokens_details.cached_tokens 里返回它，成本看板与缓存命中率统计都依赖这个数。
  */
-export function addUsage(target, usage) {
+export function addUsage(target: UsageTotals, usage: TokenUsage | null | undefined) {
   if (!usage) return target;
   const prompt = Number(usage.prompt_tokens) || 0;
   const completion = Number(usage.completion_tokens) || 0;
@@ -218,12 +225,12 @@ export function addUsage(target, usage) {
   return target;
 }
 
-export function emptyUsage() {
+export function emptyUsage(): UsageTotals {
   return { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, calls: 0 };
 }
 
 /** 缓存命中率（0~1）。没有 prompt 数据时返回 0。 */
-export function cacheHitRate(usage) {
+export function cacheHitRate(usage: Partial<UsageTotals> | null | undefined) {
   const p = Number(usage?.promptTokens) || 0;
   if (!p) return 0;
   return Math.min(1, Math.max(0, (Number(usage?.cachedTokens) || 0) / p));
@@ -244,7 +251,7 @@ export function cacheHitRate(usage) {
  * 按该时刻自动取高峰价或闲时价。不传 at 则按闲时计价（保守估值，会偏低）。
  * 历史统计请看 sumCostByTime() —— 它按每条记录的时刻分别计价后汇总，更准。
  */
-export function estimateCost(usage, opts = {}) {
+export function estimateCost(usage: Partial<UsageTotals> | null | undefined, opts: { model?: string; at?: number | Date } = {}) {
   const cfg = effectiveApi();
   // 成本只与"实际调用的模型"有关。opts.model 优先（统计时逐条传入各自的模型），
   // 不传才回退到当前选中的模型。

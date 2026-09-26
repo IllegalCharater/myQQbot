@@ -1,19 +1,34 @@
+export type StickerSource = 'qq' | 'ai' | 'manual';
+
 export interface StickerEntry extends Record<string, unknown> {
   id: string;
+  resId: string;
   url: string;
-  source: string;
-  resId?: string;
-  md5?: string;
-  desc?: string;
-  note?: string;
-  labels?: string[];
-  scenes?: string[];
-  cacheFile?: string;
-  cachedAt?: string;
-  createdAt?: string;
-  usedAt?: string;
-  useCount?: number;
+  md5: string;
+  desc: string;
+  localNote: string;
+  tags: string[];
+  usage: string;
+  source: StickerSource;
+  useCount: number;
+  lastUsedAt: number;
+  lastContext: string;
+  createdAt: string;
+  updatedAt: string;
+  cacheFile: string;
+  cachedAt: string;
 }
 
-export type StickerPatch = Partial<Pick<StickerEntry, 'note' | 'labels' | 'scenes'>>;
-export interface StickerCacheResult { cached: boolean; file?: string; error?: string }
+export interface StickerPatch {
+  note?: unknown;
+  tags?: unknown;
+  usage?: unknown;
+  source?: StickerSource;
+}
+
+export interface StickerCacheResult {
+  name: string;
+  file: string;
+  mime: string;
+  bytes: number;
+}
