@@ -1,10 +1,10 @@
 // 通用小工具：无业务逻辑。
 
-export function sleep(ms) {
+export function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
-export function randInt(min, max) {
+export function randInt(min: number, max: number) {
   const lo = Math.ceil(Math.min(min, max));
   const hi = Math.floor(Math.max(min, max));
   if (hi <= lo) return lo;
@@ -12,7 +12,7 @@ export function randInt(min, max) {
 }
 
 /** 带抖动的均匀随机区间。 */
-export function randRange([min, max]) {
+export function randRange([min, max]: readonly [number, number]) {
   return randInt(min, max);
 }
 
@@ -23,7 +23,7 @@ export function nowMs() {
 // ── 时间格式化（全部走本地时区，给模型/界面看） ─────────────────────────
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
-function pad2(n) {
+function pad2(n: number) {
   return String(n).padStart(2, '0');
 }
 
@@ -53,7 +53,7 @@ export function todayKey(ts = Date.now()) {
 // ── 文本处理 ─────────────────────────────────────────────────────────────
 
 /** 防止底层网关把文本中的 [CQ: 当作 CQ 码解析：替换为全角冒号。 */
-export function escapeCqText(text) {
+export function escapeCqText(text: unknown) {
   return String(text ?? '').replace(/\[CQ:/gi, '[CQ：');
 }
 
@@ -61,7 +61,7 @@ export function escapeCqText(text) {
  * 防提示注入/泄露：把用户昵称、消息文本里的“指令式方括号标记”弱化，
  * 避免群友伪装成系统段（如【本次唤醒】）骗模型。只处理外观，不改变语义。
  */
-export function sanitizeUserText(text) {
+export function sanitizeUserText(text: unknown) {
   let s = String(text ?? '');
   // 全角化方括号包裹的疑似系统标记：【xxx】→【xxx】保留，但 [xxx] 中含中文关键词的换成（xxx）
   s = s.replace(/\[(本次唤醒|系统|管理员|owner| Owner|OWNER|角色扮演|会话令牌|当前时间)[^\]]*\]/gi, '($1)');
@@ -69,7 +69,7 @@ export function sanitizeUserText(text) {
 }
 
 /** 兼容模型把单条消息序列化成 JSON 字符串的情况，例如 "\"你好\"" → "你好"。 */
-export function unquoteJsonString(value) {
+export function unquoteJsonString(value: unknown): unknown {
   if (typeof value !== 'string') return value;
   const t = value.trim();
   if (t.startsWith('"')) {
@@ -88,17 +88,20 @@ export function unquoteJsonString(value) {
  *   嵌套数组 → 拍平拼接
  * 返回 null = 解不出来（调用方应报错回模型，而不是把 "[object Object]" 发出去）。
  */
-function unwrapMessage(m) {
+function unwrapMessage(m: unknown): string | null {
   if (m === null || m === undefined) return '';
   if (typeof m === 'string') return m;
   if (Array.isArray(m)) return m.map(unwrapMessage).filter((x) => x !== null).join('\n');
   if (typeof m === 'object') {
+    const record = m as Record<string, unknown>;
     // content-parts：{type:'text', text:'...'} 或 {content:[{type:'text',...}]}
-    if (m.type === 'text' && typeof m.text === 'string') return m.text;
-    if (Array.isArray(m.content)) {
-      return m.content.filter((p) => p && p.type === 'text').map((p) => String(p.text ?? '')).join('\n');
+    if (record.type === 'text' && typeof record.text === 'string') return record.text;
+    if (Array.isArray(record.content)) {
+      return record.content
+        .filter((p): p is Record<string, unknown> => !!p && typeof p === 'object' && (p as Record<string, unknown>).type === 'text')
+        .map((p) => String(p.text ?? '')).join('\n');
     }
-    const v = m.text ?? m.content ?? m.message;
+    const v = record.text ?? record.content ?? record.message;
     if (typeof v === 'string') return v;
     return null;
   }
@@ -114,7 +117,7 @@ function unwrapMessage(m) {
  *  salvage 规则：能解出文本的条目照发；一条都解不出来才抛错 ——
  *  错误会作为工具结果回给模型，它在同一会话里可以自我纠正重发。
  */
-export function normalizeMessageList(input) {
+export function normalizeMessageList(input: unknown): string[] {
   let value = input;
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -129,8 +132,8 @@ export function normalizeMessageList(input) {
     }
   }
   const arr = Array.isArray(value) ? value : [value];
-  const out = [];
-  const bad = [];
+  const out: string[] = [];
+  const bad: unknown[] = [];
   for (const m of arr) {
     const unwrapped = unwrapMessage(m);
     if (unwrapped === null) { bad.push(m); continue; }
@@ -145,8 +148,8 @@ export function normalizeMessageList(input) {
 
 /** 简单串行队列：保证发送按顺序、带间隔执行。 */
 export function createSendChain() {
-  let chain = Promise.resolve();
-  return function enqueue(task) {
+  let chain: Promise<unknown> = Promise.resolve();
+  return function enqueue<T>(task: () => T | PromiseLike<T>): Promise<T> {
     const next = chain.then(task, task);
     // 防止单次失败中断整条链
     chain = next.then(() => undefined, () => undefined);
@@ -156,14 +159,16 @@ export function createSendChain() {
 
 /** 简易事件总线。 */
 export function createEventBus() {
-  const listeners = new Map();
+  type Listener = (payload: unknown) => void;
+  const listeners = new Map<string, Set<Listener>>();
   return {
-    on(type, fn) {
-      if (!listeners.has(type)) listeners.set(type, new Set());
-      listeners.get(type).add(fn);
+    on(type: string, fn: Listener) {
+      const set = listeners.get(type) ?? new Set<Listener>();
+      listeners.set(type, set);
+      set.add(fn);
       return () => listeners.get(type)?.delete(fn);
     },
-    emit(type, payload) {
+    emit(type: string, payload: unknown) {
       const set = listeners.get(type);
       if (!set) return;
       for (const fn of [...set]) {
@@ -174,7 +179,7 @@ export function createEventBus() {
 }
 
 /** 截断长文本（日志/会话记录展示用）。 */
-export function truncate(text, max = 400) {
+export function truncate(text: unknown, max = 400) {
   const s = String(text ?? '');
   return s.length <= max ? s : `${s.slice(0, max)}…(共${s.length}字)`;
 }

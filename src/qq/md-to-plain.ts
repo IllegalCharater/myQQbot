@@ -1,6 +1,6 @@
 // 把 agent 的 Markdown 回复转成适合 QQ 发送的纯文本。（移植自 qq-bridge src/md-to-plain.js）
 
-export function mdToPlain(md) {
+export function mdToPlain(md: unknown): string {
   let s = String(md ?? '');
   // 代码块：保留内容，去掉围栏
   s = s.replace(/```[a-zA-Z0-9_+-]*\n?([\s\S]*?)```/g, (_, body) => body.replace(/\n+$/, ''));
@@ -30,9 +30,9 @@ export function mdToPlain(md) {
 }
 
 /** 按 QQ 单条消息长度上限切分（群消息一般 ≤ 4500 字，留余量）。 */
-export function splitForQQ(text, max = 4000) {
+export function splitForQQ(text: string, max = 4000): string[] {
   const safeMax = Number.isFinite(max) && max >= 1 ? Math.floor(max) : 4000;
-  const parts = [];
+  const parts: string[] = [];
   let rest = text;
   while (rest.length > safeMax) {
     let cut = rest.lastIndexOf('\n', safeMax);

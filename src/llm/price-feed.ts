@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../core/config.js';
 import { setRemotePrices } from './model-prices.js';
+import type { ModelPrice, PriceTable } from './types.js';
 
 const CACHE_FILE = path.join(DATA_DIR, 'price-feed-cache.json');
 const FETCH_TIMEOUT_MS = 10000;
@@ -41,20 +42,24 @@ const status = {
   dropped: 0              // 校验被丢弃的条目数
 };
 
-let timer = null;
+let timer: NodeJS.Timeout | null = null;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
 /** 校验并规范化一条价格条目；不合格返回 null。 */
-function normEntry(v) {
-  if (!v || typeof v !== 'object') return null;
+function normEntry(v: unknown): ModelPrice | null {
+  if (!isRecord(v)) return null;
   const i = Number(v.in), o = Number(v.out);
   // in/out 至少一个是有限数字（免费模型 0/0 合法；完全没有数字才是坏条目）
   if (!Number.isFinite(i) && !Number.isFinite(o)) return null;
-  const e = {
+  const e: ModelPrice = {
     in: Number.isFinite(i) ? i : 0,
     out: Number.isFinite(o) ? o : 0,
     cached: v.cached == null ? null : (Number.isFinite(Number(v.cached)) ? Number(v.cached) : null)
   };
-  if (v.peak && typeof v.peak === 'object') {
+  if (isRecord(v.peak)) {
     const pi = Number(v.peak.in), po = Number(v.peak.out), pc = Number(v.peak.cached);
     e.peak = {
       in: Number.isFinite(pi) ? pi : e.in,
@@ -63,7 +68,7 @@ function normEntry(v) {
     };
   }
   // 图片计费规则结构各异（capped/pixel/unknown），原样透传，由 imageTokens 解读
-  if (v.image && typeof v.image === 'object') e.image = v.image;
+  if (isRecord(v.image)) e.image = v.image;
   if (typeof v.note === 'string' && v.note) e.note = v.note;
   e.src = typeof v.src === 'string' && v.src ? v.src : 'remote';
   return e;
@@ -73,23 +78,23 @@ function normEntry(v) {
  * 校验并规范化远程价格表的整个载荷。
  * @returns {{ prices: object, dropped: number } | null} 载荷完全不可用返回 null
  */
-export function normalizePriceFeed(data) {
+export function normalizePriceFeed(data: unknown): { prices: PriceTable; dropped: number } | null {
   if (!data || typeof data !== 'object') return null;
 
   // 四种外形 → 统一的 [id, entry] 列表
-  let pairs = [];
+  let pairs: Array<[unknown, unknown]> = [];
   if (Array.isArray(data)) {
     pairs = data.map((x) => [x?.id, x]);
-  } else if (Array.isArray(data.prices)) {
+  } else if (isRecord(data) && Array.isArray(data.prices)) {
     pairs = data.prices.map((x) => [x?.id, x]);
-  } else if (data.prices && typeof data.prices === 'object') {
+  } else if (isRecord(data) && isRecord(data.prices)) {
     pairs = Object.entries(data.prices);
   } else {
     // 裸 map：排除明显的元数据键，避免把 {"updated": "..."} 当成模型
     pairs = Object.entries(data).filter(([k]) => !/^(updated|version|meta|comment)$/i.test(k));
   }
 
-  const prices = {};
+  const prices: PriceTable = {};
   let dropped = 0;
   for (const [id, v] of pairs) {
     const key = String(id ?? '').trim().toLowerCase();
@@ -102,17 +107,17 @@ export function normalizePriceFeed(data) {
 }
 
 /** 应用一张表：注入查价层 + 更新状态。 */
-function applyPrices(prices, source) {
+function applyPrices(prices: PriceTable, source: string) {
   setRemotePrices(prices);
   status.source = source;
   status.count = Object.keys(prices).length;
 }
 
 /** 启动时先吃磁盘缓存（URL 对得上才用）。 */
-function applyDiskCache(url) {
+function applyDiskCache(url: string) {
   try {
-    const data = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
-    if (data?.url !== url) return false;   // 缓存是另一个 URL 的，不能用
+    const data: unknown = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+    if (!isRecord(data) || data.url !== url) return false;   // 缓存是另一个 URL 的，不能用
     const norm = normalizePriceFeed(data.prices);
     if (!norm) return false;
     applyPrices(norm.prices, 'cache');
@@ -123,7 +128,7 @@ function applyDiskCache(url) {
   }
 }
 
-function writeDiskCache(url, prices) {
+function writeDiskCache(url: string, prices: PriceTable) {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     const tmp = `${CACHE_FILE}.${process.pid}.tmp`;
@@ -137,7 +142,7 @@ function writeDiskCache(url, prices) {
  * @param {string} url
  * @returns {Promise<object>} 最新状态
  */
-export async function refreshPriceFeed(url) {
+export async function refreshPriceFeed(url: string) {
   url = String(url || '').trim();
   status.url = url;
   status.fetchedAt = Date.now();
@@ -149,7 +154,7 @@ export async function refreshPriceFeed(url) {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json().catch(() => { throw new Error('返回的不是合法 JSON'); });
+    const data: unknown = await res.json().catch(() => { throw new Error('返回的不是合法 JSON'); });
     const norm = normalizePriceFeed(data);
     if (!norm) throw new Error('JSON 里没有可用的价格条目');
     applyPrices(norm.prices, 'remote');
@@ -157,9 +162,10 @@ export async function refreshPriceFeed(url) {
     status.error = '';
     status.dropped = norm.dropped;
     writeDiskCache(url, norm.prices);
-  } catch (error) {
+  } catch (error: unknown) {
     status.ok = false;
-    status.error = String(error?.cause?.message ?? error?.message ?? error);
+    const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined;
+    status.error = String(cause ?? (error instanceof Error ? error.message : error));
     // 失败不清表：继续用远程缓存/内置表，下次重试
   }
   return priceFeedStatus();
@@ -173,7 +179,7 @@ export async function refreshPriceFeed(url) {
  *    refreshPriceFeed 内部已全 catch，这里是第二道保险 ——
  *    这个模块绝不允许以任何方式影响主程序（未捕获的 rejection 也算）。
  */
-export function initPriceFeed(url) {
+export function initPriceFeed(url: string) {
   url = String(url || '').trim();
   if (timer) { clearInterval(timer); timer = null; }
   if (!url) {

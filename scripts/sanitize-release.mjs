@@ -154,7 +154,7 @@ function resetConfig() {
  */
 function scanSecrets() {
   const SKIP_DIR = new Set(['node_modules', '.git', 'snowluma', 'backups', 'logs', '.trash', 'dist', 'out']);
-  const TEXT_EXT = new Set(['.js', '.mjs', '.cjs', '.json', '.md', '.html', '.css', '.bat', '.yml', '.yaml']);
+  const TEXT_EXT = new Set(['.js', '.ts', '.mjs', '.cjs', '.json', '.md', '.html', '.css', '.bat', '.yml', '.yaml']);
   const PATTERNS = [
     { name: 'OpenAI Key', re: /sk-[A-Za-z0-9]{20,}/g },
     { name: 'Anthropic Key', re: /sk-ant-[A-Za-z0-9\-_]{20,}/g },

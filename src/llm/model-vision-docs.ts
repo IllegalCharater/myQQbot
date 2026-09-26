@@ -12,12 +12,22 @@
 // 维护方式：新增模型时在 MODEL_DOCS 里加一行，providerId 有特殊链路时再加 PROVIDER_DOCS。
 // 字段：verdict: 'vision' | 'no-vision'；note 里注明来源。
 
-function norm(s) {
+interface VisionDoc {
+  verdict: 'vision' | 'no-vision';
+  note: string;
+}
+
+interface VisionProvider {
+  id?: string;
+  models?: unknown[];
+}
+
+function norm(s: unknown) {
   return String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 // 模型 ID 归一：统一小写；斜杠前后都可匹配（如 deepseek-ai/deepseek-v4-pro-0813 与 deepseek-v4-pro-0813 等价）。
-function modelKeys(model) {
+function modelKeys(model: unknown): string[] {
   const m = norm(model).replace(/^\/+|\/+$/g, '');
   if (!m) return [];
   const keys = [m];
@@ -27,7 +37,7 @@ function modelKeys(model) {
 }
 
 // ── 提供商级结论（链路是否透传图片） ─────────────────────────────────────
-export const PROVIDER_DOCS = {
+export const PROVIDER_DOCS: Record<string, VisionDoc> = {
   'qwen-token-plan-cn|||qwen3.8-max': {
     verdict: 'vision',
     note: '官方：Qwen3.8-Max 为多模态旗舰，支持图片/视频输入（单图最高 1600 万像素）。来源：platform.qianwenai.com、help.aliyun.com/zh/model-studio/vision'
@@ -115,7 +125,7 @@ export const PROVIDER_DOCS = {
 };
 
 // ── 模型级结论（官方能力，OpenAI 兼容 image_url 输入） ────────────────────
-export const MODEL_DOCS = {
+export const MODEL_DOCS: Record<string, VisionDoc> = {
   // DeepSeek
   'deepseek-chat': {
     verdict: 'vision',
@@ -355,21 +365,13 @@ export const MODEL_DOCS = {
     verdict: 'no-vision',
     note: 'DeepSeek-V4-Flash-0731 为纯文本模型。来源：docs.cloudbase.net'
   },
-  'deepseek-ai/deepseek-v4-pro-0813': {
-    verdict: 'no-vision',
-    note: 'DeepSeek V4 Pro 正式版（0813）官方能力清单未包含图片输入；V4 系列视觉模型是独立的 deepseek-v4-flash-vision-exp。来源：api-docs.deepseek.com'
-  },
-  'deepseek-ai/deepseek-v4-flash-0731': {
-    verdict: 'no-vision',
-    note: 'DeepSeek-V4-Flash-0731 为纯文本模型。来源：docs.cloudbase.net'
-  }
 };
 
 /**
  * 查询内置官方资料结论。
  * 返回 { verdict, note, source: 'docs' } 或 null。
  */
-export function lookupVisionDoc(providerId, model) {
+export function lookupVisionDoc(providerId: unknown, model: unknown): (VisionDoc & { source: 'docs' }) | null {
   const pid = norm(providerId);
   const m = norm(model);
   if (!m) return null;
@@ -389,8 +391,8 @@ export function lookupVisionDoc(providerId, model) {
  * 为一批提供商/模型生成 key -> 文档结论 的映射（不包含已持久化在 config.modelVision 的结论）。
  * 用于 /api/vision/results 等接口把内置知识合并给 UI。
  */
-export function builtinVisionResults(providers = []) {
-  const out = {};
+export function builtinVisionResults(providers: VisionProvider[] = []) {
+  const out: Record<string, { providerId: string; model: string; verdict: VisionDoc['verdict']; note: string; source: 'docs' }> = {};
   for (const p of providers || []) {
     const pid = String(p.id || '');
     for (const model of p.models || []) {

@@ -7,7 +7,7 @@
 //   node scripts/export-prices.mjs /path/to/out.json
 //
 // 之后维护方式：直接编辑服务器上的那个 JSON（格式与内置表条目同构），
-// 不用改代码、不用发版。格式说明见文件头注释（src/price-feed.js）。
+// 不用改代码、不用发版。格式说明见文件头注释（src/llm/price-feed.ts）。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

@@ -42,8 +42,6 @@ export const DEFAULT_CONFIG = {
   },
   // 多提供商模型目录（设置页手动维护）
   providers: [],
-  // 多提供商模型目录（设置页手动维护）
-  providers: [],
   dshProviderKeys: {},   // providerId -> 真实 API Key（providers[] 里不再存明文 Key）
   providersSourceYaml: '',
   providersImported: true,
@@ -277,25 +275,37 @@ export const DEFAULT_CONFIG = {
   }
 };
 
-function deepMerge(base, override) {
+export type AppConfig = typeof DEFAULT_CONFIG & {
+  store: typeof DEFAULT_CONFIG.store & {
+    contextSliderPos?: number;
+    groupSliderPos: Record<string, number>;
+  };
+  digest: typeof DEFAULT_CONFIG.digest & {
+    perChat: Record<string, Partial<Pick<typeof DEFAULT_CONFIG.digest, 'injectEveryRound' | 'merge' | 'maxChars'>>>;
+  };
+};
+type ConfigPatch = Record<string, unknown>;
+
+function deepMerge<T>(base: T, override: unknown): T {
   if (override === null || override === undefined) return structuredClone(base);
-  if (typeof base !== 'object' || base === null || Array.isArray(base)) return structuredClone(override);
-  const out = Array.isArray(base) ? [...base] : { ...base };
+  if (typeof base !== 'object' || base === null || Array.isArray(base)) return structuredClone(override) as T;
+  const out = (Array.isArray(base) ? [...base] : { ...base }) as Record<string, unknown>;
+  const baseRecord = base as Record<string, unknown>;
   for (const [key, value] of Object.entries(override)) {
     // 整体替换约定：{ __replace__: X } → 该键直接用 X，不做递归合并。
     // 用于映射型字段（如 api.modelPrices）需要"删掉旧键"的场景 ——
     // 普通深合并传 {} 是删不掉已有键的。
     if (value && typeof value === 'object' && !Array.isArray(value) && '__replace__' in value) {
-      out[key] = structuredClone(value.__replace__);
+      out[key] = structuredClone((value as Record<string, unknown>).__replace__);
       continue;
     }
-    if (value && typeof value === 'object' && !Array.isArray(value) && base[key] && typeof base[key] === 'object' && !Array.isArray(base[key])) {
-      out[key] = deepMerge(base[key], value);
+    if (value && typeof value === 'object' && !Array.isArray(value) && baseRecord[key] && typeof baseRecord[key] === 'object' && !Array.isArray(baseRecord[key])) {
+      out[key] = deepMerge(baseRecord[key], value);
     } else if (value !== undefined) {
       out[key] = structuredClone(value);
     }
   }
-  return out;
+  return out as T;
 }
 
 export function loadConfig() {
@@ -309,8 +319,8 @@ export function loadConfig() {
   }
 }
 
-let currentConfig = null;
-let saveTimers = new Map();
+let currentConfig: AppConfig | null = null;
+const saveTimers = new Map<string, NodeJS.Timeout>();
 
 /** 取当前生效配置（未初始化时从磁盘读）。 */
 export function getConfig() {
@@ -319,7 +329,7 @@ export function getConfig() {
 }
 
 /** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
-export function updateConfig(patch) {
+export function updateConfig(patch: ConfigPatch) {
   currentConfig = deepMerge(getConfig(), patch);
 
   // ── 响应档位：以滑条位置为唯一真相，派生 tier 与随机概率 ──
@@ -340,7 +350,7 @@ export function updateConfig(patch) {
 }
 
 /** 内存态改动（不落盘）——用于运行期覆盖（如自测注入 mock）。 */
-export function setRuntimeConfig(cfg) {
+export function setRuntimeConfig(cfg: AppConfig) {
   currentConfig = cfg;
 }
 
@@ -350,7 +360,7 @@ export function setRuntimeConfig(cfg) {
  * 关闭 → 群聊查 groupSliderPos，有单独设置就换算出该群的 tier/randomPercent，
  * 其余字段（各档读取条数、关键词表）沿用全局值。私聊永远跟随全局档位。
  */
-export function storeConfigForChat(chatKey) {
+export function storeConfigForChat(chatKey: string) {
   const store = getConfig().store || {};
   if (store.unifiedTier !== false) return store;
   const [kind, id] = String(chatKey || '').split(':');
@@ -371,9 +381,9 @@ export function storeConfigForChat(chatKey) {
  *
  * maxKeepChars 是唯一的例外：它**不参与按群覆盖**，永远是全局值（见下面 base 里的注释）。
  */
-export function digestConfigForChat(chatKey) {
+export function digestConfigForChat(chatKey: string) {
   const d = getConfig().digest || {};
-  const num = (v, fallback) => {
+  const num = (v: unknown, fallback: number) => {
     const n = Number(v);
     return Number.isFinite(n) ? Math.min(200000, Math.max(0, Math.round(n))) : fallback;
   };

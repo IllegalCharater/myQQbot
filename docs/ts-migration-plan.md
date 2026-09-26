@@ -214,11 +214,11 @@ export const CONFIG_FILE: string;  // DATA_DIR/config.json
 - 结果：类型检查、构建和 12/13 个断言套件通过；`t-panel-wiring` 的 2 条 UI 静态断言在未改动的 `ui/` 上仍失败，属于迁移前既有基线问题，未通过弱化断言处理。
 - 回滚：整体 revert 一个提交即可。
 
-### S5 逐目录 `.js` → `.ts`（体量最大的一步，但可以按目录切碎）
+### S5 逐目录 `.js` → `.ts`（🚧 进行中：`core/` 已完成）
 
 顺序（叶子优先，先啃没依赖的）：
 
-1. `core/`：`util`、`tier-slider`、`personas`、`paths`（已是 .ts）、`config`
+1. ✅ `core/`：`util`、`tier-slider`、`personas`、`paths`、`config`；已导出 `AppConfig`，严格类型检查与核心回归通过
 2. `llm/`：`model-vision-docs`、`model-prices`、`price-feed`、`llm`、`providers`、`vision-scan`
 3. `chat/`：`sessions`、`store`、`memory`
 4. `qq/`：`md-to-plain`、`sender`、`onebot`

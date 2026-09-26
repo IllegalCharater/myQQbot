@@ -24,7 +24,9 @@
 //
 // 匹配方式见 resolveOfficialPrice()：精确 → 去 provider 前缀 → 前缀匹配。
 
-export const OFFICIAL_PRICES = {
+import type { ModelPrice, PriceRow, PriceTable, UsagePriceRow } from './types.js';
+
+export const OFFICIAL_PRICES: PriceTable = {
   // ══ DeepSeek ══
   // 来源：官方中文文档 https://api-docs.deepseek.com/zh-cn/quick_start/pricing
   //       + https://api-docs.deepseek.com/zh-cn/guides/vision
@@ -298,7 +300,7 @@ export const OFFICIAL_PRICES = {
  * 匹配顺序：精确 → 去 provider 前缀再精确 → 前缀匹配。
  * 查不到返回 null（此时应由用户手动填单价）。
  */
-export function resolveOfficialPrice(modelId) {
+export function resolveOfficialPrice(modelId: unknown): (ModelPrice & { matched: string }) | null {
   const raw = String(modelId ?? '').trim().toLowerCase();
   if (!raw) return null;
 
@@ -330,11 +332,11 @@ export function resolveOfficialPrice(modelId) {
    查价时走 EFFECTIVE_PRICES —— 合并结果在注入时重建一次，
    不在每次查价时临时拼（用量统计要逐条解析几百次）。
 */
-let REMOTE_OVERRIDES = {};                 // { 模型id(小写): 条目 }
-let EFFECTIVE_PRICES = OFFICIAL_PRICES;    // 内置 + 远程的合并视图
+let REMOTE_OVERRIDES: PriceTable = {};                 // { 模型id(小写): 条目 }
+let EFFECTIVE_PRICES: PriceTable = OFFICIAL_PRICES;    // 内置 + 远程的合并视图
 
 /** 注入远程价格表（已校验的条目）。传 {} 即退回纯内置表。 */
-export function setRemotePrices(map) {
+export function setRemotePrices(map: PriceTable | null | undefined) {
   REMOTE_OVERRIDES = (map && typeof map === 'object') ? map : {};
   EFFECTIVE_PRICES = Object.keys(REMOTE_OVERRIDES).length
     ? { ...OFFICIAL_PRICES, ...REMOTE_OVERRIDES }
@@ -347,7 +349,7 @@ export function remoteOverrideCount() {
 }
 
 /** 列出全部价格条目（给设置页展示/提示用）。远程覆盖的条目带 remote:true。 */
-export function listOfficialPrices() {
+export function listOfficialPrices(): PriceRow[] {
   return Object.entries(EFFECTIVE_PRICES).map(([id, p]) => (
     Object.prototype.hasOwnProperty.call(REMOTE_OVERRIDES, id)
       ? { id, ...p, remote: true }
@@ -381,7 +383,7 @@ const PEAK_TZ_OFFSET_HOURS = 8;
  * @param {number|Date} at 时间戳（毫秒）或 Date；不传则用当前时间
  * @returns {boolean}
  */
-export function isPeakHour(at = Date.now()) {
+export function isPeakHour(at: number | Date = Date.now()) {
   const d = at instanceof Date ? at : new Date(Number(at) || Date.now());
   // 换算到目标时区的"本地小时"
   const localHour = (d.getUTCHours() + PEAK_TZ_OFFSET_HOURS) % 24;
@@ -396,7 +398,7 @@ export function isPeakHour(at = Date.now()) {
  * 没有 peak 字段的模型（绝大多数）峰谷同价，直接返回基础价。
  * @returns {{in:number, out:number, cached:number, peak:boolean}}
  */
-export function priceAt(price, at = Date.now()) {
+export function priceAt(price: ModelPrice | null | undefined, at: number | Date = Date.now()) {
   const peak = isPeakHour(at);
   if (peak && price?.peak) {
     return {
@@ -424,7 +426,7 @@ export function priceAt(price, at = Date.now()) {
  * @param {object} price 价格条目
  * @returns {{cost:number, peakCost:number, offPeakCost:number, peakTokens:number, offPeakTokens:number}}
  */
-export function sumCostByTime(rows, price) {
+export function sumCostByTime(rows: UsagePriceRow[], price: ModelPrice) {
   let cost = 0, peakCost = 0, offPeakCost = 0, peakTokens = 0, offPeakTokens = 0;
   for (const r of rows || []) {
     const p = priceAt(price, r.at);
@@ -461,7 +463,7 @@ export function sumCostByTime(rows, price) {
  * @param {number} height 图片高（像素），可省略
  * @returns {number|null} token 数；该模型不支持图片则返回 null
  */
-export function imageTokens(price, width, height) {
+export function imageTokens(price: ModelPrice | null | undefined, width?: number, height?: number) {
   const img = price?.image;
   if (!img) return null;
 
@@ -485,7 +487,7 @@ export function imageTokens(price, width, height) {
 }
 
 /** 该模型是否支持图片输入（有 image 规则即视为支持）。 */
-export function supportsImage(price) {
+export function supportsImage(price: ModelPrice | null | undefined) {
   return Boolean(price?.image);
 }
 
@@ -536,7 +538,11 @@ export function supportsImage(price) {
  *            source:'official'|'unmatched'|'custom'|'manual'|'none',
  *            matched:?string, locked:boolean}}
  */
-export function resolveModelPrice(modelId, cfg, priceTable = null) {
+export function resolveModelPrice(
+  modelId: unknown,
+  cfg: { api?: { useOfficialPrice?: boolean; modelPrices?: PriceTable; priceInputPerM?: number; priceOutputPerM?: number; priceCachedPerM?: number } } | null | undefined,
+  priceTable: PriceRow[] | null = null
+) {
   const id = String(modelId || '').trim();
   const api = (cfg && cfg.api) || {};
   const useOfficial = api.useOfficialPrice === true;
@@ -603,7 +609,7 @@ export function resolveModelPrice(modelId, cfg, priceTable = null) {
 }
 
 /** 在一张价格表里匹配模型（供前端用本地数据算，不依赖接口往返）。 */
-export function matchPriceTable(modelId, table) {
+export function matchPriceTable(modelId: unknown, table: PriceRow[]): PriceRow | null {
   const raw = String(modelId || '').trim();
   if (!raw) return null;
   const id = raw.toLowerCase();
@@ -620,7 +626,7 @@ export function matchPriceTable(modelId, table) {
   }
 
   // 前缀匹配：取最长的那条，避免 gpt-5 命中 gpt-5.6
-  let best = null;
+  let best: PriceRow | null = null;
   for (const x of list) {
     const xid = String(x.id).toLowerCase();
     if (id.startsWith(xid) && (!best || xid.length > String(best.id).length)) best = x;
@@ -657,12 +663,12 @@ export const UNKNOWN_VENDOR = '未知渠道';
  *
  * 历史会话请用它自己记录的 vendor 字段；拿当前配置倒推历史是错的。
  */
-export function vendorOfConfig(cfg) {
+export function vendorOfConfig(cfg: { api?: { provider?: string; baseUrl?: string }; providers?: Array<{ id?: string; baseURL?: string; displayName?: string }> } | null | undefined) {
   const c = cfg || {};
   const api = c.api || {};
   const base = String(api.baseUrl || '').trim();
   const provs = Array.isArray(c.providers) ? c.providers : [];
-  const norm = (u) => String(u || '').replace(/\/+$/, '');
+  const norm = (u: unknown) => String(u || '').replace(/\/+$/, '');
 
   const byId = api.provider ? provs.find((p) => p && p.id === api.provider) : null;
   const byUrl = base ? provs.find((p) => p && p.baseURL && norm(p.baseURL) === norm(base)) : null;
@@ -676,14 +682,14 @@ export function vendorOfConfig(cfg) {
 }
 
 /** 模型完整身份：「渠道：模型 id」。全角冒号，避免与 id 里的半角符号混淆。 */
-export function modelLabel(vendor, model) {
+export function modelLabel(vendor: unknown, model: unknown) {
   const v = String(vendor || '').trim() || UNKNOWN_VENDOR;
   const m = String(model || '').trim() || '(未知模型)';
   return `${v}：${m}`;
 }
 
 /** 把「渠道：模型 id」拆回两半。拆不开时 vendor 为空串。 */
-export function splitModelLabel(label) {
+export function splitModelLabel(label: unknown) {
   const s = String(label || '');
   const i = s.indexOf('：');
   return i > 0 ? { vendor: s.slice(0, i), model: s.slice(i + 1) } : { vendor: '', model: s };

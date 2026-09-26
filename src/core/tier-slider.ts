@@ -25,7 +25,7 @@ export const TIER_SLIDER_BANDS = {
  * 滑条位置 → { tier, randomPercent }
  * @param {number} pos 0~100，非法值或 NaN 按 100（4 档）处理
  */
-export function sliderToTier(pos) {
+export function sliderToTier(pos: number) {
   const b = TIER_SLIDER_BANDS;
   const raw = Number(pos);
   if (!Number.isFinite(raw)) return { tier: 4, randomPercent: 100 };
@@ -45,7 +45,7 @@ export function sliderToTier(pos) {
  * @param {number} tier 1~4
  * @param {number} randomPercent 仅 tier===3 时有效（0~100）
  */
-export function tierToSlider(tier, randomPercent = 0) {
+export function tierToSlider(tier: number, randomPercent = 0) {
   const b = TIER_SLIDER_BANDS;
   const t = Math.min(4, Math.max(1, Number(tier) || 4));
   const pct = Math.min(100, Math.max(0, Number(randomPercent) || 0));
