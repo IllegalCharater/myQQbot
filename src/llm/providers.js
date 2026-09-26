@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { load as loadYaml } from 'js-yaml';
-import { getConfig, updateConfig } from './config.js';
+import { getConfig, updateConfig } from '../core/config.js';
 
 // DSH 未写 baseURL 的提供商，按官方默认端点补全（可在 UI 修改）。
 // 来源：

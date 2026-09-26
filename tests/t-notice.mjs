@@ -8,11 +8,11 @@ import { load } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-notice-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
 
-const { parseCardSegment, decodeBase64Text, OneBotClient } = await load('onebot.js');
-const { buildToolDefs } = await load('tools.js');
-const { buildSystemPrompt } = await load('prompt.js');
-const { updateConfig } = await load('config.js');
-const { ChatStore } = await load('store.js');
+const { parseCardSegment, decodeBase64Text, OneBotClient } = await load('qq/onebot.js');
+const { buildToolDefs } = await load('agent/tools.js');
+const { buildSystemPrompt } = await load('agent/prompt.js');
+const { updateConfig } = await load('core/config.js');
+const { ChatStore } = await load('chat/store.js');
 
 updateConfig({ persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' }, api: { model: 'stub', baseUrl: 'http://x' } });
 

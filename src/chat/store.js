@@ -18,7 +18,7 @@
 // }
 import fs from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR } from './config.js';
+import { DATA_DIR } from '../core/config.js';
 
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
 // 压缩后的原文冷归档。独立子目录 + .jsonl 后缀：listChats 的正则只认

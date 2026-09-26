@@ -6,7 +6,7 @@
 // 旧版单文件 data/memory/group_<群号>.json 会在首次访问时自动迁移。
 import fs from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR, getConfig, updateConfig } from './config.js';
+import { DATA_DIR, getConfig, updateConfig } from '../core/config.js';
 
 const MEMORY_DIR = path.join(DATA_DIR, 'memory');
 

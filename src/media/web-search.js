@@ -1,7 +1,7 @@
 // 联网搜索（移植自原版 bingSearch）：Bing 中文搜索，无需 API key。
 // 搜索请求本身用普通 fetch（搜索 URL 是管理端配置的可信地址，只需清洗查询词）；
 // 对外抓取网页正文一律走 safe-fetch（web_fetch 工具）。
-import { getConfig } from './config.js';
+import { getConfig } from '../core/config.js';
 import { safeFetch } from './safe-fetch.js';
 
 /** 查询词清洗：去 CQ 码、控制字符、超长截断。 */

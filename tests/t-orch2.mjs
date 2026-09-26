@@ -4,11 +4,11 @@ import path from 'node:path';
 import { load } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
-const { ChatStore } = await load('store.js');
-const { SessionRegistry } = await load('sessions.js');
-const { SendQueue } = await load('sender.js');
-const { Orchestrator } = await load('orchestrator.js');
-const { updateConfig } = await load('config.js');
+const { ChatStore } = await load('chat/store.js');
+const { SessionRegistry } = await load('chat/sessions.js');
+const { SendQueue } = await load('qq/sender.js');
+const { Orchestrator } = await load('agent/orchestrator.js');
+const { updateConfig } = await load('core/config.js');
 
 updateConfig({ api: { baseUrl: 'http://127.0.0.1:1/v1', model: 'stub', maxRounds: 1 },
   allowAllWhenEmpty: true, persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' },

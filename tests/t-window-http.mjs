@@ -25,7 +25,7 @@ const m = (id, text, read) => ({ id, mid: `m${id}`, ts: 1758600000000 + id * 100
 write('group:123', [m(1, '老消息', true), m(2, '没看的一', false), m(3, '没看的二', false)]);
 write('group:456', [m(1, '另一个群一', false), m(2, '另一个群二', false)]);
 
-const { createApp } = await load('app.js');
+const { createApp } = await load('web/app.js');
 const core = createApp({ log() {} });
 const port = await core.start();
 const B = `http://127.0.0.1:${port}`;

@@ -4,7 +4,7 @@
 // 接受（HTTP 200 且有 choices）即视为支持看图。与图片无关的失败（密钥、模型名、网络）记为
 // unknown，不武断下结论。
 // 结果持久化在 config.modelVision["providerId|||model"]，运行时用它门控看图工具。
-import { getConfig, updateConfig } from './config.js';
+import { getConfig, updateConfig } from '../core/config.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 
 // 1×1 像素 PNG（70 字节），足够让视觉模型"看到点什么"，也不会浪费 token。

@@ -21,7 +21,7 @@
 //           peak/image/note/src 可选，与内置表条目同构。
 import fs from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR } from './config.js';
+import { DATA_DIR } from '../core/config.js';
 import { setRemotePrices } from './model-prices.js';
 
 const CACHE_FILE = path.join(DATA_DIR, 'price-feed-cache.json');

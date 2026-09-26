@@ -14,12 +14,12 @@ import { load } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-admin-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
 
-const { ChatStore, isSystemRecord } = await load('store.js');
-const { MemoryStore } = await load('memory.js');
-const { StickerManager } = await load('sticker-manager.js');
-const { removeSticker, formatStickerAdminList } = await load('stickers.js');
-const { buildPastState } = await load('prompt.js');
-const { updateConfig, getConfig } = await load('config.js');
+const { ChatStore, isSystemRecord } = await load('chat/store.js');
+const { MemoryStore } = await load('chat/memory.js');
+const { StickerManager } = await load('stickers/sticker-manager.js');
+const { removeSticker, formatStickerAdminList } = await load('stickers/stickers.js');
+const { buildPastState } = await load('agent/prompt.js');
+const { updateConfig, getConfig } = await load('core/config.js');
 
 let pass = 0, fail = 0;
 const ok = (label, cond, extra = '') => {
@@ -180,7 +180,7 @@ const SEED = [
 ];
 fs.writeFileSync(path.join(DIR, 'stickers.json'), JSON.stringify(SEED, null, 2), 'utf8');
 
-const { createApp } = await load('app.js');
+const { createApp } = await load('web/app.js');
 const core = createApp({ log: () => {} });
 const port = await core.start();
 const api = async (p, options = {}) => {

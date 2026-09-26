@@ -35,10 +35,10 @@ tests/
 
 ```js
 import { load } from './lib/src.mjs';
-const { ChatStore } = await load('store.js');       // tsc 产物 dist/ 下的模块
+const { ChatStore } = await load('chat/store.js');  // tsc 产物 dist/ 下的模块
 ```
 
-`load()` 是**动态** import，这一点是硬要求：`src/config.js` 在模块加载那一刻就把
+`load()` 是**动态** import，这一点是硬要求：`src/core/config.js` 在模块加载那一刻就把
 `DATA_DIR` 定死了，所以套件得先建临时数据目录再设 `QQ_AGENT_DATA_DIR`，然后才能
 加载第一个被测模块。顺序反过来，测试就会往真数据目录（真聊天记录、真表情包、
 真 API key）里写东西。用 `harness.dataDir()` 一次做完这两件事：
@@ -80,7 +80,7 @@ const { load } = await import('./lib/src.mjs');
 ## 为什么验 `dist/` 而不是 `src/`
 
 S2 起运行时跑的是 `tsc` 产物，**S3 起 `src/` 里有 `.ts` 了，它不再是能跑的东西**
-（Node 20 跑不了 `.ts`，`src/config.js` 会 import 不到 `./paths.js`）。
+（Node 20 跑不了 `.ts`，源码树也不是正式运行入口）。
 所以 `dist/` 是唯一的运行形态，套件也验它——这反而是好事，验的是**真正会被执行的那份代码**，
 顺带把"编译坏了"和"代码坏了"分成了两件事（`run.mjs` 一上来就 build，build 挂了
 直接报，不会拿旧产物给你一个假绿灯）。
@@ -99,13 +99,13 @@ S2 装完依赖后**已经把 hook 删掉了**：它让"用 yaml 读配置""真�
 
 ## 来历
 
-2026-09-24 之前，这 22 个套件散在 `%TEMP%` 下，路径写死成绝对路径，
+2026-09-24 之前，最初的 22 个套件散在 `%TEMP%` 下，路径写死成绝对路径，
 清一次临时目录就全没了。搬进仓库是 TypeScript 重构的 S1（见
 `docs/ts-migration-plan.md`）：后面要动目录结构、要换成跑 `dist/` 产物，
 先得有一张不会丢、且只有一处知道"源码在哪"的安全网。
 
 S2 把工具链接上，`lib/src.mjs` 的默认值从 `src/` 切到 `dist/`——这一步的前提就是
-S1 那 22 个套件已经在仓库里、已经全绿：**切换运行形态时，闸门必须是现成的。**
+S1 的 22 个套件已进入仓库，S3 又增加了 `t-paths`：**切换运行形态时，闸门必须是现成的。**
 
 S3 加进第 23 个（`t-paths`），守的是"路径常量不许再跟着文件位置走"。
 它是唯一一个会在 `%TEMP%` 里造夹具、把编译产物拷进更深目录再 import 的套件，

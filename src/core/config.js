@@ -37,7 +37,7 @@ export const DEFAULT_CONFIG = {
     priceRemoteUrl: '',
     // 按模型单独设定的价格：{ [模型 id]: { in, out, cached } }
     // 优先级最高 —— 一旦这里有记录，就不再用内置官方表，也不受全局默认单价影响。
-    // 改动只存在这里，不会回写内置价格表（src/model-prices.js）。
+    // 改动只存在这里，不会回写内置价格表（src/llm/model-prices.js）。
     modelPrices: {}
   },
   // 多提供商模型目录（设置页手动维护）

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { DATA_DIR, ROOT } from './config.js';
+import { DATA_DIR, ROOT } from '../core/config.js';
 
 const DUPLICATE_WINDOW_MS = 60_000;
 const DOWNLOAD_TIMEOUT_MS = 30 * 60_000;

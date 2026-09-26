@@ -8,11 +8,11 @@ import {
 } from './lib/harness.mjs';
 
 dataDir();
-const { ChatStore } = await load('store.js');
-const { SessionRegistry } = await load('sessions.js');
-const { SendQueue } = await load('sender.js');
-const { Orchestrator } = await load('orchestrator.js');
-const { updateConfig } = await load('config.js');
+const { ChatStore } = await load('chat/store.js');
+const { SessionRegistry } = await load('chat/sessions.js');
+const { SendQueue } = await load('qq/sender.js');
+const { Orchestrator } = await load('agent/orchestrator.js');
+const { updateConfig } = await load('core/config.js');
 
 const { ok, done } = checker();
 

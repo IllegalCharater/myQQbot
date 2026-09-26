@@ -2,7 +2,7 @@
 // QQ 收藏表情（SnowLuma fetch_custom_face_detail）是"源"，本地库是 AI 认知层。
 import fs from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR } from './config.js';
+import { DATA_DIR } from '../core/config.js';
 
 const STICKER_FILE = path.join(DATA_DIR, 'stickers.json');
 

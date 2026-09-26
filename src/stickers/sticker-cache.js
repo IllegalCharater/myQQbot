@@ -14,8 +14,8 @@
 // 模块边界：这里只有"字节 ↔ 磁盘"和"条目的图从哪来"，不碰表情库的结构（那是 stickers.js）。
 import fs from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR } from './config.js';
-import { validateImageUrl, safeFetchBinary, detectMime } from './safe-fetch.js';
+import { DATA_DIR } from '../core/config.js';
+import { validateImageUrl, safeFetchBinary, detectMime } from '../media/safe-fetch.js';
 
 export const CACHE_DIR = path.join(DATA_DIR, 'sticker-cache');
 

@@ -1,4 +1,4 @@
-// headless 入口：npm run server（= node dist/server.js，不带 Electron 窗口，浏览器访问控制台）
+// headless 入口：npm run server（= node dist/web/server.js，不带 Electron 窗口，浏览器访问控制台）
 import { createApp } from './app.js';
 
 // 跑的是 tsc 产物 dist/，行号和 src/ 对不上——开了源地图，堆栈里的行号才指回原始源码。

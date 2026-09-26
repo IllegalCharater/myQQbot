@@ -6,12 +6,12 @@ import path from 'node:path';
 import { load } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-win-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
-const { ChatStore } = await load('store.js');
-const { SessionRegistry } = await load('sessions.js');
-const { SendQueue } = await load('sender.js');
-const { Orchestrator } = await load('orchestrator.js');
-const { ContextWindow, ContextWindowRegistry } = await load('context-window.js');
-const { updateConfig } = await load('config.js');
+const { ChatStore } = await load('chat/store.js');
+const { SessionRegistry } = await load('chat/sessions.js');
+const { SendQueue } = await load('qq/sender.js');
+const { Orchestrator } = await load('agent/orchestrator.js');
+const { ContextWindow, ContextWindowRegistry } = await load('agent/context-window.js');
+const { updateConfig } = await load('core/config.js');
 
 let bad = 0;
 const ok = (name, cond, extra = '') => {

@@ -1,7 +1,7 @@
 # TypeScript 重构方案（qq-agent / myQQbot）
 
-> 状态：**S0、S1、S2、S3 已完成**，S4 及之后待单独确认再动。
-> 目前有 **1 个 `.ts` 文件**（`src/paths.ts`），其余仍是 `src/*.js`。
+> 状态：**S0、S1、S2、S3、S4 已完成**，S5 及之后待单独确认再动。
+> 目前有 **1 个 `.ts` 文件**（`src/core/paths.ts`），其余按领域位于 `src/*/*.js`。
 > 写作日期：2026-09-24
 
 ## Context
@@ -77,7 +77,7 @@ tests/
 ├─ README.md          怎么跑、两条规矩、每个套件守着什么
 ├─ lib/src.mjs        被测代码在哪 —— 全仓库只有这一处写死（S2 起默认 `dist/`）
 ├─ lib/harness.mjs    checker / dataDir / 假图床 / 假模型端点 / vm 假 DOM
-└─ t-*.mjs            22 个套件（12 断言 + 10 诊断）
+└─ t-*.mjs            23 个套件（13 断言 + 10 诊断）
 ```
 
 初版还有 `register.mjs` / `hook.mjs` / `ws-stub.mjs` / `yaml-stub.mjs` 一套 loader hook
@@ -197,7 +197,7 @@ export const CONFIG_FILE: string;  // DATA_DIR/config.json
 （`/` 、`/app.js`、`/api/config` 均 200，验完 kill）、`node scripts/apply-vision-docs.mjs`
 仍能写进临时 config（21 条）。
 
-### S4 目录搬迁（`git mv`，全是 `.js`）
+### S4 目录搬迁（✅ 已完成 2026-09-26，除 `core/paths.ts` 外仍是 `.js`）
 
 - 按第一节的树 `git mv`，**只改路径、不改代码语义**；import 说明符从 `'./x.js'` 改成 `'../core/x.js'` 之类（约 100 条边），全部机械可验。
 - 跨界引用只有 5 处（见第四节），一次改到位。**S4 特有的三处别忘**：
@@ -210,16 +210,18 @@ export const CONFIG_FILE: string;  // DATA_DIR/config.json
   （`lib/src.mjs` 里 `SRC_DIR` 的注释已经写明：`SRC_DIR` 是"运行时从哪加载"，`SOURCE_REL` 恒为 `'src'`
   是"git 历史里那棵源码树"——`t-digest` 取旧版本文件用后者，别混。）
 - 验证：`npm run build && node tests/run.mjs` 全绿；`node dist/server.js` 起得来；`node scripts/*.mjs` 三个脚本仍能跑。搬迁后顺手跑一下 `git log --follow` 确认历史跟得住（`git mv` 的目的就是这个）。
+- 新增 `scripts/check-layers.mjs` 并接入 `npm run check`；当前 29 个源码文件通过分层检查，无 T1 跨领域白名单。
+- 结果：类型检查、构建和 12/13 个断言套件通过；`t-panel-wiring` 的 2 条 UI 静态断言在未改动的 `ui/` 上仍失败，属于迁移前既有基线问题，未通过弱化断言处理。
 - 回滚：整体 revert 一个提交即可。
 
 ### S5 逐目录 `.js` → `.ts`（体量最大的一步，但可以按目录切碎）
 
 顺序（叶子优先，先啃没依赖的）：
 
-1. `core/`：`util`、`md-to-plain`、`tier-slider`、`personas`、`paths`（已是 .ts）、`config`
+1. `core/`：`util`、`tier-slider`、`personas`、`paths`（已是 .ts）、`config`
 2. `llm/`：`model-vision-docs`、`model-prices`、`price-feed`、`llm`、`providers`、`vision-scan`
 3. `chat/`：`sessions`、`store`、`memory`
-4. `qq/`：`md-to-plain` 已转、`sender`、`onebot`
+4. `qq/`：`md-to-plain`、`sender`、`onebot`
 5. `media/`：`safe-fetch`、`web-search`、`jmcomic`
 6. `stickers/`：`stickers`、`sticker-cache`、`sticker-manager`
 7. `agent/`：`context-window`、`prompt`、`tools`、`orchestrator`（最后，1793 行）
@@ -276,17 +278,17 @@ type Route = { method: 'GET'|'POST'|'DELETE'; path: string | RegExp; handle(ctx:
 
 | 位置 | 原计划 | 实际落地 |
 |---|---|---|
-| `package.json` scripts | `"server": "node src/server.js"` | ✅ `node dist/server.js` + `build`/`typecheck`/`dev`/`check` + `prestart`/`preserver` |
-| `electron/main.js` | `await import('../src/app.js')` | ✅ `await import('../dist/app.js')`（S4 后再改成 `dist/web/app.js`） |
-| `scripts/export-prices.mjs` | `import '../src/model-prices.js'` | ✅ `../dist/model-prices.js`（S4 后随 `llm/` 变深） |
-| `scripts/apply-vision-docs.mjs` | `import '../src/config.js'` | ✅ `../dist/config.js`（S4 后随 `core/` 变深） |
-| `scripts/export-prices-md.mjs` | 把 `src/model-prices.js` 当文本读 | ⏳ 仍读 `src/model-prices.js`（**必须读源码**，`dist` 里是重打印过的）→ S8 改 `src/llm/model-prices.ts` |
+| `package.json` scripts | `"server": "node src/server.js"` | ✅ `node dist/web/server.js` + `build`/`typecheck`/`dev`/`check` + `prestart`/`preserver` |
+| `electron/main.js` | `await import('../src/app.js')` | ✅ `await import('../dist/web/app.js')` |
+| `scripts/export-prices.mjs` | `import '../src/model-prices.js'` | ✅ `../dist/llm/model-prices.js` |
+| `scripts/apply-vision-docs.mjs` | `import '../src/config.js'` | ✅ `../dist/core/config.js` |
+| `scripts/export-prices-md.mjs` | 把价格源码当文本读 | ✅ S4 读 `src/llm/model-prices.js`（**必须读源码**）→ S5 转换后改 `.ts` |
 | `tests/lib/src.mjs` | —（S1 新建） | ✅ `dist/`；另有恒为 `'src'` 的 `SOURCE_REL` 给 `git show` 用（`SRC_DIR` 是"运行时从哪加载"，两件事别混）。`QQ_AGENT_SRC` 覆盖已在 S3 删除 |
 | `README.md` `启动QQ机器人.bat` | 直接起 electron | ✅ 文档补了 build；`.bat` 不动 |
 | `.gitignore` | 已有 `dist/` | ✅ 补 `*.tsbuildinfo` |
 | `scripts/sanitize-release.mjs` | `TEXT_EXT` 无 `.ts` | ⏳ S8（现在源码里还没有 `.ts`，补了也没用） |
 
-`src/server.js` 内部 `import './app.js'` **不用改**（两者都在 `dist` 里，相对关系不变）——实际也没改。
+`src/web/server.js` 内部 `import './app.js'` **不用改**（两者仍在同一目录，相对关系不变）。
 
 **S2 之后仍要在 S4 再动一次的三处**：`electron/main.js`、`scripts/export-prices.mjs`、
 `scripts/apply-vision-docs.mjs`（都只是路径变深，不是逻辑变化）。

@@ -13,7 +13,7 @@ import net from 'node:net';
 import http from 'node:http';
 import https from 'node:https';
 import { StringDecoder } from 'node:string_decoder';
-import { getConfig } from './config.js';
+import { getConfig } from '../core/config.js';
 
 const dnsLookup = dns.promises.lookup;
 

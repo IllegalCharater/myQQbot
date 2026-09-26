@@ -29,7 +29,7 @@
 // ⚠️ **本类不写存档。** 唯一的下沉通道是 settled[]：消费时攒下"已看过"的 id，由调用方
 //    （orchestrator 的 #consumeWindow）一次性写进存档的 read 字段。窗口自己从不读 read
 //    （唯一例外：首次播种时用它还原游标）。
-import { isSystemRecord } from './store.js';
+import { isSystemRecord } from '../chat/store.js';
 
 export class ContextWindow {
   #capacityOf;

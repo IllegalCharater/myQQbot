@@ -3,8 +3,8 @@
 // - 分钟/小时限频（超限直接拒绝，工具会把错误告诉模型）
 // - Markdown → 纯文本、QQ 硬长度切分、CQ 转义
 // - 发出的每一条记进 ChatStore（self=true，供下一次运行当"自己的发言"）
-import { getConfig, DEFAULT_CONFIG } from './config.js';
-import { sleep, randInt, createSendChain, escapeCqText, formatClockTime } from './util.js';
+import { getConfig, DEFAULT_CONFIG } from '../core/config.js';
+import { sleep, randInt, createSendChain, escapeCqText, formatClockTime } from '../core/util.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。

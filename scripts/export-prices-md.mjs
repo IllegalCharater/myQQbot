@@ -1,15 +1,15 @@
 // 把内置价格表导出成 Markdown 文档（docs/model-prices.md）。
-// 分组依据 = src/model-prices.js 里的 `// ══ 厂商 ══` 注释段（保持文件内的人工分组顺序）。
+// 分组依据 = src/llm/model-prices.js 里的 `// ══ 厂商 ══` 注释段（保持文件内的人工分组顺序）。
 // 用法：node scripts/export-prices-md.mjs
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OFFICIAL_PRICES } from '../dist/model-prices.js';
+import { OFFICIAL_PRICES } from '../dist/llm/model-prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 读的是**源码**不是 dist：下面解析的是文件里的分组注释，源码才是那个注释的出处。
 // （tsc 保留了注释，dist 里也有，但产物可能是旧的；S5 之后这个文件会变成 .ts。）
-const srcPath = path.join(__dirname, '..', 'src', 'model-prices.js');
+const srcPath = path.join(__dirname, '..', 'src', 'llm', 'model-prices.js');
 const outPath = path.join(__dirname, '..', 'docs', 'model-prices.md');
 
 // ── 解析源码里的分组注释，得到每个模型 id 归属的厂商名 ──
@@ -41,7 +41,7 @@ const today = new Date().toISOString().slice(0, 10);
 const lines = [];
 lines.push('# 内置模型价格表（完整导出）');
 lines.push('');
-lines.push(`> 由 \`src/model-prices.js\` 导出（\`node scripts/export-prices-md.mjs\`，非手写），数据核对时间 ${today}  `);
+lines.push(`> 由 \`src/llm/model-prices.js\` 导出（\`node scripts/export-prices-md.mjs\`，非手写），数据核对时间 ${today}  `);
 lines.push('> 单位：**元 / 每百万 token**。美元价按 1 USD ≈ 7.2 CNY 换算。');
 lines.push('');
 lines.push(`共 **${entries.length}** 条：**${officialN}** 条官方直取（official），**${derivedN}** 条二手折算（derived）。`);

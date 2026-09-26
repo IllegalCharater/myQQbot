@@ -23,11 +23,11 @@ const ok = (label, cond, extra = '') => {
 
 const {
   DEFAULT_CONFIG, setRuntimeConfig, digestConfigForChat
-} = await load('config.js');
-const { ChatStore } = await load('store.js');
+} = await load('core/config.js');
+const { ChatStore } = await load('chat/store.js');
 const {
   selectPromptDigests, renderDigestSection, collectInjectedDigests, buildUserPrompt, buildPastState
-} = await load('prompt.js');
+} = await load('agent/prompt.js');
 
 // ── 改动前的 prompt.js：从 git 取，把 './x.js' 改成绝对 file:// URL ──
 // 不能直接 import 到临时目录里那份（它的相对 import 会指向不存在的文件）。
@@ -41,11 +41,19 @@ const OLD = path.join(DIR, 'old-prompt.mjs');
 {
   // git 里那份的 import 说明符是相对它自己写的，写到临时目录就全指空了，
   // 所以要改写成 BASE_URL（= 被测代码所在目录）下的绝对 URL。
-  // `(?:\.\.?\/)+` 是为了 S4（文件下沉到 src/agent/ 之后说明符变成 '../core/x.js'）也能还原——
-  // 但注意 S4 之后**旧版本那个扁平文件**里的 './x.js' 会指向不存在的 dist/x.js，
-  // 那时要加一张"旧扁平名 → 新路径"的映射表（'util.js' → 'core/util.js' …）。
+  // 旧版本还是扁平目录；把它引用的旧文件名映射到 S4 后的 dist 子目录。
+  const legacyModulePaths = {
+    'config.js': 'core/config.js',
+    'tier-slider.js': 'core/tier-slider.js',
+    'util.js': 'core/util.js',
+    'stickers.js': 'stickers/stickers.js'
+  };
   const src = execFileSync('git', ['show', `${BASELINE}:${SOURCE_REL}/prompt.js`], { cwd: ROOT, encoding: 'utf8' });
-  fs.writeFileSync(OLD, src.replace(/from '(?:\.\.?\/)+([\w/-]+)\.js'/g, `from '${BASE_URL}$1.js'`), 'utf8');
+  fs.writeFileSync(OLD, src.replace(/from '(?:\.\.?\/)+([\w/-]+\.js)'/g, (_all, legacyPath) => {
+    const target = legacyModulePaths[legacyPath];
+    if (!target) throw new Error(`旧 prompt.js 出现未登记的模块：${legacyPath}`);
+    return `from '${BASE_URL}${target}'`;
+  }), 'utf8');
 }
 const oldPrompt = await import('file://' + OLD.replace(/\\/g, '/'));
 // 把上面那句注释变成可执行的检查：基线一旦被换成含摘要逻辑的版本，这条先红，

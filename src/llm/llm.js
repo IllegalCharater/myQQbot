@@ -1,6 +1,6 @@
 // OpenAI 兼容 Chat Completions 客户端（非流式）。
 // 支持工具调用、usage 统计、可自选模型 —— 这是与 DSH 解耦后的"大脑"接口。
-import { getConfig } from './config.js';
+import { getConfig } from '../core/config.js';
 import { resolveOfficialPrice, resolveModelPrice, priceAt } from './model-prices.js';
 
 function joinUrl(base, path) {

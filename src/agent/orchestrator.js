@@ -11,16 +11,16 @@
 // 同一会话（群/私聊）同时最多一个运行；运行期间新消息照样进窗口（进 JSON、未读），
 // 只是不叠加触发 —— 运行结束后 drain 会接着处理。
 // 不同会话之间并行，受 maxConcurrentRuns 全局限流。
-import { getConfig, storeConfigForChat, digestConfigForChat } from './config.js';
-import { vendorOfConfig } from './model-prices.js';
-import { sleep, randInt, createEventBus, todayKey, formatShortTime } from './util.js';
+import { getConfig, storeConfigForChat, digestConfigForChat } from '../core/config.js';
+import { vendorOfConfig } from '../llm/model-prices.js';
+import { sleep, randInt, createEventBus, todayKey, formatShortTime } from '../core/util.js';
 import { buildSystemPrompt, buildUserPrompt, resolveContextTier } from './prompt.js';
-import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from './llm.js';
+import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from '../llm/llm.js';
 import { buildToolDefs, toOpenAiTools, executeTool } from './tools.js';
-import { modelImageVerdict } from './vision-scan.js';
-import { currentProviders } from './providers.js';
-import { initializeJmcomicQueue } from './jmcomic.js';
-import { isSystemRecord } from './store.js';
+import { modelImageVerdict } from '../llm/vision-scan.js';
+import { currentProviders } from '../llm/providers.js';
+import { initializeJmcomicQueue } from '../media/jmcomic.js';
+import { isSystemRecord } from '../chat/store.js';
 import { ContextWindowRegistry } from './context-window.js';
 
 export class Orchestrator {

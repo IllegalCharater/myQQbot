@@ -10,13 +10,13 @@
 // 行为规则全部移植自 qq-bridge 的二代仿真 preset（qq-chat-v2），去掉了
 // 沉睡/唤醒/等待机制（由编排器的"已读/未读驱动"取代）。
 
-import { getConfig, digestConfigForChat } from './config.js';
+import { getConfig, digestConfigForChat } from '../core/config.js';
 // 滑条换算放在独立模块（零依赖），避免 config.js ↔ prompt.js 循环依赖。
 // 这里 re-export 是为了让已经从 prompt.js 引用的代码不受影响。
-import { sliderToTier as _sliderToTier, tierToSlider as _tierToSlider, TIER_SLIDER_BANDS as _TIER_SLIDER_BANDS } from './tier-slider.js';
+import { sliderToTier as _sliderToTier, tierToSlider as _tierToSlider, TIER_SLIDER_BANDS as _TIER_SLIDER_BANDS } from '../core/tier-slider.js';
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider, _TIER_SLIDER_BANDS as TIER_SLIDER_BANDS };
-import { formatFullTime, formatShortTime } from './util.js';
-import { buildStickerContext, buildStickerStrategyHint } from './stickers.js';
+import { formatFullTime, formatShortTime } from '../core/util.js';
+import { buildStickerContext, buildStickerStrategyHint } from '../stickers/stickers.js';
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
 

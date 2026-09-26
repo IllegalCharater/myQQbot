@@ -157,7 +157,7 @@ app.whenReady().then(async () => {
     // 应用只访问本机回环地址：强制直连，防止系统代理（Clash/加速器等）劫持 127.0.0.1 导致白/黑屏
     await session.defaultSession.setProxy({ mode: 'direct' });
     console.log('[window] 代理模式：direct（绕过系统代理）');
-    const { createApp } = await import('../dist/app.js');
+    const { createApp } = await import('../dist/web/app.js');
     core = createApp({ log: (...args) => console.log(...args) });
     // 先启动服务拿到真实端口，再开窗口。
     // 原先是 createWindow(core.lastPort ?? 3210) 在前、core.start() 在后 ——

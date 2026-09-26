@@ -5,29 +5,29 @@ import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { getConfig, updateConfig } from './config.js';
-import { ROOT, DATA_DIR, UI_DIR } from './paths.js';
-import { customSearch } from './web-search.js';
-import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, forwardIdFromData } from './onebot.js';
-import { ChatStore } from './store.js';
-import { MemoryStore } from './memory.js';
-import { StickerManager } from './sticker-manager.js';
-import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
-import { detectMime } from './tools.js';
-import { cachedPath } from './sticker-cache.js';
-import { SendQueue } from './sender.js';
-import { SessionRegistry } from './sessions.js';
-import { Orchestrator } from './orchestrator.js';
+import { getConfig, updateConfig } from '../core/config.js';
+import { ROOT, DATA_DIR, UI_DIR } from '../core/paths.js';
+import { customSearch } from '../media/web-search.js';
+import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, forwardIdFromData } from '../qq/onebot.js';
+import { ChatStore } from '../chat/store.js';
+import { MemoryStore } from '../chat/memory.js';
+import { StickerManager } from '../stickers/sticker-manager.js';
+import { validateImageUrl, safeFetchBinary } from '../media/safe-fetch.js';
+import { detectMime } from '../agent/tools.js';
+import { cachedPath } from '../stickers/sticker-cache.js';
+import { SendQueue } from '../qq/sender.js';
+import { SessionRegistry } from '../chat/sessions.js';
+import { Orchestrator } from '../agent/orchestrator.js';
 // 历史摘要的注入结果：面板顶部那块要显示"模型实际看到的"，就必须和提示词走同一个函数。
 // prompt.js 只依赖 config/util/stickers/tier-slider，引它不会成环。
-import { collectInjectedDigests } from './prompt.js';
-import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from './llm.js';
-import { resolveOfficialPrice, listOfficialPrices, isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from './model-prices.js';
-import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from './price-feed.js';
-import { importFromDsh, currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from './providers.js';
-import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
-import { builtinVisionResults } from './model-vision-docs.js';
-import { createEventBus, todayKey } from './util.js';
+import { collectInjectedDigests } from '../agent/prompt.js';
+import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from '../llm/llm.js';
+import { resolveOfficialPrice, listOfficialPrices, isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from '../llm/model-prices.js';
+import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from '../llm/price-feed.js';
+import { importFromDsh, currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from '../llm/providers.js';
+import { scanModelsVision, visionResults, modelImageVerdict } from '../llm/vision-scan.js';
+import { builtinVisionResults } from '../llm/model-vision-docs.js';
+import { createEventBus, todayKey } from '../core/util.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -897,7 +897,7 @@ export function createApp({ log = console.log } = {}) {
       }
 
       if (pathname === '/api/persona-templates' && method === 'GET') {
-        const { PERSONAS } = await import('./personas.js');
+        const { PERSONAS } = await import('../core/personas.js');
         const builtins = Object.entries(PERSONAS).map(([id, p]) => ({ id, name: p.name, text: p.text, builtin: true }));
         const customs = (getConfig().customPersonas || []).map((p, i) => ({
           id: `custom_${i}`,

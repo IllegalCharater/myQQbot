@@ -27,7 +27,7 @@ export const SRC_DIR = path.join(ROOT, 'dist');
 /** SRC_DIR 的 file:// URL，末尾的斜杠必须留着。给动态 import 用。 */
 export const BASE_URL = pathToFileURL(SRC_DIR).href + '/';
 
-/** 动态 import 一个被测模块，例如 load('store.js')、load('chat/store.js')。 */
+/** 动态 import 一个被测模块，例如 load('chat/store.js')。 */
 export const load = (rel) => import(BASE_URL + rel);
 
 /** 读被测源码的文本（把模块当文本分析的套件用，例如 t-digest 比对旧版本）。 */

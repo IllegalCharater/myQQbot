@@ -12,11 +12,11 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsc -p tsconfig.json --watch",
-    "check": "npm run typecheck && node tests/run.mjs",
+    "check": "npm run typecheck && node scripts/check-layers.mjs && node tests/run.mjs",
     "prestart": "npm run build",
     "preserver": "npm run build",
     "start": "chcp 65001 && electron .",
-    "server": "node dist/server.js",
+    "server": "node dist/web/server.js",
     "test": "node tests/run.mjs",
     "test:all": "node tests/run.mjs --all"
   },

@@ -34,10 +34,10 @@ const {
   findSticker, matchStickerLabel, applyStickerNote, buildStickerContext,
   cleanStickerRef, resolveStickerRef, selectEvictions, normalizeStickerEntry, loadStickerStore,
   buildStickerStrategyHint
-} = await load('stickers.js');
-const { StickerManager } = await load('sticker-manager.js');
-const { buildToolDefs } = await load('tools.js');
-const { updateConfig } = await load('config.js');
+} = await load('stickers/stickers.js');
+const { StickerManager } = await load('stickers/sticker-manager.js');
+const { buildToolDefs } = await load('agent/tools.js');
+const { updateConfig } = await load('core/config.js');
 
 updateConfig({
   persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' },

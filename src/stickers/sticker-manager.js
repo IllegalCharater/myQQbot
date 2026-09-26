@@ -1,7 +1,7 @@
 // 运行期表情库管理：同步 QQ 收藏表情 + 本地认知层（备注/笔记/使用计数）。
 // 纯函数在 stickers.js；这里管缓存、TTL 和 OneBot 交互。
-import { OneBotClient } from './onebot.js';
-import { getConfig } from './config.js';
+import { OneBotClient } from '../qq/onebot.js';
+import { getConfig } from '../core/config.js';
 import {
   loadStickerStore, saveStickerStore, mergeStickerLibrary,
   findSticker, formatStickerList, formatStickerAdminList, applyStickerNote, markStickerUsed,

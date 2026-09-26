@@ -17,7 +17,7 @@ const { ok, done, counts } = checker();
 const DIR = dataDir();               // mkdtemp + 设好 QQ_AGENT_DATA_DIR，退出时自动删
 const REPO_DIR = path.resolve(REPO);  // src.mjs 的 ROOT 是从 URL 算的，带尾分隔符
 
-const paths = await load('paths.js');
+const paths = await load('core/paths.js');
 
 // ── 1. 常量今天算得对 ──
 ok('ROOT 是仓库根', paths.ROOT === REPO_DIR, `拿到 ${paths.ROOT}，期望 ${REPO_DIR}`);
@@ -30,7 +30,7 @@ ok('UI_DIR 下有面板 index.html', fs.existsSync(path.join(paths.UI_DIR, 'inde
 // 防的是 2026-09-24 那类事故：`export { x } from './y.js'` 只转出、不引入本文件作用域，
 // 看起来一模一样，直到用到它才 `is not defined`。光比值抓不住（值本来就相同），
 // 所以这里真的调一次写盘——updateConfig() 里的 DATA_DIR / CONFIG_FILE 是无保护的。
-const cfg = await load('config.js');
+const cfg = await load('core/config.js');
 ok('config.js 转出的三个常量与 paths.js 一致',
   cfg.ROOT === paths.ROOT && cfg.DATA_DIR === paths.DATA_DIR && cfg.CONFIG_FILE === paths.CONFIG_FILE,
   `config: ${cfg.ROOT} / ${cfg.DATA_DIR} / ${cfg.CONFIG_FILE}`);
@@ -45,7 +45,7 @@ try {
   const pkg = path.join(nest, 'pkg');
   fs.mkdirSync(path.join(pkg, 'dist', 'core'), { recursive: true });
   fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"depth-fixture","type":"module"}', 'utf8');
-  fs.copyFileSync(path.join(SRC_DIR, 'paths.js'), path.join(pkg, 'dist', 'core', 'paths.js'));
+  fs.copyFileSync(path.join(SRC_DIR, 'core', 'paths.js'), path.join(pkg, 'dist', 'core', 'paths.js'));
   const deep = await import(pathToFileURL(path.join(pkg, 'dist', 'core', 'paths.js')).href);
   ok('下沉到 <pkg>/dist/core/ 后 ROOT 仍是 <pkg>', deep.ROOT === pkg, `拿到 ${deep.ROOT}`);
   ok('UI_DIR 跟着新 ROOT 走，而不是跟着文件位置走',
@@ -56,7 +56,7 @@ try {
   // 恰好有个 package.json"影响。改 MAX_UP 的话这里要跟着数层数。
   const bare = path.join(nest, 'bare', 'a', 'b', 'c', 'd', 'e', 'f');
   fs.mkdirSync(bare, { recursive: true });
-  fs.copyFileSync(path.join(SRC_DIR, 'paths.js'), path.join(bare, 'paths.js'));
+  fs.copyFileSync(path.join(SRC_DIR, 'core', 'paths.js'), path.join(bare, 'paths.js'));
   const orphan = await import(pathToFileURL(path.join(bare, 'paths.js')).href);
   ok('没有 package.json 时退回上一层而不是抛错',
     orphan.ROOT === path.resolve(bare, '..'), `拿到 ${orphan.ROOT}`);

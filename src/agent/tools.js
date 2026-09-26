@@ -3,14 +3,14 @@
 // 不再需要 key/token 参数 —— 模型物理上无法把消息发到别的群/私聊，安全性反而更强。
 //
 // 工具命名去掉了 qq_ 前缀（更短，省 token）。
-import { getConfig } from './config.js';
-import { normalizeMessageList, unquoteJsonString, formatShortTime } from './util.js';
-import { formatStickerList } from './stickers.js';
-import { validateImageUrl, safeFetchBinary, detectMime } from './safe-fetch.js';
-import { webSearch, webFetch } from './web-search.js';
-import { expandForwardNodes, forwardIdFromData } from './onebot.js';
-import { enqueueJmcomicDownload } from './jmcomic.js';
-import { cachedDataUrl, isCacheFile, sendTarget } from './sticker-cache.js';
+import { getConfig } from '../core/config.js';
+import { normalizeMessageList, unquoteJsonString, formatShortTime } from '../core/util.js';
+import { formatStickerList } from '../stickers/stickers.js';
+import { validateImageUrl, safeFetchBinary, detectMime } from '../media/safe-fetch.js';
+import { webSearch, webFetch } from '../media/web-search.js';
+import { expandForwardNodes, forwardIdFromData } from '../qq/onebot.js';
+import { enqueueJmcomicDownload } from '../media/jmcomic.js';
+import { cachedDataUrl, isCacheFile, sendTarget } from '../stickers/sticker-cache.js';
 
 async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
   const safeUrl = await validateImageUrl(url);

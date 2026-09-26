@@ -33,12 +33,12 @@ await new Promise((r) => srv.listen(0, '127.0.0.1', r));
 const PORT = srv.address().port;
 console.log('假模型服务: http://127.0.0.1:' + PORT);
 
-const { ChatStore } = await load('store.js');
-const { SessionRegistry } = await load('sessions.js');
-const { SendQueue } = await load('sender.js');
-const { Orchestrator } = await load('orchestrator.js');
-const { updateConfig } = await load('config.js');
-const { createApp } = await load('app.js');
+const { ChatStore } = await load('chat/store.js');
+const { SessionRegistry } = await load('chat/sessions.js');
+const { SendQueue } = await load('qq/sender.js');
+const { Orchestrator } = await load('agent/orchestrator.js');
+const { updateConfig } = await load('core/config.js');
+const { createApp } = await load('web/app.js');
 
 updateConfig({
   api: { baseUrl: `http://127.0.0.1:${PORT}/v1`, model: 'stub-model', apiKey: 'x', maxRounds: 1 },
@@ -101,7 +101,7 @@ for (const f of fs.readdirSync(path.join(DIR, 'messages', 'archive'))) {
 // ── 摘要能不能真的被"消费"：面板顶部的标注 + 提示词里的【历史印象】段 ──
 // 这一段专治"生成端与消费端各写各的"：压缩刚写出来的那条摘要，
 // digestStatus 认不认它、提示词的渲染函数读不读得懂它的结构，都在这里验。
-const { collectInjectedDigests } = await load('prompt.js');
+const { collectInjectedDigests } = await load('agent/prompt.js');
 const real = store.digests(key);
 const ds = j.digestStatus || {};
 console.log('\n摘要注入（GET /messages 里的 digestStatus，面板顶部就照它标）：');

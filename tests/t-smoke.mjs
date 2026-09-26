@@ -1,4 +1,4 @@
-// 端到端冒烟：像 src/server.js 那样真起一个服务（createApp() 不带参数），
+// 端到端冒烟：像 src/web/server.js 那样真起一个服务（createApp() 不带参数），
 // 然后走真 HTTP 把面板要用的每一条新路径打一遍。
 //
 // 和 t-admin 的分工：t-admin 是接口级的穷举（97 条，含各种 4xx/5xx），
@@ -59,7 +59,7 @@ fs.writeFileSync(path.join(memDir, '10001.json'), JSON.stringify({
   impressions: [{ content: '喜欢猫', createdAt: 1758600000000 }]
 }, null, 2));
 
-const { createApp } = await load('app.js');
+const { createApp } = await load('web/app.js');
 const core = createApp();
 const port = await core.start();
 const B = `http://127.0.0.1:${port}`;
