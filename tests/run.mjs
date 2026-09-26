@@ -22,6 +22,7 @@ const HERE = fileURLToPath(new URL('.', import.meta.url));
 // ── 断言套件：有 ok() 计数，失败会退非零，是真正的闸门 ──
 const ASSERT = [
   't-paths.mjs',           // 路径锚点（含"下沉一层仍算得对"）
+  't-web-router.mjs',      // Web 路由匹配、请求体与统一响应写出
   't-window.mjs',          // 上下文窗口 / 滑动
   't-window-http.mjs',     // 窗口相关 HTTP 接口
   't-reply.mjs',           // 提示词拼装
