@@ -229,6 +229,7 @@ export async function saveConfig({ quiet = false } = {}) {
       allCount: clampInt(val('#cfg-allcount', c.store?.allCount), 1, 500, 80),
       // 运行时动态上下文窗口（条）；0 = 不限。与 maxMessagesPerChat（存档留多少条）无关。
       maxContextMessages: clampInt(val('#cfg-maxctx', c.store?.maxContextMessages), 0, 5000, 0),
+      promptContextMaxChars: clampInt(val('#cfg-prompt-context-maxchars', c.store?.promptContextMaxChars), 0, 1000000, 32000),
       // 统一开关 + 分群滑条表（__replace__：删掉的群设置要真删，深合并做不到）
       unifiedTier: chk('#cfg-unifiedtier', c.store?.unifiedTier !== false),
       groupSliderPos: {

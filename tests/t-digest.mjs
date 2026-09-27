@@ -229,7 +229,7 @@ const mkCtx = (key, limit, session = {}) => ({
   chatKey: key, kind: 'group', chatId: '123', chatName: '测试群',
   triggerEntries: [{ id: 100, mid: 'm100', ts: T, senderId: '10005', senderName: '小强', text: '在吗', self: false, read: false, media: [] }],
   recentCount: 3, lastMessageAt: T, selfLastMessageAt: T - 600000, selfNickname: '小鲸鱼',
-  store, memory: memStub, stickerEntries: [], session, contextLimit: limit
+  store, memory: memStub, stickerEntries: [], session, historyLimit: limit
 });
 
 setRuntimeConfig(cfgWith({ digest: { injectEveryRound: true } }));

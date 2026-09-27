@@ -358,22 +358,22 @@ export function resolveContextTier({ triggerEntries = [], selfNickname = '', bot
 
   // 4 档：无条件响应（兜底），用 allCount
   if (tier >= 4) {
-    return { tier: 4, count: n0(c.allCount), reason: '全部响应', shouldRespond: true };
+    return { tier: 4, historyCount: n0(c.allCount), reason: '全部响应', shouldRespond: true };
   }
 
   // 1~3 档：先看最明确的召唤信号，命中就用它自己那一档的条数
   if (atMe) {
-    return { tier: 1, count: n0(c.atCount), reason: '被艾特', shouldRespond: true };
+    return { tier: 1, historyCount: n0(c.atCount), reason: '被艾特', shouldRespond: true };
   }
   if (tier >= 2 && keyword) {
-    return { tier: 2, count: n0(c.keywordCount), reason: '关键词命中', shouldRespond: true };
+    return { tier: 2, historyCount: n0(c.keywordCount), reason: '关键词命中', shouldRespond: true };
   }
   if (tier >= 3 && randomHit) {
-    return { tier: 3, count: n0(c.randomCount), reason: `随机命中(${rollValue.toFixed(0)}%)`, shouldRespond: true };
+    return { tier: 3, historyCount: n0(c.randomCount), reason: `随机命中(${rollValue.toFixed(0)}%)`, shouldRespond: true };
   }
 
   // 都没命中：不响应（调用方会把这批标记已读）
-  return { tier: 0, count: 0, reason: '未触发', shouldRespond: false };
+  return { tier: 0, historyCount: 0, reason: '未触发', shouldRespond: false };
 }
 
 // 【过去状态】里"最近这几行一律显示 #id"的窗口大小。
@@ -624,21 +624,60 @@ export function buildTriggerBlock(triggerEntries: ChatMessage[], ctx: TriggerCon
 }
 
 /**
+ * 对完整 user prompt 做统一字符预算。protected 片段（当前状态、本次新消息、决策）不裁剪；
+ * 可选背景按 priority 从小到大让位。裁剪时保留段标题和最新的尾部内容。
+ */
+function joinPromptWithinBudget(
+  parts: string[],
+  optional: Array<{ index: number; priority: number; truncate?: boolean }>,
+  maxChars: unknown
+): string {
+  const limit = Math.max(0, Number(maxChars) || 0);
+  const join = () => parts.filter(Boolean).join('\n\n');
+  if (limit <= 0) return join();
+
+  let text = join();
+  for (const item of [...optional].sort((a, b) => a.priority - b.priority)) {
+    if (text.length <= limit) break;
+    const original = parts[item.index] || '';
+    if (!original) continue;
+    const overflow = text.length - limit;
+    const keep = original.length - overflow;
+    if (item.truncate === false || keep < 120) {
+      parts[item.index] = '';
+    } else {
+      const firstLine = original.split('\n', 1)[0];
+      const marker = '\n（统一字符预算已省略较早内容）\n';
+      const tailSize = Math.max(0, keep - firstLine.length - marker.length);
+      parts[item.index] = `${firstLine}${marker}${original.slice(-tailSize)}`;
+    }
+    text = join();
+  }
+  return text;
+}
+
+/**
  * 组装一次运行的用户消息（不携带任何 LLM 对话历史）。
  * ctx: { chatKey, kind, chatId, chatName, triggerEntries, trigger, selfLastMessageAt, selfNickname }
  */
 export function buildUserPrompt(ctx: PromptContext): string {
   const cfg = getConfig();
   const now = Date.now();
-  const excludeIds = ctx.triggerEntries.map((m) => m.id);
-  // 读取条数由上下文档位决定（ctx.contextLimit 由 orchestrator 在唤醒时算好传来；
+  // 响应档位只控制“窗口之外的已读历史”深度。排除整个驻留窗口，而不只是本轮 trigger，
+  // 否则窗口内已经消费过的消息会同时出现在【过去状态】和当前新消息窗口附近。
+  const excludeIds = [...new Set([
+    ...ctx.triggerEntries.map((m) => m.id),
+    ...(ctx.windowEntryIds || [])
+  ])];
+  // 读取条数由响应档位决定（ctx.historyLimit 由 orchestrator 在唤醒时算好传来；
   // 随机档的骰子结果必须固定，否则每次渲染都会重新掷、提示词与会话记录对不上）
-  const contextLimit = ctx.contextLimit === null || ctx.contextLimit === undefined
+  const requestedHistoryLimit = ctx.historyLimit ?? ctx.contextLimit;
+  const historyLimit = requestedHistoryLimit === null || requestedHistoryLimit === undefined
     ? null                                   // 没给 = 按默认（全读档的上限）
-    : Math.max(0, Number(ctx.contextLimit) || 0);
+    : Math.max(0, Number(requestedHistoryLimit) || 0);
   // 先用原始窗口决定本轮是否需要历史摘要；摘要被选中后，再从
   // 【过去状态】排除同一本地 id，避免同一段正文在两个区块里出现两次。
-  let past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: contextLimit });
+  let past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: historyLimit });
 
   // 历史印象（压缩摘要）：与上面的窗口是**两条独立通道**，互不挤占 ——
   // 窗口读多少条由响应档位决定，摘要带多少由 digest.maxChars 决定。
@@ -651,13 +690,19 @@ export function buildUserPrompt(ctx: PromptContext): string {
   if (dig.injected.length) {
     past = buildPastState(ctx.store, ctx.chatKey, {
       excludeIds: [...excludeIds, ...dig.injected.map((x) => x.entry.id)],
-      limit: contextLimit
+      limit: historyLimit
     });
   }
   // 写回最终真正注入的历史条数，供 get_recent_messages 的 offset 补偿。
   if (ctx.session && typeof ctx.session === 'object') ctx.session.pastStateCount = past.count;
 
   const parts: string[] = [];
+  const optionalParts: Array<{ index: number; priority: number; truncate?: boolean }> = [];
+  const pushOptional = (text: string, priority: number, truncate = true) => {
+    if (!text) return;
+    optionalParts.push({ index: parts.length, priority, truncate });
+    parts.push(text);
+  };
   parts.push(`【当前时间】${formatFullTime(now)}`);
 
   // 此刻状态
@@ -682,11 +727,14 @@ export function buildUserPrompt(ctx: PromptContext): string {
   // 历史印象：放在【过去状态】**之前**（紧接【此刻状态】）。
   // 位置是有讲究的，别"整理"到末尾：摘要只在压缩后变、前缀稳定，而【过去状态】
   // 每轮都变 —— 稳定的放前面，对提示词缓存友好（缓存按前缀命中）。
-  if (dig.sectionText) parts.push(dig.sectionText);
+  if (dig.sectionText) pushOptional(dig.sectionText, 2);
 
   // 过去状态
+  let pastPartIndex = -1;
   if (past.text) {
-    parts.push(`【过去状态】以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；最近的消息和带图的消息前有 #消息id，引用/看图/收藏表情要用它）：\n${past.text}`);
+    pastPartIndex = parts.length;
+    // 历史按整段让位，不做半条消息裁切；否则 pastStateCount 无法再表示真实注入条数。
+    pushOptional(`【过去状态】以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；最近的消息和带图的消息前有 #消息id，引用/看图/收藏表情要用它）：\n${past.text}`, 4, false);
   } else if (dig.injected.length) {
     // 勾了「每轮都注入」时，读 0 条历史的唤醒也会带摘要 —— 那时再说"这是你第一次
     // 参与这个会话"就是假话（摘要里全是这个会话更早的聊天），得说清是没读而不是没有。
@@ -723,7 +771,7 @@ export function buildUserPrompt(ctx: PromptContext): string {
     if (m.senderId && !m.self) relevantUserIds.add(String(m.senderId));
   }
   const memText = ctx.memory.formatForPrompt(ctx.chatKey, { userIds: [...relevantUserIds] });
-  if (memText) parts.push(`【记忆】\n${memText}`);
+  if (memText) pushOptional(`【记忆】\n${memText}`, 3);
 
   // 成员备注：不再单独成段——备注名已经直接替换了消息里的显示名
   // （formatEntry/triggerLabels 都优先用备注），单独列一遍是重复信息。
@@ -731,7 +779,7 @@ export function buildUserPrompt(ctx: PromptContext): string {
   // 表情包（目录本身）。活跃度档位已并入系统提示的【表情包策略】段，这里不再重复引导。
   if (cfg.sticker?.enabled !== false) {
     const stickerCtx = buildStickerContext(ctx.stickerEntries || [], Number(cfg.sticker?.promptMaxStickers) || 10);
-    if (stickerCtx) parts.push(stickerCtx);
+    if (stickerCtx) pushOptional(stickerCtx, 1);
   }
 
   // 只保留本轮决策提醒；工具参数和引用细则分别归 tools schema / system prompt。
@@ -742,5 +790,13 @@ export function buildUserPrompt(ctx: PromptContext): string {
     '- 没有自然可说的内容时，安静结束。'
   ].join('\n'));
 
-  return parts.join('\n\n');
+  const prompt = joinPromptWithinBudget(parts, optionalParts, cfg.store?.promptContextMaxChars);
+  if (ctx.session && typeof ctx.session === 'object') {
+    const promptSession = ctx.session as unknown as Record<string, unknown>;
+    if (pastPartIndex >= 0 && !parts[pastPartIndex]) promptSession.pastStateCount = 0;
+    promptSession.promptBudgetChars = Math.max(0, Number(cfg.store?.promptContextMaxChars) || 0);
+    promptSession.promptBudgetExceeded = prompt.length > Math.max(0, Number(cfg.store?.promptContextMaxChars) || 0)
+      && Number(cfg.store?.promptContextMaxChars) > 0;
+  }
+  return prompt;
 }

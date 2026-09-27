@@ -466,11 +466,15 @@ export class WakeScheduler {
     // 上限现在由窗口在**入窗时**维护（超上限丢最老），不再在这里对触发批切片 ——
     // 两条分支（响应 / 不响应）从此走的是同一套窗口逻辑。
     let triggerEntries: ChatMessage[] = [];
+    let windowEntryIds: number[] = [];
     let foldedAway = 0;
     if (proactive) {
       // 主动机会：不打扰、无触发批，只带状态；顺手把零星没看过的消费掉
       this.#consumeWindow(chatKey);
     } else {
+      // tier 读取的是窗口之外的历史；先拍下整个驻留窗口，避免已消费但尚未被挤出的
+      // 消息再次出现在【过去状态】中。
+      windowEntryIds = this.windows.ensure(chatKey).win.map((entry) => Number(entry.id) || 0).filter(Boolean);
       triggerEntries = this.windows.batch(chatKey);
       foldedAway = this.windows.foldedCount(chatKey);
       this.#consumeWindow(chatKey);
@@ -540,7 +544,7 @@ export class WakeScheduler {
     try {
       for (let attempt = 1; attempt <= MAX_SESSION_ATTEMPTS; attempt++) {
         try {
-          await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit: tierResult.count, tierInfo: tierResult, foldedAway });
+          await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, historyLimit: tierResult.historyCount, windowEntryIds, tierInfo: tierResult, foldedAway });
           lastError = null;
           break;
         } catch (error) {

@@ -26,7 +26,8 @@ export interface AgentRunOptions {
   triggerEntries: ChatMessage[];
   proactive: boolean;
   seq: number;
-  contextLimit?: number | null;
+  historyLimit?: number | null;
+  windowEntryIds?: number[];
   tierInfo?: ContextTierResult | null;
   foldedAway?: number;
 }
@@ -55,7 +56,7 @@ function assistantText(content: unknown): string {
     .join('\n');
 }
 
-export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit = null, tierInfo = null, foldedAway = 0 }: AgentRunOptions): Promise<void> {
+export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { kind, chatId, chatKey, triggerEntries, proactive, seq, historyLimit = null, windowEntryIds = [], tierInfo = null, foldedAway = 0 }: AgentRunOptions): Promise<void> {
     const cfg = getConfig();
     const chatName = kind === 'group' ? await host.getChatName(chatId) : '';
     const selfNickname = kind === 'group' ? (cfg.persona.selfNickname || host.onebot.selfNickname || cfg.persona.botName) : cfg.persona.botName;
@@ -101,7 +102,8 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       //    属既有的死负载 —— 顺带记一笔，本次不动它的语义。
       moreUnreadDuringRun: host.windows.pending(chatKey).length > 0,
       proactive,
-      contextLimit,
+      historyLimit,
+      windowEntryIds,
       tierInfo,
       foldedAway
     });
@@ -117,7 +119,9 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     // 记录本次读了多长的上下文（排查提示词长度时很有用）
     if (tierInfo) {
       session.contextTier = tierInfo.tier;
-      session.contextLimit = tierInfo.count;
+      session.historyLimit = tierInfo.historyCount;
+      // 旧会话面板/历史 JSON 的兼容字段。
+      session.contextLimit = tierInfo.historyCount;
       session.contextReason = tierInfo.reason || '';
     }
     host.sessions.update(session.id);

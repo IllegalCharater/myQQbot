@@ -68,12 +68,35 @@ ok('系统提示点名拍一拍就是这类', /拍一拍/.test(sp) && /根本没
 const up = buildUserPrompt({
   chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
   triggerEntries: [store.recent(KEY, { limit: 1 })[0]], store, memory: { formatForPrompt: () => '' },
-  selfNickname: '小鲸鱼', contextLimit: 10, recentCount: 5, lastMessageAt: Date.now()
+  selfNickname: '小鲸鱼', historyLimit: 10, recentCount: 5, lastMessageAt: Date.now()
 });
 ok('引用防错规则只在系统提示保留一份，用户提示不再重复灌入',
   !/宁可不用引用，也不要拿别的消息的 id 凑/.test(up));
 ok('【过去状态】表头说明已与新规则一致', /最近的消息和带图的消息前有 #消息id/.test(up));
 ok('旧表头那句（只有带图才有 id）已不复存在', !/带图的消息前有 #消息id，看图/.test(up));
+
+console.log('\n=== 4. 响应档位历史与当前消息窗口彻底分离 ===');
+const resident = store.recent(KEY, { limit: 100 }).find((m) => m.text === '为什么这么关注这个申必表情');
+const separated = buildUserPrompt({
+  chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
+  triggerEntries: [poke], windowEntryIds: [poke.id, resident.id],
+  store, memory: { formatForPrompt: () => '' }, selfNickname: '小鲸鱼',
+  historyLimit: 30, recentCount: 5, lastMessageAt: Date.now()
+});
+ok('驻留窗口中已消费的消息不被历史深度再次注入', !separated.includes('为什么这么关注这个申必表情'));
+ok('窗口外历史仍按 historyLimit 注入', separated.includes('四台主角机'));
+
+console.log('\n=== 5. 统一字符预算优先保护当前新消息 ===');
+updateConfig({ store: { promptContextMaxChars: 2200 }, digest: { maxChars: 0 } });
+const budgeted = buildUserPrompt({
+  chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
+  triggerEntries: [{ ...poke, text: '必须完整保留的当前消息-XYZ' }], windowEntryIds: [poke.id],
+  store, memory: { formatForPrompt: () => '很长的长期记忆'.repeat(1000) },
+  stickerEntries: [], selfNickname: '小鲸鱼', historyLimit: 30,
+  recentCount: 5, lastMessageAt: Date.now(), session: {}
+});
+ok('预算内仍完整保留【本次唤醒】', budgeted.includes('必须完整保留的当前消息-XYZ'));
+ok('可选背景被收缩后不超过统一预算', budgeted.length <= 2200, `实际 ${budgeted.length}`);
 
 fs.rmSync(DIR, { recursive: true, force: true });
 console.log(`\n════ 通过 ${pass} / 失败 ${fail} ════`);

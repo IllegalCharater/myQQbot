@@ -571,20 +571,22 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'memory_query',
-      description: '查看当前会话里你对群友的长期印象。不传 userId 返回全部；传 userId 只看某一个人。',
+      description: '查看当前会话里对某一位群友的长期印象。必须提供准确的数字 QQ 号；不知道时先用 get_active_members / get_recent_messages 查询。',
       parameters: {
         type: 'object',
         properties: {
-          userId: { type: ['integer', 'string'], description: '可选：只看这个 QQ 号的印象' }
-        }
+          userId: { type: ['integer', 'string'], description: '要查询的群友 QQ 号（数字）' }
+        },
+        required: ['userId']
       },
       async execute(ctx, args) {
-        const mem = ctx.memory.query(ctx.chatKey);
         const userId = String(args.userId ?? '').trim();
+        if (!/^\d{1,15}$/.test(userId)) {
+          return err(`userId 必须是数字 QQ 号（收到：${JSON.stringify(args.userId)}）。先用 get_active_members / get_recent_messages 查准确 QQ 号再查询。`);
+        }
+        const mem = ctx.memory.query(ctx.chatKey);
         const impressions = Array.isArray(mem.memberImpression) ? mem.memberImpression : [];
-        const list = userId
-          ? impressions.filter((entry) => isRecord(entry) && String(entry.userId) === userId)
-          : impressions;
+        const list = impressions.filter((entry) => isRecord(entry) && String(entry.userId) === userId);
         return ok({ memberImpression: list });
       }
     },

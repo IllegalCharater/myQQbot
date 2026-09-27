@@ -248,6 +248,10 @@ export function renderChatSection(c) {
           而且它们<b>照样参与"要不要回应"的判定</b>（积压里的 @ 不会被漏掉），改动即时生效、不用重启。
         </div>
       </div>
+      <div class="tier-param">
+        <label>单次提示词统一字符预算：<input type="number" id="cfg-prompt-context-maxchars" min="0" max="1000000" value="${esc(st.promptContextMaxChars ?? 32000)}" /> 字（0 = 不限）</label>
+        <div class="hint">预算覆盖完整 user prompt；【本次唤醒】和本轮决策不会被裁剪。超出时依次收缩表情目录、历史摘要、长期记忆和窗口外的已读历史。</div>
+      </div>
     </div>
 
     <h3>历史摘要</h3>

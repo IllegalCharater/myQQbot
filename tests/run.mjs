@@ -28,6 +28,7 @@ const ASSERT = [
   't-reply.mjs',           // 提示词拼装
   't-notice.mjs',          // 通知 / 卡片消息解析
   't-digest.mjs',          // 历史摘要注入（含与旧版提示词逐字对比）
+  't-memory-tools.mjs',    // 长期记忆工具的参数边界与定向查询
   't-sticker.mjs',         // 表情包（含缓存）
   't-smoke.mjs',           // 端到端冒烟（真起 app 再 fetch）
   't-panel.mjs',           // 面板接口

@@ -1,370 +1,241 @@
-# TypeScript 重构方案（qq-agent / myQQbot）
+# QQ Agent 当前架构与维护指南
 
-> 状态：**S0–S8 已完成**；后端 `src/` 已全部迁移为严格 TypeScript，前端 UI 已拆为原生 ES Module，迁移计划进入维护状态。
-> Web 后端已拆为路由表、HTTP/静态文件基础设施和 8 个领域路由模块；运行入口仍为编译后的 `dist/web/app.js` 与 `dist/web/server.js`。
-> 写作日期：2026-09-24
+> 本文档描述当前代码，而不是迁移计划。TypeScript、目录分层、Web 路由拆分和 UI 模块化均已完成。
+> 最后更新：2026-09-27。
 
-## Context
+## 1. 当前状态
 
-**问题**：项目已经长到"扁平结构拖后腿"的规模，而且仍然裸奔在无类型检查的状态下。
+后端源码位于 `src/`，全部使用严格 TypeScript；`tsc` 编译到 `dist/`，Node 与 Electron 只运行编译产物。前端位于 `ui/`，使用浏览器原生 ES Module，不经过打包。
 
-- `src/` 28 个文件平铺在一起、13107 行；`src/app.js` 一个文件 2258 行，里面是 ~65 条 `if (pathname === …)` 路由分支。
-- `ui/app.js` 5924 行、单文件经典脚本、90 个顶层函数共享一个全局作用域，改动一处要通读一片。
-- 仓库里**没有任何构建/类型检查/lint/CI**：没有 `tsconfig`、没有 ESLint、没有 `.github/`，`package.json` 只有 `start` 和 `server` 两条脚本。→ **S2 已补上 `tsconfig` + `build`/`typecheck`/`dev`/`check`/`test` 脚本；ESLint 与 CI 仍不做**（见第七节）。
-- 唯一的安全网是 `%TEMP%` 下的 22 个套件（约 1000 条断言），不在版本库里，清一次临时目录就全没。→ **S1 已把 22 个全部搬进 `tests/`**。
-- 代价已经真实发生过：`detectMime` 被搬到 `safe-fetch.js` 后用 `export { … } from` 转出，漏了本地 import，**整条读图链路**在生产上炸成 `detectMime is not defined`（2026-09-24）。同一类事故还有 `normalizeStickerEntry` 的字段白名单——新字段不加进去就静默丢失（注释里专门写了警告）。这两类问题 TypeScript 都能在 `npm run typecheck` 时就拦住。
+当前工程约束：
 
-**目标**：把扁平结构拆成按域分的目录，逐步迁到 TypeScript，并补上类型检查与仓库内测试这两道闸门；**运行行为、HTTP 接口、数据格式一律不变**。
+- Node.js ≥ 20，模块格式为 ESM / NodeNext。
+- TypeScript import 保留 `.js` 后缀，保证编译后的 Node 解析路径不变。
+- `src/` 是唯一后端源码，`dist/` 是可删除、可重建的产物，禁止直接修改。
+- JSON、HTTP、OneBot 和模型响应等外部边界使用 `unknown` 后再窄化。
+- `npm run check` 同时执行类型检查、依赖层级检查和断言测试。
 
-### 已与用户确认的四条决策（不再讨论）
+## 2. 目录与依赖层级
 
-| 决策 | 结论 | 理由 |
-|---|---|---|
-| 最终怎么跑 | **tsc 编译到 `dist/`**，Node / Electron / scripts / 测试都跑 `dist` 产物 | 运行时零新增依赖；`dist` 与 `src` 目录结构 1:1，加 sourcemap 后堆栈仍指回 `.ts` 行号 |
-| 目录重构粒度 | **先只搬目录**（`git mv`，仍全是 `.js`）；拆 `app.js` 路由留到后面单独一步 | 一次只动一种东西：先路径、后类型。每步都能单独跑测试、单独回滚 |
-| 前端 UI | **拆成 ES 模块，仍是 `.js`，不打包**（`index.html` 改 `<script type="module">`） | 不引入任何新工具链，浏览器直接跑；UI 拆文件的价值主要来自模块边界，不来自类型 |
-| 测试套件 | **搬进仓库 `tests/`**；本次只出文档，**不动任何代码** | 它们会被这次重构改到 import 路径，先有安全网再动结构；顺带解决"临时目录一清就全丢" |
-
----
-
-## 一、目标形态
-
-```
+```text
 src/
-├─ core/      config.ts  paths.ts  util.ts  personas.ts  tier-slider.ts
-├─ llm/       llm.ts  providers.ts  model-prices.ts  price-feed.ts
-│             vision-scan.ts  model-vision-docs.ts
-├─ chat/      store.ts  memory.ts  sessions.ts            (+ types.ts)
-├─ qq/        onebot.ts  sender.ts  md-to-plain.ts        (+ types.ts)
-├─ media/     safe-fetch.ts  web-search.ts  jmcomic.ts
-├─ stickers/  stickers.ts  sticker-manager.ts  sticker-cache.ts  (+ types.ts)
-├─ agent/     orchestrator.ts  prompt.ts  tools.ts  context-window.ts  (+ types.ts)
-└─ web/       app.ts  server.ts  types.ts  router.ts  http.ts
-              static-files.ts  usage-service.ts  routes/*.ts
+├─ core/       配置、路径、通用函数、档位滑条
+├─ llm/        模型请求、供应商、价格、视觉能力探测
+├─ chat/       消息存档、长期记忆、会话记录
+├─ qq/         OneBot 客户端、发送队列、Markdown 转纯文本
+├─ media/      安全下载、网页搜索、媒体任务
+├─ stickers/   表情库、缓存与管理
+├─ agent/      唤醒调度、上下文、提示词、工具、Agent 循环
+└─ web/        HTTP 基础设施、路由与领域接口
+
+ui/js/
+├─ main.js     浏览器入口与页面编排
+├─ state.js    前端共享状态
+├─ views/      会话、聊天、记忆、用量与设置页面
+└─ parts/      设置区块和复用组件
 ```
 
-**依赖只能向下，跨目录禁止反向/同层互引**（同目录内部随意）：
+依赖只能从高层指向低层：
 
-```
-T0 core
-T1 llm / chat / qq / media
-T2 stickers
-T3 agent
-T4 web          ← 只有它 import 所有人，没人 import 它
-```
-
-现有的 28 个文件的依赖图**已经符合这个分层**（例：`sticker-manager → onebot` 是 T2→T1 ✓，`prompt → stickers` 是 T3→T2 ✓，`config → personas/tier-slider` 是目录内 ✓），所以搬迁只是改路径，不需要动逻辑。搬迁后建议加一个 `scripts/check-layers.mjs`（grep import 语句、按目录判层，越界就报错）把这条规则钉住。
-
-`dist/` 镜像 `src/`（`rootDir: src` + `outDir: dist`），且 `.gitignore` 里**已经有** `dist/`。
-
----
-
-## 二、分阶段（每阶段一个可回滚的提交/PR）
-
-### S0 计划落文档（✅ 已完成，不碰代码）
-
-把本文档写进仓库 `docs/ts-migration-plan.md`（多周的事，需要它能被随时翻出来；`docs/` 现在只有生成的 `model-prices.md`）。
-
-**已做**：仅新增本文件。
-**未做**：任何源码、配置、依赖改动。
-
-### S1 安全网进仓库（✅ 已完成 2026-09-24，仍是 `src/*.js`，零风险）
-
-实际落地的形状（与最初的草图略有出入，以仓库里为准）：
-
-```
-tests/
-├─ run.mjs            一条命令跑全部：先 build、逐个起子进程、汇总，失败非零退出
-├─ README.md          怎么跑、两条规矩、每个套件守着什么
-├─ lib/src.mjs        被测代码在哪 —— 全仓库只有这一处写死（S2 起默认 `dist/`）
-├─ lib/harness.mjs    checker / dataDir / 假图床 / 假模型端点 / vm 假 DOM
-└─ t-*.mjs            23 个套件（13 断言 + 10 诊断）
+```text
+core
+  ↓
+llm / chat / qq / media
+  ↓
+stickers
+  ↓
+agent
+  ↓
+web
 ```
 
-初版还有 `register.mjs` / `hook.mjs` / `ws-stub.mjs` / `yaml-stub.mjs` 一套 loader hook
-（`node_modules` 为空时顶掉 `ws` / `js-yaml`）；S2 装完真依赖后**已整套删除**，理由见 S2。
+`scripts/check-layers.mjs` 会阻止反向依赖。领域共享类型分别放在各自的 `types.ts` 中，不建立全局巨型类型文件。
 
-- **关键设计：所有套件不再硬写源码路径**，统一走 `load(rel)`（动态 import，理由见 README「两条必须知道的规矩」）。
-- 22 个套件里 10 个（t-cfg/t-compact/t-diag/t-fire/t-final/t-final2/t-orch/t-orch2/t-reentry/t-stall）是**打印式诊断脚本**、没有断言也不退非零，runner 单独分组（默认跑断言套件，`--all` 才带上）。
-- `run.mjs` 会检查"磁盘上的 `t-*.mjs` 都被归类过"，漏一个就直接报错退出——不留"红的也照样跑"的习惯。
-- 顺手加了 `npm test` / `npm run test:all`。`check`（typecheck + test）要等 S2 有 tsc 了再加，现在加会指向一条不存在的脚本。
+## 3. Bot 对话调用链
 
-**结果**：22/22 绿。断言数与搬迁前逐一核对一致（admin 113、digest 89、notice 42、panel-wiring 125、reply 12、smoke 65、sticker 129、ui-render 118、vision-log 15、window-http 15）。默认 12 个断言套件 3.7s，带诊断 45.6s。
-
-**顺手做的**：`lib/harness.mjs` 收走了两份套件里各写一遍的假模型端点/假图床/假 DOM 壳（`t-vision-log` 与 `t-ui-render` 已改用它）。其余 20 个老套件的 `ok()` 没有回改——它们是从 `%TEMP%` 原样搬进来的，这道安全网本身不值得为了好看再动一遍。
-
-### S2 工具链与 `dist` 切换（✅ 已完成 2026-09-24，此时 **0 个 `.ts` 文件**）
-
-1. devDependencies 加 `typescript@~5.6`、`@types/node@^20`（`ws` 若在 `.ts` 里 import 需 `@types/ws`；`undici` / `electron` 自带类型）。首次要 `npm install`——**注意会拉 Electron（约 100MB+）**，这台机器现在 `node_modules` 是空的。
-2. `tsconfig.json`：
-   ```jsonc
-   {
-     "compilerOptions": {
-       "module": "NodeNext", "moduleResolution": "NodeNext", "target": "ES2022",
-       "lib": ["ES2022"], "types": ["node"],
-       "rootDir": "src", "outDir": "dist",
-       "allowJs": true, "checkJs": false,        // ← 增量迁移的关键：只查 .ts
-       "strict": true, "isolatedModules": true,
-       "sourceMap": true, "inlineSources": true, "removeComments": false,  // 注释是这个仓库的文档，必须保留
-       "skipLibCheck": true, "esModuleInterop": true,
-       "incremental": true, "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
-     },
-     "include": ["src/**/*.ts", "src/**/*.js"], "exclude": ["dist", "node_modules", "tests", "ui"]
-   }
-   ```
-   **禁止 `baseUrl`/`paths` 别名**：Node 直接跑 `dist` 时不认别名，除非再引 loader/打包器——显式相对路径是这里唯一安全的选择。同理，`.ts` 里的 import 说明符**继续写 `.js` 后缀**（NodeNext 约定），这样编译产物的说明符一个字符都不用变。
-3. `package.json` scripts：`build`（`tsc -p`）/ `typecheck`（`--noEmit`）/ `dev`（`-w`）/ `check`（`typecheck && node tests/run.mjs`），`server` 改成 `node dist/server.js`，并加 `prestart`/`preserver` 自动 build（防"改了源码忘了 build，跑的是旧 dist"）。
-4. 入口改指 `dist`（见第四节清单）。
-5. 两个入口顶部调 `process.setSourceMapsEnabled?.(true)`，否则日志里的 `at async Orchestrator.wake (…:558:11)` 会指到 `dist` 的行号。（`server.js` 里要写在 import 之后——ESM import 会被提升；`electron/main.js` 里同理。）
-6. **为什么必须先做这步**：一旦有文件改成 `.ts`，Node 20 就跑不了它（`--experimental-strip-types` 是 22.6+，Electron 33 内嵌的是 Node 20），运行时只能靠 `dist`。所以构建必须排在第一个 `.ts` 之前。先在全 `.js` 状态下把工具链跑通，出问题就百分百是工具链的问题，跟类型无关。
-
-**实际落地的东西**：
-
-- 装完 75 个包（`node_modules` 301MB，tsc 5.6.3）；`dist/` 57 个文件，注释原样保留。
-  `tsc` 在 `allowJs` 下是**重新打印** JS 而不是原样拷贝：4 空格缩进、空行被吃掉、
-  单行 `if (x) y()` 被展开、CRLF 归一成 LF。所以 `dist/*.js` 与 `src/*.js` **不是逐字节相同**
-  ——"行为等价"是靠 22 个套件验的，不是靠 diff 眼看的。
-- `tests/lib/src.mjs` 的默认值从 `src/` 切到 `dist/`；`run.mjs` 开跑前先 `tsc`（失败就报错退出），
-  `--no-build` 可跳过。（当时还留了个 `QQ_AGENT_SRC=src` 逃生口，**S3 已删**——见下。）
-- 删掉了 S1 那套 loader hook（`register.mjs` / `hook.mjs` / `ws-stub.mjs` / `yaml-stub.mjs`）：
-  依赖已经真装上了，留着只会让"用 yaml 读配置"和"真的构造 WebSocket"这两条路在套件里继续是假的。
-- `scripts/export-prices.mjs` / `apply-vision-docs.mjs` 改指 `dist`；`export-prices-md.mjs`
-  仍然把 `src/model-prices.js` 当文本读（理由见 S8）；`electron/main.js` → `../dist/app.js`。
-- `src/server.js` 只加了 sourcemap 开关和一句注释，**没有实质改动**——它 import 的 `./app.js`
-  在 `dist` 里相对关系不变。
-- `scripts/*.mjs` 保持 `.mjs`（plan 里"不搬 scripts"），只改 import 指向 `dist`。
-- `dist/` 与 `*.tsbuildinfo` 都在 `.gitignore` 里；`git status` 干净（只有预期的 10 个改动文件 + 新增 `tests/`、`tsconfig.json`）。
-- `README.md`「安装与启动」重写：`npm install` → `npm run build` → `npm start`；
-  `启动QQ机器人.bat` 的说明补上"首次双击前要先 build"（`.bat` 本身不动）。
-  `pre*` 钩子让日常不必手动 build。
-
-**结果**：22/22 绿，断言数与 S1 基线**逐条一致**（admin 113、digest 89、notice 42、
-panel-wiring 125、reply 12、smoke 65、sticker 129、ui-render 118、vision-log 15、window-http 15）。
-默认 12 个断言套件 3.6s（含 build）；`npm run check` 绿。
-
-**没做的一步（留给用户）**：验证矩阵里的 `npx electron .` 我没有跑——它会弹窗、
-会碰真实 `data/`、还可能撞上已经占着 3210 端口的那个实例。
-替代检查是 `node -e "import('./dist/app.js')"` 能拿到 `createApp`。
-**真机冒烟（`npm start` / 连 SnowLuma 收发一条真实消息）仍需用户自己走一遍。**
-
-
-### S3 路径锚点集中（✅ 已完成 2026-09-24，第一个 `.ts` 文件）
-
-现状是**深度敏感**的，这是搬迁前必须拆掉的地雷：
-
-- `src/config.js`：`ROOT = resolve(__dirname, '..')` → `DATA_DIR`、`CONFIG_FILE`
-- `src/app.js`：`UI_DIR = resolve(__dirname, '..', 'ui')`
-- 两者都基于 `fileURLToPath(import.meta.url)`，**文件下沉一层就会指错**（编到 `dist/core/config.js` 后 `..` 变成 `dist/`，`python-tools/`、`assets/`、`ui/`、`data/` 全找不到）。
-
-**实际落地**：
-
-新增 `src/paths.ts`（**零依赖**，不然和 config.js 成环）：
-
-```ts
-export const ROOT: string;         // 从本文件向上最多找 6 层 package.json
-export const DATA_DIR: string;     // process.env.QQ_AGENT_DATA_DIR || ROOT/data
-export const UI_DIR: string;       // ROOT/ui
-export const CONFIG_FILE: string;  // DATA_DIR/config.json
+```text
+OneBot 入站事件
+  → ChatStore 持久化
+  → ContextWindowRegistry.push
+  → WakeScheduler 防抖聚批
+  → resolveContextTier 判断是否响应及历史深度
+  → 同步取得新消息批次并消费窗口
+  → runAgent 组装提示词和工具
+  → chatCompletionWithRetry
+  → executeTool（可多轮）
+  → send / finish 等工具产生外部动作
+  → SessionRegistry 收尾并通知 UI
+  → 运行期间到达的新消息进入下一轮 drain
 ```
 
-- 向上找不到 `package.json` 时**不抛错**，退回旧行为（上一层）。理由写在文件里：
-  路径算不准只该让某些功能不好用，不该让整个程序起不来。
-- `config.js` 改成 `import { ROOT, DATA_DIR, CONFIG_FILE } from './paths.js'` + `export { … }`
-  （**先 import 再 export**，不是 `export { … } from`——后者只转出、不引入本文件作用域，
-  正是 2026-09-24 `detectMime` 那个坑）。同时删掉了它已经用不上的 `path` / `fileURLToPath` import。
-  仓库里另有 10 个模块从 `config.js` 取 `DATA_DIR`/`ROOT`，S3 不动它们（那属于 S4/S5）。
-- `app.js` 改成 `import { ROOT, DATA_DIR, UI_DIR } from './paths.js'`，删掉本地 `__dirname` / `UI_DIR`。
-- **与计划的一处出入**：原计划还要改 `jmcomic.js` / `price-feed.js`。实际看了源码，它们
-  从来没自己算锚点（只是 `import { DATA_DIR } from './config.js'`），所以没动——那两处
-  的改动会是纯粹的噪音。
-- **`QQ_AGENT_SRC=src` 逃生口删掉了**（`tests/lib/src.mjs`、`tests/run.mjs`）：从 `src/` 里
-  出现第一个 `.ts` 起它就必然跑不通（`src/config.js` import 不到 `./paths.js`），
-  一个"看起来有、其实一定失败"的开关比没有更糟。`SRC_KIND` 随之消失，`run.mjs` 改成无条件先 build。
+模型没有跨运行的原生对话历史。每次 `runAgent` 都重新创建 system 和 user 两条初始消息。同一次运行中的工具轮次会继续追加 assistant、tool 和视觉 user 消息；运行结束后不把这串模型消息作为下一次运行的 LLM history。
 
-新增 `tests/t-paths.mjs`（10 条断言）。原计划是"从 `src/` 与 `dist/` 各跑一次"，
-但 `src/` 里没有 `paths.js`（它是 `.ts`），所以换成了**更有针对性**的做法：
+## 4. 新消息窗口与历史深度
 
-1. 验今天的四个常量（含 `UI_DIR/index.html` 真的在）；
-2. 验 `config.js` 转出的那份与 `paths.js` 一致，并**真的调一次 `updateConfig({})`**
-   ——只在值上比较抓不住"漏 import"，得让用到 `DATA_DIR`/`CONFIG_FILE` 的那行代码真的执行（它无保护）；
-3. **下沉验证**：把编译产物拷到 `%TEMP%/<夹具>/pkg/dist/core/paths.js`（`<夹具>/pkg` 下有 `package.json`），
-   import 后断言 `ROOT` 仍是 `<夹具>/pkg`。已确认旧写法（`resolve(__dirname,'..')`）在这里会算出
-   `<夹具>/pkg/dist` ——**这条断言是有牙的**，不是摆样子；
-4. 找不到 `package.json` 时退回上一层而不是抛错（夹具刻意放 6 层深，保证爬不出夹具范围，
-   结果不受机器 TEMP 目录里有没有 `package.json` 影响；改 `MAX_UP` 要跟着数层数）。
+这两个概念职责不同，不能混用。
 
-**结果**：13/13 绿（新增的 t-paths 10 条断言全过），断言数与 S2 基线逐条一致，
-`npm run check` 绿。另验：`node dist/server.js` 在临时 `QQ_AGENT_DATA_DIR` 上起得来
-（`/` 、`/app.js`、`/api/config` 均 200，验完 kill）、`node scripts/apply-vision-docs.mjs`
-仍能写进临时 config（21 条）。
+### 4.1 `ContextWindow`
 
-### S4 目录搬迁（✅ 已完成 2026-09-26，除 `core/paths.ts` 外仍是 `.js`）
+每个 `chatKey` 有一个窗口，只管理对方发来的当前新消息：
 
-- 按第一节的树 `git mv`，**只改路径、不改代码语义**；import 说明符从 `'./x.js'` 改成 `'../core/x.js'` 之类（约 100 条边），全部机械可验。
-- 跨界引用只有 5 处（见第四节），一次改到位。**S4 特有的三处别忘**：
-  - **`paths.ts` 搬进 `core/` 后，`config.js` / `app.js` 里的 `'./paths.js'` 要改成 `'./core/paths.js'`。**
-    这两行的症状最隐蔽（`ROOT` 会算成 `dist/core/`），好在这正是 `t-paths` 盯着的东西——它会先红。
-  - `electron/main.js` 的 `await import('../dist/app.js')` → **`'../dist/web/app.js'`**（`app.js` 搬到 `web/` 了）。这一处漏了不会编译报错，只在启动桌面端时才炸。
-  - `tests/t-digest.mjs` 用 `git show <baseline>:src/prompt.js` 取旧版提示词逐字对比，再靠一条正则把它内部的 `from './x.js'` 重写成绝对 URL。搬迁后那条正则要对上**新的相对路径**（`'../core/util.js'` 之类），所以需要一个"旧扁平文件名 → 新路径"的映射表；否则 `t-digest` 会因为旧文件 import 不到而红，而不是因为提示词真的变了。
-- `tests/lib/src.mjs` 仍然只指 `dist`（这次变化的是套件里的**相对**路径，`load('chat/store.js')` 这种），
-  所以搬迁对套件的影响同样集中在那一个文件 + 各套件里 `load()` 的实参。
-  （`lib/src.mjs` 里 `SRC_DIR` 的注释已经写明：`SRC_DIR` 是"运行时从哪加载"，`SOURCE_REL` 恒为 `'src'`
-  是"git 历史里那棵源码树"——`t-digest` 取旧版本文件用后者，别混。）
-- 验证：`npm run build && node tests/run.mjs` 全绿；`node dist/server.js` 起得来；`node scripts/*.mjs` 三个脚本仍能跑。搬迁后顺手跑一下 `git log --follow` 确认历史跟得住（`git mv` 的目的就是这个）。
-- 新增 `scripts/check-layers.mjs` 并接入 `npm run check`；当前 29 个源码文件通过分层检查，无 T1 跨领域白名单。
-- 结果：类型检查、构建和 12/13 个断言套件通过；`t-panel-wiring` 的 2 条 UI 静态断言在未改动的 `ui/` 上仍失败，属于迁移前既有基线问题，未通过弱化断言处理。
-- 回滚：整体 revert 一个提交即可。
+- `win`：最新的驻留消息，容量由 `store.maxContextMessages` 控制，`0` 表示不限。
+- `sunk`：因容量不足被挤出、但尚未消费的旧消息。
+- `lastSeenId`：已经由某次调度处理到的位置。
+- `settled`：等待同步到存档 `read` 镜像的消息 ID。
 
-### S5 逐目录 `.js` → `.ts`（✅ 已完成）
+主要读取接口：
 
-顺序（叶子优先，先啃没依赖的）：
+- `pending()`：`sunk + win` 中全部未消费消息，不受容量限制，用于艾特、关键词和是否响应的判断。
+- `batch()`：`win` 中尚未消费的最新消息，进入【本次唤醒】。
+- `foldedCount()`：被挤入 `sunk` 的未消费条数，用于提示模型较早消息已降级到历史。
+- `seen()`：推进水位线。回复与不回复都会消费，避免旧消息反复成为“新消息”。
 
-1. ✅ `core/`：`util`、`tier-slider`、`personas`、`paths`、`config`；已导出 `AppConfig`，严格类型检查与核心回归通过
-2. `llm/`：`model-vision-docs`、`model-prices`、`price-feed`、`llm`、`providers`、`vision-scan`
-3. `chat/`：`sessions`、`store`、`memory`
-4. `qq/`：`md-to-plain`、`sender`、`onebot`
-5. `media/`：`safe-fetch`、`web-search`、`jmcomic`
-6. `stickers/`：`stickers`、`sticker-cache`、`sticker-manager`
-7. `agent/`：`context-window`、`prompt`、`tools`、`orchestrator`（最后，1793 行）
-8. `web/`：`app`（留到 S6 拆路由时一起转，避免同一个文件改两遍）
+### 4.2 `ContextTierResult.historyCount`
 
-**一个目录转完再动下一个**，每次 `npm run typecheck && node tests/run.mjs` 必须绿——因为只检查 `.ts`（`checkJs: false`），未转换的 `.js` 不参与检查，不会出现"几万个错误糊在一起"的局面。
+响应档位决定两件事：是否响应，以及响应时读取多少条窗口之外的已读历史。
 
-`.ts` 文件一律按 `strict` 写；个别为了兼容旧写法确实需要 `any` 的地方，用**带注释的局部 `any`**（说明为什么），不要全文件放宽。
+| 触发原因 | 历史深度来源 |
+|---|---|
+| 被艾特 | `store.atCount` |
+| 命中关键词 | `store.keywordCount` |
+| 随机参与 | `store.randomCount` |
+| 全部响应 | `store.allCount` |
 
-### S6 `app.js` 拆路由（✅ 已完成，2258 行 → `web/` 子树）
+内部统一使用 `historyCount` / `historyLimit`。旧的 `PromptContext.contextLimit` 只作为兼容入口保留；会话 JSON 暂时同时记录 `historyLimit` 和旧字段 `contextLimit`，便于旧面板或历史文件继续读取。
 
-按域分成 `web/routes/`（`sessions` / `chats` / `stickers` / `config` / `usage` / `system` …），配一张路由表：
+调度器在消费窗口前拍下整个 `win` 的本地 ID，并将其作为 `windowEntryIds` 传给提示词构建器。因此【过去状态】会排除整个当前窗口，而不只是本轮 `triggerEntries`，防止驻留窗口内已经处理过的消息被历史深度再次注入。
 
-```ts
-type Route = { method: 'GET'|'POST'|'DELETE'; path: string | RegExp; handle(ctx: AppCtx, req: Req, m: RegExpMatchArray | null): Promise<Reply> };
+## 5. 提示词组装
+
+### 5.1 System prompt
+
+`buildSystemPrompt()` 放稳定、跨会话的规则：人设与表达约束、是否应当发言的原则、工具调用与引用安全规则、表情使用策略。工具参数定义留在 tool schema，不再复制到 system/user prompt。
+
+### 5.2 User prompt
+
+`buildUserPrompt()` 按以下顺序构造动态内容：
+
+1. 【当前时间】
+2. 【此刻状态】
+3. 【历史印象】——历史压缩产生的摘要
+4. 【过去状态】——窗口之外、档位允许读取的原始历史
+5. 【本次唤醒】——当前新消息窗口的未消费批次
+6. 【记忆】——仅与本轮可见成员相关的长期印象
+7. 可用表情目录
+8. 【本轮决策】
+
+避免重复的规则：
+
+- 当前窗口全部从【过去状态】排除。
+- 已进入【历史印象】的摘要条目从【过去状态】排除。
+- 成员记忆只按 `triggerEntries + 实际注入的 past.messages` 选人。
+- 成员备注直接替换消息显示名，不再额外生成重复段落。
+- 参与度与工具细则只保留一个权威注入位置。
+
+### 5.3 统一字符预算
+
+配置项：
+
+```text
+store.promptContextMaxChars = 32000
 ```
 
-参数路由（现在散着 ~10 个 `xxxMatch = pathname.match(...)` 变量）统一由表来做；handler 返回 `{ status, body }` 而不是自己 `res.writeHead/end`。**HTTP 路径、请求体、响应体一个字节都不改**（t-admin / t-smoke / t-panel 等套件在守）。
+它约束单次完整 user prompt，`0` 表示不限。当前采用字符预算而不是依赖特定模型 tokenizer，使所有 OpenAI 兼容渠道行为一致。
 
-同步转 `.ts`，并给 `AppCtx` 一个接口——现在它是鸭子类型，测试里靠手搓假对象（t-orch 就是），有接口后这些假对象能被编译器检查。
+始终保护、不裁剪的部分：当前时间、会话状态、【本次唤醒】中的新消息和【本轮决策】。
 
-**实际落地**：
+超出预算时依次让位：
 
-- `app.js`、`server.js` 已转为严格 TypeScript；`app.ts` 收敛为依赖装配、SnowLuma 生命周期、OneBot 入站事件、SSE 和 HTTP 派发。
-- 新增 `types.ts`、`http.ts`、`router.ts`、`static-files.ts`、`usage-service.ts`；普通 handler 返回统一 `Reply`，SSE 仍保持长连接专用路径。
-- 路由按 `usage/system/providers/config/sessions/chats/memory/stickers` 八个领域拆入 `web/routes/`，由 `routes/index.ts` 保持原分支优先级组合。
-- 新增 `t-web-router.mjs`（11 条断言），覆盖精确/正则匹配、方法分流、404、请求体解析以及 JSON/二进制/空响应。
-- 严格类型检查、构建、层级检查及 Web/领域回归均通过；默认与 `--all` 套件仅保留 S6 开始前已知的 `t-panel-wiring.mjs` 两条 S7 UI 接线失败，未弱化断言。
-- `src/web/` 已无 `.js` 源文件；HTTP 路径、状态码、响应结构、SSE、静态资源和运行时 `createApp()` 返回字段保持不变。
+1. 表情目录；
+2. 历史摘要；
+3. 长期记忆；
+4. 窗口外的已读历史。
 
-### S7 UI 拆 ES 模块（✅ 已完成，5924 行单文件 → 原生模块子树）
+普通可选段保留标题和较新的尾部内容；【过去状态】按整段移除，不截断半条消息。历史整段被移除时 `session.pastStateCount` 同步归零，避免 `get_recent_messages` 的翻页偏移跳过模型实际上没看到的内容。
 
-- `ui/app.js` 已删除，`index.html` 现在只加载一次 `<script type="module" src="/js/main.js">`；后端静态文件服务无需改动即可直接提供整个模块子树。
-- `ui/js/` 已按基础设施、页面视图、设置区块和可复用部件拆分：共享状态集中在 `state.js`，请求集中在 `api.js`，启动编排集中在 `main.js`；聊天、会话、记忆、表情、用量、SnowLuma 和设置各自拥有独立模块。
-- 所有相对 import 均显式保留 `.js` 后缀；不存在 bare import、缺失目标、循环依赖或无法从入口到达的模块。
-- `t-ui-render.mjs` 已改为安装假 DOM 后动态 import 具名导出，不再把整份脚本塞入 `vm`，原有 118 条渲染、XSS 和旧记录兼容断言全部保留。
-- 新增 `t-ui-modules.mjs`（9 条断言），守卫唯一 module 入口、旧入口删除、扩展名、模块可达性和无环依赖；`t-smoke.mjs` 改为验证 `/js/main.js` 与代表性子模块。
-- `t-panel-wiring.mjs` 已适配模块结构，原有两条失败（过滤列表数据源一致、消息刷新后同步摘要块）均已转为明确接线/行为保护并通过，没有删除或弱化断言。
-- 验收结果：类型检查、构建、层级检查、15 个默认断言套件、25 个含诊断套件及 `npm run check` 全部通过；HTTP、SSE、配置格式、页面 DOM id、交互文案和主题语义保持不变。
-- 回滚：UI 是独立子树，恢复旧文件并将 `index.html` 的入口改回即可；本阶段未创建 Git 提交。
+如果不可裁剪的本轮新消息和固定指令本身已经超过预算，最终文本允许超过上限，并在 session 中记录 `promptBudgetExceeded=true`。预算不能以静默截断用户当前消息为代价。
 
-### S8 收尾（✅ 已完成）
+## 6. 历史摘要与长期记忆
 
-- `scripts/sanitize-release.mjs` 的文本扫描扩展名已包含 `.ts`，并继续跳过生成目录 `dist/`；发布前可用 `--scan` 或 `--dry-run` 做只读验收。
-- `scripts/export-prices-md.mjs` 已读取 `src/llm/model-prices.ts`，`export-prices.mjs` 与 `apply-vision-docs.mjs` 已改为加载 `dist/` 中的编译产物。
-- README 已明确 `npm ci` → `npm run build` → `npm start` / `npm run server`，开发期使用 `npm run dev`；仅运行后端的发布目录可使用 `npm ci --omit=dev`，但必须先生成 `dist/`。
-- `启动QQ机器人.bat` 保持原样；Electron 入口继续加载 `dist/web/app.js`。可选的 Electron 主进程 TypeScript 化不属于本次迁移的完成条件。
-- 类型检查、构建、层级守卫、默认与 `--all` 测试、辅助脚本临时目录验证及发布脱敏扫描均通过；没有修改真实 `data/`，也没有创建 Git 提交。
+历史压缩将较旧原始消息整理为 digest，并从正常存档窗口中归档。提示词注入受两层约束：
 
----
+- `digest.maxChars`：摘要通道自己的最大候选字数；
+- `store.promptContextMaxChars`：摘要、历史、记忆、表情共同竞争的最终总预算。
 
-## 三、类型化策略
+摘要默认只在本轮确实读取历史时注入；`digest.injectEveryRound` 可改变这一时机。选中的摘要不会再在【过去状态】出现。
 
-- **只管 `.ts`**（`checkJs: false`）：迁移期间每提交都绿，未转换的 `.js` 不产生噪音。
-- **接口就近放**：`core/`（`AppConfig`）、`chat/types.ts`（`ChatMessage` / `MediaEntry` / `SessionRecord`）、`llm/types.ts`（`ChatRequestMessage` / `ToolCall` / `Usage`）、`qq/types.ts`（OneBot v11 事件联合 + CQ 段）、`stickers/types.ts`（`StickerEntry`）、`agent/types.ts`（`ToolResult` / `ToolContext` / 事件表）。跨域只有 `AppConfig` 和事件表。
-- **JSON 边界保持 `unknown` + 手写窄化**，不引入 zod/io-ts（与这个仓库"零额外运行时依赖"的风格一致；`safeParse` 之类的小 helper 已经存在）。
-- **不加**品牌类型（branded types）、不加 `noUncheckedIndexedAccess`（13k 行的存量代码会被淹没），这两样留作 S8 之后的可选收紧。
-- 有三处"注释里写着"的坑会被类型系统直接接管，这是本次重构最实在的收益：
-  1. `normalizeStickerEntry` 的字段白名单（`cacheFile` 静默丢失那一类）→ `StickerEntry` 接口 + 白名单构造器，漏字段编译期就报；
-  2. `detectMime` 的 `export { x } from` 陷阱 → `.ts` 里用未 import 的名字直接 "Cannot find name"；
-  3. `ToolContext` 鸭子类型 → 工具与假测试对象都被编译器检查。
+长期记忆用于保存跨多次聊天仍有价值的成员印象，不等同于聊天摘要：
 
----
+- `memory_append` 必须指定数字 QQ 号。
+- `memory_query` 必须指定 1–15 位数字 QQ 号，只返回该成员，禁止无参数读取全会话成员记忆。
+- `memory_remove` 用于删除失效印象。
+- 自动整理在会话结束后后台执行，不阻塞回复主链路。
 
-## 四、需要改的跨界引用（S2 一次改到位）
+摘要负责“过去发生了什么”，长期记忆负责“以后与这个人交流时仍有用的稳定信息”。
 
-| 位置 | 原计划 | 实际落地 |
-|---|---|---|
-| `package.json` scripts | `"server": "node src/server.js"` | ✅ `node dist/web/server.js` + `build`/`typecheck`/`dev`/`check` + `prestart`/`preserver` |
-| `electron/main.js` | `await import('../src/app.js')` | ✅ `await import('../dist/web/app.js')` |
-| `scripts/export-prices.mjs` | `import '../src/model-prices.js'` | ✅ `../dist/llm/model-prices.js` |
-| `scripts/apply-vision-docs.mjs` | `import '../src/config.js'` | ✅ `../dist/core/config.js` |
-| `scripts/export-prices-md.mjs` | 把价格源码当文本读 | ✅ 已改读 `src/llm/model-prices.ts`（**必须读源码**） |
-| `tests/lib/src.mjs` | —（S1 新建） | ✅ `dist/`；另有恒为 `'src'` 的 `SOURCE_REL` 给 `git show` 用（`SRC_DIR` 是"运行时从哪加载"，两件事别混）。`QQ_AGENT_SRC` 覆盖已在 S3 删除 |
-| `README.md` `启动QQ机器人.bat` | 直接起 electron | ✅ 文档补了 build；`.bat` 不动 |
-| `.gitignore` | 已有 `dist/` | ✅ 补 `*.tsbuildinfo` |
-| `scripts/sanitize-release.mjs` | `TEXT_EXT` 无 `.ts` | ✅ 已包含 `.ts`，源码密钥扫描不会跳过 TypeScript |
+## 7. 图片识别与会话面板
 
-`src/web/server.js` 内部 `import './app.js'` **不用改**（两者仍在同一目录，相对关系不变）。
+图片不会由工具自行 OCR。完整链路是：
 
-**S2 之后仍要在 S4 再动一次的三处**：`electron/main.js`、`scripts/export-prices.mjs`、
-`scripts/apply-vision-docs.mjs`（都只是路径变深，不是逻辑变化）。
-`scripts/export-prices-md.mjs` 与 `sanitize-release.mjs` 留到 S8。
+1. `get_message_images` 根据 QQ 消息 ID 查找存档媒体。
+2. `safe-fetch` 校验地址、下载二进制、识别 MIME，并转为 data URL。
+3. 工具文本结果以 `role: tool` 返回。
+4. 图片以紧随其后的多模态 `role: user` 消息注入，兼容不接受 tool 图片的 OpenAI 兼容端点。
+5. 下一轮视觉模型产生文字理解或继续调用工具。
 
----
+会话日志中的 `toolImages` 会记录图片数量。下一轮响应到达后，编排层将读图文字和同轮工具调用回填到 `toolImages.reply`；UI 在同一工具卡片中展示，并通过 `imageReply` 避免重复渲染 assistant 气泡。
 
-## 五、风险与对策
+视觉工具只有在全局视觉开关启用，且模型没有被明确探测为 `no-vision` 时才会提供给模型。
 
-1. **路径锚点深度敏感**（最大的一颗雷）→ **S3 已拆**：锚点集中在 `src/paths.ts`，
-   用"向上找 package.json"而不是数 `..`，并有 `t-paths` 的"下沉一层仍算得对"守着。
-   搬迁后 `paths.ts` 跟着进 `core/`，`config.js` / `app.js` 的 import 改成 `./core/paths.js` 即可
-   （**S4 最容易漏的就是这两行**：改完 `ROOT` 会指回 `dist/core/`，`data/`、`ui/` 全失联，
-   而且是运行时才炸——但 `t-paths` 会先红给你看）。
-2. **`.js` 后缀必须保留在 `.ts` 的 import 里**（NodeNext 约定）：这是 `dist` 与 `src` 说明符 1:1 的前提，随手"清理"成无后缀会让编译产物在 Node 里解析失败。
-3. **忘了 build 就跑**：改 `src/*.ts` 后不加 `prestart`/`preserver`，`node dist/server.js` 跑的是旧产物，排查成本极高。用 npm 生命周期钩子 + `tsc -w` 兜住。发出去的便携包本来就只带 `dist`，不受影响。
-4. **`%TEMP%` 套件是全部分安全网，且不在版本库**（S1 已解决：22 个全部搬进 `tests/` 并跑绿）。
-5. **入口清单漏改**（第四节表格）：漏一处不会编译报错，只在运行时表现为"改的地方没生效"。S2 已按表逐条核对过（表格里带 ✅ / ⏳ 状态）。
-6. **`scripts/*.mjs` 读源码文本**：`export-prices-md.mjs` 解析的是注释横幅，路径/后缀变更会静默产出空文档——S8 改完要跑一次 `node scripts/export-prices-md.mjs` 并 diff `docs/model-prices.md`。（S2 期间跑过一次，只动了 `数据核对时间` 那行，已 revert 掉以免混进 S2 的提交。）
-7. **循环依赖**：今天一个都没有（`tier-slider` 被特意做成零依赖就是为了这个）。搬迁可能诱使人写出 `core → agent` 这种反向依赖，用 `scripts/check-layers.mjs` 钉住分层。
-8. **`tsc` 编到 `dist` 会让"就地改、就地跑"的手感消失**（替代方案是 `outDir: src` 与源码同目录，代价是 `src/` 里混入生成物、`git status` 噪音、容易改错文件——已确认不走这条）。开发期用 `tsc -w` 缓解。
-   实证补充：`tsc` 在 `allowJs` 下是**重新打印** `.js`（4 空格缩进、空行被吃、单行 `if` 展开、CRLF→LF），
-   所以别拿 `dist/*.js` 跟 `src/*.js` 做 diff 判断"有没有改坏"——行为等价靠套件验。
-9. ~~**首次 `npm ci` 会拉 Electron（100MB+）**~~（S2 已装：75 个包、`node_modules` 301MB，一次性成本已付）。
-10. **UI 拆模块后，`t-ui-render` 的 `vm` 假壳方案失效**：要改成"装假 DOM 到 `globalThis` 再动态 import"，并把每个 UI 套件放进独立进程（S7 已写明）。
-11. **`dist/` 是产物，不是源码树**（S2 新增）：`SRC_DIR`（运行时从哪加载）与 `SOURCE_REL`（git 里的源码树）是两件事，
-    写套件时容易混。`t-digest` 一度用 `SRC_REL` 去 `git show`，报 `path 'dist/prompt.js' exists on disk, but not in <commit>`
-    ——凡是要碰 git 历史的地方一律用 `SOURCE_REL`。
+## 8. Agent 工具循环
 
----
+`runAgent()` 每轮会调用模型、累计用量、保存 assistant 响应、解析原生或文本形式的工具调用、执行工具并追加结果。图片结果转换为额外视觉 user 消息。无工具调用、调用 `finish`、达到轮数上限或全局中止时结束。
 
-## 六、明确的验证矩阵
+模型普通文本本身不会自动发送到 QQ；对外动作必须通过发送类工具完成。因此最终状态按真实发送记录判断：发过消息为 `done`，未发送为正常的 `noreply`。
 
-每阶段收尾都跑：
+## 9. 会话记录与可观测性
+
+每次运行记录：
+
+- system/user prompt 与总字符数；
+- 输入模型的初始 messages；
+- vendor、模型、调用轮数与 token 用量；
+- 命中的响应档位、原因和 `historyLimit`；
+- `promptBudgetChars` 与是否因保护区过大而超预算；
+- 工具调用、错误、图片注入、发送记录和结束原因。
+
+这些记录用于排查提示词膨胀、渠道计费、读图失败和工具循环，不作为下一次模型请求的对话历史。
+
+## 10. 构建、测试与发布
 
 ```bash
-npm install              # 只在 node_modules 变了时跑（S2 起是必须的前提）
-npm run typecheck        # tsc --noEmit
-npm run build            # tsc -p tsconfig.json
-node tests/run.mjs       # 仓库内套件（默认就会先 build；断言组全绿，--all 带诊断组）
-node dist/server.js      # 起服务，浏览器开 127.0.0.1:3210 逐个标签页点一遍
-npx electron .           # 窗口 / 托盘 / 单实例锁正常
-node scripts/sanitize-release.mjs --dry-run   # 发布清理流程没被破坏
+npm ci
+npm run typecheck       # 严格类型检查，不生成文件
+npm run build           # 编译 src/ → dist/
+npm test                # build 后运行断言套件
+npm run test:all        # 额外运行诊断脚本
+npm run check           # typecheck + 层级检查 + 断言套件
+npm run dev             # tsc --watch
 ```
 
-**`npx electron .` 这一步要人来做**：它会弹窗、会碰真实 `data/`、还会撞上单实例锁，
-不该由 agent 在用户的桌面上替跑。S2 用的替代检查是
-`node -e "import('./dist/app.js').then(m => console.log(typeof m.createApp))"`。
-起服务那条则是在临时 `QQ_AGENT_DATA_DIR` 上验的（面板 200 / `/api/config` 返回 JSON / `/app.js` 200），
-验完就 kill——**不要**对着真实 `data/` 起一遍。
+测试通过 `tests/lib/src.mjs` 加载 `dist/`，确保验证的是实际运行产物。新增 `t-*.mjs` 必须在 `tests/run.mjs` 的 ASSERT 或 DIAG 中显式归类，否则 runner 直接失败。
 
-外加一次**真机冒烟**（只有它能验的地方）：连 SnowLuma 收到一条真实群消息 → 机器人回复 → 会话记录面板里能看到这次运行。
+当前重点回归包括动态窗口语义、摘要去重、窗口和档位历史分离、统一预算保护本轮消息、读图结果回填、`memory_query` 定向查询，以及 Web/UI 模块接线。
 
----
+发布前执行：
 
-## 七、不做的事（本次范围外）
+```bash
+node scripts/sanitize-release.mjs --scan
+```
 
-- 不加 ESLint / Prettier / 测试框架 / 打包器（UI 明确不打包）；不引 zod 之类的运行时校验库。
-- 不改任何运行时行为、HTTP 接口、`data/` 文件格式与字段、提示词内容。
-- 不升级已有依赖，不动 Electron 版本，不碰 `snowluma/`（第三方）。
-- 不搬 `electron/`、`assets/`、`python-tools/`、`scripts/`（`scripts/*.mjs` 保持 `.mjs`，只改 import 指向）。
-- 不做 `noUncheckedIndexedAccess`、品牌类型、路径别名（`@core/*`）这类"好看但会挡住增量迁移"的收紧——留到结构稳定之后。
-- S0 不动 `ui/` 与 `src/` 的**任何**代码。S1/S2 同样一行源码没改（改动全在 `tests/`、`tsconfig.json`、
-  `package.json`、`README.md`、`.gitignore` 和三个入口/脚本的 import 指向上）。
-  **S3 动了源码，但只动了"路径从哪来"这一件事**：新增 `src/paths.ts`，`config.js` / `app.js`
-  各改两处 import、删掉自己那份数 `..` 的代码——没有任何行为、接口、数据格式变化。
+`data/`、API Key、消息存档、记忆、登录态和会话记录均不得进入公开发布物。
+
+## 11. 维护原则
+
+- 新消息窗口、已读历史、摘要、长期记忆是四种不同数据，不要重新合并成一个模糊的“上下文”。
+- 判断是否响应必须使用无限制的 `pending()`，不能只看容量受限的 `batch()`。
+- `batch()`、`foldedCount()` 与 `seen()` 之间不得插入 `await`。
+- 新增提示词内容必须明确唯一归属，并纳入统一预算，避免跨 system/user/tool schema 重复注入。
+- 修改外部 JSON 或模型响应处理时，先做运行时窄化，不用无注释的全局 `any`。
+- 不直接修改 `dist/`；不使用 TypeScript 路径别名；不省略 NodeNext import 的 `.js` 后缀。
+- 修改对话主链路后至少运行 `npm run check`。
