@@ -23,6 +23,7 @@ const chatJs = readUI('js/views/chats.js');
 const memoryJs = readUI('js/views/memory.js');
 const stickerJs = readUI('js/views/stickers.js');
 const settingsJs = readUI('js/views/settings/index.js');
+const agentRunnerTs = fs.readFileSync(path.join(process.cwd(), 'src/agent/agent-runner.ts'), 'utf8');
 
 let pass = 0, fail = 0;
 const ok = (label, cond, extra = '') => {
@@ -105,6 +106,8 @@ const legacy = [...new Set([...js.matchAll(/\$\('#([\w-]+)'\)|getElementById\('(
 if (legacy.length) console.log(`  ℹ️  历史遗留（初始提交就在、null 卫语句包着的死引用，非本次改动）：${legacy.join(', ')}`);
 
 console.log('\n═══ 存档页：过滤 / 分页的账本 ═══');
+ok('agent-runner 把活 session 传给提示词构建器（否则实际历史条数永远无法回写）',
+  /buildUserPrompt\(\{[\s\S]{0,500}?memory: host\.memory,\s*\n\s*session,/.test(agentRunnerTs));
 ok('存在 chatVisibleMessages()', /function chatVisibleMessages\(\)/.test(js));
 ok('滚动加载按过滤后的长度判断', /const total = chatVisibleMessages\(\)\.length;/.test(js),
   '若用 state.chatMessages.length，搜索态下会永远以为"后面还有"');

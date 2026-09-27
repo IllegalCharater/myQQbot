@@ -239,6 +239,7 @@ let imgHits = 0;
 const startImgSrv = async () => {
   const srv = http.createServer((req, res) => {
     if (req.url === '/ok.png') { imgHits++; res.writeHead(200, { 'content-type': 'image/png' }); return res.end(PNG); }
+    if (req.url === '/expired.png') { res.writeHead(400); return res.end('expired rkey'); }
     res.writeHead(404); res.end('nope');
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
@@ -373,6 +374,22 @@ const got = (out.content || []).find((p) => p?.image_url?.url);
 truthy('转成了 data URL 交给视觉模型', !!got && got.image_url.url.startsWith('data:image/png;base64,'), got?.image_url?.url?.slice(0, 40));
 eq('字节没被打歪', Buffer.from(got.image_url.url.split(',')[1], 'base64').equals(PNG), true);
 truthy('前面还带一句说明', (out.content || []).some((p) => p.type === 'text' && p.text.includes('972644978')));
+
+let replacedImages = null;
+const staleCtx = {
+  ...ctxImg,
+  onebot: {
+    getMsg: async () => ({ message: [{ type: 'image', data: { file: 'fresh.png', url: `${img3.url}/ok.png` } }] })
+  },
+  store: {
+    findByMid: () => ({ mid: '-376051973', media: [{ kind: 'image', url: `${img3.url}/expired.png` }] }),
+    updateByMid: (_chatKey, _mid, patch) => { replacedImages = patch.replaceImageMedia; return true; }
+  }
+};
+out = await imgMsgTool.execute(staleCtx, { messageId: '-376051973' });
+truthy('QQ 临时图片 URL 失效后会用 get_msg 刷新并成功读图', Array.isArray(out.content) && !out.isError);
+truthy('刷新得到的新图片地址会替换存档中的旧地址',
+  Array.isArray(replacedImages) && replacedImages[0]?.url === `${img3.url}/ok.png`);
 
 out = await imgMsgTool.execute({ ...ctxImg, store: { findByMid: () => ({ mid: '1', media: [{ kind: 'image', url: `${img3.url}/nope.png` }] }) } }, { messageId: '1' });
 truthy('取不到图时如实报错（不静默交出空图）', out.isError === true && out.content.startsWith('错误：图片获取失败'));

@@ -302,7 +302,7 @@ export function renderSessionDetail(s) {
       <div class="sub">
         <span>当前窗口 ${countText(context.current.count)} 条${context.current.foldedAway ? ` · 折叠 ${context.current.foldedAway} 条` : ''}</span>
         <span>响应决策 ${context.response.tier === null ? '-' : `档 ${context.response.tier}`}${context.response.reason ? ` · ${esc(context.response.reason)}` : ''}</span>
-        <span>历史注入 ${countText(context.history.injected)} / ${countText(context.history.limit)} 条</span>
+        <span title="窗口之前的原始聊天记录；不包含历史摘要和当前窗口">原始历史实际注入 ${countText(context.history.injected)} / 上限 ${countText(context.history.limit)} 条</span>
       </div>
     </div>`);
 

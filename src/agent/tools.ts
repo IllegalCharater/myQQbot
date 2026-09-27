@@ -8,7 +8,7 @@ import { normalizeMessageList, unquoteJsonString, formatShortTime } from '../cor
 import { formatStickerList } from '../stickers/stickers.js';
 import { validateImageUrl, safeFetchBinary, detectMime } from '../media/safe-fetch.js';
 import { webSearch, webFetch } from '../media/web-search.js';
-import { expandForwardNodes, forwardIdFromData } from '../qq/onebot.js';
+import { expandForwardNodes, extractMediaFromSegments, forwardIdFromData } from '../qq/onebot.js';
 import { enqueueJmcomicDownload } from '../media/jmcomic.js';
 import { cachedDataUrl, isCacheFile, sendTarget } from '../stickers/sticker-cache.js';
 import type { ChatMessage } from '../chat/types.js';
@@ -529,12 +529,36 @@ export function buildToolDefs(): ToolDefinition[] {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
-          const urls = (entry.media || []).filter((m) => m.kind === 'image' && m.url).map((m) => m.url);
+          let urls = (entry.media || []).filter((m) => m.kind === 'image' && m.url).map((m) => String(m.url));
           if (!urls.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);
-          const dataUrls: string[] = [];
-          const failed: string[] = [];
-          for (const url of urls) {
-            try { dataUrls.push(await downloadImageAsDataUrl(url)); } catch (error) { failed.push(errorMessage(error)); }
+          const downloadAll = async (targets: string[]) => {
+            const dataUrls: string[] = [];
+            const failed: string[] = [];
+            for (const url of targets) {
+              try { dataUrls.push(await downloadImageAsDataUrl(url)); } catch (error) { failed.push(errorMessage(error)); }
+            }
+            return { dataUrls, failed };
+          };
+
+          let { dataUrls, failed } = await downloadAll(urls);
+          // QQ 图片地址常带短期 rkey。入库 URL 失效时向协议端重新取一次消息，
+          // 用新鲜段替换存档图片并重试；只刷新一次，避免协议端异常时形成循环。
+          if (failed.length) {
+            try {
+              const latest = await ctx.onebot.getMsg(entry.mid);
+              const segments = isRecord(latest) && Array.isArray(latest.message) ? latest.message : [];
+              const freshMedia = extractMediaFromSegments(segments)
+                .filter((m) => m.kind === 'image' && m.url)
+                .map((m) => ({ ...m, kind: 'image', url: String(m.url) }));
+              const freshUrls = [...new Set(freshMedia.map((m) => String(m.url)))];
+              if (freshUrls.length && freshUrls.some((url, index) => url !== urls[index])) {
+                ctx.store.updateByMid(ctx.chatKey, entry.mid, { replaceImageMedia: freshMedia });
+                urls = freshUrls;
+                ({ dataUrls, failed } = await downloadAll(urls));
+              }
+            } catch (refreshError) {
+              failed.push(`刷新图片地址失败：${errorMessage(refreshError)}`);
+            }
           }
           if (!dataUrls.length) return err(`图片获取失败：${failed.join('；')}`);
           const note = failed.length ? `（另有 ${failed.length} 张获取失败）` : '';

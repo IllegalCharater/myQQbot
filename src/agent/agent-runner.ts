@@ -93,6 +93,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       triggerEntries,
       store: host.store,
       memory: host.memory,
+      session,
       stickerEntries,
       selfNickname,
       selfLastMessageAt,

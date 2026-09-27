@@ -363,12 +363,20 @@ export class ChatStore {
    * 用途：read_forward 工具把"合并转发占位符"永久升级成展开后的文本
    * —— 一次展开，以后谁（模型/存档页）都直接读到内容。
    */
-  updateByMid(chatKey: string, mid: unknown, { text, appendMedia = [] }: { text?: unknown; appendMedia?: MediaEntry[] } = {}) {
+  updateByMid(chatKey: string, mid: unknown, { text, appendMedia = [], replaceImageMedia }: {
+    text?: unknown;
+    appendMedia?: MediaEntry[];
+    replaceImageMedia?: MediaEntry[];
+  } = {}) {
     const st = this.#state(chatKey);
     const target = String(mid);
     const m = st.messages.find((x) => String(x.mid) === target);
     if (!m) return false;
     if (text != null) m.text = String(text);
+    if (replaceImageMedia) {
+      const kept = (Array.isArray(m.media) ? m.media : []).filter((x) => x?.kind !== 'image');
+      m.media = [...kept, ...replaceImageMedia];
+    }
     if (appendMedia.length) {
       m.media = Array.isArray(m.media) ? m.media : [];
       const seen = new Set(m.media.map((x) => x && x.url));

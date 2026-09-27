@@ -405,7 +405,7 @@ const newContextPanel = detailHtml({
 ok('会话面板按当前窗口 / 响应决策 / 历史注入分开展示',
   newContextPanel.includes('当前窗口 6 条 · 折叠 2 条')
   && newContextPanel.includes('响应决策 档 2 · 关键词命中')
-  && newContextPanel.includes('历史注入 31 / 40 条'));
+  && newContextPanel.includes('原始历史实际注入 31 / 上限 40 条'));
 
 const readTurn = detailHtml({
   id: 'sess-read-1', chatKey: 'group:123', status: 'done', rounds: 3, model: 'm', activity: '',
