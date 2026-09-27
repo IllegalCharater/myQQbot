@@ -45,6 +45,16 @@ export interface AgentRunnerHost {
   getChatName(groupId: string | number): Promise<string>;
 }
 
+/** 兼容 OpenAI 字符串 content 与部分兼容端点返回的文本 parts 数组。 */
+function assistantText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => isRecord(part) && part.type === 'text' && typeof part.text === 'string' ? part.text : '')
+    .filter(Boolean)
+    .join('\n');
+}
+
 export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit = null, tierInfo = null, foldedAway = 0 }: AgentRunOptions): Promise<void> {
     const cfg = getConfig();
     const chatName = kind === 'group' ? await host.getChatName(chatId) : '';
@@ -172,6 +182,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
 
       const msg = response.message;
       const finalContent = typeof msg.content === 'string' ? msg.content : (msg.content ?? null);
+      const finalText = assistantText(finalContent);
       const finalToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length ? msg.tool_calls : undefined;
       const assistantEntry = {
         role: 'assistant',
@@ -191,7 +202,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
         const toolImages = isRecord(slot?.toolImages) ? slot.toolImages : null;
         if (toolImages) {
           toolImages.reply = {
-            text: typeof finalContent === 'string' ? finalContent : '',
+            text: finalText,
             calls: (Array.isArray(finalToolCalls) ? finalToolCalls : []).map((c) => ({
               name: c?.function?.name ?? '',
               args: safeParse(c?.function?.arguments ?? '{}')

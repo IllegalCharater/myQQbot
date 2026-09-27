@@ -56,7 +56,7 @@ console.log('=== 1. 读图后模型说了什么，记在会话记录里 ===');
 {
   model.script = [
     { tool_calls: [toolCall('get_message_images', { messageId: 42 }, 'c1')] },                 // 看图
-    { content: '这是一只橘猫趴在键盘上，旁边还有半杯奶茶。', tool_calls: [toolCall('send_message', { messages: ['好可爱'] }, 'c2')] },
+    { content: [{ type: 'text', text: '这是一只橘猫趴在键盘上，旁边还有半杯奶茶。' }], tool_calls: [toolCall('send_message', { messages: ['好可爱'] }, 'c2')] },
     { content: '说完了。', tool_calls: [toolCall('finish', { summary: '接个梗' }, 'c3')] }
   ];
   model.requests = [];
@@ -85,9 +85,9 @@ console.log('=== 1. 读图后模型说了什么，记在会话记录里 ===');
       && imgRec?.toolImages?.reply?.calls?.[0]?.args?.messages?.[0] === '好可爱',
       JSON.stringify(imgRec?.toolImages?.reply?.calls));
     // 标记：那段话已经在卡片里显示了，ui 不能再单独冒一个"思考"气泡
-    const dup = s.messages.filter((m) => m.role === 'assistant' && typeof m.content === 'string' && m.content.includes('橘猫'));
-    ok('★ 那段话只出现一次，且带 imageReply 标记（ui 会跳过它）',
-      dup.length === 1 && dup[0].imageReply === true, JSON.stringify(dup.map((m) => ({ imageReply: m.imageReply }))));
+    const imageReply = s.messages.find((m) => m.role === 'assistant' && m.imageReply === true);
+    ok('★ 数组式 content 同样带 imageReply 标记（ui 会跳过原始 assistant 条）',
+      !!imageReply, JSON.stringify(s.messages.map((m) => ({ imageReply: m.imageReply }))));
     // 图片确实作为图像输入发给了模型
     const withImage = model.requests.find((r) => JSON.stringify(r?.messages || []).includes('data:image/png;base64'));
     ok('图片真的作为 data URL 发给了模型', !!withImage, `收到 ${model.requests.length} 次请求`);

@@ -434,6 +434,17 @@ const silent = detailHtml({
 ok('模型没说话但顺手标了注：只显示工具调用，不留一句空的"模型读图后说"',
   silent.includes('同一轮还调用了：') && silent.includes('sticker_note(&quot;阴阳怪气&quot;)') && !silent.includes('模型读图后说'));
 
+const actionOnly = detailHtml({
+  id: 'sess-read-action', chatKey: 'group:123', status: 'done', rounds: 2, model: 'm', activity: '',
+  messages: [
+    { toolImages: { tool: 'get_message_images', count: 1, reply: {
+      text: '', calls: [{ name: 'send_message', args: { messages: ['图片里是一只戴墨镜的猫', '还挺拽'] } }]
+    } } }
+  ], sent: [{ type: 'text', text: '图片里是一只戴墨镜的猫', at: '12:00:00' }]
+});
+ok('模型直接用 send_message 表达读图结果时，面板从动作参数补出实际内容',
+  actionOnly.includes('模型读图后发送：') && actionOnly.includes('图片里是一只戴墨镜的猫 / 还挺拽'));
+
 // 老记录（升级前留下的，toolImages 里没有 reply 字段）必须照旧能渲染
 const legacy = detailHtml({
   id: 'sess-read-4', chatKey: 'group:123', status: 'done', rounds: 1, model: 'm', activity: '',

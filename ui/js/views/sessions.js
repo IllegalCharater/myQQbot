@@ -343,8 +343,19 @@ export function renderSessionDetail(s) {
         const replyText = typeof reply.text === 'string' ? reply.text.trim() : '';
         const calls = Array.isArray(reply.calls) ? reply.calls : [];
         const callLine = calls.map((c) => `${c?.name || '?'}${argsHint(c?.args)}`).join('、');
+        // 很多模型看完图会直接调用 send_message，assistant.content 为空；真正的读图表达
+        // 在工具参数里。它不是“没有结论”，面板应把实际发送内容明确展示出来。
+        const sentAfterVision = calls
+          .filter((c) => c?.name === 'send_message')
+          .flatMap((c) => {
+            const value = c?.args?.messages;
+            return (Array.isArray(value) ? value : [value])
+              .filter((text) => typeof text === 'string' && text.trim())
+              .map((text) => text.trim());
+          });
         const body = [];
         if (replyText) body.push(`模型读图后说：${esc(replyText)}`);
+        else if (sentAfterVision.length) body.push(`模型读图后发送：${esc(sentAfterVision.join(' / '))}`);
         if (callLine) body.push(`<span class="muted">同一轮还调用了：${esc(callLine)}</span>`);
         html.push(`
           <div class="tool-card">
