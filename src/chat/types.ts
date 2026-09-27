@@ -50,6 +50,18 @@ export interface SessionRecord extends Record<string, unknown> {
   triggerText?: string;
   promptChars?: number;
   pastStateCount?: number;
+  /** 当前消息窗口在本次运行中实际注入的消息数。 */
+  currentWindowCount?: number;
+  /** 当前窗口溢出、未能进入本次提示词的消息数。 */
+  foldedAway?: number;
+  /** 历史读取边界：只读取该本地消息 id 之前的记录。 */
+  historyBeforeId?: number | null;
+  /** 当前窗口的独立响应决策。 */
+  responseTier?: number;
+  responseReason?: string;
+  responseShouldRespond?: boolean;
+  /** 独立历史策略请求读取的最大消息数。 */
+  historyLimit?: number;
   rounds?: number;
   messages: Array<Record<string, unknown>>;
   sent: Array<Record<string, unknown>>;
@@ -58,7 +70,6 @@ export interface SessionRecord extends Record<string, unknown> {
   error?: unknown;
   systemPrompt?: string;
   userPrompt?: string;
-  inputMessages?: Array<Record<string, unknown>>;
   llmRequests?: Array<Record<string, unknown>>;
 }
 export interface MemoryMember extends Record<string, unknown> { id?: string; name?: string }

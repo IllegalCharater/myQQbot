@@ -92,7 +92,7 @@ export class Orchestrator {
     //   phase: 'waiting' | 'running' | '',
     //   since: 进入回复态的时刻（用于 UI 显示"回复中 3s"），
     //   batchStartedAt: 本批第一条消息的时刻（等待窗口硬上限的计时起点），
-    //   roll: 本批固定的随机骰子（0~100，见 #predictTier 的说明），
+    //   roll: 本批固定的随机骰子（0~100，见 #resolvePendingResponse 的说明），
     //   waitingSessionId: 当前"等待中"会话 id
     // }
     //

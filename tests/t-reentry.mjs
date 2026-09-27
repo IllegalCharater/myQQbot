@@ -9,7 +9,7 @@ const { Orchestrator } = await load('agent/orchestrator.js');
 const { updateConfig } = await load('core/config.js');
 updateConfig({ api: { baseUrl: 'http://127.0.0.1:1/v1', model: 'stub', maxRounds: 1 },
   allowAllWhenEmpty: true, persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' },
-  store: { contextTier: 4, allCount: 80 }, reply: { maxWaitMs: 0, maxPerMinute: 3 }, wakeDelayMs: 800 });
+  store: { contextSliderPos: 95, historyCount: 80 }, send: { maxPerMinute: 3 }, reply: { maxWaitMs: 0 }, wakeDelayMs: 800 });
 const store = new ChatStore(0), sessions = new SessionRegistry(0);
 const memory = { formatForPrompt: () => '', members: () => [], consolidationState: () => ({ counts:{memberImpression:0}, members:[], lastConsolidatedAt:0 }), listChats: () => [] };
 const onebot = { selfId:'999', selfNickname:'小鲸鱼', connected:true, sendText: async()=>({message_id:1}), sendSticker: async()=>({}), sendPoke: async()=>({}), getGroupInfo: async()=>({group_name:'G'}), call: async()=>({}) };

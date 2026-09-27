@@ -22,7 +22,7 @@ const msg = (id, text, extra = {}) => ({ id, ts: 1700000000000 + id * 1000, send
 
 updateConfig({ api: { baseUrl: 'http://127.0.0.1:1/v1', model: 'stub', maxRounds: 1 },
   allowAllWhenEmpty: true, persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' },
-  store: { contextTier: 4, allCount: 80, maxContextMessages: 0 },
+  store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 0 },
   reply: { maxWaitMs: 0, maxLimitWaitMs: 0 }, wakeDelayMs: 50, drainDelayMs: 50 });
 
 function harness() {
@@ -130,7 +130,7 @@ console.log('\n=== 6. 播种还原游标 ===');
 // ── 7. 注册表 + 编排器：容量 5、8 条、一次运行 ───────────────────────
 console.log('\n=== 7. 端到端：容量 5 + 8 条 → 触发批 5、折走 3、全部落已读 ===');
 {
-  updateConfig({ store: { contextTier: 4, allCount: 80, maxContextMessages: 5 } });
+  updateConfig({ store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 5 } });
   const { store, orc, sessions } = harness();
   const K = key();
   for (let i = 1; i <= 8; i++) {
@@ -155,7 +155,7 @@ console.log('\n=== 7. 端到端：容量 5 + 8 条 → 触发批 5、折走 3、
 // ── 8. 端到端：小容量 + 窗外（sunk）里的 @ 仍然算响应 ────────────────
 console.log('\n=== 8. 窗口只有 2 条，被挤到窗外的 @ 仍判定响应 ===');
 {
-  updateConfig({ store: { contextTier: 1, atCount: 20, maxContextMessages: 2 } });   // 档1：只认 @
+  updateConfig({ store: { contextSliderPos: 5, historyCount: 20, maxContextMessages: 2 } });   // 响应档1：只认 @；历史独立为20
   const { store, orc, sessions } = harness();
   const K = key();
   const push = (t) => { const e = store.appendIncoming(K, { mid: t, ts: Date.now(), senderId: '555', senderName: '张三', text: t }); orc.onIncoming(K, e); return e; };
@@ -171,7 +171,7 @@ console.log('\n=== 8. 窗口只有 2 条，被挤到窗外的 @ 仍判定响应 
 // ── 9. 端到端：暂停期间只入窗、不写 read ─────────────────────────────
 console.log('\n=== 9. 暂停期间只入窗、不落已读 ===');
 {
-  updateConfig({ store: { contextTier: 4, allCount: 80, maxContextMessages: 2 } });
+  updateConfig({ store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 2 } });
   const { store, orc } = harness();
   const K = key();
   orc.setPaused(true);
@@ -204,7 +204,7 @@ console.log('\n=== 10. markChatSeen ===');
 // ── 11. 重启后播种：带 read 的存档能还原出正确的待处理量 ─────────────
 console.log('\n=== 11. 进程重启后从存档播种 ===');
 {
-  updateConfig({ store: { contextTier: 4, allCount: 80, maxContextMessages: 0 } });
+  updateConfig({ store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 0 } });
   const first = harness();
   const K = key();
   for (let i = 1; i <= 5; i++) {
@@ -251,7 +251,7 @@ console.log('\n=== 13. forgetMessage ===');
 // ── 14. 容量改动即时生效（不用重启） ─────────────────────────────────
 console.log('\n=== 14. 容量即时生效 ===');
 {
-  updateConfig({ store: { contextTier: 4, allCount: 80, maxContextMessages: 0 } });
+  updateConfig({ store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 0 } });
   const { store, orc } = harness();
   const K = key();
   for (let i = 1; i <= 6; i++) {

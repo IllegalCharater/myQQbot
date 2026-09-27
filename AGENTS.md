@@ -59,7 +59,7 @@ web
 OneBot 入站
 → ChatStore 持久化
 → ContextWindowRegistry.push
-→ WakeScheduler 聚批并判断响应档位
+→ WakeScheduler 聚批；响应策略判断是否处理，历史策略独立决定回看深度
 → runAgent 重新构造 system/user prompt
 → 模型与工具多轮循环
 → 发送类工具产生 QQ 外部动作
@@ -72,7 +72,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 ## 上下文的四种数据必须分开
 
 1. 当前新消息窗口：`ContextWindow.win/sunk`，决定【本次唤醒】。
-2. 已读原始历史：响应档位的 `historyCount/historyLimit` 决定【过去状态】深度。
+2. 已读原始历史：独立的 `historyCount/historyLimit` 决定【过去状态】深度，与响应档位无关。
 3. 历史摘要：压缩结果，注入为【历史印象】。
 4. 长期记忆：稳定成员印象，注入为【记忆】。
 
@@ -82,8 +82,8 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - `batch()` 只返回窗口内未消费的新消息。
 - `batch()`、`foldedCount()`、`seen()` 必须在同一个同步块内调用，中间不能 `await`。
 - 是否回复都要消费已经判断过的消息，防止旧消息反复成为“本次新消息”。
-- 响应档位历史必须排除整个当前 `win`，而不只是 `triggerEntries`。
-- 内部使用 `historyCount/historyLimit`；`contextLimit` 仅用于旧调用和旧会话记录兼容，不要新增依赖。
+- 原始历史以本轮 `triggerEntries` 最早消息为边界，只从边界之前读取；当前批只进【本次唤醒】。
+- 内部统一使用 `historyCount/historyLimit`，不要重新引入 `contextLimit`。
 
 ## 提示词维护规则
 
@@ -114,15 +114,15 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 修改此链路时重点运行 `t-vision-log.mjs` 和 `t-ui-render.mjs`。
 
-会话 JSON 面板以 `session.llmRequests` 展示逐轮真实模型输入（完整 messages/tools）。`inputMessages` 只为旧会话保留，不要再将顶层 `systemPrompt/userPrompt` 与它并列展示，避免把日志副本误认为重复注入。
+会话 JSON 面板只以 `session.llmRequests` 展示逐轮真实模型输入（完整 messages/tools），不要再建立首次输入副本。
 
 ## 配置兼容与命名
 
 - `store.maxContextMessages`：当前新消息窗口容量，`0` 表示不限；它不控制历史深度。
-- `store.atCount/keywordCount/randomCount/allCount`：不同触发原因读取的窗口外已读历史条数。
+- `store.historyCount`：窗口之前统一读取的原始历史条数，不受艾特、关键词、随机或响应档位影响。
 - `store.promptContextMaxChars`：完整 user prompt 的统一字符预算。
 - `digest.maxChars`：摘要通道候选预算，不替代统一预算。
-- `session.contextLimit` 是兼容字段；新代码优先写读 `session.historyLimit`。
+- 会话只写 `currentWindowCount/foldedAway`、`responseTier/responseReason`、`historyLimit/historyBeforeId/pastStateCount`，不写也不读取旧 `contextTier/contextLimit` 字段。
 
 修改配置时同时检查：
 

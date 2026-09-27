@@ -7,7 +7,9 @@ import { load } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-reply-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
 const { buildPastState, buildUserPrompt, buildSystemPrompt } = await load('agent/prompt.js');
-const { updateConfig } = await load('core/config.js');
+const { evaluateWindowTrigger } = await load('agent/response-policy.js');
+const { resolveHistoryPolicy } = await load('agent/history-policy.js');
+const { updateConfig, responseConfigForChat } = await load('core/config.js');
 const { ChatStore } = await load('chat/store.js');
 
 updateConfig({ persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' }, api: { model: 'stub', baseUrl: 'http://x' } });
@@ -38,6 +40,15 @@ hist.forEach((h, i) => store.appendIncoming(KEY, {
 // 拍一拍：mid 为 null，进【本次唤醒】
 const poke = store.appendIncoming(KEY, { mid: null, ts: t0 + 20000, senderId: '2035800860', senderName: '清三', text: '[拍一拍] 你拍了拍（来自 清三）', media: [] });
 const ids = (t) => (t.match(/#-?\d+/g) || []);
+
+console.log('\n=== 0. 窗口触发与历史档位职责分离 ===');
+updateConfig({ store: { contextSliderPos: 55, historyCount: 21 } });
+const responsePolicy = responseConfigForChat(KEY);
+const windowDecision = evaluateWindowTrigger({ entries: [{ text: '@小鲸鱼 在吗' }], identity: { selfNickname: '小鲸鱼' }, policy: responsePolicy, roll: 99 });
+const pureHistory = resolveHistoryPolicy({ historyCount: 21 });
+ok('窗口判定器只决定是否响应', windowDecision.responseTier === 1 && windowDecision.shouldRespond && !('historyCount' in windowDecision));
+ok('历史策略不读窗口与触发原因', pureHistory.historyCount === 21);
+ok('响应策略配置不携带历史深度', !('historyCount' in responsePolicy));
 
 console.log('\n=== 1. 【过去状态】的 #id 可见性（修复点 2）===');
 const past10 = buildPastState(store, KEY, { excludeIds: [poke.id], limit: 10 });
@@ -75,22 +86,25 @@ ok('引用防错规则只在系统提示保留一份，用户提示不再重复�
 ok('【过去状态】表头说明已与新规则一致', /最近的消息和带图的消息前有 #消息id/.test(up));
 ok('旧表头那句（只有带图才有 id）已不复存在', !/带图的消息前有 #消息id，看图/.test(up));
 
-console.log('\n=== 4. 响应档位历史与当前消息窗口彻底分离 ===');
+console.log('\n=== 4. 独立历史与当前消息窗口彻底分离 ===');
 const resident = store.recent(KEY, { limit: 100 }).find((m) => m.text === '为什么这么关注这个申必表情');
+store.appendIncoming(KEY, { mid: 'after-boundary', ts: Date.now(), senderId: '10086', senderName: '后来者', text: '边界之后的新消息不应伪装成历史' });
 const separated = buildUserPrompt({
   chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
-  triggerEntries: [poke], windowEntryIds: [poke.id, resident.id],
+  triggerEntries: [poke], historyBeforeId: poke.id,
   store, memory: { formatForPrompt: () => '' }, selfNickname: '小鲸鱼',
   historyLimit: 30, recentCount: 5, lastMessageAt: Date.now()
 });
-ok('驻留窗口中已消费的消息不被历史深度再次注入', !separated.includes('为什么这么关注这个申必表情'));
+ok('当前窗口消息只在【本次唤醒】出现一次', (separated.match(/\[拍一拍\]/g) || []).length === 1);
+ok('当前窗口之前的消息可按档位作为历史注入', separated.includes('为什么这么关注这个申必表情'));
 ok('窗口外历史仍按 historyLimit 注入', separated.includes('四台主角机'));
+ok('历史边界之后到达的消息不会混进【过去状态】', !separated.includes('边界之后的新消息不应伪装成历史'));
 
 console.log('\n=== 5. 统一字符预算优先保护当前新消息 ===');
 updateConfig({ store: { promptContextMaxChars: 2200 }, digest: { maxChars: 0 } });
 const budgeted = buildUserPrompt({
   chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
-  triggerEntries: [{ ...poke, text: '必须完整保留的当前消息-XYZ' }], windowEntryIds: [poke.id],
+  triggerEntries: [{ ...poke, text: '必须完整保留的当前消息-XYZ' }], historyBeforeId: poke.id,
   store, memory: { formatForPrompt: () => '很长的长期记忆'.repeat(1000) },
   stickerEntries: [], selfNickname: '小鲸鱼', historyLimit: 30,
   recentCount: 5, lastMessageAt: Date.now(), session: {}

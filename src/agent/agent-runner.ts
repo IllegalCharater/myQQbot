@@ -14,7 +14,7 @@ import type { SendQueue } from '../qq/sender.js';
 import type { SessionRegistry } from '../chat/sessions.js';
 import type { OneBotClient } from '../qq/onebot.js';
 import type { ContextWindowRegistry } from './context-window.js';
-import type { ContextTierResult, ToolDefinition } from './types.js';
+import type { HistoryPolicyResult, ResponseDecision, ToolDefinition } from './types.js';
 import type { InlineToolCall } from './inline-tool-parser.js';
 import type { ChatRequestMessage } from '../llm/types.js';
 import type { StickerEntry } from '../stickers/types.js';
@@ -27,8 +27,9 @@ export interface AgentRunOptions {
   proactive: boolean;
   seq: number;
   historyLimit?: number | null;
-  windowEntryIds?: number[];
-  tierInfo?: ContextTierResult | null;
+  historyBeforeId?: number | null;
+  responseInfo?: ResponseDecision | null;
+  historyInfo?: HistoryPolicyResult | null;
   foldedAway?: number;
 }
 
@@ -56,7 +57,7 @@ function assistantText(content: unknown): string {
     .join('\n');
 }
 
-export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { kind, chatId, chatKey, triggerEntries, proactive, seq, historyLimit = null, windowEntryIds = [], tierInfo = null, foldedAway = 0 }: AgentRunOptions): Promise<void> {
+export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { kind, chatId, chatKey, triggerEntries, proactive, seq, historyLimit = null, historyBeforeId = null, responseInfo = null, historyInfo = null, foldedAway = 0 }: AgentRunOptions): Promise<void> {
     const cfg = getConfig();
     const chatName = kind === 'group' ? await host.getChatName(chatId) : '';
     const selfNickname = kind === 'group' ? (cfg.persona.selfNickname || host.onebot.selfNickname || cfg.persona.botName) : cfg.persona.botName;
@@ -103,8 +104,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       moreUnreadDuringRun: host.windows.pending(chatKey).length > 0,
       proactive,
       historyLimit,
-      windowEntryIds,
-      tierInfo,
+      historyBeforeId,
       foldedAway
     });
 
@@ -116,13 +116,17 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     // 同名模型在不同渠道是不同商品，用量与价格要分开统计。
     session.vendor = vendorOfConfig(cfg);
     session.chatName = chatName;
-    // 记录本次读了多长的上下文（排查提示词长度时很有用）
-    if (tierInfo) {
-      session.contextTier = tierInfo.tier;
-      session.historyLimit = tierInfo.historyCount;
-      // 旧会话面板/历史 JSON 的兼容字段。
-      session.contextLimit = tierInfo.historyCount;
-      session.contextReason = tierInfo.reason || '';
+    // 三条边界分别落盘，供会话面板准确还原本次编排决策。
+    session.currentWindowCount = triggerEntries.length;
+    session.foldedAway = Math.max(0, Number(foldedAway) || 0);
+    session.historyBeforeId = historyBeforeId;
+    if (responseInfo) {
+      session.responseTier = responseInfo.responseTier;
+      session.responseReason = responseInfo.reason || '';
+      session.responseShouldRespond = responseInfo.shouldRespond;
+    }
+    if (historyInfo) {
+      session.historyLimit = historyInfo.historyCount;
     }
     host.sessions.update(session.id);
     host.emit('session-update', session.id);
@@ -131,8 +135,6 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
     ];
-    // 兼容旧会话面板：保留首次输入。准确的逐轮请求见下面的 llmRequests。
-    session.inputMessages = structuredClone(messages.map((m) => ({ role: m.role, content: m.content })));
     session.llmRequests = [];
     host.sessions.update(session.id);
 
@@ -180,7 +182,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       if (host.aborted) { host.sessions.finish(session.id, 'aborted'); return; }
       markActivity('正在思考…');
       // 在调用前保存这一轮真正交给 chat/completions 的完整输入。messages 会随工具轮次增长，
-      // 因此只记首次 inputMessages 无法还原 tool 结果和图片注入后的请求。
+      // llmRequests 是会话面板还原模型输入的唯一事实源。
       const llmRequests = session.llmRequests as Array<Record<string, unknown>>;
       const requestSnapshot: Record<string, unknown> = {
         round: round + 1,

@@ -1,7 +1,7 @@
 // 配置管理：data/config.json，UI 可写。所有字段都有默认值。
 import fs from 'node:fs';
 import { PERSONAS } from './personas.js';
-import { sliderToTier } from './tier-slider.js';   // 零依赖模块，避免循环依赖
+import { sliderToTier, tierToSlider } from './tier-slider.js';   // 零依赖模块，避免循环依赖
 // 路径常量集中在 paths.ts（向上找 package.json，对目录深度免疫）。
 // 这里只是**转出**给老调用点用——仓库里另有 10 个模块从 config.js 取 DATA_DIR/ROOT，
 // 一次性改它们会把 S3 和 S4 混成一件事；等 S4/S5 再让它们直接找 paths。
@@ -139,8 +139,6 @@ export const DEFAULT_CONFIG = {
     // 与 wakeDelayMs（立即回复时间）配合：wakeDelayMs 是尾沿防抖（每条新消息重置），
     // maxWaitMs 是不被重置的天花板，防止连发不停导致永远不触发。0 = 不限制（= 原行为）。
     maxWaitMs: 0,
-    // 回复态内的出站限频（条/分钟）。0 = 不额外收紧，沿用 send.maxPerMinute。
-    maxPerMinute: 0,
     // 命中分钟限频时最多等多久（毫秒）再发。0 = 直接报错（= 原行为）。
     // 之所以默认等待而非报错：抛错会让那条消息被丢弃，模型还会按提示重发、再失败，
     // 群里表现为"机器人坏了"。真人撞到打字速度上限时也是停一下再发。
@@ -226,7 +224,8 @@ export const DEFAULT_CONFIG = {
     // 每个会话常驻一个"一直保持最新"的窗口：只装**对方发来的**最新 N 条消息，
     // 消息一到就入窗、超出立刻丢最老（见 src/agent/context-window.ts）。
     // 它决定一次运行最多把多少条未读放进【本次唤醒】；被挤出窗口的那些不会丢，
-    // 它们降级进【过去状态】照常出现在提示词里，也照样参与"要不要回应"的判定。
+    // 它们降级成【过去状态】候选（实际条数仍受档位深度/字符预算限制），也照样参与
+    // “要不要回应”的判定。
     // 用途：长时间离线/被 @ 唤醒时，一次运行可能带上几百条积压，token 会失控。
     // **0 = 不限制**（= 原行为）。注意它与上面 maxMessagesPerChat 的区别：
     // 那个管"存档留多少条"（磁盘），这个管"一次运行读多少条"（token）。
@@ -235,16 +234,12 @@ export const DEFAULT_CONFIG = {
     // 单次 user prompt 的统一字符预算；优先保留本轮新消息和决策指令，超出时依次
     // 收缩表情目录、历史摘要、长期记忆、已读历史。0 = 不限制。
     promptContextMaxChars: 32000,
-    // ── 上下文读取档位（决定本次唤醒读多少条历史）──
-    // 档位是"累积生效"的：选 4 档时 1/2/3 档也都生效，按 4→3→2→1 顺序检查，
-    // 第一个命中的决定读取条数。这个设置替代了原来的 pastStateLimit 固定值。
-    contextTier: 4,             // 1=仅艾特 2=+关键词 3=+随机 4=全读
-    atCount: 20,                // 档1：机器人被艾特时读 w 条
-    keywordCount: 15,           // 档2：命中关键词时读 x 条
+    // ── 当前消息响应策略 ──
+    // 唯一持久化事实源；响应档位和随机概率只在运行时派生。
+    contextSliderPos: 95,
     keywords: [],               // 档2 的关键词表
-    randomPercent: 10,          // 档3：y% 概率
-    randomCount: 8,             // 档3：命中时读 z 条
-    allCount: 80,               // 档4：读全部（上限）
+    // ── 历史读取策略（与响应原因完全独立）──
+    historyCount: 80,
     // ── 响应档位的作用范围 ──
     unifiedTier: true,          // true = 上方滑条对所有会话生效；false = 可按群单独设置
     groupSliderPos: {},         // { [群号]: 0~100 } 仅 unifiedTier=false 时生效；未设置的群/私聊跟随全局滑条
@@ -283,10 +278,7 @@ export type AppConfig = Omit<typeof DEFAULT_CONFIG, 'providers' | 'dshProviderKe
   modelVision?: Record<string, { providerId?: string; model?: string; verdict?: string; note?: string; httpStatus?: number | null; latencyMs?: number | null; source?: string; checkedAt?: number }>;
   dshProviderKeys: Record<string, string>;
   providers: Array<{ id: string; displayName?: string; baseURL?: string; apiKey?: string; models: string[]; [key: string]: unknown }>;
-  store: typeof DEFAULT_CONFIG.store & {
-    contextSliderPos?: number;
-    groupSliderPos: Record<string, number>;
-  };
+  store: typeof DEFAULT_CONFIG.store & { groupSliderPos: Record<string, number> };
   digest: typeof DEFAULT_CONFIG.digest & {
     perChat: Record<string, Partial<Pick<typeof DEFAULT_CONFIG.digest, 'injectEveryRound' | 'merge' | 'maxChars'>>>;
   };
@@ -325,11 +317,58 @@ export function loadConfig(): AppConfig {
   try {
     let text = fs.readFileSync(CONFIG_FILE, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    const parsed = JSON.parse(text);
+    const parsed = normalizeConfigShape(JSON.parse(text));
     return deepMerge(DEFAULT_CONFIG, parsed) as AppConfig;
   } catch {
     return structuredClone(DEFAULT_CONFIG) as AppConfig;
   }
+}
+
+/**
+ * 把旧配置迁移到当前形状。历史深度曾按响应原因拆成四项；现在迁移为独立的
+ * historyCount。迁移时采用旧配置当前响应档位所对应的那一项，尽量保持原成本。
+ */
+function normalizeConfigShape<T>(input: T): T {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const root = input as Record<string, unknown>;
+  const store = root.store;
+  if (store && typeof store === 'object' && !Array.isArray(store)) {
+    const s = store as Record<string, unknown>;
+    if (s.contextSliderPos === undefined && s.contextTier !== undefined) {
+      s.contextSliderPos = tierToSlider(Number(s.contextTier), Number(s.randomPercent));
+    }
+    if (s.historyCount === undefined) {
+      const { tier } = sliderToTier(Number(s.contextSliderPos ?? tierToSlider(Number(s.contextTier), Number(s.randomPercent))));
+      const legacy = tier === 1 ? s.atCount : tier === 2 ? s.keywordCount : tier === 3 ? s.randomCount : s.allCount;
+      const fallback = tier === 1 ? 20 : tier === 2 ? 15 : tier === 3 ? 8 : 80;
+      s.historyCount = Math.max(0, Number(legacy) || fallback);
+    }
+    delete s.contextTier;
+    delete s.randomPercent;
+    delete s.atCount;
+    delete s.keywordCount;
+    delete s.randomCount;
+    delete s.allCount;
+  }
+  const reply = root.reply;
+  if (reply && typeof reply === 'object' && !Array.isArray(reply)) {
+    const r = reply as Record<string, unknown>;
+    const legacyLimit = Number(r.maxPerMinute);
+    // 旧版若配置了更严格的回复态上限，迁移成统一上限时取两者较小值，避免升级后
+    // 机器人突然发得更快。0 过去表示“沿用发送上限”，无需迁移。
+    if (Number.isFinite(legacyLimit) && legacyLimit > 0) {
+      const send = root.send && typeof root.send === 'object' && !Array.isArray(root.send)
+        ? root.send as Record<string, unknown>
+        : (root.send = {}) as Record<string, unknown>;
+      const currentLimit = Number(send.maxPerMinute);
+      send.maxPerMinute = Math.min(
+        Number.isFinite(currentLimit) && currentLimit > 0 ? currentLimit : DEFAULT_CONFIG.send.maxPerMinute,
+        legacyLimit
+      );
+    }
+    delete r.maxPerMinute;
+  }
+  return input;
 }
 
 let currentConfig: AppConfig | null = null;
@@ -343,17 +382,7 @@ export function getConfig(): AppConfig {
 
 /** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
 export function updateConfig(patch: ConfigPatch) {
-  currentConfig = deepMerge(getConfig(), patch);
-
-  // ── 响应档位：以滑条位置为唯一真相，派生 tier 与随机概率 ──
-  // 前端只负责上报滑条位置（contextSliderPos），档位和概率一律由这里换算。
-  // 这样即使前端算错、或者有人直接调接口只传位置，配置也不会自相矛盾。
-  const posRaw = currentConfig?.store?.contextSliderPos;
-  if (posRaw !== undefined && posRaw !== null) {
-    const { tier, randomPercent } = sliderToTier(posRaw);
-    currentConfig.store.contextTier = tier;
-    currentConfig.store.randomPercent = randomPercent;
-  }
+  currentConfig = normalizeConfigShape(deepMerge(getConfig(), patch));
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = `${CONFIG_FILE}.tmp`;
@@ -368,26 +397,28 @@ export function setRuntimeConfig(cfg: AppConfig) {
 }
 
 /**
- * 取某个会话实际生效的 store 档位配置。
- * unifiedTier 开启 → 全局 store 原样返回；
- * 关闭 → 群聊查 groupSliderPos，有单独设置就换算出该群的 tier/randomPercent，
- * 其余字段（各档读取条数、关键词表）沿用全局值。私聊永远跟随全局档位。
+ * 取某个会话实际生效的响应策略。只返回响应判定需要的最小字段，历史配置不会越界。
+ * unifiedTier 开启 → 从全局滑条位置派生档位与概率；
+ * 关闭 → 群聊查 groupSliderPos，有单独设置就换算出该群的 responseTier/randomPercent。
+ * 关键词表仍沿用全局值；历史深度不属于本函数。私聊永远跟随全局响应档位。
  */
-export function storeConfigForChat(chatKey: string) {
+export function responseConfigForChat(chatKey: string) {
   const store = getConfig().store || {};
-  if (store.unifiedTier !== false) return store;
+  let pos = store.contextSliderPos;
+  if (store.unifiedTier !== false) {
+    const { tier, randomPercent } = sliderToTier(pos);
+    return { responseTier: tier, randomPercent, keywords: store.keywords };
+  }
   const [kind, id] = String(chatKey || '').split(':');
-  if (kind !== 'group' || !id) return store;
-  const pos = store.groupSliderPos?.[id];
-  if (pos === undefined || pos === null) return store;
+  if (kind === 'group' && id) pos = store.groupSliderPos?.[id] ?? pos;
   const { tier, randomPercent } = sliderToTier(Number(pos));
-  return { ...store, contextTier: tier, randomPercent };
+  return { responseTier: tier, randomPercent, keywords: store.keywords };
 }
 
 /**
  * 取某个会话实际生效的历史摘要注入配置。
  * unified 开启 → 全局值；关闭 → 群聊查 perChat，有单独设置就覆盖，缺哪个字段就沿用全局。
- * 私聊永远跟随全局（和 storeConfigForChat 一致）。
+ * 私聊永远跟随全局（和 responseConfigForChat 一致）。
  *
  * 返回的一定是**每个字段都有值**的对象（注入三项 + 存档回收上限）：调用方（提示词与面板）
  * 不该各自再兜一遍默认值，那样两边就会漂移。

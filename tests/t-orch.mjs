@@ -13,7 +13,7 @@ const { updateConfig, getConfig } = await load('core/config.js');
 updateConfig({ api: { baseUrl: 'http://127.0.0.1:1/v1', model: 'stub', maxRounds: 1 },
   allow: { groups: [], private: [] }, allowAllWhenEmpty: true,
   persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' },
-  store: { contextTier: 4, maxContextMessages: 0 },
+  store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 0 },
   reply: { maxWaitMs: 0, maxPerMinute: 0, maxLimitWaitMs: 20000 } });
 
 const store = new ChatStore(0);
@@ -60,9 +60,9 @@ console.log('batchStartedAt 未重置:', orc2.chatState(key).batchStartedAt - t1
 orc2.abortAll();
 console.log('abortAll 后状态:', JSON.stringify(orc2.chatState(key)), '(应为 null)');
 
-console.log('\n=== 3. 骰子固定（#predictTier 与 wake 共用同一颗）===');
+console.log('\n=== 3. 骰子固定（窗口预判与 wake 共用同一颗）===');
 const orc3 = new Orchestrator({ store, memory, stickers, sender, sessions, onebot });
-updateConfig({ store: { contextTier: 3, randomPercent: 50, atCount: 5, keywordCount: 5, randomCount: 5, allCount: 5 } });
+updateConfig({ store: { contextSliderPos: 55, historyCount: 5 } });
 orc3.scheduleWake(key);
 const r1 = orc3.chatState(key).roll;
 const r2 = orc3.chatState(key).roll;

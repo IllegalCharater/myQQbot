@@ -395,6 +395,18 @@ console.log('\n═══ 会话详情：读图轮（注入的图 + 模型看完�
 state.tab = 'sessions';
 const detailHtml = (s) => { sandbox.renderSessionDetail(s); return $el('#session-detail').innerHTML; };
 
+const newContextPanel = detailHtml({
+  id: 'sess-context-new', chatKey: 'group:123', status: 'done', rounds: 1, model: 'm', activity: '',
+  currentWindowCount: 6, foldedAway: 2,
+  responseTier: 2, responseReason: '关键词命中', responseShouldRespond: true,
+  historyLimit: 40, pastStateCount: 31, historyBeforeId: 9527,
+  messages: [], sent: []
+});
+ok('会话面板按当前窗口 / 响应决策 / 历史注入分开展示',
+  newContextPanel.includes('当前窗口 6 条 · 折叠 2 条')
+  && newContextPanel.includes('响应决策 档 2 · 关键词命中')
+  && newContextPanel.includes('历史注入 31 / 40 条'));
+
 const readTurn = detailHtml({
   id: 'sess-read-1', chatKey: 'group:123', status: 'done', rounds: 3, model: 'm', activity: '',
   messages: [
@@ -465,7 +477,8 @@ state.sessionJsonMode = 'sess-json';
 const jsonHtml = detailHtml({
   id: 'sess-json', chatKey: 'group:123', status: 'done', rounds: 2, model: 'm', activity: '',
   systemPrompt: '重复展示的人设', userPrompt: '重复展示的动态输入',
-  inputMessages: [{ role: 'system', content: '旧首次快照' }],
+  currentWindowCount: 4, responseTier: 1, responseReason: '被艾特', responseShouldRespond: true,
+  historyLimit: 30, pastStateCount: 18, historyBeforeId: 100,
   llmRequests: [
     { round: 1, model: 'm', messages: [{ role: 'system', content: '唯一系统提示' }, { role: 'user', content: '第一轮输入' }], tools: [{ type: 'function', function: { name: 'x' } }] },
     { round: 2, model: 'm', messages: [{ role: 'tool', content: '工具结果' }], tools: [] }
@@ -477,15 +490,11 @@ ok('JSON 模式展示逐轮 requests 与完整 messages/tools',
   && jsonHtml.includes('工具结果') && jsonHtml.includes('&quot;tools&quot;'));
 ok('JSON 模式不再重复展示顶层 systemPrompt/userPrompt',
   !jsonHtml.includes('重复展示的人设') && !jsonHtml.includes('重复展示的动态输入'));
+ok('JSON 模式按新结构记录当前窗口、响应决策和历史注入',
+  jsonHtml.includes('&quot;context&quot;') && jsonHtml.includes('&quot;current&quot;')
+  && jsonHtml.includes('&quot;response&quot;') && jsonHtml.includes('&quot;history&quot;')
+  && jsonHtml.includes('&quot;beforeId&quot;: 100'));
 
-state.sessionJsonMode = 'sess-json-legacy';
-const legacyJsonHtml = detailHtml({
-  id: 'sess-json-legacy', chatKey: 'group:123', status: 'done', rounds: 1, model: 'm', activity: '',
-  inputMessages: [{ role: 'system', content: '老会话系统输入' }, { role: 'user', content: '老会话用户输入' }],
-  messages: [], sent: []
-});
-ok('旧会话回退到 inputMessages 并标明 legacySnapshot',
-  legacyJsonHtml.includes('老会话系统输入') && legacyJsonHtml.includes('&quot;legacySnapshot&quot;'));
 state.sessionJsonMode = null;
 
 console.log(`\n════ 通过 ${pass} / 失败 ${fail} ════`);

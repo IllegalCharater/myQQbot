@@ -148,7 +148,8 @@ ok('有样式类 .digest-panel / 注入徽标', css.includes('.digest-panel') &&
 
 // 二、设置项：三个开关 + 上限 + 统一/分群
 ok('「每轮都注入」开关在（默认不勾 = 只在读历史那轮带）', /id="cfg-digest-everyround" \$\{c\.digest\?\.injectEveryRound \? 'checked' : ''\}/.test(js));
-ok('「合并新老摘要」开关默认勾上', /id="cfg-digest-merge" \$\{c\.digest\?\.merge !== false \? 'checked' : ''\}/.test(js));
+ok('「注入时合并摘要展示」开关默认勾上', /id="cfg-digest-merge" \$\{c\.digest\?\.merge !== false \? 'checked' : ''\}/.test(js)
+  && js.includes('注入时合并摘要展示'));
 ok('字数上限默认 8000 且回显现值', /id="cfg-digest-maxchars" min="0" max="200000" value="\$\{esc\(c\.digest\?\.maxChars \?\? 8000\)\}"/.test(js));
 ok('设置页写明了「0 = 不注入」与本页其它「0 = 不限」相反', js.includes('0 = 不注入') && js.includes('正好相反'));
 ok('说明了没压缩过就不会注入（勾了也没用）', js.includes('没压过的会话，勾了也不会注入'));
@@ -165,6 +166,13 @@ ok('写入时三个字段一次写全（缺字段会被解析函数按默认值�
 
 // 三、保存分支：控件 → patch.digest 一一对应
 const saveSeg = seg("if (sec === 'chat')", "if (sec === 'desktop')");
+ok('每分钟发送频率只有一个设置入口', /id="cfg-maxpermin"/.test(js)
+  && !js.includes('cfg-reply-maxpermin'));
+ok('响应档位保存只提交滑条事实源，不提交派生字段', /contextSliderPos:/.test(saveSeg)
+  && !/\bcontextTier:/.test(saveSeg) && !/\brandomPercent:/.test(saveSeg));
+ok('历史深度只有一个独立设置，旧四套输入已删除', /id="cfg-history-count"/.test(js)
+  && /historyCount: clampInt\(val\('#cfg-history-count'/.test(saveSeg)
+  && !/cfg-(?:atcount|kwcount|randcount|allcount)/.test(js));
 ok('保存分支里建了 patch.digest', /patch\.digest = \{/.test(saveSeg));
 ok('injectEveryRound / merge / maxChars / unified 四项都从控件读',
   /injectEveryRound: chk\('#cfg-digest-everyround'/.test(saveSeg) && /merge: chk\('#cfg-digest-merge'/.test(saveSeg)

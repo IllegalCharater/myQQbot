@@ -246,12 +246,32 @@ export async function loadSessionDetail(id, { quiet = false } = {}) {
   }
 }
 
+/** 会话上下文的展示模型：只接受当前结构，不再推断旧字段。 */
+export function sessionContextView(s) {
+  return {
+    current: {
+      count: s.currentWindowCount ?? null,
+      foldedAway: Math.max(0, Number(s.foldedAway) || 0)
+    },
+    response: {
+      tier: s.responseTier ?? null,
+      reason: s.responseReason ?? '',
+      shouldRespond: s.responseShouldRespond ?? null
+    },
+    history: {
+      limit: s.historyLimit ?? null,
+      injected: s.pastStateCount ?? null,
+      beforeId: s.historyBeforeId ?? null
+    }
+  };
+}
+
 export function renderSessionDetail(s) {
   const detail = $('#session-detail');
   if (!detail) return;
   // 内容没变（轮询/SSE 重复推送）→ 完全不动 DOM，保住滚动位置和展开状态
   // json 模式切换也要触发重渲染
-  const fp = `${s.id}|${s.status}|${s.rounds || 0}|${(s.messages || []).length}|${(s.sent || []).length}|${s.error ? 1 : 0}|${s.activity || ''}|${state.sessionJsonMode === s.id ? 'json' : 'ui'}`;
+  const fp = `${s.id}|${s.status}|${s.rounds || 0}|${(s.messages || []).length}|${(s.sent || []).length}|${s.error ? 1 : 0}|${s.activity || ''}|${s.currentWindowCount ?? ''}|${s.responseTier ?? ''}|${s.historyLimit ?? ''}|${s.pastStateCount ?? ''}|${state.sessionJsonMode === s.id ? 'json' : 'ui'}`;
   if (lastDetailFp === fp) return;
   const firstRender = lastDetailFp === null;
   lastDetailFp = fp;
@@ -262,6 +282,8 @@ export function renderSessionDetail(s) {
   const chatName = formatChatTitle(s.chatKey, chatNameOf(s.chatKey));
   const statusBadge = `<span class="status-badge status-${s.status}">${STATUS_LABEL[s.status] || s.status}</span>`;
   const usage = s.usage || {};
+  const context = sessionContextView(s);
+  const countText = (value) => value === null ? '-' : String(value);
 
   const html = [];
   html.push(`
@@ -277,19 +299,22 @@ export function renderSessionDetail(s) {
         <span>${s.rounds || 0} 轮工具</span>
         <span>联网搜索 ${Number(s.webSearchCount) || 0} 次</span>
       </div>
+      <div class="sub">
+        <span>当前窗口 ${countText(context.current.count)} 条${context.current.foldedAway ? ` · 折叠 ${context.current.foldedAway} 条` : ''}</span>
+        <span>响应决策 ${context.response.tier === null ? '-' : `档 ${context.response.tier}`}${context.response.reason ? ` · ${esc(context.response.reason)}` : ''}</span>
+        <span>历史注入 ${countText(context.history.injected)} / ${countText(context.history.limit)} 条</span>
+      </div>
     </div>`);
 
   const jsonMode = state.sessionJsonMode === s.id;
   if (jsonMode) {
-    // JSON 模式以逐轮请求为唯一输入真相，不再同时重复展示 systemPrompt/userPrompt。
-    // 旧会话没有 llmRequests 时，退回首次 inputMessages，并明确标记为旧版快照。
-    const requests = Array.isArray(s.llmRequests) && s.llmRequests.length
-      ? s.llmRequests
-      : [{ round: 1, legacySnapshot: true, messages: s.inputMessages || [], tools: null }];
+    // JSON 模式以逐轮请求为唯一输入真相，不制造不完整的首次请求快照。
+    const requests = Array.isArray(s.llmRequests) ? s.llmRequests : [];
     const raw = {
       sessionId: s.id,
       chatKey: s.chatKey,
       model: s.model || '',
+      context,
       requests,
       responses: (s.messages || []).filter((m) => m.role === 'assistant').map((m, index) => ({
         round: index + 1,

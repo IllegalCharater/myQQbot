@@ -62,17 +62,11 @@ export function sliderToTierUI(pos) {
   return { tier: 4, randomPercent: 100 };
 }
 
-/** 已保存配置 → 滑条位置（优先用存下来的位置，老配置没有就从 tier/概率反推）。 */
+/** 已保存配置 → 滑条位置。旧配置由后端迁移，这里只读取唯一事实源。 */
 export function sliderToTierUI_tierToSlider(st) {
-  const b = TIER_SLIDER_BANDS;
   const saved = Number(st?.contextSliderPos);
   if (Number.isFinite(saved)) return Math.min(100, Math.max(0, saved));
-  const t = Math.min(4, Math.max(1, Number(st?.contextTier) || 4));
-  const pct = Math.min(100, Math.max(0, Number(st?.randomPercent) || 0));
-  if (t === 1) return b.tier1End / 2;
-  if (t === 2) return (b.tier1End + b.tier2End) / 2;
-  if (t === 3) return b.tier2End + (pct / 100) * (b.tier3End - b.tier2End);
-  return (b.tier3End + 100) / 2;
+  return 95;
 }
 
 /** 滑条位置 → 一句话说明（给用户的即时反馈）。 */
@@ -117,12 +111,11 @@ export function renderChatSection(c) {
     </div>
     <div class="field-row">
       <div class="field"><label>等待窗口硬上限（毫秒，0 = 不限）</label><input type="number" id="cfg-reply-maxwait" min="0" step="500" value="${esc(c.reply?.maxWaitMs ?? 0)}" /></div>
-      <div class="field"><label>回复态每分钟最多发送（0 = 沿用下方每分钟上限）</label><input type="number" id="cfg-reply-maxpermin" min="0" value="${esc(c.reply?.maxPerMinute ?? 0)}" /></div>
       <div class="field"><label>命中分钟限频时最多等待（毫秒，0 = 直接报错）</label><input type="number" id="cfg-reply-limitwait" min="0" step="1000" value="${esc(c.reply?.maxLimitWaitMs ?? 20000)}" /></div>
     </div>
     <div class="hint">
       硬上限填 0（不限）时行为与从前完全一致：每条新消息都把计时器重置满，连发不停就一直不触发。<br />
-      命中分钟限频时默认改成了"停一下再发"（最多等 20 秒）而不是直接报错 —— 报错会让那条消息被丢掉，
+      所有状态统一使用下方“每分钟最多发送”。回复态命中该上限时默认“停一下再发”（最多等 20 秒）而不是直接报错 —— 报错会让那条消息被丢掉，
       真人撞到自己的打字速度上限时做的正是等一会儿。
     </div>
 
@@ -130,7 +123,7 @@ export function renderChatSection(c) {
     <div class="field-row">
       <div class="field"><label>相邻消息最小间隔（毫秒）</label><input type="number" id="cfg-mingap" min="200" value="${esc(c.send.minGapMs)}" /></div>
       <div class="field"><label>最大间隔（毫秒）</label><input type="number" id="cfg-maxgap" min="500" value="${esc(c.send.maxGapMs)}" /></div>
-      <div class="field"><label>每分钟最多发送</label><input type="number" id="cfg-maxpermin" min="1" value="${esc(c.send.maxPerMinute)}" /></div>
+      <div class="field"><label>每分钟最多发送（统一上限）</label><input type="number" id="cfg-maxpermin" min="1" value="${esc(c.send.maxPerMinute)}" /></div>
     </div>
     <div class="field-row">
       <div class="field"><label>每小时最多发送</label><input type="number" id="cfg-maxperhour" min="1" value="${esc(c.send.maxPerHour ?? 500)}" /></div>
@@ -222,21 +215,14 @@ export function renderChatSection(c) {
     </div>
 
     <div class="tier-params">
-      <div class="tier-param${curTier === 1 ? '' : ' dim'}">
-        <label>① 被艾特时：发未读 + <input type="number" id="cfg-atcount" min="0" max="500" value="${esc(st.atCount ?? 20)}" /> 条已读</label>
-        <div class="hint">有人 @机器人时才响应。<b>任何档位下被艾特都会响应</b>。</div>
-      </div>
-      <div class="tier-param${curTier === 2 ? '' : ' dim'}">
-        <label>② 命中关键词时：发未读 + <input type="number" id="cfg-kwcount" min="0" max="500" value="${esc(st.keywordCount ?? 15)}" /> 条已读</label>
-        <div class="hint">关键词（每行一个，不区分大小写）：</div>
+      <div class="tier-param">
+        <label>响应关键词（每行一个，不区分大小写）</label>
         <textarea id="cfg-keywords" rows="3" placeholder="小鲸鱼&#10;bot">${esc((st.keywords || []).join('\n'))}</textarea>
+        <div class="hint">只影响“是否响应”，不会改变历史读取长度。</div>
       </div>
-      <div class="tier-param${curTier === 3 ? '' : ' dim'}">
-        <label>③ 随机命中时：发未读 + <input type="number" id="cfg-randcount" min="0" max="500" value="${esc(st.randomCount ?? 8)}" /> 条已读</label>
-      </div>
-      <div class="tier-param${curTier >= 4 ? '' : ' dim'}">
-        <label>④ 其余情况也响应：发未读 + <input type="number" id="cfg-allcount" min="0" max="500" value="${esc(st.allCount ?? 80)}" /> 条已读</label>
-        <div class="hint"><b>任何消息都响应</b>。</div>
+      <div class="tier-param">
+        <label>历史消息深度：读取当前窗口之前最近 <input type="number" id="cfg-history-count" min="0" max="5000" value="${esc(st.historyCount ?? 80)}" /> 条（0 = 不读取历史）</label>
+        <div class="hint">这一项完全独立于艾特、关键词、随机概率和响应档位；只控制【过去状态】。</div>
       </div>
       <div class="tier-param">
         <label>动态上下文窗口：一次运行时最多把 <input type="number" id="cfg-maxctx" min="0" max="5000" value="${esc(st.maxContextMessages ?? 0)}" /> 条未读放进【本次唤醒】（0 = 不限）</label>
@@ -244,7 +230,7 @@ export function renderChatSection(c) {
           每个会话常驻一个只装对方消息的窗口，消息一到就入窗、超出立刻丢最老，所以它看到的聊天<b>一直是最新的</b>。
           与上面的"发未读 + N 条已读"是两回事：那些管<b>读多少历史</b>，这个管<b>一次运行读多少新消息</b>。
           长时间离线或被 @ 唤醒时可能一次积压几百条，靠它兜住 token。
-          超出时丢最老的几条 —— 它们不会消失，只是降级进【过去状态】，模型会被告知折走了多少条；
+          超出时丢最老的几条 —— 它们不会消失，只是降级成【过去状态】候选（仍受历史深度和字符预算限制），模型会被告知折走了多少条；
           而且它们<b>照样参与"要不要回应"的判定</b>（积压里的 @ 不会被漏掉），改动即时生效、不用重启。
         </div>
       </div>
@@ -257,8 +243,8 @@ export function renderChatSection(c) {
     <h3>历史摘要</h3>
     <div class="hint" style="margin-bottom:8px">
       聊天记录被压缩后会留下一条摘要（工具条上的「立即压缩历史」、或定时压缩）。这一段管的是
-      <b>摘要怎么进提示词</b>，和上面的「响应档位」是两条<b>独立通道</b>：档位管读多少条<span class="muted">历史</span>，
-      这里管更早的纪要带多少。两者并行注入、互不挤占 —— 所以档 1/2/3 读的历史很少时，摘要照样带得进来。
+      <b>摘要怎么进提示词</b>，和上面的「历史消息深度」是两条<b>独立通道</b>：历史深度管原始记录，
+      这里管更早的纪要带多少。两者并行注入、互不挤占。
     </div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-digest-everyround" ${c.digest?.injectEveryRound ? 'checked' : ''} />
       <label for="cfg-digest-everyround">每轮对话都注入历史摘要</label></div>
@@ -266,7 +252,7 @@ export function renderChatSection(c) {
       勾上 = 不管这一轮读不读历史都带上；不勾（默认）= 只在<b>真的读了历史</b>的那一轮带上。
     </div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-digest-merge" ${c.digest?.merge !== false ? 'checked' : ''} />
-      <label for="cfg-digest-merge">合并新老摘要</label></div>
+      <label for="cfg-digest-merge">注入时合并摘要展示</label></div>
     <div class="hint" style="margin-top:-4px;margin-bottom:8px">
       勾上（默认）= 所有摘要拼成一段连续正文；不勾 = 每条各成一小节、带编号与分隔线。
       这里的「合并」只是<b>本地拼接</b>，不会为了合并再调一次模型做二次压缩，所以没有信息损失。
@@ -317,7 +303,7 @@ export function renderChatSection(c) {
       <div class="checkbox-row"><input type="checkbox" id="cfg-digest-everyround-g" />
         <label for="cfg-digest-everyround-g">每轮对话都注入历史摘要</label></div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-digest-merge-g" />
-        <label for="cfg-digest-merge-g">合并新老摘要</label></div>
+        <label for="cfg-digest-merge-g">注入时合并摘要展示</label></div>
       <div class="field-row">
         <div class="field"><label>注入字数上限（0 = 不注入）</label>
           <input type="number" id="cfg-digest-maxchars-g" min="0" max="200000" /></div>

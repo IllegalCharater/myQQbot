@@ -32,7 +32,7 @@ updateConfig({
   api: { baseUrl: 'http://127.0.0.1:1/v1', model: 'stub', apiKey: 'x', maxRounds: 1 },
   allow: { groups: [], private: [] }, allowAllWhenEmpty: true,
   persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' },
-  store: { contextTier: 4, maxContextMessages: 0, maxMessagesPerChat: 0 },
+  store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 0, maxMessagesPerChat: 0 },
   reply: { maxWaitMs: 0, maxPerMinute: 0 },
   sticker: { enabled: true, collectEnabled: true, maxCollectPerHour: 10, promptMaxStickers: 10 },
   security: { allowPrivateImageHosts: false }

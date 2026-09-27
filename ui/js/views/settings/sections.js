@@ -229,7 +229,7 @@ export function renderMemorySettingsSection(c) {
       <b>原文不会被删除</b>，只是移到 <code>data/messages/archive/&lt;会话&gt;.jsonl</code> 冷归档。
       摘要在存档页显示为一条「历史摘要」，页顶还会单独列出它有没有进提示词。<br />
       <b>它默认进不了提示词</b>：压缩把它插在"最近 N 条"之前（N = 下方「最近多少条原样保留」，默认 300），
-      而【过去状态】只按响应档位读几十条，摘要压根够不着。要不要带上、带多少，
+      而【过去状态】只按独立历史深度读最近若干条，摘要压根够不着。要不要带上、带多少，
       去「聊天设置 › 历史摘要」里开。
     </div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-compact-enabled" ${comp?.enabled ? 'checked' : ''} />

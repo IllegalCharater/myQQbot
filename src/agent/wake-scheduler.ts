@@ -1,6 +1,7 @@
-import { getConfig, storeConfigForChat } from '../core/config.js';
+import { getConfig, responseConfigForChat } from '../core/config.js';
 import { sleep } from '../core/util.js';
-import { resolveContextTier } from './prompt.js';
+import { evaluateWindowTrigger } from './response-policy.js';
+import { resolveHistoryPolicy } from './history-policy.js';
 import { isRetryableError } from '../llm/llm.js';
 import { runAgent } from './agent-runner.js';
 import { errorMessage } from './json-parse.js';
@@ -14,7 +15,7 @@ import type { SendQueue } from '../qq/sender.js';
 import type { SessionRegistry } from '../chat/sessions.js';
 import type { OneBotClient } from '../qq/onebot.js';
 import type { ContextWindowRegistry } from './context-window.js';
-import type { ChatRuntimeState, ContextTierResult, ToolDefinition } from './types.js';
+import type { ChatRuntimeState, HistoryPolicyResult, ResponseDecision, ToolDefinition } from './types.js';
 
 export interface WakeSchedulerDependencies {
   store: ChatStore;
@@ -146,11 +147,11 @@ export class WakeScheduler {
   /**
    * 取本批**固定**的随机骰子；不存在则掷一次并固定下来。
    *
-   * #predictTier（防抖窗口内每次来消息都会调）与 wake（真正运行前）共用它，
+   * 窗口判定（防抖窗口内每次来消息都会调）与 wake（真正运行前）共用它，
    * 这样随机档在一次批次里只掷一次骰子。此前两处各自 Math.random()，
    * 结果是 randomPercent:10 的 3 档群在窗口内每来一条消息就重掷一次，
    * 在"响应/不响应"之间反复横跳（UI 上表现为状态闪烁 + 会话记的档位理由
-   * 与放行它的那次判定对不上）。resolveContextTier 本来就支持传入 roll。
+   * 与放行它的那次判定对不上）。骰子只属于 evaluateWindowTrigger，纯档位解析器不碰它。
    */
   #batchRoll(chatKey: string): number {
     return this.runtimeState.roll(chatKey);
@@ -225,24 +226,24 @@ export class WakeScheduler {
    * 判据是窗口的 pending()：**窗口内 + 被挤出窗口但还没消费**的全部消息，不设上限。
    * 别改成窗口内容（batch()）—— 上限设小时，埋在积压里的 @ 会被漏判（见上下文窗口的注释）。
    *
-   * @returns {{shouldRespond:boolean, tier:number, count:number, reason:string}}
+   * @returns 当前窗口的响应决定；不包含任何历史长度信息
    */
-  #predictTier(chatKey: string): ContextTierResult {
+  #resolvePendingResponse(chatKey: string): ResponseDecision {
     const cfg = getConfig();
     const entries = this.windows.pending(chatKey);
-    const r = resolveContextTier({
-      triggerEntries: entries,
-      selfNickname: cfg.persona?.selfNickname || this.onebot.selfNickname || '',
-      botName: cfg.persona?.botName || '',
-      selfId: String((cfg as unknown as { onebot?: { selfId?: unknown } }).onebot?.selfId || this.onebot.selfId || ''),
-      cfg: storeConfigForChat(chatKey),  // 按会话取档位：统一开关关闭时各群可以有独立滑条
+    const responsePolicy = responseConfigForChat(chatKey);
+    return evaluateWindowTrigger({
+      entries,
+      identity: {
+        selfNickname: cfg.persona?.selfNickname || this.onebot.selfNickname || '',
+        botName: cfg.persona?.botName || '',
+        selfId: String((cfg as unknown as { onebot?: { selfId?: unknown } }).onebot?.selfId || this.onebot.selfId || '')
+      },
+      policy: responsePolicy,
       // 骰子固定：窗口内每次来消息都重判，但必须用同一颗骰子，
       // 否则随机档会随每条新消息翻来覆去（见 #batchRoll）
       roll: this.#batchRoll(chatKey)
     });
-    // 没有未读就不算"需要响应"（防抖窗口刚建立时的空转）
-    if (entries.length === 0) return { ...r, shouldRespond: false, reason: '无未读' };
-    return r;
   }
 
   scheduleWake(chatKey: string, delay: number | null = null): void {
@@ -279,7 +280,7 @@ export class WakeScheduler {
     //    等半天最后变成"中止"的条目，既干扰又让人以为出了错。
     //    窗口结束前若来了新消息且命中，届时再创建（见下面 pendingSessions 分支）。
     if (ms > 0 && !this.runningChats.has(chatKey)) {
-      const predicted = this.#predictTier(chatKey);
+      const predicted = this.#resolvePendingResponse(chatKey);
       if (predicted.shouldRespond === false) {
         // 不响应：把已存在的等待会话撤掉（例如刚被艾特、随后判定又不成立的情况）
         const stale = this.pendingSessions.get(chatKey);
@@ -433,6 +434,8 @@ export class WakeScheduler {
     // 未命中时：推进游标、不创建会话、不调模型 —— 这才是省 token 的关键
     // （消息内容仍留在存档里，日后被艾特时会作为"已读历史"带进提示词）。
     const cfgNow = getConfig();
+    let responseDecision: ResponseDecision | null = null;
+    const historyResult: HistoryPolicyResult = resolveHistoryPolicy({ historyCount: cfgNow.store.historyCount });
     if (!proactive) {
       // 窗口的 pending()：窗口内 + 被挤出窗口但还没消费的全部（不设上限，判定用）。
       // 空就早退 —— 防抖窗口刚建立时会空转一次。
@@ -442,9 +445,9 @@ export class WakeScheduler {
       }
 
       // 复用 scheduleWake 那一份判定逻辑，避免两处各写一套、日后漂移
-      const tierResult0 = this.#predictTier(chatKey);
+      responseDecision = this.#resolvePendingResponse(chatKey);
 
-      if (tierResult0.shouldRespond === false) {
+      if (responseDecision.shouldRespond === false) {
         // 不响应：推进窗口游标（"看过就是看过"）+ 下沉存档镜像，不产生会话、不消耗 token。
         // 防抖窗口内后续到达的消息会在下一次唤醒时被一起判定 ——
         // 若期间有人艾特机器人，它们会作为已读上下文带上。
@@ -453,7 +456,7 @@ export class WakeScheduler {
         if (waitingSessionId) this.#discardWaiting(waitingSessionId);
         this.emit('chat-update', chatKey);
         if (marked) {
-          console.log(`[orchestrator] ${chatKey} ${marked} 条未命中触发条件（档位 ${tierResult0.tier}），已标记已读、不响应`);
+          console.log(`[orchestrator] ${chatKey} ${marked} 条未命中触发条件（响应档 ${responseDecision.responseTier}），已标记已读、不响应`);
         }
         return;
       }
@@ -466,16 +469,15 @@ export class WakeScheduler {
     // 上限现在由窗口在**入窗时**维护（超上限丢最老），不再在这里对触发批切片 ——
     // 两条分支（响应 / 不响应）从此走的是同一套窗口逻辑。
     let triggerEntries: ChatMessage[] = [];
-    let windowEntryIds: number[] = [];
+    let historyBeforeId: number | null = null;
     let foldedAway = 0;
     if (proactive) {
       // 主动机会：不打扰、无触发批，只带状态；顺手把零星没看过的消费掉
       this.#consumeWindow(chatKey);
     } else {
-      // tier 读取的是窗口之外的历史；先拍下整个驻留窗口，避免已消费但尚未被挤出的
-      // 消息再次出现在【过去状态】中。
-      windowEntryIds = this.windows.ensure(chatKey).win.map((entry) => Number(entry.id) || 0).filter(Boolean);
       triggerEntries = this.windows.batch(chatKey);
+      // 当前窗口最早一条就是历史的右边界：tier 只能向它之前读取，当前批只进【本次唤醒】。
+      historyBeforeId = triggerEntries.length ? Number(triggerEntries[0].id) || null : null;
       foldedAway = this.windows.foldedCount(chatKey);
       this.#consumeWindow(chatKey);
     }
@@ -487,19 +489,11 @@ export class WakeScheduler {
     // ⚠️ 不要给 get_recent_messages 加钳制：那是模型主动发起的查询，
     //    钳死会让存档对唯一的消费者不可达。
 
-    // ── 档位：响应时带多少条已读历史 ──
-    // 在唤醒时算一次并固定下来（尤其是随机档的骰子结果），
-    // 否则后续每次渲染提示词都会重新掷，会话记录与提示词会对不上。
-    const tierResult = resolveContextTier({
-      triggerEntries,
-      selfNickname: cfgNow.persona?.selfNickname || this.onebot.selfNickname || '',
-      botName: cfgNow.persona?.botName || '',
-      selfId: String((cfgNow as unknown as { onebot?: { selfId?: unknown } }).onebot?.selfId || this.onebot.selfId || ''),
-      cfg: storeConfigForChat(chatKey),  // 与 #predictTier 同一来源，保证预判/实跑一致
-      // 与 #predictTier 用**同一颗**固定骰子 —— 否则预判放行了、实跑又掷一次，
-      // 可能出现"窗口显示等待中、真要跑时却判成不响应"（反之亦然）。
-      roll: this.#batchRoll(chatKey)
-    });
+    // 主动机会不经过窗口响应策略；历史深度仍由上面的独立策略统一给出。
+    if (proactive) {
+      responseDecision = { responseTier: 0, reason: '主动机会', shouldRespond: true };
+    }
+    if (!responseDecision) throw new Error('响应判定结果缺失');
 
     this.runningChats.add(chatKey);
     // 状态机：静默→回复。phase 转 running；since 若已是回复态则保留（drain 重入不重置时钟）
@@ -544,7 +538,7 @@ export class WakeScheduler {
     try {
       for (let attempt = 1; attempt <= MAX_SESSION_ATTEMPTS; attempt++) {
         try {
-          await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, historyLimit: tierResult.historyCount, windowEntryIds, tierInfo: tierResult, foldedAway });
+          await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, historyLimit: historyResult.historyCount, historyBeforeId, responseInfo: responseDecision, historyInfo: historyResult, foldedAway });
           lastError = null;
           break;
         } catch (error) {
@@ -612,7 +606,6 @@ export class WakeScheduler {
     live.error = null;
     live.finishReason = null;
     live.activity = '';
-    live.inputMessages = [];
     live.llmRequests = [];
     live.usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0, calls: 0 };
     this.sessions.update(session.id);

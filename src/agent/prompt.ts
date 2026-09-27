@@ -11,18 +11,13 @@
 // 沉睡/唤醒/等待机制（由编排器的"已读/未读驱动"取代）。
 
 import { getConfig, digestConfigForChat } from '../core/config.js';
-// 滑条换算放在独立模块（零依赖），避免 config.js ↔ prompt.js 循环依赖。
-// 这里 re-export 是为了让已经从 prompt.js 引用的代码不受影响。
-import { sliderToTier as _sliderToTier, tierToSlider as _tierToSlider, TIER_SLIDER_BANDS as _TIER_SLIDER_BANDS } from '../core/tier-slider.js';
-export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider, _TIER_SLIDER_BANDS as TIER_SLIDER_BANDS };
 import { formatFullTime, formatShortTime } from '../core/util.js';
 import { buildStickerContext, buildStickerStrategyHint } from '../stickers/stickers.js';
 import type { AppConfig } from '../core/config.js';
 import type { ChatStore } from '../chat/store.js';
 import type { ChatMessage } from '../chat/types.js';
-import type { ContextTierResult, DigestSelection, PastStateResult, PromptContext, SelectedDigest, TriggerContext } from './types.js';
+import type { DigestSelection, PastStateResult, PromptContext, SelectedDigest, TriggerContext } from './types.js';
 
-type StoreConfig = AppConfig['store'];
 type DigestConfig = ReturnType<typeof digestConfigForChat>;
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -240,142 +235,6 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
   return `[${formatShortTime(m.ts)}] ${idPrefix}${who}：${replyPrefix}${m.text}`;
 }
 
-/**
- * 判断一段消息里是否艾特了机器人。
- * 支持三种写法：@昵称 / @机器人名 / CQ 码 [CQ:at,qq=机器人QQ号]
- */
-export function isAtMe(text: unknown, { selfNickname = '', botName = '', selfId = '' }: TriggerContext = {}): boolean {
-  const t = String(text ?? '');
-  if (!t) return false;
-  const nick = String(selfNickname || '').trim();
-  const name = String(botName || '').trim();
-  if (nick && t.includes(`@${nick}`)) return true;
-  if (name && t.includes(`@${name}`)) return true;
-  // CQ 码艾特：命中机器人自己的 QQ 号
-  if (selfId) {
-    const re = /\[CQ:at(?:,[^\]]*?)?qq=(\d+)[^\]]*\]/g;
-    let m;
-    while ((m = re.exec(t))) { if (String(m[1]) === String(selfId)) return true; }
-  }
-  return false;
-}
-
-/** 是否命中关键词（不区分大小写，空表直接 false）。 */
-export function hitKeyword(text: unknown, keywords: unknown = []): boolean {
-  const t = String(text ?? '').toLowerCase();
-  if (!t) return false;
-  for (const k of Array.isArray(keywords) ? keywords : []) {
-    const kw = String(k ?? '').trim().toLowerCase();
-    if (kw && t.includes(kw)) return true;
-  }
-  return false;
-}
-
-/**
- * 决定本次唤醒该读多少条历史。
- *
- * 四档是**累积生效**的（选 4 档时 1/2/3 也都生效），按 4→3→2→1 的顺序检查，
- * 第一个命中的决定读取条数：
- *   4 全读     → allCount 条（默认行为）
- *   3 随机     → randomPercent% 概率触发，读 randomCount 条
- *   2 关键词   → 触发批里命中关键词，读 keywordCount 条
- *   1 仅艾特   → 触发批里艾特了机器人，读 atCount 条
- * 都没命中 → 读 0 条（只带触发批本身，不翻历史）
- *
- * ⚠️ 随机档的结果必须**固定下来**（由调用方保存），否则每次渲染提示词
- * 都会重新掷骰子，导致会话记录与提示词不一致。
- *
- * @returns {{tier:number, count:number, reason:string}}
- */
-/**
- * 决定这批消息**是否值得机器人回应**，以及回应时带多少条已读历史。
- *
- * 四档是**累积生效**的（选 4 档时 1/2/3 也都生效），按 4→3→2→1 顺序检查，
- * 第一个命中的决定结果：
- *
- *   4 全部响应  → 任何消息都响应，带 allCount 条已读
- *   3 随机响应  → randomPercent% 概率响应，带 randomCount 条已读
- *   2 关键词    → 命中关键词（或被艾特）才响应，带 keywordCount 条已读
- *   1 仅艾特    → 只有被艾特才响应，带 atCount 条已读
- *
- * **都没命中 → shouldRespond=false**：调用方应把这批消息标记为已读、
- * 不创建会话、不调模型（这才是省 token 的关键）。
- *
- * ⚠️ 各档的已读条数**互相独立**：设为 3 档时若实际是被艾特触发的，
- *    带的仍是 1 档的 atCount 条，而不是 3 档的 randomCount 条。
- *
- * ⚠️ 随机档结果必须**固定下来**（由调用方传 roll），否则每次渲染提示词
- *    都会重新掷骰子，导致会话记录与提示词不一致。
- *
- * @returns {{tier:number, count:number, reason:string, shouldRespond:boolean}}
- */
-/**
- * 决定这批消息**是否值得机器人回应**，以及回应时带多少条已读历史。
- *
- * ── 语义（重要）──
- * 档位决定**启用哪些触发方式**；实际触发的**原因**决定带多少条已读：
- *
- *   触发原因优先级（高→低）：  被艾特  >  关键词  >  随机  >  全部响应
- *   对应档位与条数字段：        1 档    2 档      3 档     4 档
- *                              atCount  keyword   random   allCount
- *                                       Count     Count
- *
- * 所以**各档条数互相独立**：设为 3 档时被艾特触发，带的仍是 1 档的 atCount 条，
- * 而不是 3 档的 randomCount 条。这是刻意设计 —— 被艾特是最明确的召唤，
- * 值得给更多上下文；随机命中只是"顺手聊聊"，少带点更省。
- *
- * 档位的"累积生效"体现在：3 档同时启用 1/2/3 三种触发方式，
- * 但每种方式命中时都用**它自己那一档**的条数。
- *
- * ── 没命中会怎样 ──
- * shouldRespond=false：调用方把这批消息标记已读、不创建会话、不调模型。
- * 内容仍留在存档，日后被艾特时会作为"已读历史"一起发出去。
- *
- * ⚠️ 随机档结果必须**固定下来**（由调用方传 roll），否则每次渲染提示词
- *    都会重新掷骰子，导致会话记录与提示词不一致。
- *
- * @returns {{tier:number, count:number, reason:string, shouldRespond:boolean}}
- *          tier 是"命中的档位"（触发原因所属档），不是"当前设置档位"
- */
-export function resolveContextTier({ triggerEntries = [], selfNickname = '', botName = '', selfId = '', cfg = null, roll = null }: {
-  triggerEntries?: ChatMessage[]; selfNickname?: string; botName?: string; selfId?: string | number;
-  cfg?: StoreConfig | null; roll?: number | null;
-} = {}): ContextTierResult {
-  const c = cfg || getConfig().store || {};
-  // 注意：不能用 `Number(x) || 4` —— 0 是 falsy，会被误当成"未设置"回落到 4。
-  // 必须先判断是不是有效数字，再钳到 [1,4]。
-  const rawTier = Number(c.contextTier);
-  const tier = Number.isFinite(rawTier) ? Math.min(4, Math.max(1, Math.round(rawTier))) : 4;
-
-  const texts = (triggerEntries || []).map((e) => String(e?.text ?? ''));
-  const atMe = texts.some((t) => isAtMe(t, { selfNickname, botName, selfId }));
-  const keyword = hitKeyword(texts.join('\n'), c.keywords);
-  // 掷骰子：调用方可传入已固定的 roll（0-100），避免重复随机
-  const rollValue = roll === null || roll === undefined ? Math.random() * 100 : Number(roll);
-  const randomHit = rollValue < Math.max(0, Math.min(100, Number(c.randomPercent) || 0));
-
-  const n0 = (v: unknown) => Math.max(0, Number(v) || 0);
-
-  // 4 档：无条件响应（兜底），用 allCount
-  if (tier >= 4) {
-    return { tier: 4, historyCount: n0(c.allCount), reason: '全部响应', shouldRespond: true };
-  }
-
-  // 1~3 档：先看最明确的召唤信号，命中就用它自己那一档的条数
-  if (atMe) {
-    return { tier: 1, historyCount: n0(c.atCount), reason: '被艾特', shouldRespond: true };
-  }
-  if (tier >= 2 && keyword) {
-    return { tier: 2, historyCount: n0(c.keywordCount), reason: '关键词命中', shouldRespond: true };
-  }
-  if (tier >= 3 && randomHit) {
-    return { tier: 3, historyCount: n0(c.randomCount), reason: `随机命中(${rollValue.toFixed(0)}%)`, shouldRespond: true };
-  }
-
-  // 都没命中：不响应（调用方会把这批标记已读）
-  return { tier: 0, historyCount: 0, reason: '未触发', shouldRespond: false };
-}
-
 // 【过去状态】里"最近这几行一律显示 #id"的窗口大小。
 //
 // 为什么不是"只有带图的消息才给 id"（旧规则）：模型想引用的几乎总是眼前刚发生的
@@ -389,14 +248,17 @@ const RECENT_ID_LINES = 12;
 
 /**
  * 组装"过去状态"文本：消息 JSON 的最近一段（带时间与已读语义）。
- * 读取条数由**上下文档位**决定（见 resolveContextTier），不再是固定值。
+ * 读取条数由调度层已经解析好的 `historyLimit` 决定，本模块不参与档位判定。
  */
-export function buildPastState(store: ChatStore, chatKey: string, { excludeIds = [], limit = null }: { excludeIds?: number[]; limit?: number | null } = {}): PastStateResult {
+export function buildPastState(store: ChatStore, chatKey: string, { excludeIds = [], limit = null, beforeId = null }: { excludeIds?: number[]; limit?: number | null; beforeId?: number | null } = {}): PastStateResult {
   const cfg = getConfig().store;
-  const maxLimit = limit === null ? Math.max(1, Number(cfg.allCount) || 80) : Math.max(0, Number(limit) || 0);
+  const maxLimit = limit === null ? Math.max(0, Number(cfg.historyCount) || 0) : Math.max(0, Number(limit) || 0);
   const exclude = new Set(excludeIds);
   if (maxLimit <= 0) return { text: '', count: 0, messages: [] };
-  let messages = store.recent(chatKey, { limit: maxLimit + exclude.size }).filter((m) => !exclude.has(m.id));
+  let messages = (beforeId === null || beforeId === undefined
+    ? store.recent(chatKey, { limit: maxLimit + exclude.size })
+    : store.recentBefore(chatKey, beforeId, { limit: maxLimit + exclude.size }))
+    .filter((m) => !exclude.has(m.id));
   // 屏蔽名单兜底过滤：屏蔽生效前已存档的历史消息，也不能再进提示词。
   // 入口拦截只管"新消息"，这里管"老库存"。机器人自己的发言（self）不过滤。
   const [pKind, pId] = String(chatKey || '').split(':');
@@ -418,7 +280,7 @@ export function buildPastState(store: ChatStore, chatKey: string, { excludeIds =
 // ── 历史印象：把压缩摘要注入提示词 ───────────────────────────────────────
 //
 // 背景：摘要（kind:'digest'）以前**从来没进过提示词**。compact.keepRecentMessages
-// 默认 300，而【过去状态】的窗口上限 allCount 默认只有 80（档 1/2/3 更小：20/15/8），
+// 默认 300，而【过去状态】的默认 historyCount 只有 80，
 // commitCompaction 又把摘要插在被归档区间最后一条的位置 —— 距今天至少 300 条。
 // 于是"摘要"只存在于存档里，模型一次也没看见过。
 //
@@ -663,34 +525,30 @@ function joinPromptWithinBudget(
 export function buildUserPrompt(ctx: PromptContext): string {
   const cfg = getConfig();
   const now = Date.now();
-  // 响应档位只控制“窗口之外的已读历史”深度。排除整个驻留窗口，而不只是本轮 trigger，
-  // 否则窗口内已经消费过的消息会同时出现在【过去状态】和当前新消息窗口附近。
-  const excludeIds = [...new Set([
-    ...ctx.triggerEntries.map((m) => m.id),
-    ...(ctx.windowEntryIds || [])
-  ])];
-  // 读取条数由响应档位决定（ctx.historyLimit 由 orchestrator 在唤醒时算好传来；
-  // 随机档的骰子结果必须固定，否则每次渲染都会重新掷、提示词与会话记录对不上）
-  const requestedHistoryLimit = ctx.historyLimit ?? ctx.contextLimit;
-  const historyLimit = requestedHistoryLimit === null || requestedHistoryLimit === undefined
+  // 当前窗口与独立历史按边界彻底分离：triggerEntries 只进【本次唤醒】，历史只能
+  // 从窗口最早消息之前读取。excludeIds 再做一层防御性排重。
+  const excludeIds = [...new Set(ctx.triggerEntries.map((m) => m.id))];
+  const historyBeforeId = ctx.historyBeforeId ?? null;
+  // historyLimit 由独立历史策略计算；它与响应原因、随机骰子和窗口内容无关。
+  const historyLimit = ctx.historyLimit === null || ctx.historyLimit === undefined
     ? null                                   // 没给 = 按默认（全读档的上限）
-    : Math.max(0, Number(requestedHistoryLimit) || 0);
+    : Math.max(0, Number(ctx.historyLimit) || 0);
   // 先用原始窗口决定本轮是否需要历史摘要；摘要被选中后，再从
   // 【过去状态】排除同一本地 id，避免同一段正文在两个区块里出现两次。
-  let past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: historyLimit });
+  let past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: historyLimit, beforeId: historyBeforeId });
 
-  // 历史印象（压缩摘要）：与上面的窗口是**两条独立通道**，互不挤占 ——
-  // 窗口读多少条由响应档位决定，摘要带多少由 digest.maxChars 决定。
+  // 历史印象（压缩摘要）：与上面的原始历史是**两条独立通道**，互不挤占 ——
+  // 原始历史读多少条由 historyCount 决定，摘要带多少由 digest.maxChars 决定。
   const dgc = digestConfigForChat(ctx.chatKey);
   // 不勾「每轮都注入」时维持原来的时机：只有真的要读历史的那一轮才带摘要。
-  // 档 1/2/3 都没命中、读 0 条的那种唤醒最频繁，它们省 token 的初衷不该被
-  // 一个几千字的块抵消，所以这类唤醒不带（past.count === 0 就是判据）。
+  // historyCount=0 时不应被一个几千字的摘要抵消省 token 的目的，除非显式每轮注入。
   const wantDigest = dgc.maxChars > 0 && (dgc.injectEveryRound || past.count > 0);
   const dig = wantDigest ? collectInjectedDigests(ctx.store, ctx.chatKey, { config: dgc }) : EMPTY_DIGESTS;
   if (dig.injected.length) {
     past = buildPastState(ctx.store, ctx.chatKey, {
       excludeIds: [...excludeIds, ...dig.injected.map((x) => x.entry.id)],
-      limit: historyLimit
+      limit: historyLimit,
+      beforeId: historyBeforeId
     });
   }
   // 写回最终真正注入的历史条数，供 get_recent_messages 的 offset 补偿。
@@ -764,9 +622,8 @@ export function buildUserPrompt(ctx: PromptContext): string {
   for (const m of ctx.triggerEntries || []) {
     if (m.senderId && !m.self) relevantUserIds.add(String(m.senderId));
   }
-  // 只取"这次真的会发给模型"的消息里出现的群友 —— 触发批 + 档位选中的已读。
-  // 曾经这里写死 store.recent(limit:12)，与档位脱钩：1 档只发 5 条已读时，
-  // 记忆里却混入了模型根本看不到的群友印象。
+  // 只取"这次真的会发给模型"的消息里出现的群友 —— 当前批 + 独立历史策略选中的记录。
+  // 曾经这里写死 store.recent(limit:12)，会把模型实际看不到的群友印象混进记忆段。
   for (const m of (past?.messages || [])) {
     if (m.senderId && !m.self) relevantUserIds.add(String(m.senderId));
   }

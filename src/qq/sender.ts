@@ -41,7 +41,7 @@ export class SendQueue {
     this.minuteTimes = new Map(); // chatKey -> [ts]
     this.hourTimes = new Map();   // chatKey -> [ts]
     // chatKey -> 正在回复态（由 orchestrator 的静默/回复状态机维护）。
-    // 回复态内用 config.reply.maxPerMinute 收紧出站限频；不在表里 = 静默态，沿用 send.maxPerMinute。
+    // 所有状态共用 send.maxPerMinute；回复态命中上限时可按 reply.maxLimitWaitMs 有界等待。
     this.replying = new Set();
   }
 
@@ -72,11 +72,8 @@ export class SendQueue {
     const hour = (this.hourTimes.get(chatKey) || []).filter((t) => now - t < 3600000);
     // 回退值必须与 config.js 的默认值一致（80）。此前这里是 8，
     // 配置缺失/为 0 时限频突然收紧 10 倍，行为不可预测。
-    const baseMinute = Math.max(1, Number(cfg.maxPerMinute) || DEFAULT_MAX_PER_MINUTE);
-    // 回复态内额外收紧（取更严的那个）。reply.maxPerMinute 为 0 = 不额外收紧。
-    const replyMinute = Math.max(0, Number(rep.maxPerMinute) || 0);
-    const tighter = this.replying.has(chatKey) && replyMinute > 0;
-    const effMinute = tighter ? Math.min(baseMinute, replyMinute) : baseMinute;
+    const effMinute = Math.max(1, Number(cfg.maxPerMinute) || DEFAULT_MAX_PER_MINUTE);
+    const replying = this.replying.has(chatKey);
 
     if (minute.length >= effMinute) {
       // 回复态内**有界等待**一个空位，而不是直接抛错。
@@ -87,10 +84,10 @@ export class SendQueue {
       // 真人撞到自己的打字速度上限时做的正是有界等待：停一下再发。
       // 有界（maxLimitWaitMs，默认 20s）保证工具延迟可预测；本函数位于每会话
       // 串行 chain 内，sleep 会自动按会话串行，不会与别的发送交错。
-      // 静默态（tighter=false）维持原行为：直接抛错。
+      // 静默态维持原行为：直接抛错。
       const wait = Math.max(0, minute[0] + 60000 - Date.now() + 50);
       const grace = Math.max(0, Number(rep.maxLimitWaitMs) || 0);
-      if (tighter && grace > 0 && wait <= grace) {
+      if (replying && grace > 0 && wait <= grace) {
         await sleep(wait);
         const now2 = Date.now();
         const freed = (this.minuteTimes.get(chatKey) || []).filter((t) => now2 - t < 60000);

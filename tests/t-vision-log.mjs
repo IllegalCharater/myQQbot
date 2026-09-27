@@ -24,7 +24,7 @@ updateConfig({
   api: { baseUrl: model.url, model: 'stub-vision', maxRounds: 8 },
   allowAllWhenEmpty: true, allow: { groups: [], private: [] },
   persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' },
-  store: { contextTier: 4, allCount: 80, maxContextMessages: 0 },
+  store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 0 },
   security: { allowPrivateImageHosts: true },
   reply: { maxWaitMs: 0, maxPerMinute: 0 }
 });

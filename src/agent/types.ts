@@ -48,7 +48,8 @@ export interface TriggerContext {
   selfId?: string | number;
 }
 
-export interface ContextTierResult { tier: number; historyCount: number; reason: string; shouldRespond: boolean }
+export interface ResponseDecision { responseTier: number; reason: string; shouldRespond: boolean }
+export interface HistoryPolicyResult { historyCount: number }
 export interface SelectedDigest { entry: ChatMessage; text: string; chars: number; truncated: boolean }
 export interface DigestSelection {
   picked: SelectedDigest[];
@@ -89,9 +90,8 @@ export interface PromptContext extends TriggerContext, Record<string, unknown> {
   triggerEntries: ChatMessage[];
   proactive?: boolean;
   historyLimit?: number | null;
-  /** @deprecated 使用 historyLimit。仅保留给旧调用方兼容。 */
-  contextLimit?: number | null;
-  windowEntryIds?: number[];
+  /** 当前窗口最早一条消息的本地 id；历史只能从它之前读取。 */
+  historyBeforeId?: number | null;
   foldedAway?: number;
   lastMessageAt?: number;
   recentCount?: number;

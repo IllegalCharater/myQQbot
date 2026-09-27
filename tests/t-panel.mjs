@@ -44,7 +44,7 @@ updateConfig({
   api: { baseUrl: `http://127.0.0.1:${PORT}/v1`, model: 'stub-model', apiKey: 'x', maxRounds: 1 },
   allow: { groups: [], private: [] }, allowAllWhenEmpty: true,
   persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' },
-  store: { contextTier: 4, maxContextMessages: 0 },
+  store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 0 },
   reply: { maxWaitMs: 0, maxPerMinute: 0 },
   compact: { enabled: true, minMessagesToCompact: 10, keepRecentMessages: 5, maxMessagesPerRound: 400, maxContextChars: 24000 }
 });

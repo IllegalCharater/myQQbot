@@ -271,6 +271,20 @@ export class ChatStore {
     return all.slice(0, start).slice(-Math.max(1, Number(limit) || 1));
   }
 
+  /**
+   * 读取某条本地消息之前的最近记录。用于把“当前窗口”和“档位历史”按明确边界拆开，
+   * 不用 offset 猜窗口里混入了多少 self/系统记录。
+   */
+  recentBefore(chatKey: string, beforeId: number, { limit = 80 }: { limit?: number } = {}) {
+    const st = this.#state(chatKey);
+    const boundary = Math.max(0, Number(beforeId) || 0);
+    const count = Math.max(1, Number(limit) || 1);
+    const candidates = boundary > 0
+      ? st.messages.filter((m) => (Number(m.id) || 0) < boundary)
+      : st.messages;
+    return candidates.slice(-count);
+  }
+
   findByMid(chatKey: string, mid: unknown) {
     const st = this.#state(chatKey);
     const target = String(mid);

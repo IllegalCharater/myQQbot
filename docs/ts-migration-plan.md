@@ -58,7 +58,8 @@ OneBot 入站事件
   → ChatStore 持久化
   → ContextWindowRegistry.push
   → WakeScheduler 防抖聚批
-  → resolveContextTier 判断是否响应及历史深度
+  → evaluateWindowTrigger 只判断窗口是否命中响应条件
+  → resolveHistoryPolicy 独立解析历史深度
   → 同步取得新消息批次并消费窗口
   → runAgent 组装提示词和工具
   → chatCompletionWithRetry
@@ -90,20 +91,27 @@ OneBot 入站事件
 - `foldedCount()`：被挤入 `sunk` 的未消费条数，用于提示模型较早消息已降级到历史。
 - `seen()`：推进水位线。回复与不回复都会消费，避免旧消息反复成为“新消息”。
 
-### 4.2 `ContextTierResult.historyCount`
+### 4.2 独立历史策略
 
-响应档位决定两件事：是否响应，以及响应时读取多少条窗口之外的已读历史。
+响应档位只决定当前窗口是否值得响应；`store.historyCount` 独立决定读取多少条窗口之前的历史。二者没有数据或策略依赖。
 
-| 触发原因 | 历史深度来源 |
-|---|---|
-| 被艾特 | `store.atCount` |
-| 命中关键词 | `store.keywordCount` |
-| 随机参与 | `store.randomCount` |
-| 全部响应 | `store.allCount` |
+响应档位的持久化事实源只有 `store.contextSliderPos`。`contextTier` 与
+`randomPercent` 仅在运行时由滑条位置计算，不再写入配置；加载旧配置时会一次性把
+旧字段迁移成滑条位置。全局滑条与 `groupSliderPos` 也遵循同一换算规则。
 
-内部统一使用 `historyCount` / `historyLimit`。旧的 `PromptContext.contextLimit` 只作为兼容入口保留；会话 JSON 暂时同时记录 `historyLimit` 和旧字段 `contextLimit`，便于旧面板或历史文件继续读取。
+旧配置的 `atCount/keywordCount/randomCount/allCount` 会按照升级时所选响应档位迁移成一个 `historyCount`，随后删除。内部统一使用 `historyCount` / `historyLimit`。
 
-调度器在消费窗口前拍下整个 `win` 的本地 ID，并将其作为 `windowEntryIds` 传给提示词构建器。因此【过去状态】会排除整个当前窗口，而不只是本轮 `triggerEntries`，防止驻留窗口内已经处理过的消息被历史深度再次注入。
+调度器在消费窗口前完成两件彼此独立的事：
+
+1. `evaluateWindowTrigger()` 用 `pending()` 对全部未消费消息做响应判定；
+2. `resolveHistoryPolicy()` 只读取 `store.historyCount`，不接收消息、窗口或响应结果；
+3. 用 `batch()` 拍下实际进入【本次唤醒】的当前窗口，并以其中最早消息的本地 ID
+   作为 `historyBeforeId`。
+
+提示词构建器从 `historyBeforeId` 之前向前读取 `historyCount` 条，形成【过去状态】；
+`batch()` 中的消息只形成【本次唤醒】。两段以明确边界相接，不按数组 offset 猜测，也不
+在窗口消费后重新计算响应策略。窗口外 `sunk` 中的较早未读消息属于历史候选，能否实际注入
+仍受独立历史深度和统一字符预算限制。
 
 ## 5. 提示词组装
 
@@ -118,7 +126,7 @@ OneBot 入站事件
 1. 【当前时间】
 2. 【此刻状态】
 3. 【历史印象】——历史压缩产生的摘要
-4. 【过去状态】——窗口之外、档位允许读取的原始历史
+4. 【过去状态】——窗口之外、独立历史策略允许读取的原始历史
 5. 【本次唤醒】——当前新消息窗口的未消费批次
 6. 【记忆】——仅与本轮可见成员相关的长期印象
 7. 可用表情目录
@@ -198,15 +206,17 @@ store.promptContextMaxChars = 32000
 每次运行记录：
 
 - system/user prompt 与总字符数；
-- `llmRequests` 中每一轮实际输入模型的完整 messages、tools 和请求参数；旧记录的 `inputMessages` 仅作首次输入兼容；
+- `llmRequests` 中每一轮实际输入模型的完整 messages、tools 和请求参数；
 - vendor、模型、调用轮数与 token 用量；
-- 命中的响应档位、原因和 `historyLimit`；
+- 当前窗口的注入条数与折叠条数；
+- 独立的响应档位、响应原因，以及历史读取上限、边界和实际注入条数；
 - `promptBudgetChars` 与是否因保护区过大而超预算；
 - 工具调用、错误、图片注入、发送记录和结束原因。
 
 这些记录用于排查提示词膨胀、渠道计费、读图失败和工具循环，不作为下一次模型请求的对话历史。
 
-会话面板的 JSON 模式以 `llmRequests` 为输入侧唯一真相，不再同时重复展示顶层 `systemPrompt/userPrompt`。旧会话没有逐轮快照时，会回退显示 `inputMessages` 并标记 `legacySnapshot`。
+会话面板的 JSON 模式以 `llmRequests` 为输入侧唯一真相，不再同时重复展示顶层 `systemPrompt/userPrompt`，也不再用首次输入伪造缺失的逐轮请求。
+面板元数据按 `current / response / history` 三块展示，只读取新结构字段。
 
 ## 10. 构建、测试与发布
 
@@ -222,7 +232,7 @@ npm run dev             # tsc --watch
 
 测试通过 `tests/lib/src.mjs` 加载 `dist/`，确保验证的是实际运行产物。新增 `t-*.mjs` 必须在 `tests/run.mjs` 的 ASSERT 或 DIAG 中显式归类，否则 runner 直接失败。
 
-当前重点回归包括动态窗口语义、摘要去重、窗口和档位历史分离、统一预算保护本轮消息、读图结果回填、`memory_query` 定向查询，以及 Web/UI 模块接线。
+当前重点回归包括动态窗口语义、摘要去重、当前窗口与独立历史分离、统一预算保护本轮消息、读图结果回填、`memory_query` 定向查询，以及 Web/UI 模块接线。
 
 发布前执行：
 

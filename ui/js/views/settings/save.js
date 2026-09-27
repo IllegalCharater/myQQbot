@@ -3,7 +3,7 @@ import { api } from '../../api.js';
 import { $, esc } from '../../dom.js';
 import { state } from '../../state.js';
 import { getThemePref } from '../../theme.js';
-import { clampInt, sliderToTierUI } from '../../parts/chat-settings.js';
+import { clampInt } from '../../parts/chat-settings.js';
 
 export function parseList(s) {
   return String(s || '').split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
@@ -202,31 +202,14 @@ export async function saveConfig({ quiet = false } = {}) {
     // 读取历史档位（替代原来的「最多条数 + 字符预算」两个固定值）
     patch.store = {
       ...(c.store || {}),
-      // 档位 = 滑条位置换算（唯一真相是滑条的实时 value）。
-      // 后端 updateConfig 还会用 tier-slider.js 再权威换算一次，双保险。
-      contextTier: (() => {
-        const sl = $('#ctx-tier-slider');
-        const pos = sl ? Number(sl.value) : (c.store?.contextSliderPos ?? 100);
-        return sliderToTierUI(pos).tier;
-      })(),
       // 滑条位置存下来，重开设置页能还原到用户拖动的位置
       contextSliderPos: (() => {
         const sl = $('#ctx-tier-slider');
-        return sl ? Number(sl.value) : (c.store?.contextSliderPos ?? 100);
+        return sl ? Number(sl.value) : (c.store?.contextSliderPos ?? 95);
       })(),
-      // 3 档概率由滑条位置线性决定（不再让用户单独填数字）
-      randomPercent: (() => {
-        const sl = $('#ctx-tier-slider');
-        const pos = sl ? Number(sl.value) : (c.store?.contextSliderPos ?? 100);
-        return sliderToTierUI(pos).randomPercent;
-      })(),
-      atCount: clampInt(val('#cfg-atcount', c.store?.atCount), 1, 500, 20),
-      keywordCount: clampInt(val('#cfg-kwcount', c.store?.keywordCount), 1, 500, 15),
       keywords: String($('#cfg-keywords')?.value || '')
         .split('\n').map((x) => x.trim()).filter(Boolean),
-      randomPercent: clampInt(val('#cfg-randpct', c.store?.randomPercent), 0, 100, 10),
-      randomCount: clampInt(val('#cfg-randcount', c.store?.randomCount), 1, 500, 8),
-      allCount: clampInt(val('#cfg-allcount', c.store?.allCount), 1, 500, 80),
+      historyCount: clampInt(val('#cfg-history-count', c.store?.historyCount), 0, 5000, 80),
       // 运行时动态上下文窗口（条）；0 = 不限。与 maxMessagesPerChat（存档留多少条）无关。
       maxContextMessages: clampInt(val('#cfg-maxctx', c.store?.maxContextMessages), 0, 5000, 0),
       promptContextMaxChars: clampInt(val('#cfg-prompt-context-maxchars', c.store?.promptContextMaxChars), 0, 1000000, 32000),
@@ -240,12 +223,11 @@ export async function saveConfig({ quiet = false } = {}) {
     delete patch.store.pastStateLimit;
     delete patch.store.pastStateMaxChars;
 
-    // 回复态节奏。wakeDelayMs（上面单独写顶层）是"立即回复时间"，这三项是它的配套。
+    // 回复态节奏。发送频率统一由 send.maxPerMinute 管，这里只保留等待窗口与限频等待策略。
     // patch.reply 必须建在这个分支里 —— saveConfig 只提交当前 section 的键。
     patch.reply = {
       ...(c.reply || {}),
       maxWaitMs: clampInt(val('#cfg-reply-maxwait', c.reply?.maxWaitMs), 0, 3600000, 0),
-      maxPerMinute: clampInt(val('#cfg-reply-maxpermin', c.reply?.maxPerMinute), 0, 1000, 0),
       maxLimitWaitMs: clampInt(val('#cfg-reply-limitwait', c.reply?.maxLimitWaitMs), 0, 300000, 20000)
     };
 
