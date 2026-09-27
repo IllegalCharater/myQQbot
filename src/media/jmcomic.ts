@@ -12,6 +12,9 @@ const JM_DIR = path.join(DATA_DIR, 'jmcomic');
 const DOWNLOAD_DIR = path.join(DATA_DIR, 'downloads', 'jmcomic');
 const JOBS_FILE = path.join(JM_DIR, 'jobs.json');
 const LOG_DIR = path.join(JM_DIR, 'logs');
+const CLEANUP_STATE_FILE = path.join(JM_DIR, 'cleanup-state.json');
+const CACHE_CLEANUP_INTERVAL_MS = 24 * 60 * 60_000;
+const CACHE_CLEANUP_CHECK_MS = 60 * 60_000;
 const DOWNLOAD_RETRY_MS = [5_000, 30_000, 120_000];
 const UPLOAD_RETRY_MS = [10_000, 60_000, 300_000, 900_000, 1_800_000];
 
@@ -96,6 +99,7 @@ let jobs: JmJob[] = [];
 let loaded = false;
 let workerRunning = false;
 let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+let cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
 function ensureDirs() {
   fs.mkdirSync(JM_DIR, { recursive: true });
@@ -108,6 +112,48 @@ function saveJobs() {
   const tmp = `${JOBS_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify({ version: 1, jobs }, null, 2), 'utf8');
   fs.renameSync(tmp, JOBS_FILE);
+}
+
+function lastCleanupAt(): number {
+  try {
+    const value: unknown = JSON.parse(fs.readFileSync(CLEANUP_STATE_FILE, 'utf8'));
+    return isRecord(value) ? Number(value.lastCleanupAt || 0) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveCleanupAt(timestamp: number) {
+  ensureDirs();
+  const tmp = `${CLEANUP_STATE_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ lastCleanupAt: timestamp }, null, 2), 'utf8');
+  fs.renameSync(tmp, CLEANUP_STATE_FILE);
+}
+
+function cleanupDownloadCacheIfDue() {
+  const now = Date.now();
+  if (now - lastCleanupAt() < CACHE_CLEANUP_INTERVAL_MS) return;
+  // 下载和上传共用 DOWNLOAD_DIR；只在整个队列空闲时清理，避免删除正在使用的文件。
+  if (workerRunning || jobs.some(isPending)) return;
+
+  try {
+    fs.rmSync(DOWNLOAD_DIR, { recursive: true, force: true });
+    fs.rmSync(LOG_DIR, { recursive: true, force: true });
+    jobs = [];
+    ensureDirs();
+    saveJobs();
+    saveCleanupAt(now);
+    console.info('[jmcomic] 已定时清空全部漫画文件、任务记录和任务日志');
+  } catch (error) {
+    console.warn('[jmcomic] 定时清理漫画缓存失败:', errorMessage(error));
+  }
+}
+
+function startCleanupTimer() {
+  if (cleanupTimer) return;
+  cleanupDownloadCacheIfDue();
+  cleanupTimer = setInterval(cleanupDownloadCacheIfDue, CACHE_CLEANUP_CHECK_MS);
+  cleanupTimer.unref?.();
 }
 
 function loadJobs() {
@@ -289,12 +335,13 @@ async function downloadStage(job: JmJob) {
   } catch (error) {
     const message = errorMessage(error);
     const forbidden = message.includes('禁止下载');
-    if (!forbidden && attempt < DOWNLOAD_RETRY_MS.length) {
+    const pageLimitExceeded = message.includes('超过单次下载上限');
+    if (!forbidden && !pageLimitExceeded && attempt < DOWNLOAD_RETRY_MS.length) {
       updateJob(job, { status: 'queued', lastError: message, nextAttemptAt: Date.now() + DOWNLOAD_RETRY_MS[attempt - 1] });
       return;
     }
     updateJob(job, { status: 'failed', lastError: message, failedAt: Date.now(), nextAttemptAt: null });
-    await sendStatus(job, forbidden ? `🚫 ${message}` : `❌ 下载失败：${message}`);
+    await sendStatus(job, forbidden || pageLimitExceeded ? `🚫 ${message}` : `❌ 下载失败：${message}`);
   }
 }
 
@@ -379,6 +426,7 @@ async function runWorker() {
 export function initializeJmcomicQueue({ onebot, sender, store }: JmRuntime) {
   runtime = { onebot, sender, store };
   loadJobs();
+  startCleanupTimer();
   void runWorker();
 }
 

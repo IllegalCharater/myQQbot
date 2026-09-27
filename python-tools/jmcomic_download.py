@@ -6,6 +6,7 @@ import sys
 
 BLACKLIST = {350234, 350235}
 MAX_PDF_FILES = 6
+MAX_DOWNLOAD_PAGES = 300
 RESULT_PREFIX = "__QQ_AGENT_RESULT__"
 IMAGE_CONCURRENCY = 6
 REQUEST_TIMEOUT_SECONDS = 120
@@ -27,6 +28,37 @@ def build_download_option():
     option.client.timeout = REQUEST_TIMEOUT_SECONDS
     option.client.postman.meta_data.timeout = REQUEST_TIMEOUT_SECONDS
     return option
+
+
+def ensure_page_limit(comic_id, option):
+    """在下载任何图片前统计整本漫画的页数。"""
+    client = option.new_jm_client()
+    album = client.get_album_detail(comic_id)
+
+    # 单章漫画通常直接提供总页数，可以避免额外请求。
+    declared_pages = int(getattr(album, "page_count", 0) or 0)
+    if declared_pages > MAX_DOWNLOAD_PAGES:
+        raise ValueError(
+            f"漫画 {comic_id} 共 {declared_pages} 页，超过单次下载上限 {MAX_DOWNLOAD_PAGES} 页"
+        )
+    if declared_pages > 0:
+        return declared_pages
+
+    # 多章合集的 page_count 可能为 0，只能逐章读取详情并累计；超过上限后立即停止。
+    total_pages = 0
+    for chapter in album:
+        photo = client.get_photo_detail(
+            chapter.id,
+            fetch_album=False,
+            fetch_scramble_id=True,
+        )
+        total_pages += len(photo)
+        if total_pages > MAX_DOWNLOAD_PAGES:
+            raise ValueError(
+                f"漫画 {comic_id} 已统计到 {total_pages} 页，超过单次下载上限 {MAX_DOWNLOAD_PAGES} 页"
+            )
+
+    return total_pages
 
 
 def get_comic_pdf(comic_id, download_dir):
@@ -58,6 +90,15 @@ def get_comic_pdf(comic_id, download_dir):
             except OSError as error:
                 print(f"[删除失败] {name}: {error}", file=sys.stderr, flush=True)
 
+    option = build_download_option()
+    page_count = ensure_page_limit(comic_id, option)
+    print(
+        f"[页数检查] 漫画 {comic_id} 共 {page_count} 页，允许下载",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    # 即使已有 PDF 缓存也先执行页数检查，避免旧的大型缓存绕过新限制。
     pdf_path = os.path.join(download_dir, f"{comic_id}.pdf")
     if is_valid_pdf(pdf_path):
         return pdf_path, True
@@ -65,7 +106,6 @@ def get_comic_pdf(comic_id, download_dir):
     staging_dir = os.path.join(download_dir, ".staging", f"{comic_id}-{os.getpid()}")
     os.makedirs(staging_dir, exist_ok=True)
     staging_pdf = os.path.join(staging_dir, f"{comic_id}.pdf")
-    option = build_download_option()
 
     success = False
     try:
