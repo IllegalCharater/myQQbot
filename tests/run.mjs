@@ -32,8 +32,9 @@ const ASSERT = [
   't-smoke.mjs',           // 端到端冒烟（真起 app 再 fetch）
   't-panel.mjs',           // 面板接口
   't-panel-wiring.mjs',    // 面板静态接线（ui/* 文本层）
+  't-ui-modules.mjs',      // 原生 ES Module 入口、依赖图与资源完整性
   't-admin.mjs',           // 管理接口
-  't-ui-render.mjs',       // ui/app.js 真跑一遍看 HTML
+  't-ui-render.mjs',       // UI 领域模块在假 DOM 下真跑一遍看 HTML
   't-vision-log.mjs'       // 读图 → 会话记录回填（假模型端点跑整轮）
 ];
 

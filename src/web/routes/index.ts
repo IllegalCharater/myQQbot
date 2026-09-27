@@ -6,6 +6,7 @@ import { systemRoutes } from './system.js';
 import { providerRoutes } from './providers.js';
 import { chatRoutes } from './chats.js';
 import { memoryRoutes } from './memory.js';
+import { stickerRoutes } from './stickers.js';
 
 // 顺序就是匹配优先级；新增正则路由时必须把更具体的路径放在前面。
 export const routes: readonly Route[] = [
@@ -16,4 +17,5 @@ export const routes: readonly Route[] = [
   ...providerRoutes,
   ...chatRoutes,
   ...memoryRoutes,
+  ...stickerRoutes,
 ];

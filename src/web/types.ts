@@ -51,10 +51,23 @@ export interface Route {
 
 export interface RouteMatch { route: Route; match: RegExpMatchArray | null }
 
-export interface AppHandle extends AppContext {
+export interface AppHandle {
   server: Server;
+  onebot: OneBotClient;
+  store: ChatStore;
+  memory: MemoryStore;
+  stickers: StickerManager;
+  sender: SendQueue;
+  sessions: SessionRegistry;
+  orchestrator: Orchestrator;
   start(): Promise<number>;
   stop(): Promise<void>;
+  emit(type: string, payload: unknown): void;
+  getConfig(): AppConfig;
+  updateConfig(patch: Record<string, unknown>): AppConfig;
+  launchSnowluma(): Promise<unknown>;
+  stopSnowluma(): boolean;
+  snowlumaStatus(): SnowlumaStatus;
 }
 
 export interface ResponseWriter { (res: ServerResponse, reply: Reply): void }

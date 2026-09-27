@@ -1,4 +1,4 @@
-// 面板静态接线检查：把 ui/index.html、ui/app.js、ui/style.css 当文本读，
+// 面板静态接线检查：把 ui/index.html、ui/js 模块树、ui/style.css 当文本读，
 // 断言"新加的 DOM id、页签、缓存路径"都对得上。
 //
 // 为什么值得单独一个套件：仓库没有 DOM 环境（也没装 jsdom），任何
@@ -8,11 +8,21 @@
 //   2. 新增页签漏了 switchTab 分支 / 漏了 view- 容器（点上去永远空白）
 //   3. 过滤/分页的账本又跑回未过滤的 state.chatMessages（"还有 N 条"永远算不对）
 import fs from 'node:fs';
-import { readUI } from './lib/src.mjs';
+import path from 'node:path';
+import { readUI, uiFile } from './lib/src.mjs';
 
 const html = readUI('index.html');
-const js = readUI('app.js');
+const jsRoot = uiFile('js');
+const js = fs.readdirSync(jsRoot, { recursive: true })
+  .filter((name) => String(name).endsWith('.js'))
+  .sort()
+  .map((name) => fs.readFileSync(path.join(jsRoot, name), 'utf8'))
+  .join('\n');
 const css = readUI('style.css');
+const chatJs = readUI('js/views/chats.js');
+const memoryJs = readUI('js/views/memory.js');
+const stickerJs = readUI('js/views/stickers.js');
+const settingsJs = readUI('js/views/settings/index.js');
 
 let pass = 0, fail = 0;
 const ok = (label, cond, extra = '') => {
@@ -54,15 +64,20 @@ const seg = (from, to) => {
   if (a < 0 || b < 0 || b < a) throw new Error(`切片边界找不到: ${from} … ${to}`);
   return js.slice(a, b);
 };
+const segmentOf = (source, from, to) => {
+  const a = source.indexOf(from), b = source.indexOf(to);
+  if (a < 0 || b < 0 || b < a) throw new Error(`模块切片边界找不到: ${from} … ${to}`);
+  return source.slice(a, b);
+};
 const REGIONS = {
-  '表情包页': seg('const STICKER_SOURCE_LABEL', '编辑/添加某个群友的印象'),
-  '存档页': seg('function renderChatMessages', 'function chatMessagesNewestFirst'),
-  '记忆详情': seg('async function loadMemoryDetail', 'const STICKER_SOURCE_LABEL'),
+  '表情包页': stickerJs,
+  '存档页': chatJs,
+  '记忆详情': memoryJs,
   // 顶部「历史印象」块自己读一串 id（骨架建在 renderChatMessages 里，这里读的是它），
   // 单独切一段才扫得到。
-  '历史印象块': seg('function updateChatDigestBlock', 'function chatVisibleMessages'),
+  '历史印象块': chatJs,
   // 分群设置接线读的是「聊天设置」模板里渲出来的那批控件
-  '历史摘要分群接线': seg('// ── 分群「历史摘要」', '// ── 屏蔽名单 ──')
+  '历史摘要分群接线': segmentOf(settingsJs, '// ── 分群「历史摘要」', '// ── 屏蔽名单 ──')
 };
 const IDRE = /\$\('#([\w-]+)'\)|getElementById\('([\w-]+)'\)/g;
 let idTotal = 0;

@@ -5,33 +5,35 @@ import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getConfig, updateConfig } from '../core/config.js';
-import { ROOT, DATA_DIR, UI_DIR } from '../core/paths.js';
-import { customSearch } from '../media/web-search.js';
+import type { AppConfig } from '../core/config.js';
+import type { OneBotEvent } from '../qq/types.js';
+import type { MediaEntry } from '../chat/types.js';
+import { ROOT, UI_DIR } from '../core/paths.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, forwardIdFromData } from '../qq/onebot.js';
 import { ChatStore } from '../chat/store.js';
 import { MemoryStore } from '../chat/memory.js';
 import { StickerManager } from '../stickers/sticker-manager.js';
-import { validateImageUrl, safeFetchBinary } from '../media/safe-fetch.js';
-import { detectMime } from '../agent/tools.js';
-import { cachedPath } from '../stickers/sticker-cache.js';
 import { SendQueue } from '../qq/sender.js';
 import { SessionRegistry } from '../chat/sessions.js';
 import { Orchestrator } from '../agent/orchestrator.js';
-// 历史摘要的注入结果：面板顶部那块要显示"模型实际看到的"，就必须和提示词走同一个函数。
-// prompt.js 只依赖 config/util/stickers/tier-slider，引它不会成环。
-import { collectInjectedDigests } from '../agent/prompt.js';
-import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from '../llm/llm.js';
-import { resolveOfficialPrice, listOfficialPrices, isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from '../llm/model-prices.js';
-import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from '../llm/price-feed.js';
-import { importFromDsh, currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from '../llm/providers.js';
-import { scanModelsVision, visionResults, modelImageVerdict } from '../llm/vision-scan.js';
-import { builtinVisionResults } from '../llm/model-vision-docs.js';
+import { estimateCost, cacheHitRate } from '../llm/llm.js';
+import { initPriceFeed } from '../llm/price-feed.js';
 import { createEventBus, todayKey } from '../core/util.js';
 import { serveStatic } from './static-files.js';
 import { dispatchRoute } from './router.js';
-import { writeReply } from './http.js';
+import { errorMessage, isRecord, writeReply } from './http.js';
 import { routes } from './routes/index.js';
+import { buildUsageBreakdown, buildUsageStats } from './usage-service.js';
+import type { AppHandle, CreateAppOptions } from './types.js';
+
+export type { AppHandle, CreateAppOptions } from './types.js';
+
+interface TokenPair { wsToken: string; httpToken: string }
+interface SnowlumaLog { at: number; stream: string; text: string }
+type OneBotRuntime = OneBotClient & { tokenCandidates: TokenPair[] };
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -41,32 +43,24 @@ try {
   const { Agent, setGlobalDispatcher } = await import('undici');
   setGlobalDispatcher(new Agent({ connect: { timeout: 30_000 } }));
 } catch (error) {
-  console.warn('[net] 全局连接超时设置失败（使用 undici 默认值 10s）:', error?.message ?? error);
+  console.warn('[net] 全局连接超时设置失败（使用 undici 默认值 10s）:', errorMessage(error));
 }
 
 // ── 白名单判断（移植自原版 allowed()） ───────────────────────────────────
-function allowed(kind, id, cfg) {
+function allowed(kind: 'group' | 'private', id: unknown, cfg: AppConfig) {
   const s = String(id);
-  const denyList = cfg.deny?.[kind] ?? cfg.deny?.[`${kind}s`] ?? [];
+  const key = kind === 'group' ? 'groups' : 'private';
+  const denyList = cfg.deny?.[key] ?? [];
   if (denyList.map(String).includes(s)) return false;
-  const allowList = cfg.allow?.[kind] ?? cfg.allow?.[`${kind}s`] ?? [];
+  const allowList = cfg.allow?.[key] ?? [];
   if (allowList.length > 0) return allowList.map(String).includes(s);
   return cfg.allowAllWhenEmpty === true;
 }
 
-// ── 版本信息 ─────────────────────────────────────────────────────────
-// 只读本机 package.json，不做任何联网检查。
-function localVersion() {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-    return String(pkg.version || '0.0.0');
-  } catch { return '0.0.0'; }
-}
-
-export function createApp({ log = console.log } = {}) {
+export function createApp({ log = console.log }: CreateAppOptions = {}): AppHandle {
   const cfg = getConfig();
   const bus = createEventBus();
-  const sseClients = new Set();
+  const sseClients = new Set<ServerResponse>();
 
   // ── SnowLuma 程序目录与进程管理 ──
   function snowlumaDir() {
@@ -118,10 +112,10 @@ export function createApp({ log = console.log } = {}) {
     }
   }
 
-  function isPortOpen(host, port, timeoutMs = 800) {
+  function isPortOpen(host: string, port: number, timeoutMs = 800): Promise<boolean> {
     return new Promise((resolve) => {
       const socket = new net.Socket();
-      const done = (result) => { try { socket.destroy(); } catch { /* ignore */ } resolve(result); };
+      const done = (result: boolean) => { try { socket.destroy(); } catch { /* ignore */ } resolve(result); };
       socket.setTimeout(timeoutMs);
       socket.once('connect', () => done(true));
       socket.once('timeout', () => done(false));
@@ -133,12 +127,11 @@ export function createApp({ log = console.log } = {}) {
   // SnowLuma 内置控制台日志（环形缓冲，最近 500 行）
   // 内置 SnowLuma 状态与日志。未采用多进程方案：由 Electron 主进程提供 IPC 控制与日志转发，
   // 确保 SnowLuma 随 QQ Agent 退出、无需单独管理窗口。
-  const snowlumaLogs = [];
-  let snowlumaProc = null;
+  const snowlumaLogs: SnowlumaLog[] = [];
+  let snowlumaProc: ChildProcess | null = null;
   let snowlumaProcessGroup = false;
-  let snowlumaStopping = false;
 
-  function pushSnowlumaLog(text, stream = 'stdout') {
+  function pushSnowlumaLog(text: unknown, stream = 'stdout') {
     const line = { at: Date.now(), stream, text: String(text ?? '').replace(/\r?\n$/, '') };
     if (!line.text) return;
     snowlumaLogs.push(line);
@@ -160,7 +153,7 @@ export function createApp({ log = console.log } = {}) {
       else proc.kill();
       pushSnowlumaLog('已请求关闭 SnowLuma。', 'stdout');
     } catch (error) {
-      pushSnowlumaLog(`关闭 SnowLuma 失败：${error?.message ?? error}`, 'stderr');
+      pushSnowlumaLog(`关闭 SnowLuma 失败：${errorMessage(error)}`, 'stderr');
       throw error;
     }
     return true;
@@ -206,12 +199,12 @@ export function createApp({ log = console.log } = {}) {
           emit('snowluma-status', { running: false, embedded: false, pid: null });
         });
         child.on('error', (error) => {
-          pushSnowlumaLog(`SnowLuma 启动失败：${error?.message ?? error}`, 'stderr');
+          pushSnowlumaLog(`SnowLuma 启动失败：${errorMessage(error)}`, 'stderr');
         });
         emit('snowluma-status', { running: true, embedded: true, pid: child.pid });
         return { ok: true, launched: true, embedded: true, pid: child.pid };
       } catch (error) {
-        pushSnowlumaLog(`内置模式启动失败，尝试回退独立窗口：${error?.message ?? error}`, 'stderr');
+        pushSnowlumaLog(`内置模式启动失败，尝试回退独立窗口：${errorMessage(error)}`, 'stderr');
         snowlumaProc = null;
       }
     }
@@ -236,8 +229,8 @@ export function createApp({ log = console.log } = {}) {
         child.once('error', reject);
       });
     } catch (error) {
-      pushSnowlumaLog(`通过 ${launcherName} 启动失败：${error?.message ?? error}`, 'stderr');
-      return { ok: false, error: `无法执行 ${launcherName}：${error?.message ?? error}` };
+      pushSnowlumaLog(`通过 ${launcherName} 启动失败：${errorMessage(error)}`, 'stderr');
+      return { ok: false, error: `无法执行 ${launcherName}：${errorMessage(error)}` };
     }
 
     if (isWindows) {
@@ -268,14 +261,14 @@ export function createApp({ log = console.log } = {}) {
     return { ok: true, launched: true, embedded: true, pid: child.pid };
   }
 
-  const emit = (type, payload) => {
+  const emit = (type: string, payload: unknown) => {
     bus.emit(type, payload);
     let line = null;
-    if (type === 'session-update' && payload?.sessionId) {
+    if (type === 'session-update' && isRecord(payload) && payload.sessionId) {
       try {
         // peek：只序列化、不修改，不需要 get() 那份全量 structuredClone
         // （运行中的会话每次更新都广播，克隆大会话会拖慢事件投递）
-        const s = sessions?.peek(payload.sessionId);
+        const s = sessions?.peek(String(payload.sessionId));
         if (s) {
           line = `event: ${type}\ndata: ${JSON.stringify({
             sessionId: s.id,
@@ -309,7 +302,6 @@ export function createApp({ log = console.log } = {}) {
   };
 
   // ── 组件 ──
-  const visionScan = { running: false };   // 模型图片输入能力扫描的运行状态
   const store = new ChatStore(cfg.store?.maxMessagesPerChat ?? 0);   // 0 = 不限
   const memory = new MemoryStore();
   const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0);   // 0 = 不限
@@ -318,8 +310,9 @@ export function createApp({ log = console.log } = {}) {
     httpUrl: cfg.snowluma?.httpUrl,
     accessToken: cfg.snowluma?.accessToken,
     httpToken: cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken,
-    onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
-  });
+    onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', errorMessage(error)))
+  }) as OneBotRuntime;
+  onebot.tokenCandidates = [];
   // onChange：bot 自己改库（收藏/改备注/发过）时也让面板那页刷新 —— 否则用户正看着
   // 表情页，模型在群里偷偷收藏了一张，页面不会动。
   const stickers = new StickerManager(onebot, { onChange: () => emit('sticker-update', {}) });
@@ -343,20 +336,23 @@ export function createApp({ log = console.log } = {}) {
   let lastSyncTokenSig = '';
 
   /** 从单个配置对象里提取 ws/http token（找不到网络段时返回 null）。 */
-  function extractTokens(data) {
-    const http = (data?.networks?.httpServers || []).find((s) => (s.port === 3000) || (s.name === 'http-default')) || (data?.networks?.httpServers || [])[0];
-    const ws = (data?.networks?.wsServers || []).find((s) => (s.port === 3001) || (s.name === 'ws-default')) || (data?.networks?.wsServers || [])[0];
+  function extractTokens(data: unknown): TokenPair {
+    const root = isRecord(data) ? data : {}; const networks = isRecord(root.networks) ? root.networks : {};
+    const httpServers = Array.isArray(networks.httpServers) ? networks.httpServers.filter(isRecord) : [];
+    const wsServers = Array.isArray(networks.wsServers) ? networks.wsServers.filter(isRecord) : [];
+    const http = httpServers.find((server) => server.port === 3000 || server.name === 'http-default') || httpServers[0];
+    const ws = wsServers.find((server) => server.port === 3001 || server.name === 'ws-default') || wsServers[0];
     return { wsToken: String(ws?.accessToken ?? ''), httpToken: String(http?.accessToken ?? '') };
   }
 
   /** 收集所有候选 token（含 onebot_0.json 的空令牌兜底），按"当前配置优先"排序。 */
   function readSnowlumaTokenCandidates() {
-    const out = [];
+    const out: TokenPair[] = [];
     try {
       const dir = snowlumaDir();
       if (!dir) return out;
       const cfgDir = path.join(dir, 'config');
-      let files = [];
+      let files: string[] = [];
       try {
         files = fs.readdirSync(cfgDir).filter((f) => /^onebot_\d+\.json$/.test(f) && !/^onebot_0\.json$/.test(f)).sort();
       } catch { /* ignore */ }
@@ -369,7 +365,7 @@ export function createApp({ log = console.log } = {}) {
       // 空令牌兜底：SnowLuma 允许无 token 连接（onebot_0.json 模板就是空）
       out.push({ wsToken: '', httpToken: '' });
     } catch (error) {
-      log('[onebot] 读取 SnowLuma OneBot 配置失败:', error?.message ?? error);
+      log('[onebot] 读取 SnowLuma OneBot 配置失败:', errorMessage(error));
     }
     return out;
   }
@@ -377,7 +373,7 @@ export function createApp({ log = console.log } = {}) {
   /** 候选游标：401 时递增轮换。连上后会钉住当前生效下标。 */
   let tokenCandidateIndex = 0;
 
-  function applyTokens({ wsToken, httpToken }) {
+  function applyTokens({ wsToken, httpToken }: TokenPair) {
     onebot.accessToken = wsToken;
     onebot.httpToken = httpToken || wsToken;
     const cur = getConfig();
@@ -402,7 +398,7 @@ export function createApp({ log = console.log } = {}) {
       log(`[onebot] 已收集 ${candidates.length} 个 OneBot 令牌候选（SnowLuma 多账号场景 401 时自动轮换）`);
       return true;
     } catch (error) {
-      log('[onebot] 同步 SnowLuma 令牌失败:', error?.message ?? error);
+      log('[onebot] 同步 SnowLuma 令牌失败:', errorMessage(error));
       return false;
     }
   }
@@ -440,13 +436,13 @@ export function createApp({ log = console.log } = {}) {
   });
 
   // ── 入站事件处理 ──
-  let atNameCache = new Map(); // groupId:userId -> name
-  async function resolveAtName(groupId, userId) {
+  const atNameCache = new Map<string, string>(); // groupId:userId -> name
+  async function resolveAtName(groupId: unknown, userId: unknown): Promise<string | null> {
     const key = `${groupId}:${userId}`;
-    if (atNameCache.has(key)) return atNameCache.get(key);
+    if (atNameCache.has(key)) return atNameCache.get(key) ?? null;
     try {
       const info = await onebot.getGroupMemberInfo(groupId, userId);
-      const name = info?.card || info?.nickname || null;
+      const name = isRecord(info) ? info.card || info.nickname || null : null;
       if (name) {
         atNameCache.set(key, String(name));
         if (atNameCache.size > 500) atNameCache.clear(); // 简单防膨胀
@@ -464,12 +460,13 @@ export function createApp({ log = console.log } = {}) {
    * ctx 传当前会话的 kind/id：QQ 里引用只可能发生在同一个会话内，所以被引用消息里的
    * @ 就是本群成员，能正常解析成群名片（与主消息路径的行为保持一致）。
    */
-  async function resolveReply(messageId, { kind = '', id = '' } = {}) {
+  async function resolveReply(messageId: unknown, { kind = '', id = '' }: { kind?: string; id?: string } = {}) {
     try {
       const msg = await onebot.getMsg(messageId);
-      const senderName = msg?.sender?.card || msg?.sender?.nickname || '';
+      const sender = isRecord(msg) && isRecord(msg.sender) ? msg.sender : {};
+      const senderName = sender.card || sender.nickname || '';
       let text = '';
-      if (Array.isArray(msg?.message)) {
+      if (isRecord(msg) && Array.isArray(msg.message)) {
         // 必须复用 segmentsToText，不能自己拼。被引用的消息可能是 json 卡片 /
         // 合并转发 / 图片，自己拼只会得到 "[json]" "[forward]" 这类原始英文段名，
         // 模型完全读不懂 —— 曾经这里就是这样把"引用了一张卡片"变成四个无用字符。
@@ -477,9 +474,9 @@ export function createApp({ log = console.log } = {}) {
         // 注意这里不展开合并转发（只留占位符），展开是模型用 read_forward 主动做的事。
         text = await segmentsToText(msg.message, {
           includeReply: false,
-          resolveAtName: (qq) => (kind === 'group' ? resolveAtName(id, qq) : null)
+          resolveAtName: (qq) => (kind === 'group' ? resolveAtName(id, qq) : Promise.resolve(null))
         });
-      } else if (typeof msg?.message === 'string') {
+      } else if (isRecord(msg) && typeof msg.message === 'string') {
         text = msg.message;
       }
       return { sender: String(senderName), text: String(text).slice(0, REPLY_PREVIEW_MAX) };
@@ -488,24 +485,28 @@ export function createApp({ log = console.log } = {}) {
     }
   }
 
-  async function ingestMessage(kind, id, event) {
+  async function ingestMessage(kind: 'group' | 'private', id: string, event: OneBotEvent) {
     const cfgNow = getConfig();
     if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天完全不记录
 
     const segments = Array.isArray(event.message) ? event.message : null;
-    const senderId = String(event.sender?.user_id ?? event.user_id ?? '');
-    const senderName = String(event.sender?.card || event.sender?.nickname || senderId || '');
+    const eventSender = isRecord(event.sender) ? event.sender : {};
+    const senderId = String(eventSender.user_id ?? event.user_id ?? '');
+    const senderName = String(eventSender.card || eventSender.nickname || senderId || '');
 
     // 屏蔽名单：被屏蔽群员的消息直接丢弃 —— 不存档、不触发会话、不进提示词背景。
     // 放在最前面：连合并转发展开这种网络请求都不值得为它做。
-    if (kind === 'group' && senderId && (cfgNow.blocklist?.[id] || []).map(String).includes(senderId)) return;
-    const media = segments ? extractMediaFromSegments(segments) : [];
+    const blocklist = cfgNow.blocklist as Record<string, unknown[]>;
+    if (kind === 'group' && senderId && (blocklist[id] || []).map(String).includes(senderId)) return;
+    const media: MediaEntry[] = (segments ? extractMediaFromSegments(segments) : [])
+      .filter((item): item is Record<string, unknown> & { kind: string } => typeof item.kind === 'string')
+      .map((item) => ({ ...item, kind: item.kind }));
 
     let text;
     if (segments) {
       text = await segmentsToText(segments, {
         resolveReply: (mid) => resolveReply(mid, { kind, id }),
-        resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : null
+        resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : Promise.resolve(null)
       });
     } else {
       text = String(event.raw_message ?? event.message ?? '').trim();
@@ -528,10 +529,14 @@ export function createApp({ log = console.log } = {}) {
         const ex = await expandForwardNodes(nodes);
         if (ex && ex.text) {
           text = ex.text;
-          if (ex.media?.length) media.push(...ex.media);
+          if (ex.media?.length) {
+            media.push(...ex.media
+              .filter((item): item is Record<string, unknown> & { kind: string } => typeof item.kind === 'string')
+              .map((item) => ({ ...item, kind: item.kind })));
+          }
         }
       } catch (e) {
-        log(`[ingest] 展开合并转发失败（保留占位符）: ${e?.message ?? e}`);
+        log(`[ingest] 展开合并转发失败（保留占位符）: ${errorMessage(e)}`);
       }
     }
 
@@ -539,7 +544,7 @@ export function createApp({ log = console.log } = {}) {
     // 条目要**当面交给**编排器（onIncoming 的第二个参数）：上下文窗口的入窗入口
     // 只有它一个，少传一次窗口与存档就会静默分叉（那条消息永远不会被回应）。
     const entry = store.appendIncoming(`${kind}:${id}`, {
-      mid: event.message_id,
+      mid: typeof event.message_id === 'string' || typeof event.message_id === 'number' ? event.message_id : null,
       ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
       senderId,
       senderName,
@@ -550,7 +555,7 @@ export function createApp({ log = console.log } = {}) {
     orchestrator.onIncoming(`${kind}:${id}`, entry);
   }
 
-  async function ingestPoke(event) {
+  async function ingestPoke(event: OneBotEvent) {
     // OneBot v11: notice_type=notify, sub_type=poke；群拍 target_id，私聊拍自己
     const isGroup = event.group_id != null;
     const id = isGroup ? String(event.group_id) : String(event.user_id);
@@ -561,7 +566,8 @@ export function createApp({ log = console.log } = {}) {
     // 自己拍的拍（send_poke 的 OneBot 回显）不触发处理——与 message_sent 同理，发送时已留档
     if (operatorId && operatorId === onebot.selfId) return;
     // 屏蔽名单对拍一拍同样生效（操作者是被屏蔽群员则丢弃）
-    if (isGroup && operatorId && (cfgNow.blocklist?.[id] || []).map(String).includes(operatorId)) return;
+    const blocklist = cfgNow.blocklist as Record<string, unknown[]>;
+    if (isGroup && operatorId && (blocklist[id] || []).map(String).includes(operatorId)) return;
     const targetId = String(event.target_id ?? event.user_id ?? '');
     const selfId = onebot.selfId;
     // 拍一拍也要记下真实群名片：原先这里硬编码"（拍一拍事件）"，
@@ -594,11 +600,12 @@ export function createApp({ log = console.log } = {}) {
     orchestrator.onIncoming(chatKeyNow, entry);
   }
 
-  async function handleOneBotEvent(event) {
+  async function handleOneBotEvent(event: OneBotEvent) {
     if (!event || typeof event !== 'object') return;
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
       // 自己发的消息（message_sent / self_id 相同）不触发处理（发送时已自行记录）
-      if (String(event.user_id ?? event.sender?.user_id ?? '') === onebot.selfId) return;
+      const sender = isRecord(event.sender) ? event.sender : {};
+      if (String(event.user_id ?? sender.user_id ?? '') === onebot.selfId) return;
       if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event);
       if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event);
       return;
@@ -612,35 +619,23 @@ export function createApp({ log = console.log } = {}) {
   // ── HTTP API ──
   const server = http.createServer((req, res) => {
     handleHttp(req, res).catch((error) => {
-      log('[http] 处理出错:', error?.message ?? error);
+      log('[http] 处理出错:', errorMessage(error));
       try {
         res.writeHead(500, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: String(error?.message ?? error) }));
+        res.end(JSON.stringify({ error: errorMessage(error) }));
       } catch { /* ignore */ }
     });
   });
 
-  function json(res, code, data) {
+  function json(res: ServerResponse, code: number, data: unknown) {
     res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
     res.end(JSON.stringify(data));
   }
 
-  async function readBody(req) {
-    const chunks = [];
-    let size = 0;
-    for await (const chunk of req) {
-      size += chunk.length;
-      if (size > 2 * 1024 * 1024) throw new Error('请求体过大');
-      chunks.push(chunk);
-    }
-    const text = Buffer.concat(chunks).toString('utf8');
-    return text ? JSON.parse(text) : {};
-  }
-
-  function authorize(req) {
+  function authorize(req: IncomingMessage) {
     const token = String(getConfig().server?.token ?? '');
     if (!token) return true;
-    const url = new URL(req.url, 'http://127.0.0.1');
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     return req.headers['x-console-token'] === token || url.searchParams.get('token') === token;
   }
 
@@ -651,16 +646,21 @@ export function createApp({ log = console.log } = {}) {
   // 形如 apiKeyFrom 的字段存的是"密钥来源标识"（如 manual），不是密钥本身，不要脱敏
   const SECRET_KEY_EXCLUDE = /from$/i;
 
-  function sanitizeConfig(cfg) {
-    const out = JSON.parse(JSON.stringify(cfg ?? {}));
-    const seen = new WeakSet();
+  function sanitizeConfig(cfg: AppConfig) {
+    const parsed: unknown = JSON.parse(JSON.stringify(cfg ?? {}));
+    const out: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+    const seen = new WeakSet<object>();
 
-    const walk = (node) => {
-      if (!node || typeof node !== 'object' || seen.has(node)) return;
+    const walk = (node: Record<string, unknown>) => {
+      if (seen.has(node)) return;
       seen.add(node);
       for (const key of Object.keys(node)) {
         const value = node[key];
-        if (value && typeof value === 'object') { walk(value); continue; }
+        if (isRecord(value)) { walk(value); continue; }
+        if (Array.isArray(value)) {
+          for (const item of value) if (isRecord(item)) walk(item);
+          continue;
+        }
         if (SECRET_KEY_EXCLUDE.test(key)) continue;
         // 已生成的 hasXxx 布尔标记本身也会被 apikey 模式匹配到，
         // 不排除就会连锁生成 hasHasXxx
@@ -680,8 +680,8 @@ export function createApp({ log = console.log } = {}) {
     walk(out);
 
     // 密钥集合整体清空（不逐 key 暴露存在性）
-    if (out.dshProviderKeys && typeof out.dshProviderKeys === 'object') {
-      const has = {};
+    if (isRecord(out.dshProviderKeys)) {
+      const has: Record<string, boolean> = {};
       for (const [k, v] of Object.entries(out.dshProviderKeys)) has[k] = Boolean(String(v ?? '').trim());
       out.dshProviderKeys = {};
       out.dshProviderKeyPresence = has;
@@ -690,59 +690,20 @@ export function createApp({ log = console.log } = {}) {
     // 提供商列表：删掉 key 字段（同样不能置空串，否则回传时覆盖真实 Key），补 hasKey
     if (Array.isArray(out.providers)) {
       for (const p of out.providers) {
-        const real = (cfg?.dshProviderKeys || {})[p.id] || p.apiKey;
+        if (!isRecord(p)) continue;
+        const real = (cfg.dshProviderKeys || {})[String(p.id ?? '')] || p.apiKey;
         delete p.apiKey;
         p.hasKey = Boolean(String(real ?? '').trim());
       }
     }
     // 顶层 api：walk 已生成 hasApiKey，这里补一个简写的 hasKey 供旧代码读取
-    if (out.api) out.api.hasKey = out.api.hasApiKey ?? Boolean(String(cfg?.api?.apiKey ?? '').trim());
+    if (isRecord(out.api)) out.api.hasKey = out.api.hasApiKey ?? Boolean(String(cfg.api?.apiKey ?? '').trim());
 
     return out;
   }
 
-  // ── 明文密钥端点守卫 ────────────────────────────────────────────────────
-  /**
-   * 这是本地单机程序，控制台就在本机浏览器打开，「显示密钥」是用户自己的操作，
-   * 不该被禁用。真正的风险来自**外部网页**冒用浏览器读 127.0.0.1（CSRF /
-   * DNS rebinding）—— 所以防线应当是「校验请求来源」，而不是砍掉本地功能。
-   *
-   * 放行条件（任一）：
-   *   1. 配置了 server.token 且请求带上了它（远程/多用户场景）
-   *   2. 请求来自本机控制台：Origin/Referer 指向本服务，或带 x-console-token 头
-   */
-  function keyEndpointAllowed(req) {
-    const token = String(getConfig().server?.token ?? '');
-    if (token) {
-      const url = new URL(req.url, 'http://127.0.0.1');
-      if (req.headers['x-console-token'] === token || url.searchParams.get('token') === token) return true;
-    }
-    // 带自定义头 → 不可能是简单跨站请求（需 CORS 预检通过才能发出），放行
-    if (req.headers['x-console-token']) return true;
-
-    const host = String(req.headers.host ?? '');
-    const origin = String(req.headers.origin ?? '');
-    const referer = String(req.headers.referer ?? '');
-    const isLoopbackHost = /^127\.0\.0\.1:\d+$/.test(host) || /^localhost:\d+$/.test(host);
-    if (!isLoopbackHost) return false;
-    if (origin) return origin === `http://${host}`;
-    if (referer) return referer.startsWith(`http://${host}/`);
-    return true;   // 地址栏直连等无来源请求，无法进一步区分
-  }
-
-  /**
-   * 提供商对象脱敏：去掉明文 apiKey，只留 hasKey。
-   * upsertProvider / addModelsToProvider / removeModelFromProvider 的返回值都带
-   * 明文 key（来自 withResolvedKey），不能直接 json 给前端。
-   */
-  function sanitizeProvider(p) {
-    if (!p || typeof p !== 'object') return p;
-    const { apiKey, ...rest } = p;
-    return { ...rest, apiKey: '', hasKey: Boolean(String(apiKey ?? '').trim()) };
-  }
-
-  function applyConfigPatch(patch) {
-    const next = updateConfig(patch);
+  function applyConfigPatch(patch: unknown) {
+    const next = updateConfig(patch as Record<string, unknown>);
     store.setMaxPerChat(next.store?.maxMessagesPerChat ?? 0);
     if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
     if (next.compact?.enabled) orchestrator.startCompactLoop(); else orchestrator.stopCompactLoop();
@@ -790,8 +751,8 @@ export function createApp({ log = console.log } = {}) {
     return { status: 200, body: { ok: true, webuiUrl } };
   }
 
-  async function handleHttp(req, res) {
-    const url = new URL(req.url, 'http://127.0.0.1');
+  async function handleHttp(req: IncomingMessage, res: ServerResponse) {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const pathname = url.pathname;
 
     // SSE
@@ -811,8 +772,6 @@ export function createApp({ log = console.log } = {}) {
     if (pathname.startsWith('/api/')) {
       if (!authorize(req)) return json(res, 401, { error: '未授权' });
       const method = req.method;
-      const cfgNow = getConfig();
-
       const routed = await dispatchRoute(routes, {
         store, memory, sessions, onebot, sender, stickers, orchestrator, emit,
         getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus,
@@ -826,165 +785,6 @@ export function createApp({ log = console.log } = {}) {
       // ── 表情包管理（面板"表情"页） ────────────────────────────────────────
       //
       // 库里 48 条表情以前只能靠 `data/stickers.json` 手改，这是第一个入口。
-      const stickerListMatch = pathname === '/api/stickers' && method === 'GET';
-      if (stickerListMatch) {
-        const q = String(url.searchParams.get('q') ?? '');
-        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 200));
-        const force = url.searchParams.get('force') === '1';
-        try {
-          const data = await stickers.adminList(q, limit, force);
-          // maxKeepCount 一并回显：面板顶部的计数行要拿它跟 owned 比着写（"bot 收藏 12 个 / 上限 20"）
-          return json(res, 200, { ok: true, ...data, maxKeepCount: Math.max(0, Number(getConfig().sticker?.maxKeepCount) || 0) });
-        } catch (error) {
-          return json(res, 502, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/stickers/sync' && method === 'POST') {
-        try {
-          const data = await stickers.adminList('', 500, true);
-          emit('sticker-update', {});
-          // fromCache / syncError 必须原样回：QQ 同步失败时页面上还显示着本地缓存，
-          // 不说清楚的话用户会以为"我明明删了/改了的那个怎么又回来了"。
-          return json(res, 200, { ok: !data.syncError, count: data.total, fromCache: data.fromCache, error: data.syncError || '' });
-        } catch (error) {
-          return json(res, 502, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      // 「缓存图片」：把 bot 自己收藏的表情的图补进 data/sticker-cache/（发送时就不再依赖
-      // 会过期的图床链接），顺手删掉没人认领的缓存文件。
-      // 顺序做、一次有上限：这是个手工按钮，不需要快，更需要别把图床和事件循环打满。
-      if (pathname === '/api/stickers/cache' && method === 'POST') {
-        try {
-          const targets = stickers.entries.filter((e) => e.source !== 'qq' && !cachedPath(e));
-          const MAX = 200;
-          let cached = 0;
-          const failed = [];
-          for (const item of targets.slice(0, MAX)) {
-            const r = await stickers.cacheOne(item.id);
-            if (r.cached) cached++;
-            else failed.push({ id: item.id, error: r.error || '缓存失败' });
-          }
-          const swept = stickers.sweep();
-          if (cached || swept) emit('sticker-update', {});
-          return json(res, 200, {
-            ok: true,
-            cached,
-            swept,
-            failed: failed.length,
-            errors: failed.slice(0, 5),
-            remains: Math.max(0, targets.length - MAX)
-          });
-        } catch (error) {
-          return json(res, 502, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      // 缩略图代理。**必须**走这里，页面上绝不能写 <img src="qpic…">：
-      //  ① 图床有防盗链，直连大概率裂图；
-      //  ② stickers.json 一旦被污染成内网地址，直连就是"用户的浏览器"去打内网 ——
-      //     发送路径有 validateImageUrl 把关（tools.js:172），浏览器直连等于绕开它。
-      // 复用现成的两道闸，不在这里另开 allowPrivate 口子。
-      const stickerImageMatch = /^\/api\/stickers\/([^/]+)\/image$/.exec(pathname);
-      if (stickerImageMatch && method === 'GET') {
-        let ref;
-        try { ref = decodeURIComponent(stickerImageMatch[1]); } catch { return json(res, 400, { error: '表情 id 编码错误' }); }
-        const entry = await stickers.find(ref).catch(() => null);
-        if (!entry) return json(res, 404, { error: '找不到这个表情' });
-        // 有本地缓存就直接读盘：这类条目（bot 自己收藏的）的图床链接是会过期的，
-        // 缓存文件才是它真正的图源 —— 顺带省一次图床请求、绕开防盗链。
-        // 读不出图片就往下走网络路径，不因为一个坏文件让面板裂图。
-        const local = cachedPath(entry);
-        if (local) {
-          try {
-            const buffer = await fs.promises.readFile(local);
-            const mime = detectMime(buffer);
-            if (mime) {
-              res.writeHead(200, {
-                'content-type': mime,
-                'content-length': buffer.length,
-                'cache-control': 'private, max-age=600',
-                'x-content-type-options': 'nosniff',
-                'content-security-policy': "default-src 'none'"
-              });
-              return res.end(buffer);
-            }
-          } catch { /* 读不到就当没有缓存 */ }
-        }
-        if (!entry.url) return json(res, 404, { error: '该表情没有图片地址' });
-        try {
-          const safeUrl = await validateImageUrl(entry.url);
-          const { buffer, contentType } = await safeFetchBinary(safeUrl);
-          // 只认真正探测到的图片魔数，content-type 仅作兜底且必须在 image/ 之内。
-          // 否则一个指向 text/html 的 URL 就能把 HTML 注入面板同源页面（本页首次
-          // 渲染远程图片，这道闸不能省）。
-          const mime = detectMime(buffer) || (/^image\//i.test(String(contentType || '')) ? String(contentType).split(';')[0] : '');
-          if (!mime) return json(res, 415, { error: '取回的内容不是图片' });
-          res.writeHead(200, {
-            'content-type': mime,
-            'content-length': buffer.length,
-            // 图床 URL 可能过期，缓存别太激进；private 防止共享代理串味
-            'cache-control': 'private, max-age=600',
-            'x-content-type-options': 'nosniff',
-            'content-security-policy': "default-src 'none'"
-          });
-          return res.end(buffer);
-        } catch (error) {
-          return json(res, 502, { error: String(error?.message ?? error) });
-        }
-      }
-
-      const stickerItemMatch = /^\/api\/stickers\/([^/]+)$/.exec(pathname);
-      if (stickerItemMatch && method === 'PATCH') {
-        let ref;
-        try { ref = decodeURIComponent(stickerItemMatch[1]); } catch { return json(res, 400, { ok: false, error: '表情 id 编码错误' }); }
-        const body = await readBody(req).catch(() => ({}));
-        // desc 是 QQ 那边的收藏名，mergeStickerLibrary 每次同步都会用源数据盖回来
-        // （stickers.js:74），所以它**只读**：这里不收 body.desc，前端也只展示。
-        // ⚠️ 传给 applyStickerNote 的键必须是 note（它对外的字段名是 localNote，
-        //    但 patch 的键叫 note —— 见 stickers.js:260）。
-        const patch = {};
-        if (body.note !== undefined) patch.note = String(body.note ?? '').trim().slice(0, 200);
-        if (body.usage !== undefined) patch.usage = String(body.usage ?? '').trim().slice(0, 200);
-        if (body.tags !== undefined) {
-          const raw = Array.isArray(body.tags) ? body.tags : String(body.tags ?? '').split(/[,，\s]+/);
-          patch.tags = [...new Set(raw.map((t) => String(t ?? '').trim().slice(0, 30)).filter(Boolean))].slice(0, 20);
-        }
-        if (!Object.keys(patch).length) return json(res, 400, { ok: false, error: '没有可改的字段（note / tags / usage）' });
-        // 走 noteVerbose（认标签）而不是精确 id：与 sticker_note 工具的行为一致。
-        // 歧义就报歧义并列出候选——静默挑一个改错表情，比失败糟得多。
-        const result = stickers.noteVerbose(ref, patch);
-        if (result.ambiguous?.length) {
-          return json(res, 409, {
-            ok: false,
-            error: `「${ref}」对应 ${result.ambiguous.length} 个表情，请用 id 指定：${result.ambiguous.map((e) => e.id).join(' / ')}`,
-            candidates: result.ambiguous.map((e) => ({ id: e.id, desc: e.desc, url: e.url }))
-          });
-        }
-        if (!result.entry) return json(res, 404, { ok: false, error: '找不到这个表情' });
-        emit('sticker-update', { id: result.entry.id });
-        return json(res, 200, {
-          ok: true,
-          sticker: {
-            id: result.entry.id, localNote: result.entry.localNote || '', tags: result.entry.tags || [],
-            usage: result.entry.usage || '', desc: result.entry.desc || ''
-          }
-        });
-      }
-
-      if (stickerItemMatch && method === 'DELETE') {
-        let ref;
-        try { ref = decodeURIComponent(stickerItemMatch[1]); } catch { return json(res, 400, { ok: false, error: '表情 id 编码错误' }); }
-        const result = stickers.remove(ref);
-        if (result.refused === 'qq') {
-          return json(res, 409, { ok: false, error: '这是 QQ 收藏里的表情，本地删不掉（下次同步就会回来）。请到 QQ 里取消收藏。' });
-        }
-        if (!result.removed) return json(res, 404, { ok: false, error: '找不到这个表情（删除只认 id / resId / md5 / 图片地址，不按备注名猜）' });
-        emit('sticker-update', {});
-        return json(res, 200, { ok: true, removed: { id: result.removed.id, desc: result.removed.desc || '' } });
-      }
-
       return json(res, 404, { error: `未知 API：${method} ${pathname}` });
     }
 
@@ -998,7 +798,7 @@ export function createApp({ log = console.log } = {}) {
   // DSH 自动导入已移除：模型目录改为在设置页手动维护（见 /api/providers 相关接口）。
 
   // ── 启停 ──
-  async function listenOn(port) {
+  async function listenOn(port: number): Promise<number> {
     return new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, '127.0.0.1', () => {
@@ -1019,7 +819,7 @@ export function createApp({ log = console.log } = {}) {
         break;
       } catch (error) {
         lastError = error;
-        if (error?.code !== 'EADDRINUSE') throw error;
+        if (!isRecord(error) || error.code !== 'EADDRINUSE') throw error;
       }
     }
     if (port == null) throw lastError ?? new Error('无法监听端口');
@@ -1037,7 +837,7 @@ export function createApp({ log = console.log } = {}) {
           }
         }
       } catch (error) {
-        log('[snowluma] 自动启动失败:', error?.message ?? error);
+        log('[snowluma] 自动启动失败:', errorMessage(error));
       }
     }
     // OneBot 连接前先尝试从 SnowLuma 配置同步令牌（脱敏副本/首次登录场景尤其重要）
@@ -1068,307 +868,4 @@ export function createApp({ log = console.log } = {}) {
   }
 
   return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus };
-}
-
-/**
- * 成本看板数据：按天 / 按会话 / 按群聚合最近 N 天的用量。
- *
- * 数据源是 data/sessions/*.json（会话留档），每个会话对象里已有
- * usage.{promptTokens, completionTokens, cachedTokens} 与 chatKey / model / rounds。
- * 没有历史汇总文件也能算 —— 直接扫留档即可。
- */
-/**
- * 解析时间范围参数。
- *   'today' → 今天 00:00 起
- *   '24h'   → 最近 24 小时（滚动窗口，可能跨天）
- *   '3'|'7'|'14'|'30' → 最近 N 个自然日
- */
-function resolveRange(raw) {
-  const s = String(raw || '7').trim().toLowerCase();
-  const now = Date.now();
-  if (s === 'today') {
-    const d = new Date(now);
-    d.setHours(0, 0, 0, 0);
-    return { mode: 'today', start: d.getTime(), end: now, label: '今天' };
-  }
-  if (s === '24h') {
-    return { mode: '24h', start: now - 24 * 60 * 60 * 1000, end: now, label: '最近 24 小时' };
-  }
-  const n = Math.min(30, Math.max(1, Number(s) || 7));
-  // 按自然日：从 N-1 天前的 0 点算起，保证"7 天"是 7 个完整日历日
-  const d = new Date(now);
-  d.setHours(0, 0, 0, 0);
-  return { mode: 'days', start: d.getTime() - (n - 1) * 24 * 60 * 60 * 1000, end: now, label: `最近 ${n} 天` };
-}
-
-/** 本地时区的 YYYY-MM-DD（用于按天分桶）。 */
-function dayKeyOf(ts) {
-  const d = new Date(Number(ts) || 0);
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-}
-
-/**
- * 收集时间窗内的所有"调用行"。
- * 每行是一次真实 API 调用（有 raw 时）或一次会话聚合（无 raw 时），
- * 都带自己的 token、发生时刻、模型、所属会话。
- */
-// ── 用量行缓存 ──
-// collectUsageRows 要遍历并 JSON.parse 全部会话文件。实测 300 个文件 / 25MB 时
-// 单次约 200ms，而前端每 15 秒轮询一次、stats 与 breakdown 还各扫一遍。
-// 会话文件是"结束写一次、之后不再改"，所以缓存很安全。
-//
-// 失效策略（双保险，任一条命中就重算）：
-//   1. 目录快照变化：文件数或目录 mtime 变了（新增/删除会话）
-//   2. TTL 到期：20 秒。兜住"内容被改写但目录快照不变"这类边缘情况。
-//      原来是 5 秒，但轮询间隔 4 秒、用户切页签的时机又很随机，
-//      导致切过去时缓存经常刚好过期 → 每次都走 200ms 的冷启动（"黑一下"）。
-//      用量统计不是实时数据，20 秒的新鲜度完全够用。
-//      另外前端还有一层：切过去先用上次数据立即渲染，不等网络。
-const usageRowsCache = { key: '', at: 0, rows: null, win: null };
-const USAGE_CACHE_TTL_MS = 20000;
-
-/** 目录快照：文件数 + 目录 mtime。成本低（一次 stat），足以捕捉增删。 */
-function sessionsDirSignature() {
-  const dir = path.join(DATA_DIR, 'sessions');
-  try {
-    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
-    const st = fs.statSync(dir);
-    return files.length + ':' + st.mtimeMs;
-  } catch {
-    return '';
-  }
-}
-
-function collectUsageRows({ range }) {
-  const win = resolveRange(range);
-  // 命中缓存就直接返回（注意 rows 会被调用方改写字段，所以必须给副本）
-  const sig = sessionsDirSignature() + '@' + String(range);
-  if (usageRowsCache.rows && usageRowsCache.key === sig
-      && (Date.now() - usageRowsCache.at) < USAGE_CACHE_TTL_MS) {
-    return {
-      rows: usageRowsCache.rows.slice(),
-      win: win || usageRowsCache.win,
-      searchCount: usageRowsCache.searchCount || 0,
-      toolCounts: { ...(usageRowsCache.toolCounts || {}) }
-    };
-  }
-
-  const dir = path.join(DATA_DIR, 'sessions');
-  let files = [];
-  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return { rows: [], win, searchCount: 0, toolCounts: {} }; }
-
-  const rows = [];
-  // 会话级计数：搜索次数、各工具的调用次数。
-  // 与 rows 在同一个循环里统计 —— 不额外多读一次文件。
-  // 注意这些是"次数"不是"成本"：搜索通常是资源包或免费的，
-  // 所以只列数量、绝不参与成本计算（用户明确要求）。
-  let searchCount = 0;
-  const toolCounts = Object.create(null);
-
-  for (const f of files) {
-    let s;
-    try { s = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { continue; }
-    const started = Number(s.startedAt) || 0;
-    if (!started) continue;
-
-    // 这个会话是否落在时间窗口内（工具/搜索计数按会话归属，没有独立时间戳）
-    if (started >= win.start && started <= win.end) {
-      searchCount += Number(s.webSearchCount) || 0;
-      for (const m of (s.messages || [])) {
-        const name = m && m.toolCall && m.toolCall.name;
-        if (name) toolCounts[String(name)] = (toolCounts[String(name)] || 0) + 1;
-      }
-    }
-
-    // 逐次调用展开：每条 message.raw 有独立的 usage / created / model
-    const calls = [];
-    for (const m of (s.messages || [])) {
-      const raw = m?.raw;
-      if (!raw || typeof raw !== 'object') continue;
-      const ru = raw.usage || {};
-      const rp = Number(ru.prompt_tokens) || 0;
-      const rc = Number(ru.completion_tokens) || 0;
-      if (!rp && !rc) continue;
-      const at = Number(raw.created) ? Number(raw.created) * 1000 : started;
-      calls.push({
-        promptTokens: rp,
-        completionTokens: rc,
-        cachedTokens: Number(ru.prompt_tokens_details?.cached_tokens) || 0,
-        at,
-        model: String(raw.model || s.model || '') || '(未知)'
-      });
-    }
-
-    if (calls.length) {
-      for (const c of calls) {
-        if (c.at < win.start || c.at > win.end) continue;
-        rows.push({ ...c, vendor: String(s.vendor || ''), chatKey: String(s.chatKey || '(未知)'), sessionId: s.id, exact: true });
-      }
-    } else {
-      const u = s.usage || {};
-      const p = Number(u.promptTokens) || 0;
-      const c = Number(u.completionTokens) || 0;
-      if (!p && !c) continue;
-      if (started < win.start || started > win.end) continue;
-      rows.push({
-        promptTokens: p,
-        completionTokens: c,
-        cachedTokens: Number(u.cachedTokens) || 0,
-        at: started,
-        model: String(s.model || '') || '(未知)',
-        chatKey: String(s.chatKey || '(未知)'),
-        vendor: String(s.vendor || ''),
-        sessionId: s.id,
-        exact: false
-      });
-    }
-  }
-  // 模型身份 = 渠道 + 模型 id。
-  // 渠道取**会话自己记录的** vendor（创建会话时由当时的配置派生）。
-  // 老会话没这个字段 → 标为「未知渠道」，绝不拿当前配置去倒推历史 ——
-  // 用户很可能早就换过渠道了，猜出来的结果是错的。
-  for (const r of rows) {
-    r.vendor = String(r.vendor || '').trim() || UNKNOWN_VENDOR;
-    r.modelKey = modelLabel(r.vendor, r.model);
-  }
-  // 写缓存：存的是"清洗完的 rows"，取用时给副本避免调用方污染
-  usageRowsCache.key = sig;
-  usageRowsCache.at = Date.now();
-  usageRowsCache.rows = rows.slice();
-  usageRowsCache.win = win;
-  usageRowsCache.searchCount = searchCount;
-  usageRowsCache.toolCounts = { ...toolCounts };
-  return { rows, win, searchCount, toolCounts };
-}
-
-/** 用配置解析价格（成本只与实际调用的模型有关，与当前选中模型无关）。 */
-/**
- * 取某次调用的单价。
- *
- * 按「渠道：模型 id」优先查 —— 用户可以为某个渠道下的模型单独定价
- * （A6API 的 GLM-5.3-Flash 与 OpenRouter 的可能是两个价）。
- * 查不到再退回裸模型 id（通用价），最后才是全局兜底。
- *
- * ⚠️ 必须与前端展示/批量编辑用的身份一致，否则用户设的渠道价永远不会生效。
- */
-function priceOf(model, vendor) {
-  const cfg = getConfig();
-  if (vendor) {
-    const byVendor = resolveModelPrice(modelLabel(vendor, model), cfg);
-    // 命中自定义价才算数；否则退回通用价（避免渠道名干扰官方表匹配）
-    if (byVendor.source === 'custom') return byVendor;
-  }
-  return resolveModelPrice(model, cfg);
-}
-
-/** 对一批行计价，返回总额与峰谷拆分。 */
-function costOfRows(rows) {
-  const cfg = getConfig();
-  let cost = 0, peakCost = 0, offPeakCost = 0, peakTokens = 0, offPeakTokens = 0;
-  let promptTokens = 0, completionTokens = 0, cachedTokens = 0, exactCalls = 0, hasPeakModel = false;
-  for (const r of rows) {
-    const p = priceOf(r.model, r.vendor);
-    if (p.peak) hasPeakModel = true;
-    const tier = p.peak ? priceAt({ in: p.in, out: p.out, cached: p.cached, peak: p.peak }, r.at) : p;
-    const prompt = Number(r.promptTokens) || 0;
-    const completion = Number(r.completionTokens) || 0;
-    const cached = Math.min(Number(r.cachedTokens) || 0, prompt);
-    const fresh = Math.max(0, prompt - cached);
-    const c = (fresh / 1_000_000) * tier.in + (cached / 1_000_000) * tier.cached + (completion / 1_000_000) * tier.out;
-    cost += c;
-    const tk = prompt + completion;
-    if (isPeakHour(r.at)) { peakCost += c; peakTokens += tk; } else { offPeakCost += c; offPeakTokens += tk; }
-    promptTokens += prompt;
-    completionTokens += completion;
-    cachedTokens += cached;
-    if (r.exact) exactCalls += 1;
-  }
-  return {
-    cost, peakCost, offPeakCost, peakTokens, offPeakTokens,
-    promptTokens, completionTokens, cachedTokens,
-    totalTokens: promptTokens + completionTokens,
-    cacheHitRate: promptTokens ? Math.min(1, cachedTokens / promptTokens) : 0,
-    peakRatio: (peakTokens + offPeakTokens) ? peakTokens / (peakTokens + offPeakTokens) : 0,
-    exactCalls, hasPeakModel, runs: rows.length
-  };
-}
-
-/** 按某个字段分组后各自计价。 */
-function groupBy(rows, field, limit = 0) {
-  const map = new Map();
-  for (const r of rows) {
-    const k = String(r[field] ?? '(未知)');
-    if (!map.has(k)) map.set(k, []);
-    map.get(k).push(r);
-  }
-  let out = [...map.entries()].map(([key, list]) => ({ key, ...costOfRows(list) }));
-  out.sort((a, b) => b.cost - a.cost || b.totalTokens - a.totalTokens);
-  if (limit) out = out.slice(0, limit);
-  return out;
-}
-
-/** 主统计：按天 / 按会话 / 按模型三个维度。 */
-function buildUsageStats({ range = '7' } = {}) {
-  const { rows, win, searchCount, toolCounts } = collectUsageRows({ range });
-  const totals = costOfRows(rows);
-  // 单日/24小时场景下"按天"没有意义（只有一行），由前端决定是否隐藏
-  const days = win.mode === 'days' ? groupBy(rows, 'dayKey').map((x) => ({ day: x.key, ...x })) : [];
-  // 按天分桶需要 dayKey 字段
-  for (const r of rows) r.dayKey = dayKeyOf(r.at);
-  const byDay = win.mode === 'days'
-    ? groupBy(rows, 'dayKey').map((x) => ({ day: x.key, ...x })).sort((a, b) => a.day.localeCompare(b.day))
-    : [];
-  const chats = groupBy(rows, 'chatKey', 0);
-  // 不截断：截断会让"各行成本之和 ≠ 总成本"，用户核对时会困惑。
-  // 行数多时由前端滚动容器处理。
-  const models = groupBy(rows, 'modelKey', 0).map((m) => {
-    const { vendor, model } = splitModelLabel(m.key);
-    return { ...m, vendor, model };
-  });
-  return {
-    range: String(range),
-    rangeLabel: win.label,
-    mode: win.mode,
-    totals,
-    // 次数类统计：只看数量，不参与成本计算
-    searchCount: searchCount || 0,
-    toolCounts: toolCounts || {},
-    days: byDay,
-    chats,
-    models
-  };
-}
-
-/**
- * 下钻明细：在某个维度取某个值，再按另一个维度展开。
- *   dim/key 定位子集，by 决定展开方式
- * 例：dim=chat&key=group:123&by=model → 该群下各模型的成本
- */
-function buildUsageBreakdown({ range = '7', dim = '', key = '', by = '' } = {}) {
-  const { rows, win } = collectUsageRows({ range });
-  for (const r of rows) r.dayKey = dayKeyOf(r.at);
-  // dim/by 为 model 时按复合身份匹配（模型 + 供应商）
-  const fieldOf = (d) => (d === 'day' ? 'dayKey' : d === 'model' ? 'modelKey' : 'chatKey');
-  const subset = dim ? rows.filter((r) => String(r[fieldOf(dim)] ?? '') === key) : rows;
-  // 同样不截断：保证明细各项之和 = 该子集总成本
-  const groups = groupBy(subset, fieldOf(by) || 'chatKey', 0);
-  const sum = costOfRows(subset);
-  // 峰谷信息跟随子集（弹窗外部上方展示用）
-  return {
-    range: String(range),
-    dim, key, by,
-    totals: sum,
-    showPeak: sum.hasPeakModel && (sum.peakCost > 0 || sum.offPeakCost > 0),
-    rows: groups.map((g) => ({
-      key: g.key,
-      cost: g.cost,
-      promptTokens: g.promptTokens,
-      completionTokens: g.completionTokens,
-      cachedTokens: g.cachedTokens,
-      totalTokens: g.totalTokens,
-      cacheHitRate: g.cacheHitRate,
-      runs: g.runs,
-      exactCalls: g.exactCalls
-    }))
-  };
 }

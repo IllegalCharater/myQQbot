@@ -9,14 +9,14 @@ import { mdToPlain, splitForQQ } from './md-to-plain.js';
 interface SendOptions { replyToMessageId?: unknown; atUserId?: unknown; file?: string }
 interface StickerLike extends Record<string, unknown> { id: string; url: string; desc?: string; localNote?: string }
 interface OneBotSender {
-  sendText(kind: string, id: string, text: string, options: SendOptions): Promise<Record<string, unknown>>;
-  sendSticker(kind: string, id: string, file: string, options: SendOptions): Promise<Record<string, unknown>>;
-  sendPoke(kind: string, id: string, targetUserId: unknown): Promise<Record<string, unknown>>;
+  sendText(kind: string, id: string, text: string, options: SendOptions): Promise<unknown>;
+  sendSticker(kind: string, id: string, file: string, options: SendOptions): Promise<unknown>;
+  sendPoke(kind: string, id: string, targetUserId: unknown): Promise<unknown>;
 }
 interface ChatStoreWriter { appendSelf(chatKey: string, input: { text: unknown; ts?: number; mid?: string | number | null }): unknown }
 type SendChain = <T>(task: () => Promise<T>) => Promise<T>;
-function messageIdOf(data: Record<string, unknown>): string | number | null {
-  const value = data.message_id;
+function messageIdOf(data: unknown): string | number | null {
+  const value = data && typeof data === 'object' && 'message_id' in data ? data.message_id : null;
   return typeof value === 'string' || typeof value === 'number' ? value : null;
 }
 
@@ -162,9 +162,10 @@ export class SendQueue {
           atUserId: i === 0 ? options.atUserId : null
         });
         const ts = Date.now();
-        this.store.appendSelf(chatKey, { text, ts, mid: messageIdOf(data) });
-        this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });
-        return { text, messageId: data?.message_id ?? null, at: formatClockTime(ts) };
+        const messageId = messageIdOf(data);
+        this.store.appendSelf(chatKey, { text, ts, mid: messageId });
+        this.onSent?.({ chatKey, text, messageId });
+        return { text, messageId, at: formatClockTime(ts) };
       }));
     }
 
@@ -203,9 +204,10 @@ export class SendQueue {
         atUserId: options.atUserId ?? null
       });
       const ts = Date.now();
-      this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: messageIdOf(data) });
-      this.onSent?.({ chatKey, text: `[表情包]`, messageId: data?.message_id ?? null, sticker: sticker.id });
-      return { message_id: data?.message_id ?? null };
+      const messageId = messageIdOf(data);
+      this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: messageId });
+      this.onSent?.({ chatKey, text: `[表情包]`, messageId, sticker: sticker.id });
+      return { message_id: messageId };
     });
   }
 

@@ -1,0 +1,366 @@
+import { esc } from '../../dom.js';
+import { state } from '../../state.js';
+import { THEME_ICON, THEME_LABEL } from '../../theme.js';
+import { getThemePref } from '../../theme.js';
+import { renderChatSection } from '../../parts/chat-settings.js';
+import { renderModelColumn, renderProviderColumn, visionBadge } from '../../parts/providers.js';
+
+export function renderApiSection(c) {
+  const currentProvider = (state.providers || []).find((p) => p.id === c.api.provider);
+  const currentModelDisplay = (currentProvider?.modelNames || {})[c.api.model] || c.api.model;
+  return `
+    <h3 id="settings-api">模型 API</h3>
+    <div class="field"><label>模型目录</label>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="cfg-model-pick" readonly placeholder="点击选择模型" value="${esc(currentModelDisplay || '')}" style="flex:1;cursor:pointer" />
+        <button class="btn btn-small" id="test-provider-btn">测试连通性</button>
+        <span id="provider-test-result" class="muted" style="align-self:center"></span>
+      </div>
+      <div class="hint" id="provider-hint">${currentProvider ? `当前：${esc(currentProvider.displayName)} · ${esc(c.api.model || '未选模型')} @ ${esc(currentProvider.baseURL)}${currentProvider.hasKey ? ' · 已保存 API Key（不显示）' : ' · 未保存 API Key'}` : '尚未选择模型'}</div>
+      <div class="hint" id="model-vision-hint" style="margin-top:6px"></div>
+      <input type="hidden" id="cfg-provider" value="${esc(c.api.provider || '')}" />
+      <input type="hidden" id="cfg-model" value="${esc(c.api.model || '')}" />
+    </div>
+    <div class="field-row">
+      <div class="field"><label>当前 Base URL</label>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="cfg-baseurl" readonly value="${esc(c.api.baseUrl)}" style="flex:1" />
+          <button class="btn btn-small" id="fetch-current-models-btn">获取列表</button>
+        </div></div>
+      <div class="field"><label>当前 API Key</label>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="cfg-apikey" value="${esc((currentProvider?.hasKey || c.api.apiKey) ? '******' : '')}" placeholder="输入新 Key 可替换；留空保存则保持原 Key" autocomplete="new-password" style="flex:1" />
+          <button class="btn btn-small" id="cfg-apikey-toggle" type="button">显示</button>
+        </div></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>温度</label><input type="number" id="cfg-temperature" step="0.1" min="0" max="2" value="${esc(c.api.temperature)}" /></div>
+      <div class="field"><label>单次运行最大工具轮数</label><input type="number" id="cfg-maxrounds" min="1" max="40" value="${esc(c.api.maxRounds)}" /></div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-vision" ${c.api.vision !== false ? 'checked' : ''} />
+      <label for="cfg-vision">图片输入（关闭则移除看图工具，模型只会看到 [图片] 占位符）</label>
+      <span id="vision-switch-hint" class="muted" style="font-size:12px;align-self:center"></span></div>
+    <div class="settings-divider"></div>
+
+    <h3>成本核算</h3>
+
+    <div class="checkbox-row"><input type="checkbox" id="cfg-useofficialprice" ${c.api.useOfficialPrice !== false ? 'checked' : ''} />
+      <label for="cfg-useofficialprice">用内置官方价格表估算（按模型 id 自动匹配；走中转站请关掉）</label></div>
+
+    <div class="field" style="margin-top:6px"><label>远程价格表 URL</label>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="cfg-price-remote-url" placeholder="例如 https://你的服务器/prices.json" value="${esc(c.api.priceRemoteUrl || '')}" style="flex:1" />
+        <button class="btn btn-small" id="price-feed-refresh-btn" title="不等定时，立即拉一次">立即拉取</button>
+      </div>
+      <div class="hint" id="price-feed-status" style="margin-top:4px"></div>
+    </div>
+
+    <!-- 当前模型的价格卡片：切换模型时内容跟着变 -->
+    <div class="price-card" id="model-price-card">
+      <div class="pc-head">
+        <span class="pc-title">当前模型单价</span>
+        <span class="pc-model" id="pc-model">${esc(c.api.model || '（未选择模型）')}</span>
+      </div>
+      <div class="pc-rows">
+        <div class="pc-row"><span class="pc-label">输入</span>
+          <input type="number" id="cfg-price-in" step="0.01" min="0" value="0" /><span class="pc-unit">元/百万</span></div>
+        <div class="pc-row"><span class="pc-label">输出</span>
+          <input type="number" id="cfg-price-out" step="0.01" min="0" value="0" /><span class="pc-unit">元/百万</span></div>
+        <div class="pc-row"><span class="pc-label">缓存命中</span>
+          <input type="number" id="cfg-price-cached" step="0.01" min="0" value="0" /><span class="pc-unit">元/百万</span></div>
+      </div>
+      <div class="pc-note" id="pc-note"></div>
+    </div>
+
+    <div style="display:flex;gap:8px;margin:8px 0">
+      <button class="btn btn-small" id="batch-price-btn">批量自定义价格编辑</button>
+      <span class="muted" style="font-size:12px;align-self:center">为多个模型分别设定单价</span>
+    </div>
+
+    <div class="settings-divider"></div>
+
+    <h3>手动添加提供商</h3>
+    <div class="field"><label>Base URL（可填写）</label>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="new-baseurl" placeholder="例如 https://api.deepseek.com/v1 或 https://open.bigmodel.cn/api/paas/v4" style="flex:1" />
+        <button class="btn btn-small" id="fetch-models-btn">获取列表</button>
+      </div></div>
+    <div class="field"><label>API Key（手动添加时填写）</label>
+      <div style="display:flex;gap:8px">
+        <input type="password" id="new-apikey" placeholder="sk-..." autocomplete="new-password" style="flex:1" />
+        <button class="btn btn-small" id="new-apikey-toggle" type="button">显示</button>
+      </div></div>
+    <div class="field"><label>模型 id（两列：左侧模型 ID，右侧模型目录中显示的名字；可添加多行）</label>
+      <div id="model-rows"></div>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <button class="btn btn-small" id="add-model-row-btn">＋ 添加一行</button>
+      </div>
+      <div class="hint">「获取列表」会从上面的 Base URL 拉取模型，并在弹窗里勾选加入列表。</div></div>
+    <div class="field-row">
+      <div class="field"><button class="btn btn-primary" id="confirm-add-provider-btn">确认添加</button></div>
+      <div class="field"><button class="btn btn-danger" id="delete-model-btn">删除模型…</button></div>
+    </div>
+    <div class="hint" id="provider-action-hint"></div>`;
+}
+
+
+export function renderSearchSection(c) {
+  // 每个提供方区块的初始显隐都要跟当前 provider 一致
+  const prov = String(c.webSearch?.provider || 'bing');
+  // 自定义搜索提供商列表（可多个），用于动态生成下拉框选项
+  const customProvs = Array.isArray(c.webSearch?.providers) ? c.webSearch.providers : [];
+  return `
+    <h3 id="settings-search">搜索服务</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-websearch" ${c.webSearch?.enabled !== false ? 'checked' : ''} />
+      <label for="cfg-websearch">联网搜索：启用 web_search / web_fetch 工具</label></div>
+    <div class="field"><label>搜索提供方</label>
+      <select id="cfg-searchprovider">
+        <option value="bing" ${prov === 'bing' ? 'selected' : ''}>Bing 网页解析</option>
+        <option value="deepseek" ${prov === 'deepseek' ? 'selected' : ''}>DeepSeek 原生搜索</option>
+        <option value="zhipu" ${prov === 'zhipu' ? 'selected' : ''}>智谱 Web Search</option>
+        <option value="bocha" ${prov === 'bocha' ? 'selected' : ''}>博查 AI Search</option>
+        <option value="baidu" ${prov === 'baidu' ? 'selected' : ''}>百度千帆 AI Search</option>
+        <option value="metaso" ${prov === 'metaso' ? 'selected' : ''}>秘塔 AI 搜索</option>
+        ${customProvs.map((p) => `<option value="custom:${esc(p.id)}" ${prov === `custom:${p.id}` ? 'selected' : ''}>${esc(p.name || p.baseUrl)}（自定义 · ${p.type === 'bing' ? '网页解析' : 'JSON 接口'}）</option>`).join('')}
+      </select></div>
+    <div class="field" id="custom-provider-manage" style="${prov.startsWith('custom:') ? '' : 'display:none'}">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-small" id="test-search-provider-btn">测试这个搜索服务</button>
+        <button class="btn btn-small btn-danger" id="del-search-provider-btn">删除这个搜索服务</button>
+        <span id="search-provider-action-hint" class="muted" style="font-size:12px"></span>
+      </div>
+    </div>
+    <div class="field" id="bing-search-fields" style="${prov === 'bing' ? '' : 'display:none'}"><label>搜索地址（高级：可替换为兼容 Bing 结果格式的引擎）</label><input type="text" id="cfg-searchurl" value="${esc(c.webSearch?.searchUrl || 'https://cn.bing.com/search')}" /></div>
+    <div class="field-row" id="deepseek-search-fields" style="${prov === 'deepseek' ? '' : 'display:none'}">
+      <div class="field"><label>DeepSeek 搜索 API Key（留空用环境变量 DEEPSEEK_API_KEY）</label>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="cfg-ds-searchkey" value="${esc(c.webSearch?.deepseek?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
+          <button class="btn btn-small" id="cfg-ds-searchkey-toggle" type="button">显示</button>
+        </div></div>
+      <div class="field"><label>模型</label><input type="text" id="cfg-ds-searchmodel" value="${esc(c.webSearch?.deepseek?.model || 'deepseek-chat')}" /></div>
+    </div>
+    <div class="field-row" id="zhipu-search-fields" style="${prov === 'zhipu' ? '' : 'display:none'}">
+      <div class="field"><label>智谱 API Key（留空用环境变量 ZHIPU_API_KEY）</label>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="cfg-zhipu-key" value="${esc(c.webSearch?.zhipu?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
+          <button class="btn btn-small" id="cfg-zhipu-key-toggle" type="button">显示</button>
+        </div></div>
+      <div class="field"><label>搜索引擎</label>
+        <select id="cfg-zhipu-engine">
+          <option value="search_std" ${c.webSearch?.zhipu?.engine === 'search_std' ? 'selected' : ''}>基础版 ¥0.01/次</option>
+          <option value="search_pro" ${c.webSearch?.zhipu?.engine === 'search_pro' ? 'selected' : ''}>高级版 ¥0.03/次</option>
+          <option value="search_pro_sogou" ${c.webSearch?.zhipu?.engine === 'search_pro_sogou' ? 'selected' : ''}>搜狗版 ¥0.05/次</option>
+          <option value="search_pro_quark" ${c.webSearch?.zhipu?.engine === 'search_pro_quark' ? 'selected' : ''}>夸克版 ¥0.05/次</option>
+        </select></div>
+    </div>
+    <div class="field" id="bocha-search-fields" style="${prov === 'bocha' ? '' : 'display:none'}">
+      <label>博查 API Key</label>
+      <div style="display:flex;gap:8px">
+        <input type="password" id="cfg-bocha-key" value="${esc(c.webSearch?.bocha?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
+        <button class="btn btn-small" id="cfg-bocha-key-toggle" type="button">显示</button>
+      </div></div>
+    <div class="field" id="baidu-search-fields" style="${prov === 'baidu' ? '' : 'display:none'}">
+      <label>百度千帆 API Key（留空用环境变量 BAIDU_SEARCH_API_KEY）</label>
+      <div style="display:flex;gap:8px">
+        <input type="password" id="cfg-baidu-key" value="${esc(c.webSearch?.baidu?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
+        <button class="btn btn-small" id="cfg-baidu-key-toggle" type="button">显示</button>
+      </div></div>
+    <div class="field" id="metaso-search-fields" style="${prov === 'metaso' ? '' : 'display:none'}">
+      <label>秘塔 API Key（可选，留空用官方免费额度 / 环境变量 METASO_API_KEY）</label>
+      <div style="display:flex;gap:8px">
+        <input type="password" id="cfg-metaso-key" value="${esc(c.webSearch?.metaso?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
+        <button class="btn btn-small" id="cfg-metaso-key-toggle" type="button">显示</button>
+      </div></div>
+
+    <h3>添加自定义搜索服务</h3>
+    <div class="field-row">
+      <div class="field"><label>名称（自己辨认用）</label>
+        <input type="text" id="new-sp-name" placeholder="例如：自建 SearXNG" /></div>
+      <div class="field"><label>类型</label>
+        <select id="new-sp-type">
+          <option value="openai">JSON 搜索接口（POST）</option>
+          <option value="bing">网页解析（Bing 结果格式）</option>
+        </select></div>
+    </div>
+    <div class="field"><label>接口地址 / 搜索页地址</label>
+      <input type="text" id="new-sp-baseurl" placeholder="JSON 类型：https://your-search.example.com/search；网页类型：https://your-searx.example.com/search" style="width:100%" /></div>
+    <div class="field-row">
+      <div class="field"><label>API Key（可选）</label>
+        <input type="password" id="new-sp-apikey" placeholder="多数自建服务留空即可" autocomplete="new-password" style="width:100%" /></div>
+      <div class="field"><label>模型名（可选）</label>
+        <input type="text" id="new-sp-model" placeholder="Responses API 风格才需要" /></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
+      <button class="btn btn-small" id="add-search-provider-btn">＋ 添加并选中</button>
+      <span id="add-search-provider-hint" class="muted" style="font-size:12px"></span>
+    </div>
+  `;
+}
+
+export function renderMemorySettingsSection(c) {
+  const mem = c.memory || {};
+  const comp = c.compact || {};
+  const providers = state.providers || [];
+  const useChat = mem.useChatModel !== false;
+  const selP = providers.find((p) => p.id === mem.provider);
+  const currentDisplay = selP ? `${selP.displayName || selP.id} · ${mem.model || '未选模型'}` : (mem.model || '未选模型');
+  return `
+    <h3 id="settings-memory">记忆整理</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-mem-consolidate" ${mem.consolidateEnabled !== false ? 'checked' : ''} />
+      <label for="cfg-mem-consolidate">启用记忆自动整理</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-mem-usechat" ${useChat ? 'checked' : ''} />
+      <label for="cfg-mem-usechat">使用与聊天机器人相同的模型</label></div>
+    <div id="mem-model-box" style="${useChat ? 'display:none' : ''}">
+      <div class="field"><label>记忆整理模型（点击选择）</label>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="cfg-mem-model-pick" readonly placeholder="点击选择模型" value="${esc(currentDisplay)}" style="flex:1;cursor:pointer" />
+        </div>
+        <div class="hint" id="mem-model-hint">${selP ? `当前：${esc(selP.displayName)} @ ${esc(selP.baseURL)}` : '尚未选择专用模型'}</div>
+        <input type="hidden" id="cfg-mem-provider" value="${esc(mem.provider || '')}" />
+        <input type="hidden" id="cfg-mem-model" value="${esc(mem.model || '')}" />
+      </div>
+    </div>
+    <div class="field"><label>整理冷却时间（毫秒）</label><input type="number" id="cfg-mem-interval" min="1800000" step="600000" value="${esc(mem.consolidateMinIntervalMs ?? 21600000)}" /></div>
+    <div class="hint">条数超过阈值且距上次整理超过该冷却时间后，才会在运行结束后后台整理。默认 6 小时（21600000 毫秒）。</div>
+
+    <h3>聊天记录压缩</h3>
+    <div class="hint" style="margin-bottom:8px">
+      长期运行的群里存档只增不减。压缩把最老的一段交给模型摘要成一段纪要写回存档，
+      <b>原文不会被删除</b>，只是移到 <code>data/messages/archive/&lt;会话&gt;.jsonl</code> 冷归档。
+      摘要在存档页显示为一条「历史摘要」，页顶还会单独列出它有没有进提示词。<br />
+      <b>它默认进不了提示词</b>：压缩把它插在"最近 N 条"之前（N = 下方「最近多少条原样保留」，默认 300），
+      而【过去状态】只按响应档位读几十条，摘要压根够不着。要不要带上、带多少，
+      去「聊天设置 › 历史摘要」里开。
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-compact-enabled" ${comp?.enabled ? 'checked' : ''} />
+      <label for="cfg-compact-enabled">启用定时压缩（会调用模型，产生费用）</label></div>
+    <div class="field-row">
+      <div class="field"><label>巡检间隔（毫秒）</label><input type="number" id="cfg-compact-interval" min="300000" step="60000" value="${esc(comp?.checkIntervalMs ?? 3600000)}" /></div>
+      <div class="field"><label>同一会话冷却（毫秒）</label><input type="number" id="cfg-compact-cooldown" min="600000" step="600000" value="${esc(comp?.minIntervalMs ?? 86400000)}" /></div>
+      <div class="field"><label>一次巡检最多处理几个会话</label><input type="number" id="cfg-compact-chats" min="1" max="10" value="${esc(comp?.maxChatsPerSweep ?? 1)}" /></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>存档条数超过多少才压</label><input type="number" id="cfg-compact-minmsgs" min="50" value="${esc(comp?.minMessagesToCompact ?? 800)}" /></div>
+      <div class="field"><label>最近多少条原样保留（下限 100）</label><input type="number" id="cfg-compact-keep" min="100" value="${esc(comp?.keepRecentMessages ?? 300)}" /></div>
+      <div class="field"><label>单轮最多摘要多少条</label><input type="number" id="cfg-compact-perround" min="20" value="${esc(comp?.maxMessagesPerRound ?? 400)}" /></div>
+    </div>
+    <div class="field"><label>喂给模型的原始文本上限（字符）</label><input type="number" id="cfg-compact-chars" min="2000" step="1000" value="${esc(comp?.maxContextChars ?? 24000)}" /></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-compact-memory" ${comp?.compactMemory !== false ? 'checked' : ''} />
+      <label for="cfg-compact-memory">压缩后顺带整理一次本群记忆（走它自己的冷却）</label></div>
+    <div class="hint">
+      「最近多少条原样保留」是这里最关键的旋钮：它同时是记忆引擎的证据来源
+      （判断"谁在活跃/该不该发现新人"要数最近的发言），设得太小会让这些判断悄悄失灵。
+      建议不低于 200。冷却与门槛没到就什么都不做，不会白花钱。
+    </div>`;
+}
+
+export function renderPersonaSection(c) {
+  return `
+    <h3>人设</h3>
+    ${renderPersonaPicker(c)}
+    <div class="field-row">
+      <div class="field"><label>机器人名字</label><input type="text" id="cfg-botname" value="${esc(c.persona.botName)}" /></div>
+      <div class="field"><label>群内展示名（可选）</label><input type="text" id="cfg-selfnick" value="${esc(c.persona.selfNickname || '')}" /></div>
+      <div class="field"><label>参与度</label>
+        <select id="cfg-participation">
+          <option value="low" ${c.persona.participation === 'low' ? 'selected' : ''}>安静型</option>
+          <option value="medium" ${c.persona.participation === 'medium' ? 'selected' : ''}>普通群友</option>
+          <option value="high" ${c.persona.participation === 'high' ? 'selected' : ''}>活跃型</option>
+        </select></div>
+    </div>
+    <div class="field"><label>角色设定</label>
+      <textarea id="cfg-roletext" class="persona-role-text" placeholder="例如：你是运维群里的老油条……">${esc(c.persona.roleText || '')}</textarea></div>
+    <div class="field"><label>管理员附加规则（可选，追加到系统提示）</label>
+      <textarea id="cfg-customrules" class="persona-role-text" style="min-height:100px">${esc(c.persona.customRules || '')}</textarea></div>
+    ${renderPersonaSaveBar()}`;
+}
+
+export function renderAllowSection(c) {
+  return `
+    <h3 id="settings-allow">聊天白名单</h3>
+    <div class="hint" style="margin-bottom:10px">白名单为空时机器人不会在任何群聊/私聊内运行。</div>
+    <div class="field"><label>从 QQ 账号直接勾选</label>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-small" id="pick-groups-btn">选择群</button>
+        <button class="btn btn-small" id="pick-friends-btn">选择好友</button>
+        <span id="pick-result" class="muted" style="align-self:center"></span>
+      </div></div>
+    <div class="field-row">
+      <div class="field"><label>允许的群号（逗号分隔）</label><input type="text" id="cfg-allowgroups" value="${esc((c.allow.groups || []).join(','))}" /></div>
+      <div class="field"><label>允许的 QQ（逗号分隔）</label><input type="text" id="cfg-allowprivate" value="${esc((c.allow.private || []).join(','))}" /></div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-allowallwhenempty" ${c.allowAllWhenEmpty === true ? 'checked' : ''} />
+      <label for="cfg-allowallwhenempty">白名单留空时允许所有会话</label></div>
+    <div class="hint">说明：勾选后，若上方两个列表都为空，机器人会在<b>所有</b>群聊和私聊中运行；只要填了任意一项，就只按名单过滤。</div>`;
+}
+
+// 表情包积极程度档位：[值, 显示名]
+export function renderDesktopSection(c) {
+  return `
+    <h3>桌面端</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-autostart" ${c.server?.autoStart ? 'checked' : ''} />
+      <label for="cfg-autostart">开机自启</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-closetray" ${c.server?.closeToTray !== false ? 'checked' : ''} />
+      <label for="cfg-closetray">点关闭时最小化到托盘</label></div>
+    <h3>界面</h3>
+    <div class="field"><label>主题</label>
+      <div class="theme-picker" id="theme-picker">
+        ${['dark', 'light', 'system', '?'].map((t) => `
+          <div class="theme-option${getThemePref() === t ? ' on' : ''}" data-theme-opt="${t}" role="button" tabindex="0">
+            <span class="t-ico">${THEME_ICON[t]}</span>
+            <span>${THEME_LABEL[t]}</span>
+          </div>`).join('')}
+      </div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-showvision" ${c.ui?.showVision !== false ? 'checked' : ''} />
+      <label for="cfg-showvision">模型目录显示“支持图片输入/不支持图片输入”徽标</label></div>
+    <div class="field"><label>界面刷新间隔（毫秒）</label><input type="number" id="cfg-refreshms" min="1000" step="1000" value="${esc(c.ui?.refreshMs ?? 15000)}" /></div>
+    <h3>版本</h3>
+    <div class="field"><label>当前版本 <b id="update-current">…</b><span class="muted">（本机 package.json）</span></label></div>`;
+}
+
+export function renderOnebotSection(c) {
+  return `
+    <h3 id="settings-onebot">OneBot（SnowLuma）</h3>
+    <div class="hint" style="margin-bottom:10px">SnowLuma 的启动、关闭与日志已移动到顶部「SnowLuma」页签。此处只保留连接配置。</div>
+    <div class="field"><label>SnowLuma 程序目录（留空 = 自动使用项目内 snowluma/ 文件夹）</label>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="cfg-snowlumadir" value="${esc(c.snowluma.dir || '')}" style="flex:1" />
+        <button class="btn btn-small" id="open-snowluma-btn">打开文件夹</button>
+      </div>
+      <div class="hint" id="snowluma-hint"></div></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-snowlumalaunch" ${c.snowluma.autoLaunch ? 'checked' : ''} />
+      <label for="cfg-snowlumalaunch">QQ Agent 启动时自动拉起 SnowLuma（未运行时）</label></div>
+    <div class="field-row">
+      <div class="field"><label>WebSocket 地址（收消息）</label><input type="text" id="cfg-wsurl" value="${esc(c.snowluma.wsUrl)}" /></div>
+      <div class="field"><label>HTTP 地址（发消息）</label><input type="text" id="cfg-httpurl" value="${esc(c.snowluma.httpUrl)}" /></div>
+      <div class="field"><label>WebSocket 令牌</label><input type="password" id="cfg-obtoken" value="${esc(c.snowluma.accessToken || '')}" /></div>
+      <div class="field"><label>HTTP 令牌（与 WS 不同时填；SnowLuma 默认分开）</label><input type="password" id="cfg-obhttptoken" value="${esc(c.snowluma.httpAccessToken || '')}" /></div>
+    </div>
+    <div class="hint">改完 OneBot 地址需要重启应用生效；模型/人设/白名单即时生效。</div>`;
+}
+
+export function renderPersonaPicker(c) {
+  const currentId = Object.entries(state.personaTemplates || {}).find(([, p]) => p.text === (c.persona?.roleText || ''))?.[0] || '';
+  const currentName = state.personaTemplates[currentId]?.name || '';
+  return `
+    <div class="field-row" style="align-items:flex-end">
+      <div class="field">
+        <label>选择人设</label>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="cfg-persona-pick" readonly placeholder="点击选择人设" value="${esc(currentName)}" style="flex:1;cursor:pointer" />
+          <button class="btn btn-small" id="new-persona-btn">＋ 添加人设</button>
+          <button class="btn btn-small btn-danger hidden" id="del-persona-btn">删除当前自定义人设</button>
+        </div>
+        <span id="persona-pick-hint" class="muted" style="font-size:12px"></span>
+      </div>
+    </div>`;
+}
+
+export function renderPersonaSaveBar() {
+  return `
+    <div class="persona-save-row">
+      <button class="btn btn-primary" id="save-persona-btn">保存人设修改</button>
+      <span id="persona-save-result" class="muted"></span>
+    </div>`;
+}

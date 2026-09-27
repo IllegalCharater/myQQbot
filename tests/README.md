@@ -68,7 +68,8 @@ const { load } = await import('./lib/src.mjs');
 | `t-smoke` | 端到端冒烟：真起 app 再 fetch |
 | `t-panel` / `t-panel-wiring` | 面板接口 + `ui/*` 文本层接线 |
 | `t-admin` | 管理接口 |
-| `t-ui-render` | 把 `ui/app.js` 整份丢进 vm 跑一遍，看拼出来的 HTML |
+| `t-ui-render` | 安装最小假 DOM 后动态导入 UI 模块，检查具名渲染函数生成的 HTML |
+| `t-ui-modules` | UI 唯一模块入口、相对 import 完整性、可达性与无环依赖 |
 | `t-vision-log` | 读图 → 会话记录回填（自起假模型端点跑整轮 orchestrator） |
 
 ## 诊断脚本（10）

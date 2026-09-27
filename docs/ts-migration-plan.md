@@ -1,7 +1,7 @@
 # TypeScript 重构方案（qq-agent / myQQbot）
 
-> 状态：**S0、S1、S2、S3、S4、S5 已完成**；`core/`、`llm/`、`chat/`、`qq/`、`media/`、`stickers/`、`agent/` 已全部迁移为严格 TypeScript。S6 尚未开始。
-> 当前 `core/llm/chat/qq/media/stickers/agent` 已全部使用 `.ts`；仅 `web/app.js` 与 `web/server.js` 按计划留到 S6。
+> 状态：**S0–S8 已完成**；后端 `src/` 已全部迁移为严格 TypeScript，前端 UI 已拆为原生 ES Module，迁移计划进入维护状态。
+> Web 后端已拆为路由表、HTTP/静态文件基础设施和 8 个领域路由模块；运行入口仍为编译后的 `dist/web/app.js` 与 `dist/web/server.js`。
 > 写作日期：2026-09-24
 
 ## Context
@@ -39,7 +39,8 @@ src/
 ├─ media/     safe-fetch.ts  web-search.ts  jmcomic.ts
 ├─ stickers/  stickers.ts  sticker-manager.ts  sticker-cache.ts  (+ types.ts)
 ├─ agent/     orchestrator.ts  prompt.ts  tools.ts  context-window.ts  (+ types.ts)
-└─ web/       app.ts  server.ts                          (S6 后再加 routes/)
+└─ web/       app.ts  server.ts  types.ts  router.ts  http.ts
+              static-files.ts  usage-service.ts  routes/*.ts
 ```
 
 **依赖只能向下，跨目录禁止反向/同层互引**（同目录内部随意）：
@@ -231,7 +232,7 @@ export const CONFIG_FILE: string;  // DATA_DIR/config.json
 
 `.ts` 文件一律按 `strict` 写；个别为了兼容旧写法确实需要 `any` 的地方，用**带注释的局部 `any`**（说明为什么），不要全文件放宽。
 
-### S6 `app.js` 拆路由（2258 行 → `web/` 子树）
+### S6 `app.js` 拆路由（✅ 已完成，2258 行 → `web/` 子树）
 
 按域分成 `web/routes/`（`sessions` / `chats` / `stickers` / `config` / `usage` / `system` …），配一张路由表：
 
@@ -243,21 +244,33 @@ type Route = { method: 'GET'|'POST'|'DELETE'; path: string | RegExp; handle(ctx:
 
 同步转 `.ts`，并给 `AppCtx` 一个接口——现在它是鸭子类型，测试里靠手搓假对象（t-orch 就是），有接口后这些假对象能被编译器检查。
 
-### S7 UI 拆 ES 模块（独立轨道，可与其他阶段并行）
+**实际落地**：
 
-`ui/js/`：`main.js`（启动 + 标签页）、`state.js`、`api.js`（`api()` + EventSource）、`dom.js`（`$`/`$$`/`esc`/格式化）、`views/*.js`（sessions / chats / memory / stickers / usage / settings）、`parts/*.js`（下拉、滑条、模态框、主题、成本表）。**分组原则直接沿用文件里现成的 `// ── xxx ──` 分节横幅**（约 33 段），每文件 ≤400 行。
+- `app.js`、`server.js` 已转为严格 TypeScript；`app.ts` 收敛为依赖装配、SnowLuma 生命周期、OneBot 入站事件、SSE 和 HTTP 派发。
+- 新增 `types.ts`、`http.ts`、`router.ts`、`static-files.ts`、`usage-service.ts`；普通 handler 返回统一 `Reply`，SSE 仍保持长连接专用路径。
+- 路由按 `usage/system/providers/config/sessions/chats/memory/stickers` 八个领域拆入 `web/routes/`，由 `routes/index.ts` 保持原分支优先级组合。
+- 新增 `t-web-router.mjs`（11 条断言），覆盖精确/正则匹配、方法分流、404、请求体解析以及 JSON/二进制/空响应。
+- 严格类型检查、构建、层级检查及 Web/领域回归均通过；默认与 `--all` 套件仅保留 S6 开始前已知的 `t-panel-wiring.mjs` 两条 S7 UI 接线失败，未弱化断言。
+- `src/web/` 已无 `.js` 源文件；HTTP 路径、状态码、响应结构、SSE、静态资源和运行时 `createApp()` 返回字段保持不变。
 
-- `index.html`：`<script src="/app.js">` → `<script type="module" src="/js/main.js">`。`src/app.js` 的静态服务**不用改**（它已经服务 `UI_DIR` 下任意路径，mime 表里有 `.js`）。
-- 已确认的两件事让这步很便宜：HTML 里**没有任何 `onclick="fn()"`**（全是事件委托/绑定），所以"函数不再挂全局"不会踩雷；模块是 defer 加载，反而免掉了现在的启动时序顾虑。
-- **约束（为了测试）**：UI 模块不许 import 任何东西（无 bare specifier），顶层不许碰 DOM——全部走导出的 `init()`。这样 `t-ui-render` 可以从"整份塞进 `vm` + 手搓 DOM 壳 + `globalThis.__state` hack"升级成：先把假 DOM 装到 `globalThis`，再 `await import('ui/js/main.js')`，然后用**具名导出**驱动（比现在干净）。UI 套件必须在各自进程里跑（模块只求值一次）。
-- 回滚：UI 是独立子树，`index.html` 那一行改回去即可。
+### S7 UI 拆 ES 模块（✅ 已完成，5924 行单文件 → 原生模块子树）
 
-### S8 收尾
+- `ui/app.js` 已删除，`index.html` 现在只加载一次 `<script type="module" src="/js/main.js">`；后端静态文件服务无需改动即可直接提供整个模块子树。
+- `ui/js/` 已按基础设施、页面视图、设置区块和可复用部件拆分：共享状态集中在 `state.js`，请求集中在 `api.js`，启动编排集中在 `main.js`；聊天、会话、记忆、表情、用量、SnowLuma 和设置各自拥有独立模块。
+- 所有相对 import 均显式保留 `.js` 后缀；不存在 bare import、缺失目标、循环依赖或无法从入口到达的模块。
+- `t-ui-render.mjs` 已改为安装假 DOM 后动态 import 具名导出，不再把整份脚本塞入 `vm`，原有 118 条渲染、XSS 和旧记录兼容断言全部保留。
+- 新增 `t-ui-modules.mjs`（9 条断言），守卫唯一 module 入口、旧入口删除、扩展名、模块可达性和无环依赖；`t-smoke.mjs` 改为验证 `/js/main.js` 与代表性子模块。
+- `t-panel-wiring.mjs` 已适配模块结构，原有两条失败（过滤列表数据源一致、消息刷新后同步摘要块）均已转为明确接线/行为保护并通过，没有删除或弱化断言。
+- 验收结果：类型检查、构建、层级检查、15 个默认断言套件、25 个含诊断套件及 `npm run check` 全部通过；HTTP、SSE、配置格式、页面 DOM id、交互文案和主题语义保持不变。
+- 回滚：UI 是独立子树，恢复旧文件并将 `index.html` 的入口改回即可；本阶段未创建 Git 提交。
 
-- `scripts/sanitize-release.mjs`：`TEXT_EXT` 里补 **`.ts`**（否则密钥扫描会跳过源码）；`SKIP_DIR` 已有 `dist`；发布流程要在打包前 `npm run build`（发布包只需要 `dist` + 运行时依赖，`npm ci --omit=dev` 即可，`typescript` 不必随包走）。
-- `scripts/export-prices-md.mjs` 是**把 `src/model-prices.js` 当文本读**、按 `// ══ 厂商 ══` 注释切段的——迁移后要指向 `src/llm/model-prices.ts`（tsc 默认保留注释，`removeComments: false` 也保住了 `dist` 里的注释，但这个脚本读的是**源码**）。`scripts/export-prices.mjs` / `apply-vision-docs.mjs` 的 import 改指 `dist`。
-- README：安装（`npm ci`）→ 首次 `npm run build` → `npm start` / `npm run server`；改源码后 `npm run dev`（watch）。`启动QQ机器人.bat` **保持原样**（它是给最终用户/便携包用的，跑的就是已构建好的 `dist`；开发流走 npm 脚本）。
-- 可选：`electron/main.js`（177 行）也转 `.ts`（要单独一个 `tsconfig.electron.json`，因为 `rootDir` 不同）。
+### S8 收尾（✅ 已完成）
+
+- `scripts/sanitize-release.mjs` 的文本扫描扩展名已包含 `.ts`，并继续跳过生成目录 `dist/`；发布前可用 `--scan` 或 `--dry-run` 做只读验收。
+- `scripts/export-prices-md.mjs` 已读取 `src/llm/model-prices.ts`，`export-prices.mjs` 与 `apply-vision-docs.mjs` 已改为加载 `dist/` 中的编译产物。
+- README 已明确 `npm ci` → `npm run build` → `npm start` / `npm run server`，开发期使用 `npm run dev`；仅运行后端的发布目录可使用 `npm ci --omit=dev`，但必须先生成 `dist/`。
+- `启动QQ机器人.bat` 保持原样；Electron 入口继续加载 `dist/web/app.js`。可选的 Electron 主进程 TypeScript 化不属于本次迁移的完成条件。
+- 类型检查、构建、层级守卫、默认与 `--all` 测试、辅助脚本临时目录验证及发布脱敏扫描均通过；没有修改真实 `data/`，也没有创建 Git 提交。
 
 ---
 
@@ -286,7 +299,7 @@ type Route = { method: 'GET'|'POST'|'DELETE'; path: string | RegExp; handle(ctx:
 | `tests/lib/src.mjs` | —（S1 新建） | ✅ `dist/`；另有恒为 `'src'` 的 `SOURCE_REL` 给 `git show` 用（`SRC_DIR` 是"运行时从哪加载"，两件事别混）。`QQ_AGENT_SRC` 覆盖已在 S3 删除 |
 | `README.md` `启动QQ机器人.bat` | 直接起 electron | ✅ 文档补了 build；`.bat` 不动 |
 | `.gitignore` | 已有 `dist/` | ✅ 补 `*.tsbuildinfo` |
-| `scripts/sanitize-release.mjs` | `TEXT_EXT` 无 `.ts` | ⏳ S8（现在源码里还没有 `.ts`，补了也没用） |
+| `scripts/sanitize-release.mjs` | `TEXT_EXT` 无 `.ts` | ✅ 已包含 `.ts`，源码密钥扫描不会跳过 TypeScript |
 
 `src/web/server.js` 内部 `import './app.js'` **不用改**（两者仍在同一目录，相对关系不变）。
 

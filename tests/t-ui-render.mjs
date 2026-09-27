@@ -1,17 +1,13 @@
-// 前端渲染真实执行测试：把 ui/app.js 整份丢进 vm，配一层最小 DOM 假壳，
+// 前端渲染真实执行测试：先安装最小 DOM 假壳，再动态 import UI 领域模块，
 // 然后用真数据调 loadStickerView / loadMemoryDetail / chatMsgRowHtml，
 // 检查它们吐出来的 HTML。
 //
 // 为什么还要这一层（已经有静态 lint 了）：静态检查只能证明"id 拼写一致"，
 // 证明不了"这段代码跑起来不炸"。模板串里少一个反引号、引用了不存在的 helper、
 // state 字段名打错，在文本层面全都看不出来，但会在用户点开那一页时白屏。
-// 仓库没有 jsdom，所以这里手搓一层壳：只实现 app.js 真正用到的那几个方法，
+// 仓库没有 jsdom，所以这里手搓一层壳：只实现这些模块真正用到的那几个方法，
 // 遇到没实现的就让它抛错——那正是"用了壳里没有的能力"的信号，不该被静默吞掉。
-import vm from 'node:vm';
-import { readUI } from './lib/src.mjs';
 import { createDomSandbox } from './lib/harness.mjs';
-
-const code = readUI('app.js');
 
 let pass = 0, fail = 0;
 const ok = (label, cond, extra = '') => {
@@ -19,14 +15,28 @@ const ok = (label, cond, extra = '') => {
   else { fail++; console.log(`  ❌ ${label}${extra ? ' → ' + extra : ''}`); }
 };
 
-// ── 最小 DOM 假壳：壳本身搬到了 lib/harness.mjs（S7 把 ui/app.js 拆成 ES 模块时，
-//    这套"整份丢进 vm"的办法要一起换掉，届时只有 harness 那一份要动） ──
-const { sandbox, ctx, doc, el: $el } = createDomSandbox();
+// ── 最小 DOM 假壳：壳本身在 lib/harness.mjs；模块在安装全局后才动态 import。 ──
+const dom = createDomSandbox();
+const { doc, el: $el } = dom;
+for (const [key, value] of Object.entries(dom.sandbox)) {
+  if (key === 'navigator') continue;
+  Object.defineProperty(globalThis, key, { value, configurable: true, writable: true });
+}
+const sandbox = globalThis;
 
 console.log('\n═══ 整份 app.js 能在无 DOM 环境下加载完（启动路径不炸） ═══');
 try {
-  // 追加一行把模块级 const 暴露出来（const/let 不会挂到 globalThis 上）
-  vm.runInContext(code + '\n;globalThis.__state = state;globalThis.__labels = STICKER_SOURCE_LABEL;\n', ctx, { filename: 'ui/app.js' });
+  const [domHelpers, stateModule, chats, stickers, memory, sessions] = await Promise.all([
+    import('../ui/js/dom.js'),
+    import('../ui/js/state.js'),
+    import('../ui/js/views/chats.js'),
+    import('../ui/js/views/stickers.js'),
+    import('../ui/js/views/memory.js'),
+    import('../ui/js/views/sessions.js')
+  ]);
+  Object.assign(sandbox, domHelpers, chats, stickers, memory, sessions);
+  sandbox.__state = stateModule.state;
+  sandbox.__labels = stickers.STICKER_SOURCE_LABEL;
   ok('加载 + 执行顶层代码没抛异常', true);
 } catch (e) {
   ok('加载 + 执行顶层代码没抛异常', false, `${e.name}: ${e.message}`);

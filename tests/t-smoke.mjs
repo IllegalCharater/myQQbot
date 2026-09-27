@@ -81,11 +81,14 @@ ok('首页含新页签按钮', String(home.body).includes('data-tab="stickers"')
 ok('首页含新视图容器', String(home.body).includes('id="view-stickers"'));
 ok('首页含搜索框 / 刷新按钮 / 列表 / 详情四个挂载点',
   ['sticker-search', 'sticker-sync-btn', 'sticker-items', 'sticker-detail'].every((id) => String(home.body).includes(`id="${id}"`)));
-const jsRes = await call('/app.js');
-ok('GET /app.js 拿到脚本且是新版（含 renderStickerItems）',
-  jsRes.status === 200 && String(jsRes.body).includes('renderStickerItems'), `status=${jsRes.status}`);
-ok('/app.js 含存档操作与记忆单条操作的代码',
-  String(jsRes.body).includes('data-op="edit"') && String(jsRes.body).includes('imp-edit'));
+const jsRes = await call('/js/main.js');
+ok('GET /js/main.js 拿到 ES Module 入口',
+  jsRes.status === 200 && String(jsRes.body).includes("from './views/stickers.js'"), `status=${jsRes.status}`);
+const stickerModule = await call('/js/views/stickers.js');
+const memoryModule = await call('/js/views/memory.js');
+ok('页面领域模块可由静态服务器直接加载',
+  stickerModule.status === 200 && memoryModule.status === 200
+  && String(stickerModule.body).includes('renderStickerItems') && String(memoryModule.body).includes('imp-edit'));
 const cssRes = await call('/style.css');
 ok('GET /style.css 拿到样式且含新页样式',
   cssRes.status === 200 && String(cssRes.body).includes('.sticker-grid') && String(cssRes.body).includes('.imp-row'), `status=${cssRes.status}`);
@@ -105,7 +108,7 @@ ok('穿过 URL 规范化的编码穿越被守卫拦下（403）', t1.includes('4
 const t2 = await rawGet('/../package.json');
 ok('字面 .. 被 URL 解析提前规范掉，落成 404（同样拿不到文件）', t2.includes('404'), t2);
 ok('静态文件确实在服务（对照组，证明上面两条不是"什么都没在跑"）',
-  (await rawGet('/app.js')).includes('200'));
+  (await rawGet('/js/main.js')).includes('200'));
 
 console.log('\n═══ 表情包页要用的四条接口 ═══');
 const list = await call('/api/stickers');
