@@ -81,6 +81,8 @@ export class SessionRegistry {
       triggerText: String(triggerEntriesToText(trigger) ?? ''),
       systemPrompt: '',
       userPrompt: '',
+      inputMessages: [],                       // 旧版兼容：首次 system/user 输入
+      llmRequests: [],                         // 每轮真正发送给模型的 messages/tools 快照
       promptChars: 0,
       model: '',
       rounds: 0,

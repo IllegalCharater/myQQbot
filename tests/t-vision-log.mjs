@@ -91,6 +91,12 @@ console.log('=== 1. 读图后模型说了什么，记在会话记录里 ===');
     // 图片确实作为图像输入发给了模型
     const withImage = model.requests.find((r) => JSON.stringify(r?.messages || []).includes('data:image/png;base64'));
     ok('图片真的作为 data URL 发给了模型', !!withImage, `收到 ${model.requests.length} 次请求`);
+    ok('会话日志逐轮保存了完整模型请求',
+      s.llmRequests?.length === model.requests.length
+      && s.llmRequests.some((r) => JSON.stringify(r.messages || []).includes('data:image/png;base64')),
+      `日志 ${s.llmRequests?.length || 0} 轮 / 实际 ${model.requests.length} 轮`);
+    ok('首轮请求里人设只作为一条 system 消息出现',
+      s.llmRequests?.[0]?.messages?.filter((m) => m.role === 'system').length === 1);
     ok('发给模型的消息里没有混进 imageReply 这个给 ui 看的字段',
       !JSON.stringify(model.requests).includes('imageReply'));
   }

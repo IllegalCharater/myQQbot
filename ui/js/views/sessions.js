@@ -281,15 +281,18 @@ export function renderSessionDetail(s) {
 
   const jsonMode = state.sessionJsonMode === s.id;
   if (jsonMode) {
-    // JSON 模式：原模原样展示输入给模型的内容 + 模型返回的原始内容
+    // JSON 模式以逐轮请求为唯一输入真相，不再同时重复展示 systemPrompt/userPrompt。
+    // 旧会话没有 llmRequests 时，退回首次 inputMessages，并明确标记为旧版快照。
+    const requests = Array.isArray(s.llmRequests) && s.llmRequests.length
+      ? s.llmRequests
+      : [{ round: 1, legacySnapshot: true, messages: s.inputMessages || [], tools: null }];
     const raw = {
       sessionId: s.id,
       chatKey: s.chatKey,
       model: s.model || '',
-      systemPrompt: s.systemPrompt || '',
-      userPrompt: s.userPrompt || '',
-      inputMessages: (s.inputMessages || []).map((m) => ({ role: m.role, content: m.content })),
-      llmMessages: (s.messages || []).filter((m) => m.role === 'assistant').map((m) => ({
+      requests,
+      responses: (s.messages || []).filter((m) => m.role === 'assistant').map((m, index) => ({
+        round: index + 1,
         role: m.role,
         content: m.content,
         tool_calls: m.tool_calls ?? null,

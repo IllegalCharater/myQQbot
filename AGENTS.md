@@ -114,6 +114,8 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 修改此链路时重点运行 `t-vision-log.mjs` 和 `t-ui-render.mjs`。
 
+会话 JSON 面板以 `session.llmRequests` 展示逐轮真实模型输入（完整 messages/tools）。`inputMessages` 只为旧会话保留，不要再将顶层 `systemPrompt/userPrompt` 与它并列展示，避免把日志副本误认为重复注入。
+
 ## 配置兼容与命名
 
 - `store.maxContextMessages`：当前新消息窗口容量，`0` 表示不限；它不控制历史深度。

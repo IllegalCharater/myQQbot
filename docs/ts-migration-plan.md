@@ -198,13 +198,15 @@ store.promptContextMaxChars = 32000
 每次运行记录：
 
 - system/user prompt 与总字符数；
-- 输入模型的初始 messages；
+- `llmRequests` 中每一轮实际输入模型的完整 messages、tools 和请求参数；旧记录的 `inputMessages` 仅作首次输入兼容；
 - vendor、模型、调用轮数与 token 用量；
 - 命中的响应档位、原因和 `historyLimit`；
 - `promptBudgetChars` 与是否因保护区过大而超预算；
 - 工具调用、错误、图片注入、发送记录和结束原因。
 
 这些记录用于排查提示词膨胀、渠道计费、读图失败和工具循环，不作为下一次模型请求的对话历史。
+
+会话面板的 JSON 模式以 `llmRequests` 为输入侧唯一真相，不再同时重复展示顶层 `systemPrompt/userPrompt`。旧会话没有逐轮快照时，会回退显示 `inputMessages` 并标记 `legacySnapshot`。
 
 ## 10. 构建、测试与发布
 

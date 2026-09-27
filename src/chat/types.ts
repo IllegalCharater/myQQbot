@@ -58,5 +58,7 @@ export interface SessionRecord extends Record<string, unknown> {
   error?: unknown;
   systemPrompt?: string;
   userPrompt?: string;
+  inputMessages?: Array<Record<string, unknown>>;
+  llmRequests?: Array<Record<string, unknown>>;
 }
 export interface MemoryMember extends Record<string, unknown> { id?: string; name?: string }

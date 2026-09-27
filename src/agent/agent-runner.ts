@@ -131,8 +131,9 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
     ];
-    // JSON 模式需要看到输入给模型的完整 messages（去工具之前）
+    // 兼容旧会话面板：保留首次输入。准确的逐轮请求见下面的 llmRequests。
     session.inputMessages = structuredClone(messages.map((m) => ({ role: m.role, content: m.content })));
+    session.llmRequests = [];
     host.sessions.update(session.id);
 
     // 工具集按配置过滤：无视觉模型 → 移除看图工具；搜索关闭 → 移除联网工具
@@ -178,6 +179,23 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     for (let round = 0; round < maxRounds && !finish; round++) {
       if (host.aborted) { host.sessions.finish(session.id, 'aborted'); return; }
       markActivity('正在思考…');
+      // 在调用前保存这一轮真正交给 chat/completions 的完整输入。messages 会随工具轮次增长，
+      // 因此只记首次 inputMessages 无法还原 tool 结果和图片注入后的请求。
+      const llmRequests = session.llmRequests as Array<Record<string, unknown>>;
+      const requestSnapshot: Record<string, unknown> = {
+        round: round + 1,
+        model: cfg.api.model,
+        messages: structuredClone(messages)
+      };
+      if (openAiTools.length) {
+        requestSnapshot.tools = structuredClone(openAiTools);
+        requestSnapshot.tool_choice = 'auto';
+      }
+      const requestTemperature = cfg.api.temperature ?? 0.8;
+      if (Number.isFinite(Number(requestTemperature))) requestSnapshot.temperature = Number(requestTemperature);
+      llmRequests.push(requestSnapshot);
+      host.sessions.update(session.id);
+      host.emit('session-update', session.id);
       // 网络抖动/5xx/429 会自动重试（同一轮请求，messages 不变，幂等不重复发言）
       const response = await chatCompletionWithRetry({ messages, tools: openAiTools });
       session.model = response.model || session.model;

@@ -613,6 +613,7 @@ export class WakeScheduler {
     live.finishReason = null;
     live.activity = '';
     live.inputMessages = [];
+    live.llmRequests = [];
     live.usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0, calls: 0 };
     this.sessions.update(session.id);
     this.emit('session-update', session.id);

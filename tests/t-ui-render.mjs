@@ -460,5 +460,33 @@ const longSay = detailHtml({
 });
 ok('参数摘要太长时截断（不让一行工具摘要把卡片撑爆）', longSay.includes('…') && !longSay.includes('啊'.repeat(120)));
 
+console.log('\n  ── JSON 模式：逐轮原始模型请求 ──');
+state.sessionJsonMode = 'sess-json';
+const jsonHtml = detailHtml({
+  id: 'sess-json', chatKey: 'group:123', status: 'done', rounds: 2, model: 'm', activity: '',
+  systemPrompt: '重复展示的人设', userPrompt: '重复展示的动态输入',
+  inputMessages: [{ role: 'system', content: '旧首次快照' }],
+  llmRequests: [
+    { round: 1, model: 'm', messages: [{ role: 'system', content: '唯一系统提示' }, { role: 'user', content: '第一轮输入' }], tools: [{ type: 'function', function: { name: 'x' } }] },
+    { round: 2, model: 'm', messages: [{ role: 'tool', content: '工具结果' }], tools: [] }
+  ],
+  messages: [{ role: 'assistant', content: '模型输出', raw: { id: 'raw-1' } }], sent: []
+});
+ok('JSON 模式展示逐轮 requests 与完整 messages/tools',
+  jsonHtml.includes('&quot;requests&quot;') && jsonHtml.includes('唯一系统提示')
+  && jsonHtml.includes('工具结果') && jsonHtml.includes('&quot;tools&quot;'));
+ok('JSON 模式不再重复展示顶层 systemPrompt/userPrompt',
+  !jsonHtml.includes('重复展示的人设') && !jsonHtml.includes('重复展示的动态输入'));
+
+state.sessionJsonMode = 'sess-json-legacy';
+const legacyJsonHtml = detailHtml({
+  id: 'sess-json-legacy', chatKey: 'group:123', status: 'done', rounds: 1, model: 'm', activity: '',
+  inputMessages: [{ role: 'system', content: '老会话系统输入' }, { role: 'user', content: '老会话用户输入' }],
+  messages: [], sent: []
+});
+ok('旧会话回退到 inputMessages 并标明 legacySnapshot',
+  legacyJsonHtml.includes('老会话系统输入') && legacyJsonHtml.includes('&quot;legacySnapshot&quot;'));
+state.sessionJsonMode = null;
+
 console.log(`\n════ 通过 ${pass} / 失败 ${fail} ════`);
 process.exit(fail === 0 ? 0 : 1);
