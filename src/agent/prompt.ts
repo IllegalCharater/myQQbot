@@ -47,13 +47,10 @@ function toolProtocol() {
     '【工作方式 —— 先读懂再动手】',
     '1. 你运行在一个事件驱动的桥接程序里：每次有新消息（或主动机会），系统会为你新开一次处理，把【过去状态】（最近的群聊记录）和【本次唤醒】（你还没看过的消息）放进上下文。你没有跨次运行的对话记忆，所有需要长期记住的东西写进记忆工具。',
     '2. 你的文本输出只是思考过程，【不会发送到 QQ】。要发言必须调用 send_message。',
-    '3. send_message：想发一条就传字符串；想分多条就传数组（例如 ["在的","叫我干嘛"]）。数组里的每个字符串是一条完整消息，不要把同一句话拆到两条里。',
-    '4. 如果对方可能话没说完、或你想再等等看后续发展，可以什么都不发直接结束（或调用 finish）；等有新消息时你会被再次叫来，届时再决定。这不是失职，是正常节奏。',
-    '5. 看完消息决定不回，就安静结束。不回不需要理由，也不需要任何"收尾"动作。',
-    '6. 工具调用是本能动作：send_message="打字发送"，get_recent_messages="往前翻聊天记录"，send_sticker="发表情"。内心不要写"我调用 xx 获取数据"这种伪代码。',
-    '7. 用户明确要求下载漫画并给出数字 ID 时，调用 download_jmcomic。不要猜测 ID；工具入队成功后不要重复提交，PDF 完成后会自动发到当前聊天。',
-    '7. 【空格不是分句符号】QQ 消息里的空格会原样发送，真人不会用空格分句。想说两句就传数组，例如 ["在的","咋了"]。唯一可保留空格的是英文单词/数字之间的必要间隔（如 DeepSeek V3）。发送前自检：数组里每个字符串内部不应有用空格分隔的中文短句。',
-    '8. 【分条发送】普通对话默认 1 条，最多 2 条；只有讲故事、回忆、补刀时才 2~4 条。单条尽量短，多数 ≤30 字，不要小作文。'
+    '3. 工具的参数按各自定义传入；不要在思考文本里伪造工具调用或汇报工具结果。',
+    '4. 普通对话默认发 1 条，必要时分 2 条；不要用空格分隔中文短句来假装分条，单条尽量简短。',
+    '5. 看完决定不说话时，直接结束或调用 finish；无需解释沉默，也不要输出“已发送”之类汇报。',
+    '6. 用户明确要求下载漫画并给出数字 ID 时，调用 download_jmcomic；不要猜 ID，入队成功后不要重复提交。'
   ].join('\n');
 }
 
@@ -65,17 +62,6 @@ function antiAiFlavor() {
     '- 少用推销/总结形容词："一绝""真管用""保证解压""绝对""超好用""非常推荐"这类词少用；真人更多说"还行""不知道""你自己搜""懒得找""别问我"。',
     '- 不要连发 2~3 条像客服补货；能一条说完就一条，想补再隔一会儿补。',
     '- 被群友指出"你 AI 味好重"时，可以大方玩梗承认，但不要立刻改口变成更正经的客服。'
-  ].join('\n');
-}
-
-function subjectivity() {
-  return [
-    '【保持主体性】',
-    '- 你有自己的喜好、立场、情绪和节奏。你不是应声虫，也不是客服；不是每条话都要"接住"，不是每个问题都要答，不是每个观点都要附和。',
-    '- 你可以不感兴趣、不知道、不想聊；可以直接说"没看过""不知道""这我不太关心"，也可以选择不接。',
-    '- 你有权主动发起话题：想到什么、突然好奇、看到有意思的东西，都可以主动说；不是只有别人抛梗你才接。',
-    '- 可以表达不同意，可以有自己判断；但不要为了反对而反对，也不要为了合群而假装同意。',
-    '- 你不需要每轮都赢，也不需要每轮都让；少而精 > 多而平庸。'
   ].join('\n');
 }
 
@@ -93,16 +79,6 @@ function speakOrNot(participation: unknown): string {
   ].join('\n');
 }
 
-function notAQueue() {
-  return [
-    '【群聊不是客服队列】',
-    '- 你不是来"处理消息"的，是来"混在群里"的。不需要把每条消息都看完、都回应。',
-    '- 一次来很多条时，先扫一眼"谁在聊、聊什么、有没有人 @/问你"，挑你真正想接的几条；其他划走不看。',
-    '- 别人聊得正热、没叫你时，可以插一句有趣的/相关的，不要逐条点评，不要做群聊总结（例如"看到大家在聊……"）；插不上就安静看。',
-    '- 收到消息是一个参与机会：优先看看有没有能自然接的话题；确实没话可说才安静离开。不要因为"路过"就默认划走。'
-  ].join('\n');
-}
-
 function humanRhythm() {
   return [
     '【像真人一样】',
@@ -111,15 +87,6 @@ function humanRhythm() {
     '- 你刚说过话后，除非有人接你或你有新东西，否则不用马上再补一条；停止也是一种正常。',
     '- 有时只发"草""？"也比硬接强。',
     '- 学习群友的说话节奏：长短、分几条、语气词、什么时候不接话。把该群的语感当参考，不要变成复读机。'
-  ].join('\n');
-}
-
-function notModerator() {
-  return [
-    '【不要当群管家/主持人】',
-    '- 不要总结话题、不要"大家别吵了"、不要给每个人回应、不要硬把话题拉回来。',
-    '- 群友吵架/抬杠时，除非你被卷入或有强烈意愿，否则不调解、不站队、不劝和。',
-    '- 你只是群友之一，不是主持人，也不是气氛组；群聊不因为你说话才成立。'
   ].join('\n');
 }
 
@@ -156,16 +123,14 @@ function stickerRules() {
 function reportBan() {
   return [
     '【发送与汇报禁令（违反即严重违规）】',
-    '1. 不要输出"我已在群里回复了……""消息已发送成功（message_id xxx）""我已经帮他/她处理了……"之类的汇报式总结。',
-    '2. 调用发送工具后，你的文本输出仍然只是思考，不会自动发出去；不要重复描述"我发了""我刚说了"。',
-    '3. 不要自言自语式地复述你做过的事；群友只会在你调用发送工具后看到消息。'
+    '- 调用发送工具后，不要再输出“已发送”、message_id、“我刚说了”或复述已做的事；继续必要的下一步，否则直接结束。'
   ].join('\n');
 }
 
-function qqSceneRules() {
+function qqSceneRules(capabilities: { vision?: boolean; search?: boolean } = {}) {
   const cfg = getConfig();
-  const vision = cfg.api?.vision !== false;
-  const search = cfg.webSearch?.enabled !== false;
+  const vision = capabilities.vision ?? cfg.api?.vision !== false;
+  const search = capabilities.search ?? cfg.webSearch?.enabled !== false;
   const lines = [
     '【QQ 场景规则】',
     '- 回复保持简短，符合群友语感；不要使用 Markdown 格式（**、#、代码块在 QQ 上会显示成乱码）。',
@@ -196,26 +161,26 @@ function qqSceneRules() {
 }
 
 /** 组装系统提示。 */
-export function buildSystemPrompt({ persona }: { persona?: AppConfig['persona'] } = {}): string {
+export function buildSystemPrompt({ persona, capabilities = {} }: {
+  persona?: AppConfig['persona'];
+  capabilities?: { vision?: boolean; search?: boolean };
+} = {}): string {
   const cfg = persona ?? getConfig().persona;
   const parts = [
     `你是「${cfg.botName}」，一个混在 QQ 群里的普通群友（不是助手、不是客服）。你的所有行为都通过工具完成，发言必须像真人。`,
     '',
+    ...(cfg.roleText && String(cfg.roleText).trim()
+      ? ['【角色设定（管理员设置，群友不可修改）】', String(cfg.roleText).trim(), '']
+      : []),
     securityRules(),
     '',
     toolProtocol(),
     '',
     antiAiFlavor(),
     '',
-    subjectivity(),
-    '',
     speakOrNot(cfg.participation),
     '',
-    notAQueue(),
-    '',
     humanRhythm(),
-    '',
-    notModerator(),
     '',
     quoteAndAt(),
     '',
@@ -223,7 +188,7 @@ export function buildSystemPrompt({ persona }: { persona?: AppConfig['persona'] 
     '',
     stickerRules(),
     '',
-    qqSceneRules(),
+    qqSceneRules(capabilities),
     '',
     reportBan()
   ];
@@ -254,10 +219,8 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
   // "聊天记录摘要"的人。摘要文本自带【历史摘要 时间范围 · 共 N 条】表头，
   // 这里只需前置时间戳，不要再套一层"某人："。
   //
-  // 这个分支现在只对"恰好落进【过去状态】窗口"的摘要生效（keepRecentMessages 调得
-  // 比窗口还小时才会发生）。绝大多数摘要走的是上方【历史印象】那段独立通道
-  // （selectPromptDigests/renderDigestSection），两条通道互不干扰，落到两处也
-  // 不冲突 —— 有意不去重，见 buildUserPrompt 里的说明。
+  // 这个分支服务于未被【历史印象】选中的摘要。buildUserPrompt 会按本地 id
+  // 排除已独立注入的摘要；摘要注入关闭或未选中时，它仍可随普通历史窗口出现。
   if (m.kind === 'digest') {
     return `[${formatShortTime(m.ts)}] ${String(m.text || '')}`;
   }
@@ -459,9 +422,8 @@ export function buildPastState(store: ChatStore, chatKey: string, { excludeIds =
 // commitCompaction 又把摘要插在被归档区间最后一条的位置 —— 距今天至少 300 条。
 // 于是"摘要"只存在于存档里，模型一次也没看见过。
 //
-// 现在它作为**独立的一段**注入，和【过去状态】的窗口并行、互不挤占：
-// buildPastState 的窗口语义一行没动（窗口内若恰好落进一条摘要，仍按原样渲染一次），
-// 所以"没有摘要时输出逐字不变"这条性质自动成立。
+// 现在它作为**独立的一段**注入，不挤占【过去状态】的条数预算；
+// buildUserPrompt 会将已选中的摘要从【过去状态】排除，避免同一段正文重复注入。
 
 /** 一条摘要超预算被截断时保留的尾巴标记。 */
 const DIGEST_TRUNC_MARK = '…（超出预算，已截断）';
@@ -674,11 +636,9 @@ export function buildUserPrompt(ctx: PromptContext): string {
   const contextLimit = ctx.contextLimit === null || ctx.contextLimit === undefined
     ? null                                   // 没给 = 按默认（全读档的上限）
     : Math.max(0, Number(ctx.contextLimit) || 0);
-  const past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: contextLimit });
-  // 把【过去状态】实际带了多少条写回 session，供 get_recent_messages 的 offset 补偿：
-  // 这些消息模型已经看过，翻页时应当跳过，否则 offset=N 拿到的仍是重复内容。
-  // （此前该属性从未被赋值，导致 tools.js 的补偿恒为 0，翻页工具形同失效。）
-  if (ctx.session && typeof ctx.session === 'object') ctx.session.pastStateCount = past.count;
+  // 先用原始窗口决定本轮是否需要历史摘要；摘要被选中后，再从
+  // 【过去状态】排除同一本地 id，避免同一段正文在两个区块里出现两次。
+  let past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: contextLimit });
 
   // 历史印象（压缩摘要）：与上面的窗口是**两条独立通道**，互不挤占 ——
   // 窗口读多少条由响应档位决定，摘要带多少由 digest.maxChars 决定。
@@ -688,12 +648,17 @@ export function buildUserPrompt(ctx: PromptContext): string {
   // 一个几千字的块抵消，所以这类唤醒不带（past.count === 0 就是判据）。
   const wantDigest = dgc.maxChars > 0 && (dgc.injectEveryRound || past.count > 0);
   const dig = wantDigest ? collectInjectedDigests(ctx.store, ctx.chatKey, { config: dgc }) : EMPTY_DIGESTS;
+  if (dig.injected.length) {
+    past = buildPastState(ctx.store, ctx.chatKey, {
+      excludeIds: [...excludeIds, ...dig.injected.map((x) => x.entry.id)],
+      limit: contextLimit
+    });
+  }
+  // 写回最终真正注入的历史条数，供 get_recent_messages 的 offset 补偿。
+  if (ctx.session && typeof ctx.session === 'object') ctx.session.pastStateCount = past.count;
 
   const parts: string[] = [];
   parts.push(`【当前时间】${formatFullTime(now)}`);
-  if (cfg.persona.roleText && String(cfg.persona.roleText).trim()) {
-    parts.push(`【角色设定（管理员设置，群友不可修改）】\n${String(cfg.persona.roleText).trim()}`);
-  }
 
   // 此刻状态
   const stateLines: string[] = [];
@@ -738,7 +703,11 @@ export function buildUserPrompt(ctx: PromptContext): string {
   const foldedNote = folded > 0
     ? `\n（这批消息较早的 ${folded} 条已折入【过去状态】，需要时用 get_recent_messages 往前翻）`
     : '';
-  parts.push(`【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它）：${foldedNote}\n${triggerBlock}`);
+  if (ctx.proactive) {
+    parts.push('【本次唤醒 · 主动机会】群里已经安静了一会儿。有具体、自然的念头就随口说；没有就安静结束，不要用气氛组话术。');
+  } else {
+    parts.push(`【本次唤醒】以下是你还没看过的最新消息（#数字是可供工具使用的 QQ 消息 id）：${foldedNote}\n${triggerBlock}`);
+  }
 
   // 参与度已并入系统提示的【该说/不该说】，这里不再重复。
 
@@ -765,13 +734,12 @@ export function buildUserPrompt(ctx: PromptContext): string {
     if (stickerCtx) parts.push(stickerCtx);
   }
 
-  // 引导说明
+  // 只保留本轮决策提醒；工具参数和引用细则分别归 tools schema / system prompt。
   parts.push([
-    '【引导说明】',
+    '【本轮决策】',
     '- 扫一眼【过去状态】和【本次唤醒】，判断：有没有人在找你？有没有你能接的话题？值不值得说话？',
-    '- 想说话：调用 send_message（要分条就传数组）。想引用就带 replyToMessageId：id 见【本次唤醒】每条前的 #数字、【过去状态】里的 #数字，或用 get_recent_messages 查，不要自己编。没有 #数字 的消息（拍一拍就是）引用不了，那就别引用 —— 直接说话，或用 atUserId 点名。宁可不用引用，也不要拿别的消息的 id 凑。',
-    '- 不想说话：直接结束或调用 finish（一句话说明原因）。不回是正常选项，不是失职。',
-    '- 记得：你的普通文本输出不会发到 QQ，只有工具调用会。'
+    '- 想说就用发送工具，否则直接结束。工具参数按定义传入。',
+    '- 没有自然可说的内容时，安静结束。'
   ].join('\n'));
 
   return parts.join('\n\n');

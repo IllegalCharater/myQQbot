@@ -70,7 +70,8 @@ const up = buildUserPrompt({
   triggerEntries: [store.recent(KEY, { limit: 1 })[0]], store, memory: { formatForPrompt: () => '' },
   selfNickname: '小鲸鱼', contextLimit: 10, recentCount: 5, lastMessageAt: Date.now()
 });
-ok('引导说明写明"宁可不用引用，也不要拿别的消息的 id 凑"', /宁可不用引用，也不要拿别的消息的 id 凑/.test(up));
+ok('引用防错规则只在系统提示保留一份，用户提示不再重复灌入',
+  !/宁可不用引用，也不要拿别的消息的 id 凑/.test(up));
 ok('【过去状态】表头说明已与新规则一致', /最近的消息和带图的消息前有 #消息id/.test(up));
 ok('旧表头那句（只有带图才有 id）已不复存在', !/带图的消息前有 #消息id，看图/.test(up));
 

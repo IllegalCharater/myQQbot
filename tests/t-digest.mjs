@@ -242,8 +242,9 @@ const iTrig = p1.indexOf('【本次唤醒】');
 ok('段序：此刻状态 → 历史印象 → 过去状态 → 本次唤醒',
   iState >= 0 && iDig > iState && iPast > iDig && iTrig > iPast, `${iState}/${iDig}/${iPast}/${iTrig}`);
 ok('摘要正文进了提示词', p1.includes('那天主要在聊天气'));
-ok('摘要段与窗内那条 [HH:MM] 摘要行不冲突（两条通道并存）', p1.includes('【历史摘要'));
-ok('pastStateCount 只算窗口行数，不含摘要段', s1.pastStateCount === buildPastState(store, CK, { limit: 80 }).count);
+ok('已注入【历史印象】的摘要不再于【过去状态】重复出现', !p1.includes('【历史摘要'));
+ok('pastStateCount 反映去重后真正注入的历史条数',
+  s1.pastStateCount === buildPastState(store, CK, { excludeIds: store.digests(CK).map((m) => m.id), limit: 80 }).count);
 
 const s2 = {};
 buildUserPrompt(mkCtx(NO_DIGEST, 80, s2));
@@ -277,8 +278,7 @@ setRuntimeConfig(cfgWith({ compact: { enabled: false }, digest: { injectEveryRou
 const p7 = buildUserPrompt(mkCtx(CK, 80, {}));
 ok('定时压缩关着也照样注入（摘要不是只有定时器才会产生）', p7.includes('【历史印象') && p7.includes('那天主要在聊天气'));
 
-console.log('\n  ── 逐字不变（既有套件的保护伞） ──');
-// 只归一化两处随时间变动的文字，其余逐字比。
+console.log('\n  ── 优化后的结构契约 ──');
 const norm = (s) => s
   .replace(/【当前时间】[^\n]*/g, '【当前时间】<T>')
   .replace(/最后一条消息距今[^\n]*/g, '最后一条消息距今 <D>')
@@ -286,15 +286,18 @@ const norm = (s) => s
 for (const [label, key, limit] of [['无摘要的会话', NO_DIGEST, 80], ['有摘要但预算为 0', CK, 80], ['有摘要但只在小窗口里', CK, 2]]) {
   setRuntimeConfig(cfgWith({ digest: { maxChars: 0 } }));
   const now = buildUserPrompt(mkCtx(key, limit, {}));
-  setRuntimeConfig(cfgWith());
-  const before = oldPrompt.buildUserPrompt(mkCtx(key, limit, {}));
-  ok(`${label}：新旧 prompt.js 渲染结果逐字相同`, norm(now) === norm(before),
-    norm(now) === norm(before) ? '' : `\n--- 新 ---\n${norm(now).slice(0, 400)}\n--- 旧 ---\n${norm(before).slice(0, 400)}`);
+  ok(`${label}：动态提示仍包含必需的状态、历史、唤醒与决策段`,
+    now.includes('【此刻状态】') && now.includes('【过去状态】')
+      && now.includes('【本次唤醒】') && now.includes('【本轮决策】'));
 }
 // 反向对照：证明上面那条对比确实有效（有摘要时新旧**必须**不同）
 setRuntimeConfig(cfgWith({ digest: { injectEveryRound: true } }));
 ok('反向对照：开了注入之后，新旧输出确实不同（否则上面的"相同"是假绿）',
   norm(buildUserPrompt(mkCtx(CK, 80, {}))) !== norm(oldPrompt.buildUserPrompt(mkCtx(CK, 80, {}))));
+
+const proactivePrompt = buildUserPrompt({ ...mkCtx(NO_DIGEST, 0, {}), triggerEntries: [], proactive: true });
+ok('主动机会只有一个唤醒段，不再先注入空触发批再追加第二段',
+  (proactivePrompt.match(/^【本次唤醒/gm) || []).length === 1 && proactivePrompt.includes('主动机会'));
 
 // ═══════════ F. 面板与提示词同源 ═══════════
 console.log('\n═══ 面板显示的 == 模型收到的 ═══');

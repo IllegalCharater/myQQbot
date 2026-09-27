@@ -87,6 +87,7 @@ export interface PromptContext extends TriggerContext, Record<string, unknown> {
   chatId: string | number;
   chatName?: string;
   triggerEntries: ChatMessage[];
+  proactive?: boolean;
   contextLimit?: number | null;
   foldedAway?: number;
   lastMessageAt?: number;

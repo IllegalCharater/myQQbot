@@ -66,8 +66,16 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       try { stickerEntries = (await host.stickers.sync(false)).entries ?? []; } catch { stickerEntries = []; }
     }
 
+    // 工具集与系统提示共用同一份能力判定，避免提示说“能看图”但工具已被移除。
+    const visionEnabled = cfg.api.vision !== false
+      && modelImageVerdict(cfg.api.provider, cfg.api.model) !== 'no-vision';
+    const searchEnabled = cfg.webSearch?.enabled !== false;
+
     // 组装提示词（无 LLM 历史）
-    const systemPrompt = buildSystemPrompt();
+    const systemPrompt = buildSystemPrompt({
+      persona: cfg.persona,
+      capabilities: { vision: visionEnabled, search: searchEnabled }
+    });
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,
       triggerEntries,
@@ -107,9 +115,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
 
     const messages: ChatRequestMessage[] = [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: proactive
-        ? `${userPrompt}\n\n【本次唤醒】（主动机会）群里已经安静了一会儿。你可以主动抛一个自然的话题（像随口说的，不要像播报），也可以判断没必要说话就安静结束。`
-        : userPrompt }
+      { role: 'user', content: userPrompt }
     ];
     // JSON 模式需要看到输入给模型的完整 messages（去工具之前）
     session.inputMessages = structuredClone(messages.map((m) => ({ role: m.role, content: m.content })));
@@ -117,9 +123,6 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
 
     // 工具集按配置过滤：无视觉模型 → 移除看图工具；搜索关闭 → 移除联网工具
     // 视觉判定 = 全局开关 && 选中模型未被探测为"明确不支持图片"（未探测/unknown 时保持开关行为）
-    const visionEnabled = cfg.api.vision !== false
-      && modelImageVerdict(cfg.api.provider, cfg.api.model) !== 'no-vision';
-    const searchEnabled = cfg.webSearch?.enabled !== false;
     const toolDefs = host.toolDefs.filter((d) => {
       if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
