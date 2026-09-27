@@ -174,8 +174,8 @@ export class Orchestrator {
     return this.scheduler.markChatSeen(chatKey);
   }
 
-  forgetMessage(chatKey: string, id: unknown): boolean {
-    return this.scheduler.forgetMessage(chatKey, id);
+  reloadWindow(chatKey: string): void {
+    this.scheduler.reloadWindow(chatKey);
   }
 
   onIncoming(chatKey: string, entry: ChatMessage | null = null): void {

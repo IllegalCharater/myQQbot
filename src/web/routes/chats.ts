@@ -50,7 +50,7 @@ export const chatRoutes: Route[] = [
     method: 'DELETE', path: /^\/api\/chats\/(group|private)_(\d+)\/messages\/(\d+)$/, async handle(ctx, _req, match) {
       const chatKey = `${match?.[1]}:${match?.[2]}`; const localId = Number(match?.[3]); const result = ctx.store.deleteByLocalId(chatKey, localId);
       if (!result) return { status: 404, body: { ok: false, error: '找不到这条记录（可能已在别处删掉）' } };
-      ctx.orchestrator.forgetMessage(chatKey, localId); ctx.emit('chat-update', chatKey);
+      ctx.orchestrator.reloadWindow(chatKey); ctx.emit('chat-update', chatKey);
       return { status: 200, body: { ok: true, removed: { id: result.removed.id, senderName: result.removed.senderName, ts: result.removed.ts },
         backup: result.backup ? path.basename(result.backup) : '', remaining: ctx.store.getChatMeta(chatKey).total } };
     },

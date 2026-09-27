@@ -44,30 +44,35 @@ const key = () => `group:${1000 + (++keySeq)}`;
 console.log('=== 1. 入窗与幂等 ===');
 {
   const w = new ContextWindow({ chatKey: KEY, capacity: 5 });
-  ok('push 普通消息入窗', w.push(msg(1, '你好')) === true && w.win.length === 1);
-  ok('同一 id 重投被忽略', w.push(msg(1, '你好')) === false && w.win.length === 1);
-  ok('自己发的消息不入窗', w.push(msg(2, '我', { self: true })) === false && w.win.length === 1);
-  ok('摘要不入窗', w.push(msg(3, '纪要', { kind: 'digest' })) === false && w.win.length === 1);
-  ok('人工备注不入窗', w.push(msg(4, '备注', { kind: 'note' })) === false && w.win.length === 1);
+  ok('push 普通消息入窗', w.push(msg(1, '你好')) === true && w.stats().win === 1);
+  ok('同一 id 重投被忽略', w.push(msg(1, '你好')) === false && w.stats().win === 1);
+  ok('自己发的消息不入窗', w.push(msg(2, '我', { self: true })) === false && w.stats().win === 1);
+  ok('摘要不入窗', w.push(msg(3, '纪要', { kind: 'digest' })) === false && w.stats().win === 1);
+  ok('人工备注不入窗', w.push(msg(4, '备注', { kind: 'note' })) === false && w.stats().win === 1);
   ok('乱序的旧 id 被忽略', w.push(msg(1, 'x')) === false);
-  ok('新 id 正常入窗', w.push(msg(9, '在的')) === true && w.win.length === 2);
+  ok('新 id 正常入窗', w.push(msg(9, '在的')) === true && w.stats().win === 2);
+  const snapshot = w.pending(); snapshot[0].text = '外部篡改';
+  ok('外部拿到的是快照，不能修改窗口成员', w.pending()[0].text === '你好');
+  ok('窗口不暴露删除成员的方法', typeof w.remove === 'undefined');
 }
 
-// ── 2. 类级：容量 / 裁剪 / sunk / 折走条数 ───────────────────────────
+// ── 2. 类级：容量 / 滑动 / 折走条数 ─────────────────────────────────
 console.log('\n=== 2. 容量 5、连来 8 条 ===');
 {
   const w = new ContextWindow({ chatKey: KEY, capacity: 5 });
   for (let i = 1; i <= 8; i++) w.push(msg(i, `第${i}条`));
-  ok('窗口只留最新 5 条', w.win.length === 5, `win=${w.win.map(m => m.id).join(',')}`);
-  ok('被挤出的 3 条进了 sunk', w.sunk.length === 3 && w.sunk.map(m => m.id).join(',') === '1,2,3');
-  ok('pending() = 8（不设上限）', w.pending().length === 8);
+  ok('窗口只留最新 5 条', w.stats().win === 5, `win=${w.pending().map(m => m.id).join(',')}`);
+  ok('被挤出的 3 条只记折叠账本', w.stats().folded === 3);
+  ok('pending() 严格不超过窗口上限', w.pending().length === 5 && w.pending()[0].id === 4);
   ok('batch() = 5（进【本次唤醒】）', w.batch().length === 5 && w.batch()[0].id === 4);
   ok('foldedCount() = 3', w.foldedCount() === 3);
+  ok('takeFoldedIds() 专门取出滑出的 3 个 id', w.takeFoldedIds().join(',') === '1,2,3');
+  ok('取走待提交 id 后 foldedCount 仍保留本轮统计', w.foldedCount() === 3 && w.takeFoldedIds().length === 0);
   const crossed = w.seen();
-  ok('seen() 返回跨过的 8 条', crossed.length === 8);
-  ok('游标推到 8', w.lastSeenId === 8);
-  ok('settled 攒下 8 个 id', w.takeSettled().length === 8);
-  ok('消费后 sunk 清空、pending 归零', w.sunk.length === 0 && w.pending().length === 0 && w.foldedCount() === 0);
+  ok('seen() 只返回窗口中的 5 条快照', crossed.length === 5);
+  ok('游标推到 8', w.stats().cursor === 8);
+  ok('settled 只处理仍在窗口内的 5 个 id', w.takeSettled().length === 5);
+  ok('消费后折叠账本清空、pending 归零', w.stats().folded === 0 && w.pending().length === 0 && w.foldedCount() === 0);
   w.push(msg(9, '第9条'));
   ok('消费后再来一条只算它自己', w.pending().length === 1 && w.batch().length === 1 && w.foldedCount() === 0);
 }
@@ -77,7 +82,7 @@ console.log('\n=== 3. 容量 0 = 不限 ===');
 {
   const w = new ContextWindow({ chatKey: KEY, capacity: 0 });
   for (let i = 1; i <= 30; i++) w.push(msg(i, `第${i}条`));
-  ok('30 条全在窗里、sunk 恒空', w.win.length === 30 && w.sunk.length === 0);
+  ok('30 条全在窗里、折叠账本恒空', w.stats().win === 30 && w.stats().folded === 0);
   ok('batch() = pending() = 30', w.batch().length === 30 && w.pending().length === 30);
 }
 
@@ -90,39 +95,28 @@ console.log('\n=== 4. 容量调小 ===');
   w.seen();                       // 1~6 全部消费过
   cap = 2;                        // 设置页把上限从"不限"改成 2
   w.push(msg(7, '第7条')); w.push(msg(8, '第8条'));
-  ok('调小后窗口只留 2 条', w.win.length === 2, `win=${w.win.map(m => m.id).join(',')}`);
-  ok('已消费的被直接丢掉、不进 sunk', w.sunk.length === 0);
+  ok('调小后窗口只留 2 条', w.stats().win === 2, `win=${w.pending().map(m => m.id).join(',')}`);
+  ok('已消费的被直接丢掉、不进折叠账本', w.stats().folded === 0);
   ok('pending 只剩没看过的 7,8', w.pending().map(m => m.id).join(',') === '7,8');
   w.push(msg(9, '第9条')); w.push(msg(10, '第10条'));
-  ok('没消费的被挤出 → 进 sunk、不丢', w.pending().map(m => m.id).join(',') === '7,8,9,10' && w.sunk.length === 2);
-}
-
-// ── 5. 类级：remove（面板删消息） ────────────────────────────────────
-console.log('\n=== 5. 面板删消息 ===');
-{
-  const w = new ContextWindow({ chatKey: KEY, capacity: 3 });
-  for (let i = 1; i <= 3; i++) w.push(msg(i, `第${i}条`));
-  ok('删窗口内的条目', w.remove(3) === true && w.win.length === 2);
-  ok('删不存在的条目返回 false', w.remove(999) === false);
-  w.push(msg(4, 'x')); w.push(msg(5, 'y'));    // 把 1 挤进 sunk
-  ok('删 sunk 里的条目', w.remove(1) === true && w.pending().map(m => m.id).join(',') === '2,4,5');
+  ok('没消费的被滑出后不再属于窗口，只保留结算 id', w.pending().map(m => m.id).join(',') === '9,10' && w.stats().folded === 2);
 }
 
 // ── 6. 类级：用带 read 前缀的存档播种 ────────────────────────────────
 console.log('\n=== 6. 播种还原游标 ===');
 {
   // 情形 A：比窗口更老的都处理过了（read 前缀吃满整个窗口）
-  const a = new ContextWindow({ chatKey: KEY, capacity: 5 });
-  a.seed([msg(1, 'a', { read: true }), msg(2, 'b', { read: true }), msg(3, 'c'), msg(4, 'd')], []);
-  ok('游标 = read 前缀末尾（2）', a.lastSeenId === 2);
+  const a = new ContextWindow({ chatKey: KEY, capacity: 5,
+    initialEntries: [msg(1, 'a', { read: true }), msg(2, 'b', { read: true }), msg(3, 'c'), msg(4, 'd')] });
+  ok('游标 = read 前缀末尾（2）', a.stats().cursor === 2);
   ok('pending() 只剩没看过的 3,4', a.pending().map(m => m.id).join(',') === '3,4');
   ok('batch() 同上', a.batch().map(m => m.id).join(',') === '3,4');
   ok('maxPushedId 取到最大 id', a.maxPushedId === 4);
   // 情形 B：窗外还有没处理过的（read 前缀为空 → 游标 0，窗外那批照算待处理）
-  const b = new ContextWindow({ chatKey: KEY, capacity: 2 });
-  b.seed([msg(3, 'c'), msg(4, 'd')], [msg(1, 'a'), msg(2, 'b')]);
-  ok('窗外未处理 → 游标 0', b.lastSeenId === 0);
-  ok('pending() = 窗外 2 条 + 窗内 2 条', b.pending().map(m => m.id).join(',') === '1,2,3,4');
+  const b = new ContextWindow({ chatKey: KEY, capacity: 2,
+    initialEntries: [msg(3, 'c'), msg(4, 'd')], initialFoldedIds: [1, 2] });
+  ok('窗外未处理 → 游标 0', b.stats().cursor === 0);
+  ok('pending() 只含严格窗口内 2 条', b.pending().map(m => m.id).join(',') === '3,4');
   ok('batch() 只含窗内 2 条', b.batch().map(m => m.id).join(',') === '3,4');
   ok('foldedCount() = 2', b.foldedCount() === 2);
 }
@@ -137,7 +131,8 @@ console.log('\n=== 7. 端到端：容量 5 + 8 条 → 触发批 5、折走 3、
     const e = store.appendIncoming(K, { mid: i, ts: 1700000000000 + i * 1000, senderId: '555', senderName: '张三', text: `第${i}条` });
     orc.onIncoming(K, e);          // 走真实入口（app.js 的 ingest 就是这么调的）
   }
-  ok('窗口 stats：容量 5 / 未消费 8', JSON.stringify(orc.windows.stats(K)) === JSON.stringify({ chatKey: K, capacity: 5, win: 5, sunk: 3, pending: 8, batch: 5, cursor: 0 }), JSON.stringify(orc.windows.stats(K)));
+  ok('窗口 stats：容量 5 / 窗口严格 5 条', JSON.stringify(orc.windows.stats(K)) === JSON.stringify({ chatKey: K, capacity: 5, win: 5, folded: 3, pending: 5, batch: 5, cursor: 0 }), JSON.stringify(orc.windows.stats(K)));
+  ok('被折走的 3 条在唤醒前就已自动进入已读历史', store.unreadCount(K) === 5);
   orc.scheduleWake(K, 0);
   const trig = await new Promise((resolve) => {
     const iv = setInterval(() => {
@@ -152,24 +147,24 @@ console.log('\n=== 7. 端到端：容量 5 + 8 条 → 触发批 5、折走 3、
   orc.abortAll();
 }
 
-// ── 8. 端到端：小容量 + 窗外（sunk）里的 @ 仍然算响应 ────────────────
-console.log('\n=== 8. 窗口只有 2 条，被挤到窗外的 @ 仍判定响应 ===');
+// ── 8. 端到端：响应判定严格只看窗口 ─────────────────────────────────
+console.log('\n=== 8. 窗口只有 2 条，被滑出的 @ 不再参与响应判定 ===');
 {
   updateConfig({ store: { contextSliderPos: 5, historyCount: 20, maxContextMessages: 2 } });   // 响应档1：只认 @；历史独立为20
   const { store, orc, sessions } = harness();
   const K = key();
   const push = (t) => { const e = store.appendIncoming(K, { mid: t, ts: Date.now(), senderId: '555', senderName: '张三', text: t }); orc.onIncoming(K, e); return e; };
   push('@小鲸鱼 在吗'); push('闲聊一'); push('闲聊二');   // @ 是最老的，会被后面两条挤出窗口
-  ok('窗口只留最新 2 条、@ 被挤出窗口', orc.windows.stats(K).win === 2 && orc.windows.get(K).win.every(m => !m.text.includes('@')));
-  ok('但 pending() 仍含那条 @', orc.windows.pending(K).some(m => m.text.includes('@')));
+  ok('窗口只留最新 2 条、@ 已滑出', orc.windows.stats(K).win === 2 && orc.windows.pending(K).every(m => !m.text.includes('@')));
+  ok('pending() 不再暴露窗外消息', !orc.windows.pending(K).some(m => m.text.includes('@')));
   orc.scheduleWake(K, 3000);       // ms>0 → 预判通过才建"等待中"会话
   await new Promise(r => setTimeout(r, 120));
-  ok('预判为响应（出现了等待中会话）', [...sessions.current.values()].some(s => s.status === 'waiting' && s.chatKey === K));
+  ok('预判为不响应（不会出现等待中会话）', ![...sessions.current.values()].some(s => s.status === 'waiting' && s.chatKey === K));
   orc.abortAll();
 }
 
 // ── 9. 端到端：暂停期间只入窗、不写 read ─────────────────────────────
-console.log('\n=== 9. 暂停期间只入窗、不落已读 ===');
+console.log('\n=== 9. 暂停期间仍按窗口容量自动沉入历史 ===');
 {
   updateConfig({ store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 2 } });
   const { store, orc } = harness();
@@ -179,8 +174,8 @@ console.log('\n=== 9. 暂停期间只入窗、不落已读 ===');
     const e = store.appendIncoming(K, { mid: i, ts: Date.now() + i, senderId: '555', senderName: '张三', text: `积压${i}` });
     orc.onIncoming(K, e);
   }
-  ok('窗口已裁剪但积压仍在 pending', orc.windows.stats(K).win === 2 && orc.windows.pendingCount(K) === 4);
-  ok('存档未读仍为 4、read 一个没动', store.unreadCount(K) === 4 && store.recent(K, { limit: 100 }).every(m => m.read !== true));
+  ok('窗口严格只保留最新 2 条', orc.windows.stats(K).win === 2 && orc.windows.pendingCount(K) === 2);
+  ok('滑出的 2 条已进入历史，窗口内最新 2 条仍未读', store.unreadCount(K) === 2);
   orc.setPaused(false);
   orc.abortAll();
 }
@@ -195,7 +190,7 @@ console.log('\n=== 10. markChatSeen ===');
     orc.onIncoming(K, e);
   }
   const n = orc.markChatSeen(K);
-  ok('返回消费条数 3', n === 3);
+  ok('返回当前窗口实际消费条数 2（滑出的 1 条此前已结算）', n === 2);
   ok('存档未读归零', store.unreadCount(K) === 0);
   ok('游标真推进（pending 归零，不会再被当成待回应）', orc.windows.pendingCount(K) === 0);
   orc.abortAll();
@@ -234,20 +229,6 @@ console.log('\n=== 12. 分叉兜底（#sync）===');
   orc.abortAll();
 }
 
-// ── 13. 删除消息：窗口跟着忘掉 ───────────────────────────────────────
-console.log('\n=== 13. forgetMessage ===');
-{
-  const { store, orc } = harness();
-  const K = key();
-  const e1 = store.appendIncoming(K, { mid: 1, ts: Date.now(), senderId: '555', senderName: '张三', text: '要删的' });
-  const e2 = store.appendIncoming(K, { mid: 2, ts: Date.now() + 1, senderId: '555', senderName: '张三', text: '留下的' });
-  orc.onIncoming(K, e1); orc.onIncoming(K, e2);
-  store.deleteByLocalId(K, e1.id);
-  ok('forgetMessage 返回 true', orc.forgetMessage(K, e1.id) === true);
-  ok('窗口里只剩留下的那条', orc.windows.pendingCount(K) === 1 && orc.windows.pending(K)[0].text === '留下的', JSON.stringify(orc.windows.pending(K).map(m => m.text)));
-  orc.abortAll();
-}
-
 // ── 14. 容量改动即时生效（不用重启） ─────────────────────────────────
 console.log('\n=== 14. 容量即时生效 ===');
 {
@@ -263,7 +244,7 @@ console.log('\n=== 14. 容量即时生效 ===');
   const e7 = store.appendIncoming(K, { mid: 7, ts: Date.now(), senderId: '555', senderName: '张三', text: '第7条' });
   orc.onIncoming(K, e7);
   ok('改成 2 后立刻只留 2 条', orc.windows.stats(K).win === 2, JSON.stringify(orc.windows.stats(K)));
-  ok('裁掉但没消费的仍是待处理', orc.windows.pendingCount(K) === 7, `pending=${orc.windows.pendingCount(K)}`);
+  ok('裁掉的内容不再算窗口成员，只保留折叠结算数', orc.windows.pendingCount(K) === 2 && orc.windows.stats(K).folded === 5, JSON.stringify(orc.windows.stats(K)));
   orc.abortAll();
 }
 

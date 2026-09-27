@@ -172,10 +172,10 @@ export class WakeScheduler {
    * @returns {number} 本次消费掉的条数
    */
   #consumeWindow(chatKey: string): number {
-    const crossed = this.windows.seen(chatKey);
+    this.windows.seen(chatKey);
     const ids = this.windows.takeSettled(chatKey);
     if (ids.length) this.store.markRead(chatKey, { ids });
-    return crossed.length;
+    return ids.length;
   }
 
   /**
@@ -191,9 +191,9 @@ export class WakeScheduler {
     return n;
   }
 
-  /** 面板把某条消息删了：窗口也得跟着忘掉它（否则会把它当新消息递给模型）。 */
-  forgetMessage(chatKey: string, id: unknown): boolean {
-    return this.windows.remove(chatKey, id);
+  /** 存档结构变化后整体重建私有窗口，不暴露成员级修改入口。 */
+  reloadWindow(chatKey: string): void {
+    this.windows.reload(chatKey);
   }
 
   // ── 入站接口 ───────────────────────────────────────────────────────────
