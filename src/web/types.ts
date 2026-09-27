@@ -6,7 +6,7 @@ import type { SessionRegistry } from '../chat/sessions.js';
 import type { OneBotClient } from '../qq/onebot.js';
 import type { SendQueue } from '../qq/sender.js';
 import type { StickerManager } from '../stickers/sticker-manager.js';
-import type { Orchestrator } from '../agent/orchestrator.js';
+import type { Orchestrator } from '../agent/runtime/orchestrator.js';
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export type JsonHeaders = Record<string, string>;

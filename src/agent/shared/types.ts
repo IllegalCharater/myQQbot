@@ -1,13 +1,13 @@
-import type { ChatMessage } from '../chat/types.js';
-import type { SessionRecord } from '../chat/types.js';
-import type { ChatStore } from '../chat/store.js';
-import type { MemoryStore } from '../chat/memory.js';
-import type { StickerManager } from '../stickers/sticker-manager.js';
-import type { StickerEntry } from '../stickers/types.js';
-import type { SendQueue } from '../qq/sender.js';
-import type { OneBotClient } from '../qq/onebot.js';
-import type { SessionRegistry } from '../chat/sessions.js';
-import type { ContextWindowRegistry } from './context-window.js';
+import type { ChatMessage } from '../../chat/types.js';
+import type { SessionRecord } from '../../chat/types.js';
+import type { ChatStore } from '../../chat/store.js';
+import type { MemoryStore } from '../../chat/memory.js';
+import type { StickerManager } from '../../stickers/sticker-manager.js';
+import type { StickerEntry } from '../../stickers/types.js';
+import type { SendQueue } from '../../qq/sender.js';
+import type { OneBotClient } from '../../qq/onebot.js';
+import type { SessionRegistry } from '../../chat/sessions.js';
+import type { ContextWindowRegistry } from '../context/context-window.js';
 
 export type ToolArguments = Record<string, unknown>;
 export interface ToolContentPart extends Record<string, unknown> { type: string }

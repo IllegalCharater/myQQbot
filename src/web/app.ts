@@ -18,7 +18,7 @@ import { MemoryStore } from '../chat/memory.js';
 import { StickerManager } from '../stickers/sticker-manager.js';
 import { SendQueue } from '../qq/sender.js';
 import { SessionRegistry } from '../chat/sessions.js';
-import { Orchestrator } from '../agent/orchestrator.js';
+import { Orchestrator } from '../agent/runtime/orchestrator.js';
 import { estimateCost, cacheHitRate } from '../llm/llm.js';
 import { initPriceFeed } from '../llm/price-feed.js';
 import { createEventBus, todayKey } from '../core/util.js';

@@ -11,7 +11,7 @@ dataDir();
 const { ChatStore } = await load('chat/store.js');
 const { SessionRegistry } = await load('chat/sessions.js');
 const { SendQueue } = await load('qq/sender.js');
-const { Orchestrator } = await load('agent/orchestrator.js');
+const { Orchestrator } = await load('agent/runtime/orchestrator.js');
 const { updateConfig } = await load('core/config.js');
 
 const { ok, done } = checker();

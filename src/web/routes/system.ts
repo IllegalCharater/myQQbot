@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT } from '../../core/paths.js';
 import { listModels } from '../../llm/llm.js';
-import { PERSONAS } from '../../core/personas.js';
+import { PERSONAS } from '../../core/prompt-catalog.js';
 import { errorMessage, isRecord, readBody } from '../http.js';
 import type { Route } from '../types.js';
 

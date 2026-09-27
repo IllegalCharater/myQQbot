@@ -3,16 +3,17 @@
 // 不再需要 key/token 参数 —— 模型物理上无法把消息发到别的群/私聊，安全性反而更强。
 //
 // 工具命名去掉了 qq_ 前缀（更短，省 token）。
-import { getConfig } from '../core/config.js';
-import { normalizeMessageList, unquoteJsonString, formatShortTime } from '../core/util.js';
-import { formatStickerList } from '../stickers/stickers.js';
-import { validateImageUrl, safeFetchBinary, detectMime } from '../media/safe-fetch.js';
-import { webSearch, webFetch } from '../media/web-search.js';
-import { expandForwardNodes, extractMediaFromSegments, forwardIdFromData } from '../qq/onebot.js';
-import { enqueueJmcomicDownload } from '../media/jmcomic.js';
-import { cachedDataUrl, isCacheFile, sendTarget } from '../stickers/sticker-cache.js';
-import type { ChatMessage } from '../chat/types.js';
-import type { ToolArguments, ToolContentPart, ToolContext, ToolDefinition, ToolResult } from './types.js';
+import { getConfig } from '../../core/config.js';
+import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
+import { normalizeMessageList, unquoteJsonString, formatShortTime } from '../../core/util.js';
+import { formatStickerList } from '../../stickers/stickers.js';
+import { validateImageUrl, safeFetchBinary, detectMime } from '../../media/safe-fetch.js';
+import { webSearch, webFetch } from '../../media/web-search.js';
+import { expandForwardNodes, extractMediaFromSegments, forwardIdFromData } from '../../qq/onebot.js';
+import { enqueueJmcomicDownload } from '../../media/jmcomic.js';
+import { cachedDataUrl, isCacheFile, sendTarget } from '../../stickers/sticker-cache.js';
+import type { ChatMessage } from '../../chat/types.js';
+import type { ToolArguments, ToolContentPart, ToolContext, ToolDefinition, ToolResult } from '../shared/types.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -128,17 +129,17 @@ function imageParts(text: string, dataUrls: string[]): ToolContentPart[] {
  *   emit  (事件上报给 UI/日志)
  * }
  */
-export function buildToolDefs(): ToolDefinition[] {
+export function buildAllToolDefs(): ToolDefinition[] {
   return [
     {
       name: 'send_message',
-      description: '发送消息到当前聊天（本工具只能发到本次会话对应的群/私聊）。messages 传字符串=发一条；传字符串数组=分多条发送（推荐，更像真人）。只有需要明确"我回的是哪条"时才传 replyToMessageId 引用；需要点名某人才传 atUserId。不要在字符串内部用空格分句。',
+      description: TOOL_PROMPT_TEXT[0],
       parameters: {
         type: 'object',
         properties: {
-          messages: { description: '要发送的内容：字符串=一条；数组=分多条', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
-          replyToMessageId: { type: ['integer', 'string'], description: '要引用/回复的消息 id（聊天记录里每条消息前的 #数字，可选）。没有 #数字 的消息（如 [拍一拍]）引用不了，别硬填，宁可不引用也不要拿别的消息的 id 凑' },
-          atUserId: { type: ['integer', 'string'], description: '要 @ 的群成员 QQ 号（可选，与引用二选一，不要滥用）' }
+          messages: { description: TOOL_PROMPT_TEXT[1], oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+          replyToMessageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[2] },
+          atUserId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[3] }
         },
         required: ['messages']
       },
@@ -162,13 +163,13 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'send_sticker',
-      description: '发送一个表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 填【可用表情包】或 list_stickers 给出的 id；已经标注过的表情也可以直接填它的备注/标签（唯一命中时才作数）。',
+      description: TOOL_PROMPT_TEXT[4],
       parameters: {
         type: 'object',
         properties: {
-          stickerId: { type: 'string', description: '表情 id，或该表情的备注/标签（如"蕾米的凝"）；来自【可用表情包】或 list_stickers' },
-          replyToMessageId: { type: ['integer', 'string'], description: '可选：要引用的消息 id（聊天记录里的 #数字）' },
-          atUserId: { type: ['integer', 'string'], description: '可选：要 @ 的 QQ 号' }
+          stickerId: { type: 'string', description: TOOL_PROMPT_TEXT[5] },
+          replyToMessageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[6] },
+          atUserId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[7] }
         },
         required: ['stickerId']
       },
@@ -224,12 +225,12 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'list_stickers',
-      description: '查看/搜索你的 QQ 收藏表情（含备注和你的本地笔记）。',
+      description: TOOL_PROMPT_TEXT[8],
       parameters: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: '可选搜索词，匹配备注/笔记/标签' },
-          limit: { type: 'integer', description: '最多返回条数，默认 24' }
+          query: { type: 'string', description: TOOL_PROMPT_TEXT[9] },
+          limit: { type: 'integer', description: TOOL_PROMPT_TEXT[10] }
         }
       },
       async execute(ctx, args) {
@@ -243,10 +244,10 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'get_sticker_image',
-      description: '查看一个没有备注/不确定含义的表情的图片（视觉模型可直接"看懂"）。stickerId 填 id，也可以填备注/标签（唯一命中时）。',
+      description: TOOL_PROMPT_TEXT[11],
       parameters: {
         type: 'object',
-        properties: { stickerId: { type: 'string', description: '表情 id，或该表情的备注/标签（唯一命中时）' } },
+        properties: { stickerId: { type: 'string', description: TOOL_PROMPT_TEXT[12] } },
         required: ['stickerId']
       },
       async execute(ctx, args) {
@@ -270,14 +271,14 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'sticker_note',
-      description: '给一个表情记下你的理解（含义/用法/标签），以后选得更准。stickerId 可以填 list_stickers 给出的 id，也可以直接填【可用表情包】里那个表情的备注/标签（唯一命中时）。',
+      description: TOOL_PROMPT_TEXT[13],
       parameters: {
         type: 'object',
         properties: {
-          stickerId: { type: 'string', description: '表情 id，或该表情的备注/标签（如"蕾米的凝"）；来自 list_stickers 或【可用表情包】' },
-          note: { type: 'string', description: '你的理解/含义' },
-          tags: { type: 'array', items: { type: 'string' }, description: '标签列表（可选）' },
-          usage: { type: 'string', description: '适用场景（可选）' }
+          stickerId: { type: 'string', description: TOOL_PROMPT_TEXT[14] },
+          note: { type: 'string', description: TOOL_PROMPT_TEXT[15] },
+          tags: { type: 'array', items: { type: 'string' }, description: TOOL_PROMPT_TEXT[16] },
+          usage: { type: 'string', description: TOOL_PROMPT_TEXT[17] }
         },
         required: ['stickerId']
       },
@@ -298,12 +299,12 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'collect_sticker',
-      description: '收藏别人刚发的表情/图片到你的表情库（偶尔用，收藏前先 get_message_images 看图确认）。需要备注一句简短说明。',
+      description: TOOL_PROMPT_TEXT[18],
       parameters: {
         type: 'object',
         properties: {
-          messageId: { type: ['integer', 'string'], description: '那条消息的 QQ 消息 id（聊天记录里的 #数字）' },
-          note: { type: 'string', description: '一句简短备注（帮未来的你识别）' }
+          messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[19] },
+          note: { type: 'string', description: TOOL_PROMPT_TEXT[20] }
         },
         required: ['messageId']
       },
@@ -334,10 +335,10 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'send_poke',
-      description: '拍一拍（群聊传 targetUserId；私聊默认拍对方）。targetUserId 必须是数字 QQ 号：不知道对方 QQ 号时，先调 get_active_members 或 get_recent_messages 查到再拍，绝对不要传名字、昵称或"未知"。适合用"戳一下"代替一句废话、回应别人的拍一拍，或偶尔逗一下正在聊的人。别频繁。',
+      description: TOOL_PROMPT_TEXT[21],
       parameters: {
         type: 'object',
-        properties: { targetUserId: { type: ['integer', 'string'], description: '要拍的群友 QQ 号（数字，群聊必填；不知道就先查 get_active_members）' } }
+        properties: { targetUserId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[22] } }
       },
       async execute(ctx, args) {
         try {
@@ -362,12 +363,12 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'get_recent_messages',
-      description: '往前翻当前会话的更多历史消息（提示词里只带了最近一段；需要更早的上下文时用）。返回带 messageId（就是聊天记录里的 #数字），可用于引用或看图。消息文本出现 [合并转发聊天记录] 时，用 read_forward 展开看内容；出现 [群公告] 时，用 read_group_notice 读公告正文。',
+      description: TOOL_PROMPT_TEXT[23],
       parameters: {
         type: 'object',
         properties: {
-          limit: { type: 'integer', description: '最多返回条数，默认 30，最大 100' },
-          offset: { type: 'integer', description: '跳过最近 N 条，用于翻更早的消息' }
+          limit: { type: 'integer', description: TOOL_PROMPT_TEXT[24] },
+          offset: { type: 'integer', description: TOOL_PROMPT_TEXT[25] }
         }
       },
       async execute(ctx, args) {
@@ -389,11 +390,11 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'read_forward',
-      description: '展开查看合并转发的聊天记录。消息文本出现 [合并转发聊天记录] 或 [转发消息 …] 占位符时用。参数 messageId 填**那条转发消息自己**前面的 #数字 —— 不要填"引用了这条转发"的别的消息的 id，也不要自己编。展开结果会写回存档，以后再看就是展开的文本，不用重复调。',
+      description: TOOL_PROMPT_TEXT[26],
       parameters: {
         type: 'object',
         properties: {
-          messageId: { type: ['integer', 'string'], description: '转发消息自己的 QQ 消息 id（聊天记录里的 #数字，可能为负数）' }
+          messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[27] }
         },
         required: ['messageId']
       },
@@ -438,10 +439,10 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'read_group_notice',
-      description: '读取当前群的群公告正文（群规、活动、约定通常都写在里面）。消息里出现 [群公告] 时用 —— 那种卡片本身不含正文，只有这个工具能拿到。返回的是该群当前全部公告，按发布时间从新到旧排；群友问"公告写了啥""群规是什么"时先读再答，别凭印象编。',
+      description: TOOL_PROMPT_TEXT[28],
       parameters: {
         type: 'object',
-        properties: { limit: { type: 'integer', description: '最多返回几条，默认 3，最大 10（按发布时间从新到旧）' } }
+        properties: { limit: { type: 'integer', description: TOOL_PROMPT_TEXT[29] } }
       },
       async execute(ctx, args) {
         if (ctx.kind !== 'group') return err('群公告只在群聊里有，私聊没有公告可读。');
@@ -479,10 +480,10 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'get_active_members',
-      description: '查看当前会话最近活跃的成员（QQ 号、名字、最近发言时间、发言数），用于 @ 或拍一拍时找人。',
+      description: TOOL_PROMPT_TEXT[30],
       parameters: {
         type: 'object',
-        properties: { limit: { type: 'integer', description: '默认 10，最大 20' } }
+        properties: { limit: { type: 'integer', description: TOOL_PROMPT_TEXT[31] } }
       },
       async execute(ctx, args) {
         const members = ctx.store.activeMembers(ctx.chatKey, Math.min(20, Math.max(1, Number(args.limit) || 10)));
@@ -498,10 +499,10 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'get_message_detail',
-      description: '按 QQ 消息 id 查看单条消息详情（完整文本、发送者、时间）。id 用聊天记录里每条消息前的 #数字，不要自己编。',
+      description: TOOL_PROMPT_TEXT[32],
       parameters: {
         type: 'object',
-        properties: { messageId: { type: ['integer', 'string'], description: 'QQ 消息 id（聊天记录里的 #数字，可能为负数）' } },
+        properties: { messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[33] } },
         required: ['messageId']
       },
       async execute(ctx, args) {
@@ -519,10 +520,10 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'get_message_images',
-      description: '查看某条消息里的图片/表情（视觉模型可以直接看懂）。消息文本出现 [图片] 时可用。id 用聊天记录里每条消息前的 #数字。',
+      description: TOOL_PROMPT_TEXT[34],
       parameters: {
         type: 'object',
-        properties: { messageId: { type: ['integer', 'string'], description: 'QQ 消息 id（聊天记录里的 #数字，可能为负数）' } },
+        properties: { messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[35] } },
         required: ['messageId']
       },
       async execute(ctx, args) {
@@ -570,14 +571,14 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'memory_append',
-      description: '记一条对群友的长期印象（下次运行会自动看到）。只记"以后和这个人打交道时用得上"的稳定印象：他的身份/关系、说话风格、爱玩的梗、雷点、常聊话题、别踩的坑。太临时的事情不要记。userId 必须填对方的 QQ 号（不知道就先调 get_active_members / get_recent_messages 查）；target 填备注名/群名片/昵称，用于展示。',
+      description: TOOL_PROMPT_TEXT[36],
       parameters: {
         type: 'object',
         properties: {
           category: { type: 'string', enum: ['memberImpression'] },
-          userId: { type: ['integer', 'string'], description: '对方 QQ 号（数字）' },
-          target: { type: 'string', description: '对方名字（备注名/群名片/昵称）' },
-          content: { type: 'string', description: '印象内容（≤120字，稳定、可跨多次聊天使用）' }
+          userId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[37] },
+          target: { type: 'string', description: TOOL_PROMPT_TEXT[38] },
+          content: { type: 'string', description: TOOL_PROMPT_TEXT[39] }
         },
         required: ['category', 'userId', 'content']
       },
@@ -595,11 +596,11 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'memory_query',
-      description: '查看当前会话里对某一位群友的长期印象。必须提供准确的数字 QQ 号；不知道时先用 get_active_members / get_recent_messages 查询。',
+      description: TOOL_PROMPT_TEXT[40],
       parameters: {
         type: 'object',
         properties: {
-          userId: { type: ['integer', 'string'], description: '要查询的群友 QQ 号（数字）' }
+          userId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[41] }
         },
         required: ['userId']
       },
@@ -616,14 +617,14 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'memory_remove',
-      description: '删除一条过时/不再准确的对群友印象。userId 优先按 QQ 号删；target 按名字删；两者都不传则删全部印象。',
+      description: TOOL_PROMPT_TEXT[42],
       parameters: {
         type: 'object',
         properties: {
           category: { type: 'string', enum: ['memberImpression'] },
-          userId: { type: ['integer', 'string'], description: '对方 QQ 号（优先）' },
-          target: { type: 'string', description: '对方名字（没有 QQ 号时用）' },
-          content: { type: 'string', description: '可选：只删这条内容' }
+          userId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[43] },
+          target: { type: 'string', description: TOOL_PROMPT_TEXT[44] },
+          content: { type: 'string', description: TOOL_PROMPT_TEXT[45] }
         },
         required: ['category']
       },
@@ -638,7 +639,7 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'report_feedback',
-      description: '向管理员（控制台）反馈你遇到的问题、困惑或需要人工介入的情况。不要用于聊天。',
+      description: TOOL_PROMPT_TEXT[46],
       parameters: {
         type: 'object',
         properties: {
@@ -657,10 +658,10 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'web_search',
-      description: '联网搜索（Bing），返回标题/URL/摘要列表。适用：实时信息、新闻热点、网络用语/梗的含义、自己不确定的事实。可以换关键词连续搜 2~3 次；对最相关的 1~2 个结果用 web_fetch 读正文，不要只看摘要。',
+      description: TOOL_PROMPT_TEXT[47],
       parameters: {
         type: 'object',
-        properties: { query: { type: 'string', description: '搜索词' } },
+        properties: { query: { type: 'string', description: TOOL_PROMPT_TEXT[48] } },
         required: ['query']
       },
       async execute(ctx, args) {
@@ -677,10 +678,10 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'web_fetch',
-      description: '只读抓取网页正文（≤2 万字符）。群友发来链接问"写了什么"时直接抓；配合 web_search 阅读搜索结果的详细内容。禁止访问内网/本机地址。',
+      description: TOOL_PROMPT_TEXT[49],
       parameters: {
         type: 'object',
-        properties: { url: { type: 'string', description: '要抓取的 http(s) URL' } },
+        properties: { url: { type: 'string', description: TOOL_PROMPT_TEXT[50] } },
         required: ['url']
       },
       async execute(ctx, args) {
@@ -700,11 +701,11 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'download_jmcomic',
-      description: '把指定数字漫画 ID 加入 PDF 下载队列；完成后会自动把 PDF 上传到当前群聊或私聊。仅在用户明确要求下载并给出 ID 时调用，不要猜测 ID或重复提交。',
+      description: TOOL_PROMPT_TEXT[51],
       parameters: {
         type: 'object',
         properties: {
-          comicId: { type: 'string', pattern: '^\\d{1,20}$', description: '1 至 20 位数字漫画 ID，例如 12345' }
+          comicId: { type: 'string', pattern: '^\\d{1,20}$', description: TOOL_PROMPT_TEXT[52] }
         },
         required: ['comicId'],
         additionalProperties: false
@@ -720,10 +721,10 @@ export function buildToolDefs(): ToolDefinition[] {
     },
     {
       name: 'finish',
-      description: '明确结束本次处理（表示你看完了、决定了下一步）。看完不打算说话时调用它（summary 写一句给自己看的理由）；说完话想收尾时也可以调用。不调用也可以——直接结束文本输出同样代表结束。',
+      description: TOOL_PROMPT_TEXT[53],
       parameters: {
         type: 'object',
-        properties: { summary: { type: 'string', description: '一句话说明你这次的决定（只记录给管理端看，不会发送）' } },
+        properties: { summary: { type: 'string', description: TOOL_PROMPT_TEXT[54] } },
         required: ['summary']
       },
       async execute(ctx, args) {
@@ -732,6 +733,16 @@ export function buildToolDefs(): ToolDefinition[] {
       }
     }
   ];
+}
+
+/** Select a domain-owned subset without changing the canonical definition objects. */
+export function selectTools(defs: ToolDefinition[], names: readonly string[]): ToolDefinition[] {
+  const byName = new Map(defs.map((definition) => [definition.name, definition]));
+  return names.map((name) => {
+    const definition = byName.get(name);
+    if (!definition) throw new Error(`Unknown tool definition: ${name}`);
+    return definition;
+  });
 }
 
 /** 转成 OpenAI tools 参数格式。 */

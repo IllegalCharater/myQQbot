@@ -6,9 +6,9 @@ import { load } from './lib/src.mjs';
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-reply-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
-const { buildPastState, buildUserPrompt, buildSystemPrompt } = await load('agent/prompt.js');
-const { evaluateWindowTrigger } = await load('agent/response-policy.js');
-const { resolveHistoryPolicy } = await load('agent/history-policy.js');
+const { buildPastState, buildUserPrompt, buildSystemPrompt } = await load('agent/prompting/prompt-builder.js');
+const { evaluateWindowTrigger } = await load('agent/context/response-policy.js');
+const { resolveHistoryPolicy } = await load('agent/context/history-policy.js');
 const { updateConfig, responseConfigForChat } = await load('core/config.js');
 const { ChatStore } = await load('chat/store.js');
 

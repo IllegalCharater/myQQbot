@@ -25,7 +25,13 @@ src/
 ├─ qq/         OneBot 客户端、发送队列、Markdown 转纯文本
 ├─ media/      安全下载、网页搜索、媒体任务
 ├─ stickers/   表情库、缓存与管理
-├─ agent/      唤醒调度、上下文、提示词、工具、Agent 循环
+├─ agent/      Agent 领域（内部继续按职责分层）
+│  ├─ runtime/       唤醒调度、运行状态与 Agent 循环
+│  ├─ context/       当前窗口、响应策略与历史策略
+│  ├─ prompting/     动态提示词拼装与预算裁剪
+│  ├─ tools/         工具统一入口、领域分组与执行
+│  ├─ maintenance/   主动冒泡、历史压缩与记忆整理
+│  └─ shared/        Agent 内共享类型与解析器
 └─ web/        HTTP 基础设施、路由与领域接口
 
 ui/js/
@@ -113,6 +119,11 @@ OneBot 入站事件
 仍受独立历史深度和统一字符预算限制。
 
 ## 5. 提示词组装
+
+模型可见固定文案的唯一目录是 `src/core/prompt-catalog.ts`。它统一保存默认 persona、
+system/user 固定段、工具及参数 description、历史压缩和记忆整理指令；
+`src/agent/prompting/prompt-builder.ts` 只负责动态变量、聊天记录格式化、条件选择与预算裁剪。
+UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词目录。
 
 ### 5.1 System prompt
 
@@ -246,7 +257,7 @@ node scripts/sanitize-release.mjs --scan
 - 新消息窗口、已读历史、摘要、长期记忆是四种不同数据，不要重新合并成一个模糊的“上下文”。
 - 判断是否响应必须使用无限制的 `pending()`，不能只看容量受限的 `batch()`。
 - `batch()`、`foldedCount()` 与 `seen()` 之间不得插入 `await`。
-- 新增提示词内容必须明确唯一归属，并纳入统一预算，避免跨 system/user/tool schema 重复注入。
+- 新增模型可见固定指令必须先进入 `src/core/prompt-catalog.ts`，业务模块只引用 Catalog；同时明确唯一归属并纳入统一预算，避免跨 system/user/tool schema 重复注入。
 - 修改外部 JSON 或模型响应处理时，先做运行时窄化，不用无注释的全局 `any`。
 - 不直接修改 `dist/`；不使用 TypeScript 路径别名；不省略 NodeNext import 的 `.js` 后缀。
 - 修改对话主链路后至少运行 `npm run check`。

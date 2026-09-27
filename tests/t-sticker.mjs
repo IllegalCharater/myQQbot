@@ -36,7 +36,7 @@ const {
   buildStickerStrategyHint
 } = await load('stickers/stickers.js');
 const { StickerManager } = await load('stickers/sticker-manager.js');
-const { buildToolDefs } = await load('agent/tools.js');
+const { buildToolDefs } = await load('agent/tools/index.js');
 const { updateConfig } = await load('core/config.js');
 
 updateConfig({

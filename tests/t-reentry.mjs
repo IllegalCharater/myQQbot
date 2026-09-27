@@ -5,7 +5,7 @@ process.env.QQ_AGENT_DATA_DIR = DIR;
 const { ChatStore } = await load('chat/store.js');
 const { SessionRegistry } = await load('chat/sessions.js');
 const { SendQueue } = await load('qq/sender.js');
-const { Orchestrator } = await load('agent/orchestrator.js');
+const { Orchestrator } = await load('agent/runtime/orchestrator.js');
 const { updateConfig } = await load('core/config.js');
 updateConfig({ api: { baseUrl: 'http://127.0.0.1:1/v1', model: 'stub', maxRounds: 1 },
   allowAllWhenEmpty: true, persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' },

@@ -1,23 +1,24 @@
-import { getConfig } from '../core/config.js';
-import { vendorOfConfig } from '../llm/model-prices.js';
-import { buildSystemPrompt, buildUserPrompt } from './prompt.js';
-import { chatCompletionWithRetry, addUsage } from '../llm/llm.js';
-import { toOpenAiTools, executeTool } from './tools.js';
-import { modelImageVerdict } from '../llm/vision-scan.js';
-import { parseInlineToolCalls } from './inline-tool-parser.js';
-import { isRecord, safeParse } from './json-parse.js';
-import type { ChatMessage, SessionRecord } from '../chat/types.js';
-import type { ChatStore } from '../chat/store.js';
-import type { MemoryStore } from '../chat/memory.js';
-import type { StickerManager } from '../stickers/sticker-manager.js';
-import type { SendQueue } from '../qq/sender.js';
-import type { SessionRegistry } from '../chat/sessions.js';
-import type { OneBotClient } from '../qq/onebot.js';
-import type { ContextWindowRegistry } from './context-window.js';
-import type { HistoryPolicyResult, ResponseDecision, ToolDefinition } from './types.js';
-import type { InlineToolCall } from './inline-tool-parser.js';
-import type { ChatRequestMessage } from '../llm/types.js';
-import type { StickerEntry } from '../stickers/types.js';
+import { getConfig } from '../../core/config.js';
+import { PROMPT_CATALOG } from '../../core/prompt-catalog.js';
+import { vendorOfConfig } from '../../llm/model-prices.js';
+import { buildSystemPrompt, buildUserPrompt } from '../prompting/prompt-builder.js';
+import { chatCompletionWithRetry, addUsage } from '../../llm/llm.js';
+import { toOpenAiTools, executeTool } from '../tools/index.js';
+import { modelImageVerdict } from '../../llm/vision-scan.js';
+import { parseInlineToolCalls } from '../shared/inline-tool-parser.js';
+import { isRecord, safeParse } from '../shared/json-parse.js';
+import type { ChatMessage, SessionRecord } from '../../chat/types.js';
+import type { ChatStore } from '../../chat/store.js';
+import type { MemoryStore } from '../../chat/memory.js';
+import type { StickerManager } from '../../stickers/sticker-manager.js';
+import type { SendQueue } from '../../qq/sender.js';
+import type { SessionRegistry } from '../../chat/sessions.js';
+import type { OneBotClient } from '../../qq/onebot.js';
+import type { ContextWindowRegistry } from '../context/context-window.js';
+import type { HistoryPolicyResult, ResponseDecision, ToolDefinition } from '../shared/types.js';
+import type { InlineToolCall } from '../shared/inline-tool-parser.js';
+import type { ChatRequestMessage } from '../../llm/types.js';
+import type { StickerEntry } from '../../stickers/types.js';
 
 export interface AgentRunOptions {
   kind: string;
@@ -307,7 +308,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
           imageUserMessages.push({
             role: 'user',
             content: [
-              { type: 'text', text: `[系统：以下是工具 ${name} 返回的 ${images.length} 张图片，请直接"看图"回应]` },
+              { type: 'text', text: PROMPT_CATALOG.user.toolImages(name, images.length) },
               ...images
             ]
           });

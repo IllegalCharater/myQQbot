@@ -27,7 +27,7 @@ const {
 const { ChatStore } = await load('chat/store.js');
 const {
   selectPromptDigests, renderDigestSection, collectInjectedDigests, buildUserPrompt, buildPastState
-} = await load('agent/prompt.js');
+} = await load('agent/prompting/prompt-builder.js');
 
 // ── 改动前的 prompt.js：从 git 取，把 './x.js' 改成绝对 file:// URL ──
 // 不能直接 import 到临时目录里那份（它的相对 import 会指向不存在的文件）。

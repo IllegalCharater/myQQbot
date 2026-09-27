@@ -11,25 +11,25 @@
 // 同一会话（群/私聊）同时最多一个运行；运行期间新消息照样进窗口（进 JSON、未读），
 // 只是不叠加触发 —— 运行结束后 drain 会接着处理。
 // 不同会话之间并行，受 maxConcurrentRuns 全局限流。
-import { getConfig } from '../core/config.js';
-import { createEventBus } from '../core/util.js';
-import { buildToolDefs } from './tools.js';
-import { initializeJmcomicQueue } from '../media/jmcomic.js';
-import { ContextWindowRegistry } from './context-window.js';
-import { isRecord } from './json-parse.js';
+import { getConfig } from '../../core/config.js';
+import { createEventBus } from '../../core/util.js';
+import { buildToolDefs } from '../tools/index.js';
+import { initializeJmcomicQueue } from '../../media/jmcomic.js';
+import { ContextWindowRegistry } from '../context/context-window.js';
+import { isRecord } from '../shared/json-parse.js';
 import type { RuntimeStateRegistry } from './runtime-state.js';
-import { ProactiveController } from './proactive-controller.js';
-import { MemoryConsolidator } from './memory-consolidator.js';
-import { HistoryCompactor } from './history-compactor.js';
+import { ProactiveController } from '../maintenance/proactive-controller.js';
+import { MemoryConsolidator } from '../maintenance/memory-consolidator.js';
+import { HistoryCompactor } from '../maintenance/history-compactor.js';
 import { WakeScheduler } from './wake-scheduler.js';
-import type { ChatMessage } from '../chat/types.js';
-import type { ChatStore } from '../chat/store.js';
-import type { MemoryStore } from '../chat/memory.js';
-import type { StickerManager } from '../stickers/sticker-manager.js';
-import type { SendQueue } from '../qq/sender.js';
-import type { SessionRegistry } from '../chat/sessions.js';
-import type { OneBotClient } from '../qq/onebot.js';
-import type { ChatRuntimeState, OrchestratorDependencies, ToolDefinition } from './types.js';
+import type { ChatMessage } from '../../chat/types.js';
+import type { ChatStore } from '../../chat/store.js';
+import type { MemoryStore } from '../../chat/memory.js';
+import type { StickerManager } from '../../stickers/sticker-manager.js';
+import type { SendQueue } from '../../qq/sender.js';
+import type { SessionRegistry } from '../../chat/sessions.js';
+import type { OneBotClient } from '../../qq/onebot.js';
+import type { ChatRuntimeState, OrchestratorDependencies, ToolDefinition } from '../shared/types.js';
 
 export class Orchestrator {
   store: ChatStore;

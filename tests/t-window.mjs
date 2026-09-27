@@ -9,8 +9,8 @@ process.env.QQ_AGENT_DATA_DIR = DIR;
 const { ChatStore } = await load('chat/store.js');
 const { SessionRegistry } = await load('chat/sessions.js');
 const { SendQueue } = await load('qq/sender.js');
-const { Orchestrator } = await load('agent/orchestrator.js');
-const { ContextWindow, ContextWindowRegistry } = await load('agent/context-window.js');
+const { Orchestrator } = await load('agent/runtime/orchestrator.js');
+const { ContextWindow, ContextWindowRegistry } = await load('agent/context/context-window.js');
 const { updateConfig } = await load('core/config.js');
 
 let bad = 0;

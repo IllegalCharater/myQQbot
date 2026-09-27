@@ -1,7 +1,7 @@
 // 当前消息响应策略：只判断窗口是否需要响应。
 // 不读历史配置、不更新窗口、不组装提示词；调用方必须显式传入最小数据。
-import type { ChatMessage } from '../chat/types.js';
-import type { ResponseDecision, TriggerContext } from './types.js';
+import type { ChatMessage } from '../../chat/types.js';
+import type { ResponseDecision, TriggerContext } from '../shared/types.js';
 
 interface WindowPolicyConfig {
   responseTier: number;

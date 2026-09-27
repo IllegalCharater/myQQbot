@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { detectMime } from '../../agent/tools.js';
+import { detectMime } from '../../agent/tools/index.js';
 import { safeFetchBinary, validateImageUrl } from '../../media/safe-fetch.js';
 import { cachedPath } from '../../stickers/sticker-cache.js';
 import type { StickerPatch } from '../../stickers/types.js';

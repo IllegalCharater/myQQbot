@@ -1,5 +1,5 @@
-import type { SendQueue } from '../qq/sender.js';
-import type { ChatRuntimeState } from './types.js';
+import type { SendQueue } from '../../qq/sender.js';
+import type { ChatRuntimeState } from '../shared/types.js';
 
 export class RuntimeStateRegistry {
   readonly states = new Map<string, ChatRuntimeState>();

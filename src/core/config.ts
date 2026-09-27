@@ -1,6 +1,6 @@
 // 配置管理：data/config.json，UI 可写。所有字段都有默认值。
 import fs from 'node:fs';
-import { PERSONAS } from './personas.js';
+import { PERSONAS } from './prompt-catalog.js';
 import { sliderToTier, tierToSlider } from './tier-slider.js';   // 零依赖模块，避免循环依赖
 // 路径常量集中在 paths.ts（向上找 package.json，对目录深度免疫）。
 // 这里只是**转出**给老调用点用——仓库里另有 10 个模块从 config.js 取 DATA_DIR/ROOT，
@@ -222,7 +222,7 @@ export const DEFAULT_CONFIG = {
     maxMessagesPerChat: 0,
     // ── 动态上下文窗口的容量 ──
     // 每个会话常驻一个"一直保持最新"的窗口：只装**对方发来的**最新 N 条消息，
-    // 消息一到就入窗、超出立刻丢最老（见 src/agent/context-window.ts）。
+    // 消息一到就入窗、超出立刻丢最老（见 src/agent/context/context-window.ts）。
     // 它决定一次运行最多把多少条未读放进【本次唤醒】；被挤出窗口的那些不会丢，
     // 它们降级成【过去状态】候选（实际条数仍受档位深度/字符预算限制），也照样参与
     // “要不要回应”的判定。

@@ -1,7 +1,7 @@
-import { getConfig } from '../core/config.js';
-import { randInt } from '../core/util.js';
-import type { ChatStore } from '../chat/store.js';
-import type { ContextWindowRegistry } from './context-window.js';
+import { getConfig } from '../../core/config.js';
+import { randInt } from '../../core/util.js';
+import type { ChatStore } from '../../chat/store.js';
+import type { ContextWindowRegistry } from '../context/context-window.js';
 
 export interface ProactiveControllerDependencies {
   store: ChatStore;

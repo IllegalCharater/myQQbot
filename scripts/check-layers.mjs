@@ -31,6 +31,18 @@ function slash(value) {
 
 const errors = [];
 const files = filesUnder(SRC);
+
+// Agent 内部实现必须按职责落入子目录；不再允许大型实现回到根目录。
+const agentRoot = path.join(SRC, 'agent');
+const agentGroups = ['runtime', 'context', 'prompting', 'tools', 'maintenance', 'shared'];
+for (const group of agentGroups) {
+  if (!fs.existsSync(path.join(agentRoot, group))) errors.push(`agent/${group}: 缺少 Agent 分层目录`);
+}
+for (const entry of fs.readdirSync(agentRoot, { withFileTypes: true })) {
+  if (entry.isFile() && SOURCE_EXT.test(entry.name)) {
+    errors.push(`agent/${entry.name}: Agent 实现不得平铺在根目录`);
+  }
+}
 for (const source of files) {
   const sourceRel = slash(path.relative(SRC, source));
   const sourceDomain = sourceRel.split('/')[0];

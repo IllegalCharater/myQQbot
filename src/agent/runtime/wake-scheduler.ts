@@ -1,21 +1,21 @@
-import { getConfig, responseConfigForChat } from '../core/config.js';
-import { sleep } from '../core/util.js';
-import { evaluateWindowTrigger } from './response-policy.js';
-import { resolveHistoryPolicy } from './history-policy.js';
-import { isRetryableError } from '../llm/llm.js';
+import { getConfig, responseConfigForChat } from '../../core/config.js';
+import { sleep } from '../../core/util.js';
+import { evaluateWindowTrigger } from '../context/response-policy.js';
+import { resolveHistoryPolicy } from '../context/history-policy.js';
+import { isRetryableError } from '../../llm/llm.js';
 import { runAgent } from './agent-runner.js';
-import { errorMessage } from './json-parse.js';
+import { errorMessage } from '../shared/json-parse.js';
 import { RuntimeStateRegistry } from './runtime-state.js';
 import type { AgentRunOptions } from './agent-runner.js';
-import type { ChatMessage, SessionRecord } from '../chat/types.js';
-import type { ChatStore } from '../chat/store.js';
-import type { MemoryStore } from '../chat/memory.js';
-import type { StickerManager } from '../stickers/sticker-manager.js';
-import type { SendQueue } from '../qq/sender.js';
-import type { SessionRegistry } from '../chat/sessions.js';
-import type { OneBotClient } from '../qq/onebot.js';
-import type { ContextWindowRegistry } from './context-window.js';
-import type { ChatRuntimeState, HistoryPolicyResult, ResponseDecision, ToolDefinition } from './types.js';
+import type { ChatMessage, SessionRecord } from '../../chat/types.js';
+import type { ChatStore } from '../../chat/store.js';
+import type { MemoryStore } from '../../chat/memory.js';
+import type { StickerManager } from '../../stickers/sticker-manager.js';
+import type { SendQueue } from '../../qq/sender.js';
+import type { SessionRegistry } from '../../chat/sessions.js';
+import type { OneBotClient } from '../../qq/onebot.js';
+import type { ContextWindowRegistry } from '../context/context-window.js';
+import type { ChatRuntimeState, HistoryPolicyResult, ResponseDecision, ToolDefinition } from '../shared/types.js';
 
 export interface WakeSchedulerDependencies {
   store: ChatStore;

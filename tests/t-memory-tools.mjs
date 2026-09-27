@@ -1,6 +1,6 @@
 import { load } from './lib/src.mjs';
 
-const { buildToolDefs } = await load('agent/tools.js');
+const { buildToolDefs } = await load('agent/tools/index.js');
 
 let pass = 0;
 let fail = 0;

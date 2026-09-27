@@ -18,7 +18,7 @@ const { ChatStore, isSystemRecord } = await load('chat/store.js');
 const { MemoryStore } = await load('chat/memory.js');
 const { StickerManager } = await load('stickers/sticker-manager.js');
 const { removeSticker, formatStickerAdminList } = await load('stickers/stickers.js');
-const { buildPastState } = await load('agent/prompt.js');
+const { buildPastState } = await load('agent/prompting/prompt-builder.js');
 const { updateConfig, getConfig } = await load('core/config.js');
 
 let pass = 0, fail = 0;

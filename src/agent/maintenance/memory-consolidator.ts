@@ -1,12 +1,13 @@
-import { getConfig } from '../core/config.js';
-import { todayKey } from '../core/util.js';
-import { chatCompletion } from '../llm/llm.js';
-import { currentProviders } from '../llm/providers.js';
-import { isSystemRecord } from '../chat/store.js';
-import { errorMessage, extractJsonObject } from './json-parse.js';
-import type { ChatStore } from '../chat/store.js';
-import type { MemoryStore } from '../chat/memory.js';
-import type { ChatRequestMessage } from '../llm/types.js';
+import { getConfig } from '../../core/config.js';
+import { PROMPT_CATALOG } from '../../core/prompt-catalog.js';
+import { todayKey } from '../../core/util.js';
+import { chatCompletion } from '../../llm/llm.js';
+import { currentProviders } from '../../llm/providers.js';
+import { isSystemRecord } from '../../chat/store.js';
+import { errorMessage, extractJsonObject } from '../shared/json-parse.js';
+import type { ChatStore } from '../../chat/store.js';
+import type { MemoryStore } from '../../chat/memory.js';
+import type { ChatRequestMessage } from '../../llm/types.js';
 
 interface ImpressionLike { content: string; createdAt: number }
 interface MemoryMemberLike {
@@ -377,16 +378,8 @@ export class MemoryConsolidator {
     for (const e of mem.impressions) lines.push(`- ${e.content} (${fmtTs(e.createdAt)})`);
     const maxKeep = Number(getConfig().memory?.maxImpressionsPerMember) || 5;
     return {
-      system: '你是聊天机器人的记忆整理模块，负责整理对某一位群友的长期印象。你只做合并、改写与删除，绝不发明任何新事实。输出必须是严格的 JSON 对象，不要 Markdown 代码块，不要任何解释文字。格式：{"impressions":["…"]}',
-      user: [
-        '下面是机器人对一位群友的全部印象，请整理：',
-        '1. 把同义/重复的印象合并成一条，以最新的观感为准。',
-        '2. 明显过时、矛盾、或一次性事件（不会再次影响相处）的印象删除。',
-        `3. 最多保留 ${maxKeep} 条，每条不超过 120 字。`,
-        '原则：所有信息只能来自原文，语义不变，宁少勿错；没有可保留的时输出空数组。',
-        '',
-        ...lines
-      ].join('\n')
+      system: PROMPT_CATALOG.maintenance.consolidateSystem,
+      user: PROMPT_CATALOG.maintenance.consolidateUser(maxKeep, lines)
     };
   }
 
@@ -401,17 +394,13 @@ export class MemoryConsolidator {
       .filter(Boolean);
 
     return {
-      system: '你是聊天机器人的记忆模块，负责从聊天记录里提炼对某一位群友的长期印象。只提炼"以后跟这个人打交道用得上"的稳定特征，严格依据给定的发言，不要编造。输出必须是严格的 JSON 对象，不要 Markdown 代码块，不要任何解释文字。格式：{"impressions":["…"]}',
-      user: [
-        `下面是群友（QQ ${uid}${(mem.name && `，名字 ${mem.name}`) || ''}）最近的部分发言，请提炼对他的长期印象：`,
-        '1. 只保留稳定特征：说话风格、爱玩的梗、常聊话题、雷点、身份关系。',
-        '2. 不要记一次性事件、临时话题，也不要记录流水账。',
-        `3. 最多 ${maxKeep} 条，每条不超过 120 字，用第一人称视角（"他/她…"）。`,
-        '4. 宁少勿错：信息不足就少写，不要脑补。',
-        '5. 若实在提炼不出任何稳定特征，输出空数组。',
-        '',
-        sample.length ? sample.join('\n') : '（没有抓到该群友的发言）'
-      ].join('\n')
+      system: PROMPT_CATALOG.maintenance.newImpressionSystem,
+      user: PROMPT_CATALOG.maintenance.newImpressionUser({
+        userId: uid,
+        name: String(mem.name || ''),
+        maxKeep,
+        sample
+      })
     };
   }
 

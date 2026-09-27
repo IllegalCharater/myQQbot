@@ -1,9 +1,10 @@
-import { digestConfigForChat, getConfig } from '../core/config.js';
-import { formatShortTime } from '../core/util.js';
-import { errorMessage, extractJsonObject } from './json-parse.js';
-import type { ChatMessage } from '../chat/types.js';
-import type { ChatStore } from '../chat/store.js';
-import type { ContextWindowRegistry } from './context-window.js';
+import { digestConfigForChat, getConfig } from '../../core/config.js';
+import { PROMPT_CATALOG } from '../../core/prompt-catalog.js';
+import { formatShortTime } from '../../core/util.js';
+import { errorMessage, extractJsonObject } from '../shared/json-parse.js';
+import type { ChatMessage } from '../../chat/types.js';
+import type { ChatStore } from '../../chat/store.js';
+import type { ContextWindowRegistry } from '../context/context-window.js';
 import type { MemoryConsolidator } from './memory-consolidator.js';
 
 export interface HistoryCompactorDependencies {
@@ -228,24 +229,11 @@ export class HistoryCompactor {
     const res = await this.deps.memoryConsolidator.chat([
       {
         role: 'system',
-        content: [
-          '你是聊天机器人的聊天记录归档模块，负责把一段群聊记录压缩成可长期保留的纪要。',
-          '严格要求：',
-          '1. 只依据给定的聊天记录写，绝不编造，也不要用常识去补全。',
-          '2. 保留：谁和谁在聊什么、聊出了什么结论、发生过的具体事件、反复出现的梗与专有名词、约定和承诺。',
-          '3. 丢掉：寒暄、复读、表情包灌水、没有信息量的应答。',
-          '4. 用第三人称按时间顺序分段陈述，不要逐条复述。',
-          '5. 输出必须是严格的 JSON 对象，不要 Markdown 代码块，不要任何解释文字。',
-          '格式：{"summary":"…","seen":N}。seen 必须等于你收到的消息行数 —— 它用来证明你确实读完了全部输入。'
-        ].join('\n')
+        content: PROMPT_CATALOG.maintenance.historySystem
       },
       {
         role: 'user',
-        content: [
-          `下面是聊天记录（共 ${lines.length} 行，按时间排序），请压缩成纪要：`,
-          '',
-          lines.join('\n')
-        ].join('\n')
+        content: PROMPT_CATALOG.maintenance.historyUser(lines.length, lines.join('\n'))
       }
     ]);
 
@@ -288,4 +276,3 @@ export class HistoryCompactor {
     return { entries: range, removeIds: new Set(range.map((m) => m.id)), digestEntry, seen };
   }
 }
-

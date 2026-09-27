@@ -23,7 +23,7 @@ const chatJs = readUI('js/views/chats.js');
 const memoryJs = readUI('js/views/memory.js');
 const stickerJs = readUI('js/views/stickers.js');
 const settingsJs = readUI('js/views/settings/index.js');
-const agentRunnerTs = fs.readFileSync(path.join(process.cwd(), 'src/agent/agent-runner.ts'), 'utf8');
+const agentRunnerTs = fs.readFileSync(path.join(process.cwd(), 'src/agent/runtime/agent-runner.ts'), 'utf8');
 
 let pass = 0, fail = 0;
 const ok = (label, cond, extra = '') => {

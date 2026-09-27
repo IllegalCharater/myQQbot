@@ -1,7 +1,7 @@
 import { errorMessage, isRecord, readBody } from '../http.js';
 import type { Route } from '../types.js';
 import path from 'node:path';
-import { collectInjectedDigests } from '../../agent/prompt.js';
+import { collectInjectedDigests } from '../../agent/prompting/prompt-builder.js';
 
 interface ChatSummary extends Record<string, unknown> {
   key: string; lastTs: number; replying: boolean; phase: string; compacting: boolean; chatName: string;
