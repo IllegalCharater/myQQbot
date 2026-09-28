@@ -1,7 +1,5 @@
 import { api } from '../api.js';
-import { $$, esc } from '../dom.js';
-import { state } from '../state.js';
-import { closeModelModal, modelModalShell } from './modal.js';
+import { $, $$, esc } from '../dom.js';
 import { parseList } from '../views/settings/save.js';
 
 export async function openWhitelistPicker(kind) {
