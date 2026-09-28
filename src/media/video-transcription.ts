@@ -15,6 +15,9 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { AppConfig } from '../core/config.js';
 import { isPrivateIp, openSafeStream, validateFetchUrl } from './safe-fetch.js';
+import {
+  BilibiliResolveError, resolveBilibiliMedia, type ResolvedMediaSource
+} from './bilibili.js';
 
 interface TranscriptionMedia extends Record<string, unknown> { kind: string; url?: string }
 interface TranscriptionSender {
@@ -198,9 +201,9 @@ interface MediaProxy {
   close(): Promise<void>;
 }
 
-async function createMediaProxy(sourceUrl: string, signal: AbortSignal, maxBytes: number): Promise<MediaProxy> {
+async function createMediaProxy(source: ResolvedMediaSource, signal: AbortSignal, maxBytes: number): Promise<MediaProxy> {
   // 启动监听前先完成一次 DNS 校验，让明显不可访问/内网目标尽早失败。
-  await validateFetchUrl(sourceUrl);
+  await validateFetchUrl(source.url);
   const token = randomUUID();
   let transferred = 0;
   const active = new Set<http.IncomingMessage>();
@@ -210,10 +213,10 @@ async function createMediaProxy(sourceUrl: string, signal: AbortSignal, maxBytes
       return;
     }
     try {
-      const forwarded: Record<string, string> = {};
+      const forwarded: Record<string, string> = { ...(source.headers || {}) };
       if (typeof req.headers.range === 'string') forwarded.range = req.headers.range;
       if (typeof req.headers['if-range'] === 'string') forwarded['if-range'] = req.headers['if-range'];
-      const opened = await openSafeStream(sourceUrl, {
+      const opened = await openSafeStream(source.url, {
         method: req.method as 'GET' | 'HEAD', headers: forwarded, signal
       });
       const upstream = opened.response;
@@ -271,7 +274,17 @@ function progressDurationMs(stderr: string): number {
 }
 
 async function extractAudio(sourceUrl: string, outputPath: string, config: EffectiveConfig, signal: AbortSignal) {
-  const proxy = await createMediaProxy(sourceUrl, signal, config.maxSourceBytes).catch(() => {
+  let source: ResolvedMediaSource;
+  try {
+    source = await resolveBilibiliMedia(sourceUrl, signal, config.maxDurationSeconds);
+  } catch (error) {
+    if (error instanceof BilibiliResolveError) {
+      const stage: FailureStage = error.code === 'VIDEO_TOO_LONG' ? 'extracting' : 'validation';
+      throw new TranscriptionError(stage, error.code, error.message);
+    }
+    throw new TranscriptionError('validation', 'BILIBILI_RESOLVE_FAILED', '无法解析 B 站视频');
+  }
+  const proxy = await createMediaProxy(source, signal, config.maxSourceBytes).catch(() => {
     throw new TranscriptionError('validation', 'URL_UNREACHABLE', '无法访问链接');
   });
   try {

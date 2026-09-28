@@ -23,6 +23,7 @@ import type { OneBotEvent } from '../../qq/types.js';
 import type { SendQueue } from '../../qq/sender.js';
 import { parseTranscriptionCommand } from '../../media/video-transcription.js';
 import type { VideoTranscriptionQueue } from '../../media/video-transcription.js';
+import { isBilibiliUrl } from '../../media/bilibili.js';
 import { errorMessage, isRecord } from '../http/http.js';
 
 // ── 白名单判断（移植自原版 allowed()） ───────────────────────────────────
@@ -34,6 +35,18 @@ function allowed(kind: 'group' | 'private', id: unknown, cfg: AppConfig) {
   const allowList = cfg.allow?.[key] ?? [];
   if (allowList.length > 0) return allowList.map(String).includes(s);
   return cfg.allowAllWhenEmpty === true;
+}
+
+/** 在接入层把 B 站卡片补成可定位的视频媒体；通用 OneBot 协议解析保持平台无关。 */
+function addBilibiliVideoAliases(media: MediaEntry[]): void {
+  const existing = new Set(media
+    .filter((item) => item.kind === 'video' && typeof item.url === 'string')
+    .map((item) => String(item.url)));
+  for (const item of [...media]) {
+    if (item.kind !== 'card' || typeof item.url !== 'string' || !isBilibiliUrl(item.url) || existing.has(item.url)) continue;
+    media.push({ kind: 'video', url: item.url, source: 'bilibili-card' });
+    existing.add(item.url);
+  }
 }
 
 export interface Ingest {
@@ -98,6 +111,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       const sender = isRecord(msg) && isRecord(msg.sender) ? msg.sender : {};
       const senderName = sender.card || sender.nickname || '';
       let text = '';
+      let media: MediaEntry[] = [];
       if (isRecord(msg) && Array.isArray(msg.message)) {
         // 必须复用 segmentsToText，不能自己拼。被引用的消息可能是 json 卡片 /
         // 合并转发 / 图片，自己拼只会得到 "[json]" "[forward]" 这类原始英文段名，
@@ -108,10 +122,14 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
           includeReply: false,
           resolveAtName: (qq) => (kind === 'group' ? resolveAtName(id, qq) : Promise.resolve(null))
         });
+        media = extractMediaFromSegments(msg.message)
+          .filter((item): item is Record<string, unknown> & { kind: string } => typeof item.kind === 'string')
+          .map((item) => ({ ...item, kind: item.kind }));
+        addBilibiliVideoAliases(media);
       } else if (isRecord(msg) && typeof msg.message === 'string') {
         text = msg.message;
       }
-      return { sender: String(senderName), text: String(text).slice(0, REPLY_PREVIEW_MAX) };
+      return { sender: String(senderName), text: String(text).slice(0, REPLY_PREVIEW_MAX), media };
     } catch {
       return null;
     }
@@ -140,15 +158,27 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       const candidate = String(segment.data.url || segment.data.file || '').trim();
       media.push({ kind: 'video', ...(candidate ? { url: candidate } : {}), file: String(segment.data.file || '') });
     }
+    addBilibiliVideoAliases(media);
 
     let text;
+    let commandText;
+    const repliedMedia: MediaEntry[] = [];
     if (segments) {
+      commandText = await segmentsToText(segments, {
+        includeReply: false,
+        resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : Promise.resolve(null)
+      });
       text = await segmentsToText(segments, {
-        resolveReply: (mid) => resolveReply(mid, { kind, id }),
+        resolveReply: async (mid) => {
+          const info = await resolveReply(mid, { kind, id });
+          if (info?.media?.length) repliedMedia.push(...info.media);
+          return info;
+        },
         resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : Promise.resolve(null)
       });
     } else {
       text = String(event.raw_message ?? event.message ?? '').trim();
+      commandText = text;
     }
 
     // 合并转发：占位符 → 展开真实内容（模型要读懂、看懂转发的聊天记录）
@@ -181,7 +211,11 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
 
     if (!text && !media.length) return;
     const chatKey = `${kind}:${id}`;
-    const isTranscriptionCommand = /^\/转写(?:\s|\[视频\]|$)/u.test(String(text || '').trim());
+    const isTranscriptionCommand = /^\/转写(?:\s|\[视频\]|$)/u.test(String(commandText || '').trim());
+    if (isTranscriptionCommand && repliedMedia.length) {
+      media.push(...repliedMedia);
+      addBilibiliVideoAliases(media);
+    }
     // 条目要**当面交给**编排器（onIncoming 的第二个参数）：上下文窗口的入窗入口
     // 只有它一个，少传一次窗口与存档就会静默分叉。确定性命令是唯一例外：它通过
     // wakeEligible:false 原子落成已读历史，窗口及其兜底同步都会明确排除它。
@@ -200,7 +234,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     // FFmpeg 与 ASR 极速版请求全部在单并发后台 worker 里运行，不占住 OneBot 入站处理链。
     if (isTranscriptionCommand) {
       try {
-        const url = parseTranscriptionCommand(text, media);
+        const url = parseTranscriptionCommand(commandText, media);
         if (!url) return;
         const job = transcription.enqueue({
           chatKey,

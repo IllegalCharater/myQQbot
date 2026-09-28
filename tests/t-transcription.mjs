@@ -12,6 +12,7 @@ const {
   VideoTranscriptionQueue, buildFlashRecognitionRequest, normalizeTranscriptionUrl,
   parseTranscriptionCommand, resolveTranscriptionConfig
 } = await load('media/video-transcription.js');
+const { isBilibiliUrl } = await load('media/bilibili.js');
 const { DEFAULT_CONFIG, updateConfig } = await load('core/config.js');
 
 const rejected = [
@@ -31,6 +32,11 @@ ok('/转写 可取显式 URL，也可取 video media URL',
   parseTranscriptionCommand('/转写 https://example.com/a.mp4') === 'https://example.com/a.mp4'
   && parseTranscriptionCommand('/转写[视频]', [{ kind: 'video', url: 'https://example.com/b.mp4' }]) === 'https://example.com/b.mp4');
 ok('普通聊天不是转写命令', parseTranscriptionCommand('看看这个视频 https://example.com/a.mp4') === null);
+ok('B 站主站、移动站与短链可识别，近似域名不会误判',
+  isBilibiliUrl('https://www.bilibili.com/video/BV1xx411c7mD')
+  && isBilibiliUrl('https://m.bilibili.com/video/BV1xx411c7mD')
+  && isBilibiliUrl('https://b23.tv/fixture')
+  && !isBilibiliUrl('https://bilibili.com.evil.example/video/BV1xx411c7mD'));
 
 const { createIngest } = await load('web/onebot/ingest.js');
 const { ChatStore } = await load('chat/store.js');
@@ -87,6 +93,45 @@ commandWindows.reload('group:123');
 ok('窗口从存档重播后仍排除 /转写',
   commandWindows.pending('group:123').map((m) => m.mid).join(',') === '788');
 
+const bilibiliCardUrl = 'https://b23.tv/fixture-card';
+const cardCommands = [];
+const cardReplies = [];
+const cardIngest = createIngest({
+  onebot: {
+    selfId: '999999',
+    getMsg: async () => ({
+      sender: { nickname: '卡片发送者' },
+      message: [{
+        type: 'json',
+        data: { data: JSON.stringify({
+          app: 'com.tencent.structmsg', view: 'news',
+          meta: { detail_1: { title: 'B站视频', desc: '测试卡片', jumpUrl: bilibiliCardUrl } }
+        }) }
+      }]
+    })
+  },
+  store: new ChatStore(),
+  sender: { sendTextBatch: async (...args) => { cardReplies.push(args); return {}; } },
+  orchestrator: { onIncoming: () => { throw new Error('显式转写命令不应进入 Agent'); } },
+  transcription: {
+    enqueue: (input) => {
+      cardCommands.push(input);
+      return { id: 'card-task-fixture', chatKey: input.chatKey, status: 'queued', createdAt: 1, updatedAt: 1 };
+    }
+  },
+  emit: () => {},
+  getConfig: () => commandConfig,
+  log: () => {}
+});
+await cardIngest.handle({
+  post_type: 'message', message_type: 'group', group_id: 123, user_id: 456,
+  message_id: 790, sender: { user_id: 456, nickname: '测试者' },
+  message: [{ type: 'reply', data: { id: '789' } }, { type: 'text', data: { text: '/转写' } }]
+});
+ok('回复 B 站视频卡片发送 /转写，会从被引用卡片提取链接并立即入队',
+  cardCommands.length === 1 && cardCommands[0].url === bilibiliCardUrl
+  && cardReplies.length === 1 && String(cardReplies[0][1]).includes('已开始处理'));
+
 // 同一聊天的异步解析必须按 OneBot 到达顺序提交：第一条引用查询被阻塞时，
 // 后到的简单消息不能抢先拿到更小的本地 id。
 const orderedStore = new ChatStore();
@@ -130,6 +175,9 @@ const transcribeSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/media/v
 const safeFetchSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/media/safe-fetch.ts'), 'utf8'));
 ok('FFmpeg 输入是本机流式代理，不直接使用 job.sourceUrl',
   /'-i',\s*proxy\.url/.test(transcribeSrc) && !/'-i',\s*job\.sourceUrl/.test(transcribeSrc));
+ok('B 站页面先解析为短时效媒体源，实际媒体仍走同一安全代理',
+  /resolveBilibiliMedia\(sourceUrl, signal, config\.maxDurationSeconds\)/.test(transcribeSrc)
+  && /createMediaProxy\(source, signal, config\.maxSourceBytes\)/.test(transcribeSrc));
 ok('流式响应每一跳重定向都重新调用 validateFetchUrl',
   /const next = new URL\(location, url\)\.toString\(\);\s*\(\{ url, ip \} = await validateFetchUrl\(next\)\)/s.test(safeFetchSrc));
 ok('FFmpeg 使用 spawn 参数数组且显式禁止 shell',
