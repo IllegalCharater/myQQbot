@@ -497,5 +497,31 @@ ok('JSON 模式按新结构记录当前窗口、响应决策和历史注入',
 
 state.sessionJsonMode = null;
 
+// ═══════════ G. 白名单选择器：状态行 ═══════════
+// 这条来自真机报障：点「选择群 / 选择好友」时状态行写着「拉取中…」就一直那么写着——
+// 成功路径原先从不改写它，只有失败和点「确定」才写。浮层弹窗把自己的进度挡在外面，
+// 用户唯一能看到的就是这行字。
+console.log('\n═══ 白名单选择器：拉取到之后的那个状态行 ═══');
+const picker = await import('../ui/js/parts/whitelist.js');
+const pickResult = $el('#pick-result');
+
+routeFetch([[/\/api\/onebot\/groups$/, { groups: [{ id: '10001', name: '测试群' }, { id: '10002', name: '另一个群' }] }]]);
+pickResult.textContent = '打开前的旧文本';
+// 壳里 createElement 造出的 overlay 不解析 innerHTML（querySelector 恒为 null），
+// 所以函数走到绑事件那步必然抛 —— 要验的状态行在它之前就写好了，吞掉这个必然的异常。
+// 这里不依赖"壳解析不了"这件事：即使哪天壳能解析了，断言照样成立。
+await picker.openWhitelistPicker('groups').catch(() => {});
+ok('拉取成功后状态行改写（不再挂着「拉取中…」）',
+  pickResult.textContent === '已拉取 2 个群，在弹窗里勾选后点「确定」', pickResult.textContent);
+
+routeFetch([[/\/api\/onebot\/friends$/, { friends: [] }]]);
+await picker.openWhitelistPicker('friends').catch(() => {});
+ok('好友列表为空时说的是「没拉到好友列表」', pickResult.textContent === '没拉到好友列表', pickResult.textContent);
+
+routeFetch([]);  // 无路由 → 404 → api() 抛
+await picker.openWhitelistPicker('groups').catch(() => {});
+ok('拉取失败时给出失败原因与排查方向',
+  pickResult.textContent.includes('拉取失败') && pickResult.textContent.includes('OneBot 未连接'), pickResult.textContent);
+
 console.log(`\n════ 通过 ${pass} / 失败 ${fail} ════`);
 process.exit(fail === 0 ? 0 : 1);
