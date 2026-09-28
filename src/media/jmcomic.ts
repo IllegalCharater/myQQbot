@@ -47,7 +47,7 @@ interface JmJob {
   uploadStartedAt?: number;
   uploadVerifyAttempts?: number;
   uploadedFileId?: string;
-  completionSource?: 'response' | 'group-file-check';
+  completionSource?: 'response' | 'group-file-check' | 'private-history-check';
 }
 
 interface JmRuntime {
@@ -101,7 +101,7 @@ function normalizeJob(value: unknown): JmJob | null {
     ...(typeof value.uploadStartedAt === 'number' ? { uploadStartedAt: value.uploadStartedAt } : {}),
     ...(typeof value.uploadVerifyAttempts === 'number' ? { uploadVerifyAttempts: value.uploadVerifyAttempts } : {}),
     ...(typeof value.uploadedFileId === 'string' ? { uploadedFileId: value.uploadedFileId } : {}),
-    ...(value.completionSource === 'response' || value.completionSource === 'group-file-check'
+    ...(value.completionSource === 'response' || value.completionSource === 'group-file-check' || value.completionSource === 'private-history-check'
       ? { completionSource: value.completionSource } : {})
   };
 }
@@ -229,6 +229,12 @@ function isPending(job: JmJob): boolean {
 
 function commandKey(requesterId: unknown, comicId: string): string {
   return `${requesterId || 'unknown'}:${comicId}`;
+}
+
+function jobKind(job: JmJob): 'group' | 'private' {
+  const fromKey = String(job.chatKey || '').split(':', 1)[0];
+  if (fromKey === 'group' || fromKey === 'private') return fromKey;
+  return job.kind === 'group' ? 'group' : 'private';
 }
 
 /**
@@ -376,7 +382,7 @@ function responseFileId(value: unknown): string {
   return isRecord(value) ? String(value.file_id ?? value.fileId ?? '') : '';
 }
 
-function completeUpload(job: JmJob, source: 'response' | 'group-file-check', fileId = '') {
+function completeUpload(job: JmJob, source: 'response' | 'group-file-check' | 'private-history-check', fileId = '') {
   // 从这里开始 OneBot 已明确返回成功，或群文件列表已经证明目标文件存在。
   // 任何本地收尾失败都不能再把任务放回上传路径。
   try {
@@ -418,10 +424,11 @@ async function uploadStage(job: JmJob) {
     status: 'uploading', uploadAttempts: attempt, uploadStartedAt: Date.now(),
     uploadVerifyAttempts: 0, lastError: ''
   });
-  const params = job.kind === 'group'
+  const kind = jobKind(job);
+  const params = kind === 'group'
     ? { group_id: Number(job.chatId), file: pdfPath, name: `${job.comicId}.pdf` }
     : { user_id: Number(job.chatId), file: pdfPath, name: `${job.comicId}.pdf` };
-  const action = job.kind === 'group' ? 'upload_group_file' : 'upload_private_file';
+  const action = kind === 'group' ? 'upload_group_file' : 'upload_private_file';
   try {
     const result = await runtime?.onebot.call(action, params, UPLOAD_TIMEOUT_MS);
     completeUpload(job, 'response', responseFileId(result));
@@ -445,14 +452,24 @@ function matchingGroupFile(value: unknown, job: JmJob, pdfPath: string): Record<
   return null;
 }
 
-async function uploadUncertainStage(job: JmJob) {
-  if (job.kind !== 'group') {
-    const message = `PDF 上传结果无法确认：${job.lastError || '连接在返回结果前中断'}`;
-    updateJob(job, { status: 'failed', lastError: message, failedAt: Date.now(), nextAttemptAt: null });
-    await sendStatus(job, '⚠️ PDF 上传结果无法确认；为避免重复发送，已停止自动重试。请先检查私聊文件。');
-    return;
+function matchingPrivateFile(value: unknown, job: JmJob, pdfPath: string): Record<string, unknown> | null {
+  if (!isRecord(value) || !Array.isArray(value.messages)) throw new Error('好友消息历史返回格式无效');
+  const expectedName = `${job.comicId}.pdf`;
+  const expectedSize = fs.statSync(pdfPath).size;
+  for (const message of value.messages) {
+    if (!isRecord(message) || !Array.isArray(message.message)) continue;
+    for (const segment of message.message) {
+      if (!isRecord(segment) || segment.type !== 'file' || !isRecord(segment.data)) continue;
+      const data = segment.data;
+      const name = String(data.name ?? data.file_name ?? data.fileName ?? data.file ?? '');
+      const size = Number(data.file_size ?? data.fileSize ?? data.size ?? -1);
+      if (name === expectedName && size === expectedSize) return data;
+    }
   }
+  return null;
+}
 
+async function uploadUncertainStage(job: JmJob) {
   let pdfPath: string;
   try {
     pdfPath = validatePdf(job.pdfPath);
@@ -466,12 +483,19 @@ async function uploadUncertainStage(job: JmJob) {
   }
 
   const verifyAttempt = Number(job.uploadVerifyAttempts || 0) + 1;
+  const kind = jobKind(job);
   try {
-    const result = await runtime?.onebot.call('get_group_root_files', { group_id: Number(job.chatId) });
-    const found = matchingGroupFile(result, job, pdfPath);
+    const result = kind === 'group'
+      ? await runtime?.onebot.call('get_group_root_files', { group_id: Number(job.chatId) })
+      : await runtime?.onebot.call('get_friend_msg_history', {
+          user_id: Number(job.chatId), message_id: 0, count: 50, reverse_order: true
+        });
+    const found = kind === 'group'
+      ? matchingGroupFile(result, job, pdfPath)
+      : matchingPrivateFile(result, job, pdfPath);
     if (found) {
-      completeUpload(job, 'group-file-check', responseFileId(found));
-      console.info(`[jmcomic] 已通过群文件列表确认上传完成（${job.id}）`);
+      completeUpload(job, kind === 'group' ? 'group-file-check' : 'private-history-check', responseFileId(found));
+      console.info(`[jmcomic] 已通过${kind === 'group' ? '群文件列表' : '好友消息历史'}确认上传完成（${job.id}）`);
       return;
     }
   } catch (error) {
@@ -487,9 +511,10 @@ async function uploadUncertainStage(job: JmJob) {
     return;
   }
 
-  const message = `连续 ${verifyAttempt} 次未在群文件中确认到 ${job.comicId}.pdf；为避免重复发送，未自动重传`;
+  const surface = kind === 'group' ? '群文件' : '私聊历史';
+  const message = `连续 ${verifyAttempt} 次未在${surface}中确认到 ${job.comicId}.pdf；为避免重复发送，未自动重传`;
   updateJob(job, { status: 'failed', uploadVerifyAttempts: verifyAttempt, lastError: message, failedAt: Date.now(), nextAttemptAt: null });
-  await sendStatus(job, `⚠️ ${message}，请先检查群文件后再决定是否重新提交。`);
+  await sendStatus(job, `⚠️ ${message}，请检查${surface}后再决定是否重新提交。`);
 }
 
 function nextRunnableJob() {

@@ -37,6 +37,12 @@ fs.writeFileSync(JOBS_FILE, JSON.stringify({
       chatId: '123', chatKey: 'group:123', status: 'uploading', downloadAttempts: 1,
       uploadAttempts: 1, pdfPath: PDF, lastError: '', nextAttemptAt: NOW - 1,
       createdAt: NOW - 2000, updatedAt: NOW - 1000, uploadStartedAt: NOW - 1000
+    },
+    {
+      id: 'private-found', key: 'u:444', comicId: '444', requesterId: 'u', kind: 'private',
+      chatId: '456', chatKey: 'private:456', status: 'uploading', downloadAttempts: 1,
+      uploadAttempts: 1, pdfPath: PDF, lastError: '', nextAttemptAt: NOW - 1,
+      createdAt: NOW - 2000, updatedAt: NOW - 1000, uploadStartedAt: NOW - 1000
     }
   ]
 }, null, 2), 'utf8');
@@ -84,6 +90,14 @@ const runtime = {
           folders: []
         };
       }
+      if (action === 'get_friend_msg_history') {
+        return {
+          messages: [{
+            message_type: 'private',
+            message: [{ type: 'file', data: { file_id: 'file-444', name: '444.pdf', file_size: pdfSize } }]
+          }]
+        };
+      }
       throw new Error(`unexpected action: ${action}`);
     }
   },
@@ -121,6 +135,7 @@ try {
   const verifiedFresh = saved.find((job) => job.id === 'fresh-timeout');
   const verifiedRestart = saved.find((job) => job.id === 'restart-found');
   const absentRestart = saved.find((job) => job.id === 'restart-absent');
+  const verifiedPrivate = saved.find((job) => job.id === 'private-found');
   ok('超时任务在群文件列表命中后完成，且没有第二次上传',
     verifiedFresh?.status === 'completed' && verifiedFresh?.completionSource === 'group-file-check' &&
       verifiedFresh?.uploadedFileId === 'file-111' &&
@@ -134,6 +149,11 @@ try {
     absentRestart?.status === 'upload_uncertain' && absentRestart?.uploadVerifyAttempts === 1 &&
       calls.filter((call) => call.action === 'upload_group_file').length === 1,
     JSON.stringify(absentRestart));
+  ok('私聊上传结果未知时查询好友历史，命中文件段后完成而不是发送误报警告',
+    verifiedPrivate?.status === 'completed' && verifiedPrivate?.completionSource === 'private-history-check' &&
+      verifiedPrivate?.uploadedFileId === 'file-444' &&
+      calls.filter((call) => call.action === 'get_friend_msg_history').length === 1,
+    JSON.stringify({ verifiedPrivate, calls }));
   ok('第二轮核验按 60 秒退避排定',
     timers.some((timer) => timer.active && timer.ms === 60_000),
     `timers=${JSON.stringify(timers.map(({ ms, active }) => ({ ms, active })))}`);
