@@ -15,7 +15,8 @@ export const configRoutes: Route[] = [
     async handle(ctx, req) {
       const patch = await readBody(req);
       const config = ctx.applyConfigPatch(patch);
-      return { status: 200, body: { ok: true, config } };
+      // 保存响应同 GET /api/config 一样必须脱敏；否则新增的热搜 Key 会在浏览器响应里回显。
+      return { status: 200, body: { ok: true, config: ctx.sanitizeConfig(config) } };
     },
   },
 ];

@@ -27,7 +27,8 @@ const { getConfig } = await load('core/config.js');
 // 手工登记的 id 清单。表里加一个任务是个**有意的动作**，必须同步登记到这里。
 const EXPECTED_IDS = [
   'proactive.bubble', 'compact.sweep', 'price.feed',
-  'jmcomic.cleanup', 'jmcomic.worker', 'transcription.worker', 'onebot.reconnect'
+  'jmcomic.cleanup', 'jmcomic.worker', 'transcription.worker', 'onebot.reconnect',
+  'hot-search.daily-broadcast'
 ];
 
 // 只含局部计时器的文件（附录 B 里那 17 处的宿主）。它们**不许**作为任何一行的 owner——
@@ -40,13 +41,14 @@ const LOCALTIMER_ONLY_FILES = [
   'src/media/safe-fetch.ts',              // DNS 解析超时
   'src/web/app.ts',                       // 启动期端口轮询的等待间隔（SnowLuma 就绪探测）
   'src/web/onebot/snowluma.ts',           // 端口探活 socket 超时（从 app.ts 搬出，行为不变）
+  'src/web/runtime/hot-search/api-client.ts', // 单次 ApiZero 请求的 8 秒超时
   'src/web/routes/chats.ts',              // getChatName 3s 兜底
   'src/agent/runtime/wake-scheduler.ts',  // 唤醒防抖 / 等待窗口 / 限速等待
   'electron/main.js'                      // 窗口加载前 2s 延时
 ];
 
 const ids = LONG_TERM_TASKS.map((t) => t.id).sort();
-ok('任务表恰好是这 7 个 id（不多不少）',
+ok('任务表恰好是这 8 个 id（不多不少）',
   ids.length === EXPECTED_IDS.length && ids.every((id, i) => id === [...EXPECTED_IDS].sort()[i]),
   `表里是 ${ids.join('、')}；清单是 ${[...EXPECTED_IDS].sort().join('、')}`);
 
@@ -59,7 +61,8 @@ ok('每行都写了 label 与 note（这张表的价值就在 note 说清了"为
 // `setInterval(` / `setTimeout(`（排除 `ReturnType<typeof setTimeout>` 这类纯类型行）。
 const schedulesIn = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8')
   .split(/\r?\n/)
-  .filter((line) => /set(?:Interval|Timeout)\(/.test(line) && !/ReturnType<typeof setTimeout>/.test(line))
+  .filter((line) => (/set(?:Interval|Timeout)\(/.test(line) || /cron\.schedule\(/.test(line))
+    && !/ReturnType<typeof setTimeout>/.test(line))
   .length;
 
 const ownerProblems = LONG_TERM_TASKS.filter((t) =>
@@ -136,10 +139,12 @@ ok('onebot 的重连调度只有一处，且句柄被存进 #reconnectTimer（S1
 const { Orchestrator } = await load('agent/runtime/orchestrator.js');
 const { OneBotClient } = await load('qq/onebot.js');
 const { VideoTranscriptionQueue } = await load('media/video-transcription.js');
+const { HotSearchScheduler } = await load('web/runtime/hot-search/scheduler.js');
 const RESOLVERS = {
   Orchestrator: () => Orchestrator.prototype,
   OneBotClient: () => OneBotClient.prototype,
   VideoTranscriptionQueue: () => VideoTranscriptionQueue.prototype,
+  HotSearchScheduler: () => HotSearchScheduler.prototype,
   'price-feed': () => priceFeed,
   jmcomic: () => jmcomic
 };

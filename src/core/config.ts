@@ -126,6 +126,19 @@ export const DEFAULT_CONFIG = {
   allow: { groups: [], private: [] },
   deny: { groups: [], private: [] },
   allowAllWhenEmpty: false,
+  // 每日全网热搜播报。API Key 可留空：运行时先读这里，再回退 HOT_SEARCH_API_KEY；
+  // 两者都没有时按极数本源文档走匿名额度。目标群在执行时还会与 allow.groups 再取交集。
+  hotSearchEnabled: false,
+  hotSearchApiKey: '',
+  hotSearchCron: '0 9 * * *',
+  hotSearchTimezone: 'Asia/Shanghai',
+  hotSearchTargetGroupIds: [],
+  hotSearchItemLimit: 10,
+  hotSearchPlatformFilter: [],
+  hotSearchIncludeLinks: false,
+  // 状态文件 data/hot-search-state.json 是任务状态的完整事实源；这里仅镜像最近成功日期，
+  // 兼容配置备份/迁移，并让重启后的“当天只成功播报一次”有第二道持久化保险。
+  hotSearchLastSuccessDate: '',
   // 运行节奏
   wakeDelayMs: 2000,        // 空闲时收到消息到发起运行的防抖窗口（等连发聚成一批）
   drainDelayMs: 1200,       // 一次运行结束后发现还有未读，到下一次运行的间隔
@@ -293,11 +306,15 @@ export const DEFAULT_CONFIG = {
   }
 };
 
-export type AppConfig = Omit<typeof DEFAULT_CONFIG, 'providers' | 'dshProviderKeys' | 'store' | 'digest' | 'memory'> & {
+export type AppConfig = Omit<typeof DEFAULT_CONFIG,
+  'providers' | 'dshProviderKeys' | 'store' | 'digest' | 'memory' |
+  'hotSearchTargetGroupIds' | 'hotSearchPlatformFilter'> & {
   memberNotes?: Record<string, string>;
   modelVision?: Record<string, { providerId?: string; model?: string; verdict?: string; note?: string; httpStatus?: number | null; latencyMs?: number | null; source?: string; checkedAt?: number }>;
   dshProviderKeys: Record<string, string>;
   providers: Array<{ id: string; displayName?: string; baseURL?: string; apiKey?: string; models: string[]; [key: string]: unknown }>;
+  hotSearchTargetGroupIds: string[];
+  hotSearchPlatformFilter: string[];
   store: typeof DEFAULT_CONFIG.store & { groupSliderPos: Record<string, number> };
   digest: typeof DEFAULT_CONFIG.digest & {
     perChat: Record<string, Partial<Pick<typeof DEFAULT_CONFIG.digest, 'injectEveryRound' | 'merge' | 'maxChars'>>>;

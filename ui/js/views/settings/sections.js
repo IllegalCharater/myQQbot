@@ -294,6 +294,59 @@ export function renderAllowSection(c) {
     <div class="hint">说明：勾选后，若上方两个列表都为空，机器人会在<b>所有</b>群聊和私聊中运行；只要填了任意一项，就只按名单过滤。</div>`;
 }
 
+export function renderHotSearchSection(c) {
+  const cronMatch = String(c.hotSearchCron || '0 9 * * *').match(/^(\d{1,2}) (\d{1,2}) \* \* \*$/);
+  const time = cronMatch
+    ? `${String(cronMatch[2]).padStart(2, '0')}:${String(cronMatch[1]).padStart(2, '0')}`
+    : '09:00';
+  const selectedGroups = new Set((c.hotSearchTargetGroupIds || []).map(String));
+  const platformLabels = { weibo: '微博', zhihu: '知乎', bilibili: 'B站', tieba: '百度贴吧' };
+  const selectedPlatforms = new Set(c.hotSearchPlatformFilter || []);
+  const allowedGroups = (c.allow?.groups || []).map(String);
+  return `
+    <h3>每日热搜播报</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-hotsearch-enabled" ${c.hotSearchEnabled === true ? 'checked' : ''} />
+      <label for="cfg-hotsearch-enabled">启用每日全网热搜播报</label></div>
+    <div class="field-row">
+      <div class="field"><label>极数本源 API Key</label>
+        <input type="password" id="cfg-hotsearch-key" value="${c.hasHotSearchApiKey ? '******' : ''}"
+          placeholder="可留空匿名调用；输入新 Key 可替换" autocomplete="new-password" />
+        <div class="hint" id="hotsearch-key-hint">${c.hasHotSearchApiKey
+          ? '已配置 Key（不会返回浏览器或写入日志）'
+          : '未配置 Key：仍会尝试匿名请求，但匿名额度与 QPS 较低。也可通过 HOT_SEARCH_API_KEY 注入。'}</div>
+      </div>
+      <div class="field"><label>每日时间</label><input type="time" id="cfg-hotsearch-time" value="${esc(time)}" /></div>
+      <div class="field"><label>时区</label><input type="text" id="cfg-hotsearch-timezone" value="Asia/Shanghai" readonly /></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>目标 QQ 群（Ctrl/Command 可多选）</label>
+        <select id="cfg-hotsearch-groups" multiple size="6">
+          ${allowedGroups.map((id) => `<option value="${esc(id)}" ${selectedGroups.has(id) ? 'selected' : ''}>${esc(id)}</option>`).join('')}
+        </select>
+        <div class="hint" id="hotsearch-groups-hint">只显示当前 QQ 中存在且位于发送白名单范围内的群。</div>
+      </div>
+      <div class="field"><label>每次收录条数（3～20）</label>
+        <input type="number" id="cfg-hotsearch-limit" min="3" max="20" value="${esc(c.hotSearchItemLimit ?? 10)}" />
+        <label style="margin-top:12px">平台筛选（全不选 = 全平台）</label>
+        ${Object.entries(platformLabels).map(([id, label]) => `
+          <div class="checkbox-row"><input type="checkbox" data-hotsearch-platform="${id}" id="cfg-hotsearch-platform-${id}" ${selectedPlatforms.has(id) ? 'checked' : ''} />
+            <label for="cfg-hotsearch-platform-${id}">${label}</label></div>`).join('')}
+        <div class="checkbox-row"><input type="checkbox" id="cfg-hotsearch-links" ${c.hotSearchIncludeLinks === true ? 'checked' : ''} />
+          <label for="cfg-hotsearch-links">附带原始榜单链接（默认关闭）</label></div>
+      </div>
+    </div>
+    <div class="settings-divider"></div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn btn-small" id="hotsearch-preview-btn" type="button">立即测试拉取</button>
+      <button class="btn btn-small btn-primary" id="hotsearch-broadcast-btn" type="button">立即播报一次</button>
+      <span id="hotsearch-action-hint" class="muted"></span>
+    </div>
+    <div class="field" style="margin-top:12px"><label>最近一次任务状态</label>
+      <div id="hotsearch-status" class="hint">正在读取…</div>
+      <pre id="hotsearch-preview" style="display:none;white-space:pre-wrap;max-height:420px;overflow:auto;margin-top:10px"></pre>
+    </div>`;
+}
+
 // 表情包积极程度档位：[值, 显示名]
 export function renderDesktopSection(c) {
   return `

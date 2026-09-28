@@ -25,6 +25,8 @@ import { createIngest } from './onebot/ingest.js';
 import { createConsole } from './http/console.js';
 import { errorMessage, isRecord } from './http/http.js';
 import type { AppHandle, CreateAppOptions } from './types.js';
+import { HotSearchScheduler } from './runtime/hot-search/scheduler.js';
+import { createHotSearchAdminActions } from './runtime/hot-search/admin-actions.js';
 
 export type { AppHandle, CreateAppOptions } from './types.js';
 
@@ -82,6 +84,8 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   });
   const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log });
   const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit });
+  const hotSearchScheduler = new HotSearchScheduler({ getConfig, updateConfig, sender, log });
+  const hotSearch = createHotSearchAdminActions(hotSearchScheduler);
 
   // 长期任务一律在 start() 里启动、在 stop() 里停止（见 src/web/tasks.ts）。
   // 这里不启动任何后台任务 —— 构造对象图不该有副作用，而且真正需要它们的是
@@ -111,7 +115,7 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // `applyConfigPatch` 是"把配置变更接到组件上"（与 `start()` 同类），以依赖形式转交。
   const { server, listenOn } = createConsole({
     sseClients, store, memory, sessions, onebot, sender, stickers, orchestrator,
-    emit, snowluma, getConfig, updateConfig, applyConfigPatch, log
+    emit, snowluma, hotSearch, getConfig, updateConfig, applyConfigPatch, log
   });
 
   function applyConfigPatch(patch: unknown) {
@@ -120,6 +124,8 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
     if (next.compact?.enabled) orchestrator.startCompactLoop(); else orchestrator.stopCompactLoop();
     initPriceFeed(next.api?.priceRemoteUrl || '');
+    // 运行期配置保存只重建热搜自己的 cron 句柄；不重跑整张 LIFECYCLE（其中还有无条件任务）。
+    void hotSearchScheduler.refresh().catch((error) => log('[hot-search] 重建计划失败:', errorMessage(error)));
     // 端点（ws/http 地址与令牌）变了就重连 —— S11b 补上的缺口：以前改 snowluma.wsUrl
     // 保存之后实例还指着旧地址，必须重启应用才生效。**只在真的变了时重连**：applyEndpoint
     // 拿同一份归一化做比较，所以"保存了一次没动端点的设置"不会断连。
@@ -157,7 +163,8 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       store,
       priceFeed: { init: initPriceFeed, stop: stopPriceFeed },
       jmcomic: { init: initJmcomicQueue, stop: stopJmcomicQueue },
-      transcription: { start: () => transcription.start(), stop: () => transcription.stop() }
+      transcription: { start: () => transcription.start(), stop: () => transcription.stop() },
+      hotSearch: { start: () => hotSearchScheduler.start(), stop: () => hotSearchScheduler.stop() }
     };
   }
 

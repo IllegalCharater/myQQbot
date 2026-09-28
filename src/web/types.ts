@@ -8,6 +8,7 @@ import type { SendQueue } from '../qq/sender.js';
 import type { StickerManager } from '../stickers/sticker-manager.js';
 import type { AgentControlPort } from '../agent/runtime/control-port.js';
 import type { AppEmit } from '../core/events.js';
+import type { HotSearchAdminActions } from './runtime/hot-search/admin-actions.js';
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export type JsonHeaders = Record<string, string>;
@@ -29,6 +30,7 @@ export interface AppContext {
   stickers: StickerManager;
   orchestrator: AgentControlPort;
   emit: AppEmit;
+  hotSearch: HotSearchAdminActions;
   getConfig(): AppConfig;
   updateConfig(patch: Record<string, unknown>): AppConfig;
   launchSnowluma(): Promise<unknown>;

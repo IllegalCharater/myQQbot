@@ -168,6 +168,24 @@ export async function saveConfig({ quiet = false } = {}) {
     patch.allowAllWhenEmpty = allowAllBox ? !!allowAllBox.checked : (c.allowAllWhenEmpty === true);
   }
 
+  if (sec === 'hotsearch') {
+    const enteredKey = val('#cfg-hotsearch-key', '').trim();
+    const time = val('#cfg-hotsearch-time', '09:00');
+    const match = time.match(/^(\d{2}):(\d{2})$/);
+    const groups = [...(el('#cfg-hotsearch-groups')?.selectedOptions || [])].map((option) => option.value);
+    const platforms = [...document.querySelectorAll('[data-hotsearch-platform]')]
+      .filter((node) => node.checked)
+      .map((node) => node.dataset.hotsearchPlatform);
+    patch.hotSearchEnabled = chk('#cfg-hotsearch-enabled', c.hotSearchEnabled === true);
+    patch.hotSearchCron = match ? `${Number(match[2])} ${Number(match[1])} * * *` : '0 9 * * *';
+    patch.hotSearchTimezone = 'Asia/Shanghai';
+    patch.hotSearchTargetGroupIds = groups;
+    patch.hotSearchItemLimit = clampInt(val('#cfg-hotsearch-limit', c.hotSearchItemLimit), 3, 20, 10);
+    patch.hotSearchPlatformFilter = platforms;
+    patch.hotSearchIncludeLinks = chk('#cfg-hotsearch-links', c.hotSearchIncludeLinks === true);
+    if (enteredKey && enteredKey !== '******') patch.hotSearchApiKey = enteredKey;
+  }
+
   if (sec === 'chat') {
     patch.wakeDelayMs = Number(val('#cfg-wakedelay', c.wakeDelayMs)) || 2000;
     patch.drainDelayMs = Number(val('#cfg-draindelay', c.drainDelayMs)) || 1200;

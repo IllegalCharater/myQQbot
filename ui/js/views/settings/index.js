@@ -9,7 +9,7 @@ import { applyProviderPick, bindModelDdDismiss, renderModelColumn, renderProvide
 import { clampInt, renderChatSection, sliderDesc, sliderToTierUI, sliderToTierUI_tierToSlider } from '../../parts/chat-settings.js';
 import {
   renderAllowSection, renderApiSection, renderDesktopSection, renderMemorySettingsSection,
-  renderOnebotSection, renderPersonaSection, renderSearchSection
+  renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderSearchSection
 } from './sections.js';
 import { parseList, saveConfig } from './save.js';
 import { openBlocklistModal } from '../../parts/blocklist.js';
@@ -78,6 +78,7 @@ export function renderSettingsSidebar() {
     ['memory', '记忆'],
     ['persona', '人设'],
     ['allow', '聊天白名单'],
+    ['hotsearch', '每日热搜播报'],
     ['chat', '聊天设置'],
     ['desktop', '桌面端'],
     ['onebot', 'OneBot（SnowLuma）']
@@ -117,6 +118,7 @@ export function renderSettingsSection(c) {
     memory: () => renderMemorySettingsSection(c),
     persona: () => renderPersonaSection(c),
     allow: () => renderAllowSection(c),
+    hotsearch: () => renderHotSearchSection(c),
     chat: () => renderChatSection(c),
     desktop: () => renderDesktopSection(c),
     onebot: () => renderOnebotSection(c)
@@ -147,6 +149,73 @@ export function bindSettingsEvents(c) {
       $('#cfg-save-result').textContent = `保存失败：${e.message}`;
     }
   });
+
+  // ── 每日热搜播报 ──
+  const hotGroupSelect = $('#cfg-hotsearch-groups');
+  if (hotGroupSelect) {
+    const selected = new Set((c.hotSearchTargetGroupIds || []).map(String));
+    const allowed = new Set((c.allow?.groups || []).map(String));
+    api('/api/onebot/groups').then((data) => {
+      const groups = (data.groups || []).filter((group) => allowed.size === 0
+        ? c.allowAllWhenEmpty === true
+        : allowed.has(String(group.id)));
+      hotGroupSelect.innerHTML = groups.length
+        ? groups.map((group) => `<option value="${esc(group.id)}" ${selected.has(String(group.id)) ? 'selected' : ''}>${esc(group.name)}（${esc(group.id)}）</option>`).join('')
+        : '<option value="" disabled>（没有可用的白名单群）</option>';
+      const hint = $('#hotsearch-groups-hint');
+      if (hint) hint.textContent = groups.length
+        ? `可选 ${groups.length} 个当前存在且在发送白名单范围内的群。`
+        : '没有可选目标群：请先在“聊天白名单”中加入群，并确认机器人仍在该群。';
+    }).catch((error) => {
+      const hint = $('#hotsearch-groups-hint');
+      if (hint) hint.textContent = `群列表读取失败，暂按白名单群号显示：${error.message}`;
+    });
+
+    const renderHotStatus = async () => {
+      const box = $('#hotsearch-status');
+      if (!box) return;
+      try {
+        const result = await api('/api/hot-search/status');
+        const status = result.status || {};
+        const labels = { idle: '尚未运行', running: '运行中', success: '成功', failed: '失败', skipped: '已跳过' };
+        const when = status.updatedAt ? new Date(status.updatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—';
+        const next = status.nextRunAt ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未排定';
+        const auth = status.hasApiKey ? 'API Key' : '匿名额度';
+        box.textContent = `${labels[status.status] || status.status || '未知'} · 鉴权：${auth} · 时间：${when} · 条数：${status.itemCount || 0} · 目标群：${status.targetCount || 0} · 下次：${next}${status.error ? ` · ${status.error}` : ''}`;
+      } catch (error) { box.textContent = `状态读取失败：${error.message}`; }
+    };
+    renderHotStatus();
+
+    $('#hotsearch-preview-btn')?.addEventListener('click', async () => {
+      const hint = $('#hotsearch-action-hint');
+      const preview = $('#hotsearch-preview');
+      if (hint) hint.textContent = '正在拉取…';
+      try {
+        await saveConfig({ quiet: true });
+        const result = await api('/api/hot-search/preview', { method: 'POST', body: '{}' });
+        if (preview) {
+          preview.style.display = '';
+          preview.textContent = (result.preview?.pages || []).join('\n\n────────\n\n');
+        }
+        if (hint) hint.textContent = `拉取成功：${result.preview?.itemCount || 0} 条，仅预览，未发送。`;
+      } catch (error) { if (hint) hint.textContent = `拉取失败：${error.message}`; }
+      await renderHotStatus();
+    });
+
+    $('#hotsearch-broadcast-btn')?.addEventListener('click', async () => {
+      const chosen = [...hotGroupSelect.selectedOptions].filter((option) => option.value);
+      const hint = $('#hotsearch-action-hint');
+      if (!chosen.length) { if (hint) hint.textContent = '请至少选择一个目标群。'; return; }
+      if (!confirm(`确定立即向当前配置的 ${chosen.length} 个目标群播报一次热搜吗？`)) return;
+      if (hint) hint.textContent = '正在播报…';
+      try {
+        await saveConfig({ quiet: true });
+        const result = await api('/api/hot-search/broadcast', { method: 'POST', body: '{}' });
+        if (hint) hint.textContent = `播报完成：${result.result?.itemCount || 0} 条，${result.result?.sentGroupIds?.length || 0} 个群。`;
+      } catch (error) { if (hint) hint.textContent = `播报失败：${error.message}`; }
+      await renderHotStatus();
+    });
+  }
 
   // 搜索提供方切换
   const searchProviderSel = $('#cfg-searchprovider');

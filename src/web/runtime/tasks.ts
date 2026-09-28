@@ -43,9 +43,9 @@ export interface TaskEntry {
   /**
    * 承载这个名字的对象：
    * - `'Orchestrator'` / `'OneBotClient'` → 类方法，套件在原型或真实例上解析；
-   * - `'price-feed'` / `'jmcomic'` → 模块导出；`VideoTranscriptionQueue` → 类方法。
+   * - `'price-feed'` / `'jmcomic'` → 模块导出；其余名字 → 类方法。
    */
-  on: 'Orchestrator' | 'OneBotClient' | 'VideoTranscriptionQueue' | 'price-feed' | 'jmcomic';
+  on: 'Orchestrator' | 'OneBotClient' | 'VideoTranscriptionQueue' | 'HotSearchScheduler' | 'price-feed' | 'jmcomic';
   kind: 'method' | 'export';
   name: string;
 }
@@ -88,12 +88,26 @@ export interface LongTermTask {
 }
 
 /**
- * 7 个长期任务（原有 6 个 + 视频转写 worker）。**不含** `wake.debounce`：那是每会话的唤醒防抖，按 §6.1 的分界线
+ * 8 个长期任务（原有 6 个 + 视频转写 worker + 每日热搜播报）。**不含** `wake.debounce`：那是每会话的唤醒防抖，按 §6.1 的分界线
  * （生命周期是否长于一次请求或一次会话）属于局部计时器，`tests/t-tasks.mjs` 有一条
  * 反向断言专门钉它不在表内——设计稿 §6.3 的表里把它列为第 7 行"排除"是清点时的写法，
  * 不是表的一行。
  */
 export const LONG_TERM_TASKS: LongTermTask[] = [
+  {
+    id: 'hot-search.daily-broadcast',
+    owner: 'src/web/runtime/hot-search/scheduler.ts',
+    label: '每日全网热搜播报（Asia/Shanghai cron）',
+    enabledBy: { path: 'hotSearchEnabled', kind: 'boolean' },
+    configRefresh: 'on-apply',
+    unref: true,
+    start: { on: 'HotSearchScheduler', kind: 'method', name: 'start' },
+    stop: { on: 'HotSearchScheduler', kind: 'method', name: 'stop' },
+    stopCancelsPending: true,
+    conformance: 'full',
+    note: 'node-cron 句柄由 HotSearchScheduler 私有持有，stop() 会 destroy 未来计划并等待在途播报收尾；' +
+      '配置保存经 applyConfigPatch → refresh() 原地重建。定时器 unref，不会单独钉住进程。'
+  },
   {
     id: 'proactive.bubble',
     owner: 'src/agent/maintenance/proactive-controller.ts',

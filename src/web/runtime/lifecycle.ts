@@ -19,7 +19,7 @@
 // 能力（connect/close、两个巡检、价格表、jmcomic 队列、视频转写）**全部由 `deps` 递进来**，本文件里
 // 对下层模块只有 `import type`（编译期擦除，`dist/web/lifecycle.js` 不 require 任何下层模块）。
 // 这不只是为了好看：只有这样，"顺序"才是一个能在假 `deps` 上被**逐条观察**到的性质
-// （§9.3 的 spy 断言），否则六个 entry 里有一半只能靠"把代码读一遍"来确认。真正把模块函数
+// （§9.3 的 spy 断言），否则这些 entry 里有一半只能靠"把代码读一遍"来确认。真正把模块函数
 // 递进来的地方是 `app.ts` 的 `lifecycleDeps()`——**"装的是什么"在 app，"按什么顺序装"在这里**。
 //
 // ⚠️ 顺序即语义，两条都是结构性质而非约定：
@@ -43,7 +43,7 @@ export interface LifecycleJmRuntime {
 
 /**
  * 清单要的全部能力。**每一项都必须能在假对象上替换**——套件就是靠这个数组之外的一层
- * 把六个 entry 的调用顺序逐条记下来的（否则价格表与 jmcomic 是直接 import 的单例，
+ * 把每个 entry 的调用顺序逐条记下来的（否则价格表与 jmcomic 是直接 import 的单例，
  * 顺序只能靠读代码）。所以这里只放**最少必要**的方法，不放整个类。
  */
 export interface LifecycleDeps {
@@ -63,6 +63,7 @@ export interface LifecycleDeps {
   priceFeed: { init(url: string): void; stop(): void };
   jmcomic: { init(runtime: LifecycleJmRuntime): void; stop(): void };
   transcription: { start(): void | Promise<void>; stop(): void | Promise<void> };
+  hotSearch: { start(): void | Promise<void>; stop(): void | Promise<void> };
 }
 
 export interface LifecycleEntry {
@@ -106,6 +107,14 @@ export const LIFECYCLE: readonly LifecycleEntry[] = [
     enabled: ALWAYS,
     start: (deps) => deps.onebot.connect(),
     stop: (deps) => deps.onebot.close()
+  },
+  {
+    // 管理器始终装配；是否真的建立 cron 由入口现读 enabled、每日表达式与合法目标群决定。
+    // 它排在 onebot 之后，因此逆序停止时会先销毁计划/等在途播报收尾，再关闭 QQ 传输层。
+    ids: ['hot-search.daily-broadcast'],
+    enabled: ALWAYS,
+    start: (deps) => deps.hotSearch.start(),
+    stop: (deps) => deps.hotSearch.stop()
   },
   {
     ids: ['proactive.bubble'],

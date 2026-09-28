@@ -34,6 +34,7 @@ import { routes } from '../routes/index.js';
 import { buildUsageBreakdown, buildUsageStats } from '../usage-service.js';
 import { errorMessage, isRecord, writeReply } from './http.js';
 import type { SnowlumaController } from '../onebot/snowluma.js';
+import type { HotSearchAdminActions } from '../runtime/hot-search/admin-actions.js';
 
 export interface ConsoleDeps {
   /** SSE 客户端集合由组装根持有（`emit` 闭包要往同一个集合里广播），这里只借用。 */
@@ -47,6 +48,7 @@ export interface ConsoleDeps {
   orchestrator: AgentControlPort;
   emit: AppEmit;
   snowluma: SnowlumaController;
+  hotSearch: HotSearchAdminActions;
   getConfig: () => AppConfig;
   updateConfig: (patch: Record<string, unknown>) => AppConfig;
   /** 组装根的实现（见文件头注释：它属于组装根职责，这里只做转交）。 */
@@ -66,7 +68,7 @@ export interface Console {
 export function createConsole(deps: ConsoleDeps): Console {
   const {
     sseClients, store, memory, sessions, onebot, sender, stickers, orchestrator,
-    emit, snowluma, getConfig, updateConfig, applyConfigPatch, log
+    emit, snowluma, hotSearch, getConfig, updateConfig, applyConfigPatch, log
   } = deps;
 
   const server = http.createServer((req, res) => {
@@ -130,6 +132,9 @@ export function createConsole(deps: ConsoleDeps): Console {
       }
     };
     walk(out);
+
+    // 热搜 Key 还支持 systemd 环境变量。只回显“是否存在”，绝不把环境变量值带进配置响应。
+    out.hasHotSearchApiKey = Boolean(String(cfg.hotSearchApiKey || process.env.HOT_SEARCH_API_KEY || '').trim());
 
     // 密钥集合整体清空（不逐 key 暴露存在性）
     if (isRecord(out.dshProviderKeys)) {
@@ -201,7 +206,7 @@ export function createConsole(deps: ConsoleDeps): Console {
       if (!authorize(req)) return json(res, 401, { error: '未授权' });
       const method = req.method;
       const routed = await dispatchRoute(routes, {
-        store, memory, sessions, onebot, sender, stickers, orchestrator, emit,
+        store, memory, sessions, onebot, sender, stickers, orchestrator, emit, hotSearch,
         getConfig, updateConfig, buildUsageStats, buildUsageBreakdown,
         sanitizeConfig, applyConfigPatch, buildStatus,
         launchSnowluma: () => snowluma.launch(),

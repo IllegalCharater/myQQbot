@@ -151,7 +151,7 @@ ok('每个 id 恰好被一条 entry 覆盖（无重复）',
   ' —— 重复意味着同一次 initialize 被调两遍');
 
 // enabled 闸门与描述表的 `enabledBy` 行为等价：两条布尔任务跟着真配置翻转，
-// 其余四条恒真（它们的判定在各模块内部，见 lifecycle.ts 的 ALWAYS 注释）。
+// 其余五条恒真（它们的判定在各模块内部，见 lifecycle.ts 的 ALWAYS 注释）。
 const { getConfig, updateConfig } = await load('core/config.js');
 const entryFor = (id) => LIFECYCLE.find((e) => e.ids.includes(id));
 const restore = getConfig();
@@ -168,8 +168,8 @@ ok('proactive.bubble / compact.sweep 的 enabled 跟着真配置的点分路径�
   && entryFor('proactive.bubble').enabled(cfgB) === false && entryFor('compact.sweep').enabled(cfgB) === true,
   `proactive=${entryFor('proactive.bubble').enabled(cfgA)}/${entryFor('proactive.bubble').enabled(cfgB)} ` +
   `compact=${entryFor('compact.sweep').enabled(cfgA)}/${entryFor('compact.sweep').enabled(cfgB)}`);
-const alwaysIds = ['onebot.reconnect', 'price.feed', 'jmcomic.cleanup', 'transcription.worker'];
-ok('其余四条恒真（开关留在入口内部：转写入口自行校验 enabled/config，jmcomic 无配置依赖）',
+const alwaysIds = ['onebot.reconnect', 'hot-search.daily-broadcast', 'price.feed', 'jmcomic.cleanup', 'transcription.worker'];
+ok('其余五条恒真（开关留在入口内部：热搜/转写入口自行校验配置，jmcomic 无配置依赖）',
   alwaysIds.every((id) => entryFor(id).enabled(cfgA) === true && entryFor(id).enabled(cfgB) === true),
   alwaysIds.filter((id) => entryFor(id).enabled(cfgA) !== true).join(',') || '（都恒真）');
 updateConfig({ proactive: { enabled: previous.proactive }, compact: { enabled: previous.compact } });
@@ -182,13 +182,14 @@ ok('lifecycle.ts 不 import tasks.ts（id 两边各写一份，一致性由本�
 
 // ── 3. 接线：app.start() / app.stop() 真的走清单，停止是逆序（S11c）──
 // 两件事分开守，理由同 S10a：
-//   • **顺序**是纯逻辑，用假 deps 逐条观察（五个 entry 全部经由 deps 调用，见 lifecycle.ts 的
+//   • **顺序**是纯逻辑，用假 deps 逐条观察（全部 entry 都经由 deps 调用，见 lifecycle.ts 的
 //     设计说明——哪怕代价是 deps 拿的是整个 onebot 实例）；
 //   • **接线**是"app 里到底调没调 startLifecycle"，模块级测试证明不了，只能扫函数体文本。
 
 // 期望序列是**手写的**，不从 LIFECYCLE 推——从清单推等于自己验自己（t-tasks 的 EXPECTED_IDS 同理）。
 const EXPECTED_ENTRY_IDS = [
   ['onebot.reconnect'],
+  ['hot-search.daily-broadcast'],
   ['proactive.bubble'],
   ['compact.sweep'],
   ['price.feed'],
@@ -202,8 +203,8 @@ ok('手工登记的序列长度与清单一致（新增 entry 必须同步登记
   EXPECTED_ENTRY_IDS.length === LIFECYCLE.length,
   `清单 ${LIFECYCLE.length} 条、登记 ${EXPECTED_ENTRY_IDS.length} 条`);
 
-const EXPECTED_START = ['onebot.connect', 'proactive.start', 'compact.start', 'priceFeed.init', 'jmcomic.init', 'transcription.start'];
-const EXPECTED_STOP = ['transcription.stop', 'jmcomic.stop', 'priceFeed.stop', 'compact.stop', 'proactive.stop', 'onebot.close'];
+const EXPECTED_START = ['onebot.connect', 'hotSearch.start', 'proactive.start', 'compact.start', 'priceFeed.init', 'jmcomic.init', 'transcription.start'];
+const EXPECTED_STOP = ['transcription.stop', 'jmcomic.stop', 'priceFeed.stop', 'compact.stop', 'proactive.stop', 'hotSearch.stop', 'onebot.close'];
 
 function spyDeps(config, seq) {
   return {
@@ -226,7 +227,8 @@ function spyDeps(config, seq) {
     // 下面那条"spy ⇄ lifecycle.ts 结构对账"就是为这类静默中止加的：它把运行期崩溃
     // 变成一条普通的红。标号与属性名统一用 `jmcomic.init`，与 `priceFeed.init` 同形。
     jmcomic: { init: () => seq.push('jmcomic.init'), stop: () => seq.push('jmcomic.stop') },
-    transcription: { start: () => seq.push('transcription.start'), stop: () => seq.push('transcription.stop') }
+    transcription: { start: () => seq.push('transcription.start'), stop: () => seq.push('transcription.stop') },
+    hotSearch: { start: () => seq.push('hotSearch.start'), stop: () => seq.push('hotSearch.stop') }
   };
 }
 
@@ -262,7 +264,7 @@ ok('spy deps 与 lifecycle.ts 真正读的 `deps.*` 逐一对得上（写错属�
 const allOn = { proactive: { enabled: true }, compact: { enabled: true }, api: { priceRemoteUrl: 'http://x/p.json' } };
 const seq = [];
 await startLifecycle(spyDeps(allOn, seq));
-ok('startLifecycle 按清单顺序启动（connect → 冒泡 → 压缩 → 价格表 → jmcomic → 转写）',
+ok('startLifecycle 按清单顺序启动（connect → 热搜 → 冒泡 → 压缩 → 价格表 → jmcomic → 转写）',
   JSON.stringify(seq) === JSON.stringify(EXPECTED_START),
   `实际 ${JSON.stringify(seq)}`);
 ok('全开时每一条 entry 都真的被调用（不是"顺序对但漏了谁"）',
@@ -279,8 +281,8 @@ ok('onebot.close() 是逆序里最后一个（"停长期任务排在 onebot.clos
 
 const seqOff = [];
 await startLifecycle(spyDeps({ proactive: { enabled: false }, compact: { enabled: false }, api: {} }, seqOff));
-ok('闸门关着的那两条不进启动序列，恒真的四条照常',
-  JSON.stringify(seqOff) === JSON.stringify(['onebot.connect', 'priceFeed.init(空 URL)', 'jmcomic.init', 'transcription.start']),
+ok('闸门关着的那两条不进启动序列，恒真的五条照常',
+  JSON.stringify(seqOff) === JSON.stringify(['onebot.connect', 'hotSearch.start', 'priceFeed.init(空 URL)', 'jmcomic.init', 'transcription.start']),
   `实际 ${JSON.stringify(seqOff)}`);
 
 // 接线事实（文本）。函数体按 `\n  }` 收尾切：start/stop 都嵌在 createApp 里，本体缩进更深。
@@ -315,7 +317,7 @@ const moduleEntryNames = (owner) => LONG_TERM_TASKS
 const DEPS_NAMES = [
   ...moduleEntryNames('price-feed'),
   ...moduleEntryNames('jmcomic'),
-  'getConfig', 'onebot', 'orchestrator', 'transcription'
+  'getConfig', 'onebot', 'orchestrator', 'transcription', 'hotSearch'
 ];
 const missingDeps = [...new Set(DEPS_NAMES)].filter((name) => !new RegExp(`\\b${name}\\b`).test(depsBody));
 ok('deps 里递的是真模块，且用的是描述表里的名字（假 deps 的模块级测试证明不了这一点）',
