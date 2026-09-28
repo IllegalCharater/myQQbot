@@ -9,7 +9,8 @@ import { applyProviderPick, bindModelDdDismiss, renderModelColumn, renderProvide
 import { clampInt, renderChatSection, sliderDesc, sliderToTierUI, sliderToTierUI_tierToSlider } from '../../parts/chat-settings.js';
 import {
   renderAllowSection, renderApiSection, renderDesktopSection, renderMemorySettingsSection,
-  renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderSearchSection
+  renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderSearchSection,
+  renderTranscriptionSection
 } from './sections.js';
 import { parseList, saveConfig } from './save.js';
 import { openBlocklistModal } from '../../parts/blocklist.js';
@@ -79,6 +80,7 @@ export function renderSettingsSidebar() {
     ['persona', '人设'],
     ['allow', '聊天白名单'],
     ['hotsearch', '每日热搜播报'],
+    ['transcription', '音视频转写'],
     ['chat', '聊天设置'],
     ['desktop', '桌面端'],
     ['onebot', 'OneBot（SnowLuma）']
@@ -119,6 +121,7 @@ export function renderSettingsSection(c) {
     persona: () => renderPersonaSection(c),
     allow: () => renderAllowSection(c),
     hotsearch: () => renderHotSearchSection(c),
+    transcription: () => renderTranscriptionSection(c),
     chat: () => renderChatSection(c),
     desktop: () => renderDesktopSection(c),
     onebot: () => renderOnebotSection(c)

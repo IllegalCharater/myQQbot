@@ -347,6 +347,62 @@ export function renderHotSearchSection(c) {
     </div>`;
 }
 
+export function renderTranscriptionSection(c) {
+  const t = c.transcription || {};
+  const mib = 1024 * 1024;
+  const enabled = t.enabledFromEnvironment ? t.effectiveEnabled === true : t.enabled === true;
+  const appIdHint = t.appIdFromEnvironment
+    ? '当前由环境变量 TENCENTCLOUD_APP_ID 提供；在这里填写会改为配置文件优先。'
+    : (t.hasAppId ? 'AppID 已配置。' : '未配置 AppID。');
+  const credentialHint = t.hasSecretId && t.hasSecretKey
+    ? `腾讯云凭证已配置${t.secretIdFromEnvironment || t.secretKeyFromEnvironment ? '（至少一项来自环境变量）' : '（保存在服务端配置中）'}；浏览器不会读取原值。`
+    : '腾讯云凭证尚未完整配置；可以在这里输入新值，或使用 TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY。';
+  return `
+    <h3>音视频转写</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-transcription-enabled" ${enabled ? 'checked' : ''} ${t.enabledFromEnvironment ? 'disabled' : ''} />
+      <label for="cfg-transcription-enabled">启用 QQ 命令 <code>/转写 &lt;视频URL&gt;</code></label></div>
+    <div class="hint" style="margin-bottom:10px">${t.enabledFromEnvironment
+      ? `启用状态由环境变量 QQ_AGENT_TRANSCRIPTION_ENABLED 固定为“${enabled ? '启用' : '停用'}”；如需页面控制，请先移除该环境变量并重启。`
+      : '保存后新入队的任务读取最新配置。FFmpeg 路径发生变化后建议重启服务，以重新执行启动可用性检查。'}</div>
+
+    <h3>腾讯云录音文件识别极速版</h3>
+    <div class="field-row">
+      <div class="field"><label>腾讯云 AppID</label>
+        <input type="text" id="cfg-transcription-appid" inputmode="numeric" value="${esc(t.appId || '')}"
+          placeholder="${t.appIdFromEnvironment ? '已由环境变量提供；留空保持' : '纯数字 AppID'}" />
+        <div class="hint">${esc(appIdHint)}</div></div>
+      <div class="field"><label>识别引擎</label>
+        <input type="text" id="cfg-transcription-engine" value="${esc(t.engineType || '16k_zh')}" placeholder="16k_zh" />
+        <div class="hint">默认 <code>16k_zh</code>：16k 中文普通话。</div></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>SecretId</label>
+        <input type="password" id="cfg-transcription-secretid" value="${t.hasSecretId ? '******' : ''}"
+          placeholder="输入新 SecretId；留空或保持掩码则不修改" autocomplete="new-password" /></div>
+      <div class="field"><label>SecretKey</label>
+        <input type="password" id="cfg-transcription-secretkey" value="${t.hasSecretKey ? '******' : ''}"
+          placeholder="输入新 SecretKey；留空或保持掩码则不修改" autocomplete="new-password" /></div>
+    </div>
+    <div class="hint">${esc(credentialHint)} 输入框是只写的，不提供“显示原密钥”。</div>
+
+    <h3>本地处理与限制</h3>
+    <div class="field"><label>FFmpeg 可执行文件</label>
+      <input type="text" id="cfg-transcription-ffmpeg" value="${esc(t.ffmpegPath || 'ffmpeg')}" placeholder="/usr/bin/ffmpeg" />
+      <div class="hint">必须包含 <code>libmp3lame</code> 编码器；用户 URL 始终通过本地安全代理传给 FFmpeg。</div></div>
+    <div class="field-row">
+      <div class="field"><label>FFmpeg 总超时（毫秒）</label><input type="number" id="cfg-transcription-ffmpeg-timeout" min="10000" max="10800000" step="1000" value="${esc(t.ffmpegTimeoutMs ?? 900000)}" /></div>
+      <div class="field"><label>腾讯云请求总超时（毫秒）</label><input type="number" id="cfg-transcription-flash-timeout" min="10000" max="1800000" step="1000" value="${esc(t.flashTimeoutMs ?? 300000)}" /></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>最长音视频时长（秒，最高 7200）</label><input type="number" id="cfg-transcription-max-duration" min="1" max="7200" value="${esc(t.maxDurationSeconds ?? 7200)}" /></div>
+      <div class="field"><label>最大临时 MP3（MiB，最高 100）</label><input type="number" id="cfg-transcription-max-audio-mib" min="1" max="100" value="${esc(Math.round(Number(t.maxAudioBytes || 100 * mib) / mib))}" /></div>
+      <div class="field"><label>最大源数据流量（MiB）</label><input type="number" id="cfg-transcription-max-source-mib" min="1" max="1024" value="${esc(Math.round(Number(t.maxSourceBytes || 256 * mib) / mib))}" /></div>
+    </div>
+    <div class="field"><label>QQ 内直接回复的最大字符数（200～4000）</label>
+      <input type="number" id="cfg-transcription-result-chars" min="200" max="4000" value="${esc(t.resultMaxChars ?? 3500)}" />
+      <div class="hint">超过后会截断消息，并尝试把完整 UTF-8 文本作为文件发送。</div></div>`;
+}
+
 // 表情包积极程度档位：[值, 显示名]
 export function renderDesktopSection(c) {
   return `

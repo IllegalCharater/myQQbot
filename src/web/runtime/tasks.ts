@@ -96,7 +96,7 @@ export interface LongTermTask {
 export const LONG_TERM_TASKS: LongTermTask[] = [
   {
     id: 'hot-search.daily-broadcast',
-    owner: 'src/web/runtime/hot-search/scheduler.ts',
+    owner: 'src/media/hot-search/scheduler.ts',
     label: '每日全网热搜播报（Asia/Shanghai cron）',
     enabledBy: { path: 'hotSearchEnabled', kind: 'boolean' },
     configRefresh: 'on-apply',

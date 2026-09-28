@@ -1,8 +1,7 @@
 import path from 'node:path';
 import cron, { type ScheduledTask } from 'node-cron';
-import type { AppConfig } from '../../../core/config.js';
-import { DATA_DIR } from '../../../core/paths.js';
-import type { SendQueue } from '../../../qq/sender.js';
+import type { AppConfig } from '../../core/config.js';
+import { DATA_DIR } from '../../core/paths.js';
 import { fetchHotSearch, sanitizeHotSearchError } from './api-client.js';
 import { normalizeHotSearchResponse } from './normalize.js';
 import { dedupeHotSearchItems } from './dedupe.js';
@@ -18,7 +17,9 @@ const DEFAULT_CRON = '0 9 * * *';
 interface SchedulerDependencies {
   getConfig(): AppConfig;
   updateConfig(patch: Record<string, unknown>): AppConfig;
-  sender: Pick<SendQueue, 'sendTextBatch'>;
+  sender: {
+    sendTextBatch(chatKey: string, texts: string[]): Promise<unknown>;
+  };
   log?: (...args: unknown[]) => void;
   stateStore?: HotSearchStateStore;
   fetchFeed?: typeof fetchHotSearch;

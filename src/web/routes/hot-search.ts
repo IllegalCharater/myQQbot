@@ -1,4 +1,4 @@
-import { sanitizeHotSearchError } from '../runtime/hot-search/api-client.js';
+import { sanitizeHotSearchError } from '../../media/hot-search/api-client.js';
 import type { Route } from '../types.js';
 
 function errorReply(error: unknown, fallbackStatus = 502) {

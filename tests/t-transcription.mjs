@@ -248,6 +248,9 @@ try {
     response.ok && !serialized.includes('config-secret-id') && !serialized.includes('config-secret-key')
     && body.transcription?.hasSecretId === true && body.transcription?.hasSecretKey === true
     && !('secretId' in body.transcription) && !('secretKey' in body.transcription));
+  ok('控制台只返回环境变量存在性/生效状态，不泄露环境变量凭证',
+    body.transcription?.hasAppId === true && body.transcription?.effectiveEnabled === true
+    && !serialized.includes('placeholder-id') && !serialized.includes('placeholder-key'));
 } finally {
   await app.stop();
 }

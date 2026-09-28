@@ -25,8 +25,8 @@ import { createIngest } from './onebot/ingest.js';
 import { createConsole } from './http/console.js';
 import { errorMessage, isRecord } from './http/http.js';
 import type { AppHandle, CreateAppOptions } from './types.js';
-import { HotSearchScheduler } from './runtime/hot-search/scheduler.js';
-import { createHotSearchAdminActions } from './runtime/hot-search/admin-actions.js';
+import { HotSearchScheduler } from '../media/hot-search/scheduler.js';
+import { createHotSearchAdminActions } from '../media/hot-search/admin-actions.js';
 
 export type { AppHandle, CreateAppOptions } from './types.js';
 

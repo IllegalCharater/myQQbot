@@ -54,6 +54,12 @@ web
 
 `scripts/check-layers.mjs` 会检查这条规则。不要为了方便制造 `core → agent`、`chat → web` 等反向依赖。
 
+`media/` 同时承载媒体处理与 Bot 的可选扩展能力。新增这类能力时，主体实现统一放在
+`src/media/<feature>/`，按功能目录收拢；`src/web/routes/` 只保留 HTTP 管理表面，`src/web/app.ts`
+只负责依赖注入和生命周期装配。当前范例是 `src/media/hot-search/`。由于 `llm`、`chat`、`qq`、
+`media` 同属 T1，能力模块不得直接横向 import `qq/` 等同层实现；需要发送消息等能力时定义最小
+结构化端口，由 `web/app.ts` 注入真实对象。
+
 `agent/` 内部必须按职责落进子目录，根目录不得平铺实现文件，也不保留旧路径的转发兼容壳：
 
 ```text

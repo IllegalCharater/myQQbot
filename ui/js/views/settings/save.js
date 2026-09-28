@@ -186,6 +186,28 @@ export async function saveConfig({ quiet = false } = {}) {
     if (enteredKey && enteredKey !== '******') patch.hotSearchApiKey = enteredKey;
   }
 
+  if (sec === 'transcription') {
+    const t = c.transcription || {};
+    const appId = val('#cfg-transcription-appid', t.appId || '').trim();
+    if (appId && !/^\d+$/.test(appId)) throw new Error('腾讯云 AppID 必须为纯数字');
+    const secretId = val('#cfg-transcription-secretid', '').trim();
+    const secretKey = val('#cfg-transcription-secretkey', '').trim();
+    patch.transcription = {
+      enabled: t.enabledFromEnvironment ? t.enabled === true : chk('#cfg-transcription-enabled', t.enabled === true),
+      appId,
+      engineType: val('#cfg-transcription-engine', t.engineType || '16k_zh').trim() || '16k_zh',
+      ffmpegPath: val('#cfg-transcription-ffmpeg', t.ffmpegPath || 'ffmpeg').trim() || 'ffmpeg',
+      ffmpegTimeoutMs: clampInt(val('#cfg-transcription-ffmpeg-timeout', t.ffmpegTimeoutMs), 10000, 10800000, 900000),
+      flashTimeoutMs: clampInt(val('#cfg-transcription-flash-timeout', t.flashTimeoutMs), 10000, 1800000, 300000),
+      maxDurationSeconds: clampInt(val('#cfg-transcription-max-duration', t.maxDurationSeconds), 1, 7200, 7200),
+      maxAudioBytes: clampInt(val('#cfg-transcription-max-audio-mib', Math.round(Number(t.maxAudioBytes || 104857600) / 1048576)), 1, 100, 100) * 1048576,
+      maxSourceBytes: clampInt(val('#cfg-transcription-max-source-mib', Math.round(Number(t.maxSourceBytes || 268435456) / 1048576)), 1, 1024, 256) * 1048576,
+      resultMaxChars: clampInt(val('#cfg-transcription-result-chars', t.resultMaxChars), 200, 4000, 3500),
+      ...(secretId && secretId !== '******' ? { secretId } : {}),
+      ...(secretKey && secretKey !== '******' ? { secretKey } : {})
+    };
+  }
+
   if (sec === 'chat') {
     patch.wakeDelayMs = Number(val('#cfg-wakedelay', c.wakeDelayMs)) || 2000;
     patch.drainDelayMs = Number(val('#cfg-draindelay', c.drainDelayMs)) || 1200;

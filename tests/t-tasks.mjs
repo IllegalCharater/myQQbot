@@ -41,7 +41,7 @@ const LOCALTIMER_ONLY_FILES = [
   'src/media/safe-fetch.ts',              // DNS 解析超时
   'src/web/app.ts',                       // 启动期端口轮询的等待间隔（SnowLuma 就绪探测）
   'src/web/onebot/snowluma.ts',           // 端口探活 socket 超时（从 app.ts 搬出，行为不变）
-  'src/web/runtime/hot-search/api-client.ts', // 单次 ApiZero 请求的 8 秒超时
+  'src/media/hot-search/api-client.ts',       // 单次 ApiZero 请求的 8 秒超时
   'src/web/routes/chats.ts',              // getChatName 3s 兜底
   'src/agent/runtime/wake-scheduler.ts',  // 唤醒防抖 / 等待窗口 / 限速等待
   'electron/main.js'                      // 窗口加载前 2s 延时
@@ -139,7 +139,7 @@ ok('onebot 的重连调度只有一处，且句柄被存进 #reconnectTimer（S1
 const { Orchestrator } = await load('agent/runtime/orchestrator.js');
 const { OneBotClient } = await load('qq/onebot.js');
 const { VideoTranscriptionQueue } = await load('media/video-transcription.js');
-const { HotSearchScheduler } = await load('web/runtime/hot-search/scheduler.js');
+const { HotSearchScheduler } = await load('media/hot-search/scheduler.js');
 const RESOLVERS = {
   Orchestrator: () => Orchestrator.prototype,
   OneBotClient: () => OneBotClient.prototype,

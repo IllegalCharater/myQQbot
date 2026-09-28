@@ -8,12 +8,16 @@ const DATA = dataDir('qqagent-hot-search-');
 const { ok, done } = checker();
 
 const { DEFAULT_CONFIG, updateConfig } = await load('core/config.js');
-const { fetchHotSearch } = await load('web/runtime/hot-search/api-client.js');
-const { normalizeHotSearchResponse } = await load('web/runtime/hot-search/normalize.js');
-const { dedupeHotSearchItems } = await load('web/runtime/hot-search/dedupe.js');
-const { formatHotSearchPages } = await load('web/runtime/hot-search/formatter.js');
-const { HotSearchStateStore } = await load('web/runtime/hot-search/state-store.js');
-const { HotSearchScheduler } = await load('web/runtime/hot-search/scheduler.js');
+const { fetchHotSearch } = await load('media/hot-search/api-client.js');
+const { normalizeHotSearchResponse } = await load('media/hot-search/normalize.js');
+const { dedupeHotSearchItems } = await load('media/hot-search/dedupe.js');
+const { formatHotSearchPages } = await load('media/hot-search/formatter.js');
+const { HotSearchStateStore } = await load('media/hot-search/state-store.js');
+const { HotSearchScheduler } = await load('media/hot-search/scheduler.js');
+
+ok('热搜能力主体固定在 media/hot-search，web 只保留管理路由',
+  fs.existsSync(path.join(ROOT, 'src/media/hot-search/types.ts'))
+  && !fs.existsSync(path.join(ROOT, 'src/web/runtime/hot-search')));
 
 const payload = (itemsByPlatform = {
   weibo: [{ rank: 1, title: '同一热点', hot: 123, url: 'https://example.com/a' }],

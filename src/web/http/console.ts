@@ -34,7 +34,7 @@ import { routes } from '../routes/index.js';
 import { buildUsageBreakdown, buildUsageStats } from '../usage-service.js';
 import { errorMessage, isRecord, writeReply } from './http.js';
 import type { SnowlumaController } from '../onebot/snowluma.js';
-import type { HotSearchAdminActions } from '../runtime/hot-search/admin-actions.js';
+import type { HotSearchAdminActions } from '../../media/hot-search/admin-actions.js';
 
 export interface ConsoleDeps {
   /** SSE 客户端集合由组装根持有（`emit` 闭包要往同一个集合里广播），这里只借用。 */
@@ -132,6 +132,27 @@ export function createConsole(deps: ConsoleDeps): Console {
       }
     };
     walk(out);
+
+    // 音视频转写凭证也支持 systemd 环境变量。通用 walk 只看配置文件里的值，
+    // 这里补上“实际是否可用”和来源标记；只返回布尔值，绝不把环境变量明文带给浏览器。
+    if (isRecord(out.transcription)) {
+      const target = out.transcription;
+      const stored = cfg.transcription;
+      const envEnabled = String(process.env.QQ_AGENT_TRANSCRIPTION_ENABLED || '').trim();
+      const envAppId = String(process.env.TENCENTCLOUD_APP_ID || '').trim();
+      const envSecretId = String(process.env.TENCENTCLOUD_SECRET_ID || '').trim();
+      const envSecretKey = String(process.env.TENCENTCLOUD_SECRET_KEY || '').trim();
+      target.hasAppId = Boolean(String(stored.appId || envAppId).trim());
+      target.hasSecretId = Boolean(String(stored.secretId || envSecretId).trim());
+      target.hasSecretKey = Boolean(String(stored.secretKey || envSecretKey).trim());
+      target.appIdFromEnvironment = !String(stored.appId || '').trim() && Boolean(envAppId);
+      target.secretIdFromEnvironment = !String(stored.secretId || '').trim() && Boolean(envSecretId);
+      target.secretKeyFromEnvironment = !String(stored.secretKey || '').trim() && Boolean(envSecretKey);
+      target.enabledFromEnvironment = Boolean(envEnabled);
+      target.effectiveEnabled = envEnabled
+        ? ['1', 'true', 'yes', 'on'].includes(envEnabled.toLowerCase())
+        : stored.enabled === true;
+    }
 
     // 热搜 Key 还支持 systemd 环境变量。只回显“是否存在”，绝不把环境变量值带进配置响应。
     out.hasHotSearchApiKey = Boolean(String(cfg.hotSearchApiKey || process.env.HOT_SEARCH_API_KEY || '').trim());

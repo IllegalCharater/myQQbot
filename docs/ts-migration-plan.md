@@ -23,7 +23,7 @@ src/
 ├─ llm/        模型请求、供应商、价格、视觉能力探测
 ├─ chat/       消息存档、长期记忆、会话记录
 ├─ qq/         OneBot 客户端、发送队列、Markdown 转纯文本
-├─ media/      安全下载、网页搜索、媒体任务
+├─ media/      安全下载、网页搜索、媒体任务与 Bot 可选扩展能力（按功能子目录收拢）
 ├─ stickers/   表情库、缓存与管理
 ├─ agent/      Agent 领域（内部继续按职责分层）
 │  ├─ runtime/       唤醒调度、运行状态、跨模块端口与 Agent 循环
@@ -75,6 +75,10 @@ web
 ```
 
 `scripts/check-layers.mjs` 会阻止反向依赖。领域共享类型分别放在各自的 `types.ts` 中，不建立全局巨型类型文件。
+
+Bot 的可选扩展能力主体统一落在 `src/media/<feature>/`；例如每日热搜位于
+`src/media/hot-search/`。Web 层只保留路由、配置表面与组装接线。`media` 与 `qq` 同属 T1，
+扩展能力不能直接 import `qq/` 实现，发送等需求通过由 `web/app.ts` 注入的最小结构化端口完成。
 
 `agent/` 与 `web/` 还各有一条"根目录不得平铺实现"的硬规则，同由 `check-layers.mjs` 执行：`agent/` 的六个职责目录必须齐全且根目录不得有 `.ts`；`web/` 根目录只放行 `app.ts`/`server.ts`/`types.ts`/`usage-service.ts`（组装根、入口、领域类型、读模型），其余实现必须落进 `http/`、`runtime/`、`routes/`、`onebot/` 四个子目录之一。两条规则的判据相同——**是否触碰共享组件图**：只碰共享图的不搬，自己拥有私有状态的才搬。三项锚点（`app.ts`、`server.ts`、`types.ts`）不能挪位置，因为测试按字面路径读它们、还按函数名切 `app.ts` 的源码文本。嵌套层级本身不受检查（只按顶层目录判层）。
 

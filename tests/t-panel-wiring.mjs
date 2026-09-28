@@ -70,6 +70,29 @@ const segmentOf = (source, from, to) => {
   if (a < 0 || b < 0 || b < a) throw new Error(`模块切片边界找不到: ${from} … ${to}`);
   return source.slice(a, b);
 };
+
+console.log('\n═══ 音视频转写设置 ═══');
+ok('设置侧栏有独立的音视频转写入口并接到渲染函数',
+  /\['transcription', '音视频转写'\]/.test(js)
+  && /transcription: \(\) => renderTranscriptionSection\(c\)/.test(js));
+for (const id of [
+  'cfg-transcription-enabled', 'cfg-transcription-appid', 'cfg-transcription-engine',
+  'cfg-transcription-secretid', 'cfg-transcription-secretkey', 'cfg-transcription-ffmpeg',
+  'cfg-transcription-ffmpeg-timeout', 'cfg-transcription-flash-timeout',
+  'cfg-transcription-max-duration', 'cfg-transcription-max-audio-mib',
+  'cfg-transcription-max-source-mib', 'cfg-transcription-result-chars'
+]) {
+  ok(`#${id} 已加入设置模板`, new RegExp(`id="${id}"`).test(js));
+}
+const transcriptionSave = seg("if (sec === 'transcription')", "if (sec === 'chat')");
+ok('音视频转写保存分支生成 patch.transcription', /patch\.transcription = \{/.test(transcriptionSave));
+ok('SecretId/SecretKey 保持只写：掩码或空值不会覆盖服务端原值',
+  /secretId && secretId !== '\*\*\*\*\*\*'/.test(transcriptionSave)
+  && /secretKey && secretKey !== '\*\*\*\*\*\*'/.test(transcriptionSave));
+ok('页面保存时钳制极速版 7200 秒 / 100 MiB 硬上限',
+  /maxDurationSeconds: clampInt\([^\n]+, 1, 7200, 7200\)/.test(transcriptionSave)
+  && /maxAudioBytes: clampInt\([^\n]+, 1, 100, 100\) \* 1048576/.test(transcriptionSave));
+
 const REGIONS = {
   '表情包页': stickerJs,
   '存档页': chatJs,
