@@ -1,4 +1,4 @@
-import { errorMessage, isRecord, readBody } from '../http.js';
+import { errorMessage, isRecord, readBody } from '../http/http.js';
 import { EVENTS } from '../../core/events.js';
 import type { Route } from '../types.js';
 

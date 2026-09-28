@@ -66,6 +66,8 @@ export interface AppHandle {
   emit: AppEmit;
   getConfig(): AppConfig;
   updateConfig(patch: Record<string, unknown>): AppConfig;
+  /** 配置生效的唯一出口（HTTP `POST /api/config` 与测试都走它，S11b 起在 handle 上也暴露一份）。 */
+  applyConfigPatch(patch: unknown): AppConfig;
   launchSnowluma(): Promise<unknown>;
   stopSnowluma(): boolean;
   snowlumaStatus(): SnowlumaStatus;

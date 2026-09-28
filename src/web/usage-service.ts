@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig } from '../core/config.js';
 import { DATA_DIR } from '../core/paths.js';
-import { isRecord } from './http.js';
+import { isRecord } from './http/http.js';
 import {
   isPeakHour,
   modelLabel,

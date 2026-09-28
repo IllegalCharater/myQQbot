@@ -8,7 +8,9 @@
 //     （S10b 的 `if (!runtime) return` 就是为它加的，第 2 段真跑一次 worker 来钉）；
 //   • onebot 的两处重连是**裸 setTimeout、句柄没存**：close() 停不掉它，connect()/reconnect()
 //     也清不掉它——迟到的定时器会再建一个 socket 覆盖 `this.socket`（S10c 存句柄后修掉，
-//     第 4 段用**同一个句柄**的 clearTimeout 来钉）。
+//     第 4 段用**同一个句柄**的 clearTimeout 来钉）；
+//   • 配置刷新不看 snowluma 端点（S11b）：改完保存后实例还指着旧地址，要重启才生效——
+//     第 5 段钉"改了要重连"，同时钉死"没真的变就**不许**重连"（否则保存一次设置断一次连接）。
 //
 // 手法：临时把 globalThis 上的计时器换成本地记录器（设计稿 §9.2 认可的"第 2 种补法"，
 // 先例是 harness 的 `createDomSandbox` 在 vm 里覆写计时器）。**不改生产代码**——`dist/`
@@ -34,12 +36,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { checker, dataDir } from './lib/harness.mjs';
-import { load } from './lib/src.mjs';
+import { ROOT, load, stripComments } from './lib/src.mjs';
 
 const DATA = dataDir('qqagent-timers-');
 const { ok, done } = checker();
 
-// jmcomic 夹具：**必须在本文件第一次 `initializeJmcomicQueue()` 之前写盘**（下面第 2、3 段都会调它）。
+// jmcomic 夹具：**必须在本文件第一次 `initJmcomicQueue()` 之前写盘**（下面第 2、3 段都会调它）。
 // 两条设计，缺一不可：
 //   • 状态是 pending（`upload_failed`）：`cleanupDownloadCacheIfDue` 只在整个队列空闲时才清空
 //     下载目录、`jobs = []` 并重新写盘，所以没有这个待办的话首跑清理会把夹具连同 jobs.json
@@ -184,14 +186,14 @@ await withFakeTimers(async (t) => {
   // 于是后面还能拿它当"有待办"的夹具。
   //
   // 注意这一段**不能**用 `t.active()` 断句柄数：stub 是同步被调到的，所以 stopJmcomicQueue
-  // 就在 `initializeJmcomicQueue` 返回之前把那个 interval 清掉了。这里要钉的是"有没有排
+  // 就在 `initJmcomicQueue` 返回之前把那个 interval 清掉了。这里要钉的是"有没有排
   // 新的 timeout"，用"建过几个"来数才对。
   const stopDuringUpload = {
     onebot: { call: () => { jmcomic.stopJmcomicQueue(); throw new Error('t-timers：模拟上传途中停队列'); } },
     sender: {}, store: {}
   };
-  jmcomic.initializeJmcomicQueue(stopDuringUpload);
-  ok('initializeJmcomicQueue 起了缓存清理 interval',
+  jmcomic.initJmcomicQueue(stopDuringUpload);
+  ok('initJmcomicQueue 起了缓存清理 interval',
     t.intervals.length === 1, `建了 ${t.intervals.length} 个 interval`);
 
   await flush();
@@ -205,7 +207,7 @@ await withFakeTimers(async (t) => {
   // 这条同时是"stop 没把用户的下载任务丢掉"的行为证据 —— jobs 真被清了的话，
   // scheduleNextWake 捞不到待办，这里就一个 timeout 都不会有。
   // （上一轮上传失败已把 nextAttemptAt 挪到 10s 后，所以此刻它不可跑、不会碰 onebot。）
-  jmcomic.initializeJmcomicQueue({ onebot: {}, sender: {}, store: {} });
+  jmcomic.initJmcomicQueue({ onebot: {}, sender: {}, store: {} });
   await flush();
   ok('重新 init：jobs 没被 stop 清掉（wake timer 为那个待办重新排了出来）',
     t.active().length === 1 && t.activeTimeouts().length === 1,
@@ -231,7 +233,7 @@ await withFakeTimers(async (t) => {
 // （形状对 ≠ 接线通：两边各自合法、合起来不通，而且编译器和静态断言都看不见）。
 // 所以这里真起一个应用（同 t-smoke 的做法），只数句柄。
 //
-// 这一段是"启动点在 start()"这条决定的守护：把 initPriceFeed / initializeJmcomicQueue
+// 这一段是"启动点在 start()"这条决定的守护：把 initPriceFeed / initJmcomicQueue
 // 搬回 createApp() 或某个构造函数的话，`before` 就不会是 0，第 ① 条会红。
 const { createApp } = await load('web/app.js');
 
@@ -346,5 +348,91 @@ await withFakeTimers(async (t) => {
     t.clearedTimeouts.has(fromCloseEvent.id) === true && t.activeTimeouts().length === 0,
     `被清 ${t.clearedTimeouts.size} 个、还剩 ${t.activeTimeouts().length} 个`);
 });
+
+// ── 5. 改端点配置触发重连，且"没真的变就不重连"（S11b）──
+// 缺口：`applyConfigPatch` 以前完全不看 snowluma 的地址与令牌，用户改完保存之后实例
+// 还指着旧地址，必须重启应用才生效（设计稿 §7.3 记的那一行）。补法是 `applyEndpoint`
+// **比较后**返回"到底变了没有"，调用方据此决定重连 —— 所以这一段有两个方向，缺一不可：
+//   ① 改了 → 必须重连（缺了它，那个缺口还在）；
+//   ② 没改 → **不许**重连。只测 ① 的话，一个"无条件 reconnect()"的实现也能全绿，
+//      而它的后果很具体：每保存一次设置就断一次 WebSocket，面板状态灯乱闪、在收的事件丢帧。
+// 判据是 `app.onebot.socket` 的**身份**：`reconnect()` 会先置空再建新的，所以身份变了就是重连了。
+// （`t-timers` 的既有一课：只数"建了几个"分不清"清了没重建"与"压根没清"；身份比较没有这个问题。）
+await withFakeTimers(async (t) => {
+  const app = createApp({ log: () => {} });
+  await app.start();
+  const before = app.onebot.socket;
+  ok('前置：start() 之后实例上有一个真 socket（否则下面的身份比较无从谈起）',
+    before !== null && before !== undefined,
+    `socket=${before ? '有' : '无'}`);
+
+  // ① 同值：把当前的四个端点原样再写一遍（httpUrl 故意多带一个尾斜杠）。
+  //    尾斜杠那一下同时是**归一化**的接线证据：归一化只写在构造函数里的话，
+  //    这里会被判成变更 → 断连，而用户什么都没改。
+  const cfg = app.getConfig();
+  app.applyConfigPatch({
+    snowluma: {
+      wsUrl: cfg.snowluma.wsUrl,
+      httpUrl: `${cfg.snowluma.httpUrl}/`,
+      accessToken: cfg.snowluma.accessToken,
+      httpAccessToken: cfg.snowluma.httpAccessToken
+    }
+  });
+  ok('端点没真的变 → 不重连（socket 身份不变，尾斜杠差异也不算变更）',
+    app.onebot.socket === before,
+    app.onebot.socket === before ? '' : 'socket 被换掉了 —— 保存一次没动端点的设置就断了一次连接');
+
+  // ② 改了 wsUrl：必须重连，而且新 socket 得真的建出来（区分"清了没重建"与"没清"）。
+  app.applyConfigPatch({ snowluma: { wsUrl: 'ws://127.0.0.1:3002' } });
+  ok('改了 wsUrl → 立刻重连（新 socket 身份不同且非空）',
+    app.onebot.socket !== before && app.onebot.socket !== null,
+    `socket=${app.onebot.socket ? '有' : '无'}、身份${app.onebot.socket === before ? '未变' : '已变'}`);
+
+  await app.stop();
+}, { fetch: false });
+
+// 能力级：`applyEndpoint` 的比较规则（直接构造，不经过 app）。
+await withFakeTimers(() => {
+  const ep = new OneBotClient({ wsUrl: 'ws://127.0.0.1:3001', httpUrl: 'http://127.0.0.1:3000', accessToken: 'tok' });
+  // 构造之后先记下"初始值"，不要在这里写死归一化后的字面量：写死的话，构造函数的归一化
+  // 一旦被撤掉，下面那条"没给的字段保持不动"会跟着红 —— **红得对但理由不对**
+  // （它管的是"undefined 不落成清空"，不是"构造函数会去尾斜杠"）。证伪探针 P3 实测踩到过。
+  const initial = { httpUrl: ep.httpUrl, accessToken: ep.accessToken, httpToken: ep.httpToken };
+  ok('applyEndpoint({}) → false：一个字段都没给，就什么都没变', ep.applyEndpoint({}) === false);
+  ok('httpUrl 尾斜杠不算变更（与构造函数同一份归一化）',
+    ep.applyEndpoint({ httpUrl: `${initial.httpUrl}/` }) === false && ep.httpUrl === initial.httpUrl,
+    `httpUrl="${ep.httpUrl}"`);
+  ok('改了字段 → true，且字段真的改到实例上',
+    ep.applyEndpoint({ wsUrl: 'ws://127.0.0.1:3002' }) === true && ep.wsUrl === 'ws://127.0.0.1:3002',
+    `wsUrl="${ep.wsUrl}"`);
+  // 比较基准取**紧接着这一次调用之前**的值：拿构造时的值当基准的话，上面那条尾斜杠断言
+  // 会先把 httpUrl 改掉，于是这条会为"别人的改动"变红（探针 P3 实测踩到）。
+  const beforeUndefined = { httpUrl: ep.httpUrl, accessToken: ep.accessToken, httpToken: ep.httpToken };
+  ep.applyEndpoint({ wsUrl: 'ws://127.0.0.1:3003' });
+  ok('没给的字段保持不动（undefined = 保持不变，不是"清空"）',
+    ep.httpUrl === beforeUndefined.httpUrl && ep.accessToken === beforeUndefined.accessToken
+    && ep.httpToken === beforeUndefined.httpToken,
+    `httpUrl="${ep.httpUrl}" accessToken="${ep.accessToken}" httpToken="${ep.httpToken}"`);
+  ok('空令牌是真的清空（构造函数对令牌也是 String(v || \'\')，留空 = 免鉴权）',
+    ep.applyEndpoint({ httpToken: '' }) === true && ep.httpToken === '',
+    `httpToken="${ep.httpToken}"`);
+  ok('applyEndpoint 只改字段，不自己重连（重连是调用方的决策：app.ts 比较后调，start() 只补 URL）',
+    ep.socket === null,
+    'socket 被建出来了 —— 说明 applyEndpoint 内部接了 reconnect/connect');
+});
+
+// 接线事实（文本）：能力级测试证明不了 `applyConfigPatch` 里接了它 —— S10a 的教训
+// （模块级段只证明"有能力"，证明不了"接上了"）。切出函数体再扫，避免把全文里
+// 别处的 applyEndpoint（start() 里那一处）算成证据。
+const appSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/web/app.ts'), 'utf8'));
+const patchBody = (appSrc.match(/function applyConfigPatch\(patch: unknown\) \{[\s\S]*?\n  \}/) || [''])[0];
+ok('applyConfigPatch 的接线：体内同时出现 applyEndpoint 与 reconnect',
+  patchBody.includes('applyEndpoint') && patchBody.includes('reconnect'),
+  patchBody ? `函数体里 ${patchBody.includes('applyEndpoint') ? '有' : '没有'} applyEndpoint、` +
+    `${patchBody.includes('reconnect') ? '有' : '没有'} reconnect` : '没切出 applyConfigPatch 函数体（锚点失效）');
+ok('两个 URL 字段不再有直接赋值（端点只有一个写入口：applyEndpoint）',
+  !/onebot\.(wsUrl|httpUrl)\s*=/.test(appSrc),
+  (appSrc.match(/.*onebot\.(wsUrl|httpUrl)\s*=.*/g) || []).join(' | ') +
+  ' —— 绕过 applyEndpoint 直接赋值就绕过了归一化，于是"同值"会被判成变更');
 
 process.exit(done() ? 0 : 1);

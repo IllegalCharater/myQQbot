@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Reply } from './types.js';
+import type { Reply } from '../types.js';
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

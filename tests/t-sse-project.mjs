@@ -1,4 +1,4 @@
-// SSE 帧投影：dist/web/event-projector.js 的纯函数单测。
+// SSE 帧投影：dist/web/http/event-projector.js 的纯函数单测。
 //
 // 这段逻辑以前藏在 src/web/app.ts 的 emit 闭包里，只能靠 t-smoke 端到端间接守 ——
 // 写错了症状是"面板不更新"，看不到是哪一帧不对。抽成纯函数后这里逐字节比对。
@@ -9,7 +9,7 @@ import { checker, dataDir } from './lib/harness.mjs';
 import { load, readSrc } from './lib/src.mjs';
 
 dataDir('qqagent-sse-project-');
-const { projectSse, projectSessionUpdate, writeSse } = await load('web/event-projector.js');
+const { projectSse, projectSessionUpdate, writeSse } = await load('web/http/event-projector.js');
 
 const { ok, done } = checker();
 

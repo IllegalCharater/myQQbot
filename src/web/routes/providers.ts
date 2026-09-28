@@ -1,11 +1,10 @@
-import { EVENTS } from '../../core/events.js';
 import { chatCompletion, resolveApiKey } from '../../llm/llm.js';
 import { customSearch } from '../../media/web-search.js';
 import {
   addModelsToProvider, currentProviders, fetchModelsFrom, removeModelFromProvider,
   setProviderKey, testAllProviders, testModelChat, testOneProvider, upsertProvider,
 } from '../../llm/providers.js';
-import { errorMessage, isRecord, readBody } from '../http.js';
+import { errorMessage, isRecord, readBody } from '../http/http.js';
 import type { Route } from '../types.js';
 import { builtinVisionResults } from '../../llm/model-vision-docs.js';
 import { scanModelsVision, visionResults } from '../../llm/vision-scan.js';
@@ -154,10 +153,11 @@ export const providerRoutes: Route[] = [
       const body = bodyRecord(await readBody(req).catch(() => ({})));
       const onlyProviderIds = Array.isArray(body.providerIds) ? body.providerIds.map(String) : null;
       visionScan.running = true;
-      ctx.emit(EVENTS.visionScan, { phase: 'start' });
-      void scanModelsVision({ providers: currentProviders(), emit: ctx.emit, onlyProviderIds, timeoutMs: 25_000, limit: 3 })
-        .then(({ total }) => ctx.emit(EVENTS.visionScan, { phase: 'done', total }))
-        .catch((error: unknown) => ctx.emit(EVENTS.visionScan, { phase: 'error', error: errorMessage(error) }))
+      // 进度与结果不再经事件上报（`vision-scan` 零消费者，S11d 已删）。
+      // 面板靠这一条 HTTP 的 202 与 `/api/vision/results` 的 `scanning` 标志轮询，
+      // 所以这里的 `visionScan.running` 是**真在用的**本地状态，不是事件残留。
+      void scanModelsVision({ providers: currentProviders(), onlyProviderIds, timeoutMs: 25_000, limit: 3 })
+        .catch(() => { /* 失败不改已返回的 202；下一次轮询会看到 running 归位 */ })
         .finally(() => { visionScan.running = false; });
       return { status: 202, body: { ok: true, started: true } };
     },

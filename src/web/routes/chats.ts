@@ -1,4 +1,4 @@
-import { errorMessage, isRecord, readBody } from '../http.js';
+import { errorMessage, isRecord, readBody } from '../http/http.js';
 import type { Route } from '../types.js';
 import path from 'node:path';
 import { collectInjectedDigests } from '../../agent/prompting/prompt-builder.js';

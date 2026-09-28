@@ -5,8 +5,6 @@
 // unknown，不武断下结论。
 // 结果持久化在 config.modelVision["providerId|||model"]，运行时用它门控看图工具。
 import { getConfig, updateConfig } from '../core/config.js';
-import { EVENTS } from '../core/events.js';
-import type { AppEmit } from '../core/events.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 
 type VisionVerdict = 'vision' | 'no-vision' | 'unknown';
@@ -114,10 +112,14 @@ export async function detectModelVision({ baseUrl, apiKey, model }: { baseUrl: s
 }
 
 /**
- * 扫描目录（providerId 过滤可选）。并发受控，结果逐个写进 config 并通过 emit 汇报进度。
+ * 扫描目录（providerId 过滤可选）。并发受控，结果逐个写进 config。
  * 返回 { total, results }。
+ *
+ * 进度不再对外汇报：原先这里每完成一个模型就发一次 `vision-scan` 事件，
+ * 但那个事件**零消费者**（面板读的是 HTTP 的 `visionData.scanning`），
+ * S11d 已连同词表一起删除。调用方拿返回值即可。
  */
-export async function scanModelsVision({ providers = [], emit = null, limit = 3, timeoutMs = 25000, onlyProviderIds = null }: { providers?: ScanProvider[]; emit?: AppEmit | null; limit?: number; timeoutMs?: number; onlyProviderIds?: string[] | null } = {}) {
+export async function scanModelsVision({ providers = [], limit = 3, timeoutMs = 25000, onlyProviderIds = null }: { providers?: ScanProvider[]; limit?: number; timeoutMs?: number; onlyProviderIds?: string[] | null } = {}) {
   const tasks: ScanTask[] = [];
   for (const p of providers || []) {
     if (onlyProviderIds && !onlyProviderIds.includes(p.id)) continue;
@@ -127,7 +129,6 @@ export async function scanModelsVision({ providers = [], emit = null, limit = 3,
     }
   }
   const total = tasks.length;
-  let done = 0;
 
   // 结果先在内存累积，扫描结束（或每满 5 条 / 每 2 秒）统一写一次盘。
   // 原先每个模型都调一次 updateConfig → 每次 deepMerge + structuredClone 全量配置
@@ -157,8 +158,6 @@ export async function scanModelsVision({ providers = [], emit = null, limit = 3,
           checkedAt: Date.now()
         });
         if (pending.size >= 5) flushPending();
-    done += 1;
-    emit?.(EVENTS.visionScan, { key, providerId: task.providerId, model: task.model, verdict: r.verdict, done, total });
   };
 
   // 简单并发池
@@ -166,9 +165,10 @@ export async function scanModelsVision({ providers = [], emit = null, limit = 3,
   const workers = Array.from({ length: Math.max(1, Math.min(limit, tasks.length || 1)) }, async () => {
     while (index < tasks.length) {
       const task = tasks[index++];
-      await runTask(task).catch((error: unknown) => {
-        done += 1;
-        emit?.(EVENTS.visionScan, { key: `${task.providerId}|||${task.model}`, providerId: task.providerId, model: task.model, verdict: 'unknown', done, total, error: String(error instanceof Error ? error.message : error) });
+      await runTask(task).catch(() => {
+        // 单个模型探测抛异常时只跳过它，不让整个扫描失败。
+        // 异常内容曾经经 `vision-scan` 事件报给面板（零消费者，S11d 已删）；
+        // "探测失败但请求成功"那一档由 detectModelVision 的 verdict: 'unknown' 表达。
       });
     }
   });

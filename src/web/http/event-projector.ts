@@ -7,8 +7,8 @@
 // 本模块只做"事件 → 文本"，不碰事件总线、不持有状态、不做 IO，唯一的读取依赖是
 // SessionRegistry.peek（结构化依赖，测试里传对象字面量即可）。
 import type { ServerResponse } from 'node:http';
-import { EVENTS } from '../core/events.js';
-import { isRecord } from '../agent/shared/json-parse.js';
+import { EVENTS } from '../../core/events.js';
+import { isRecord } from '../../agent/shared/json-parse.js';
 
 /**
  * 投影只读这些字段，全部可选且为 unknown —— 这样测试可以只给关心的几个字段，

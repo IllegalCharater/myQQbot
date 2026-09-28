@@ -139,14 +139,30 @@ const usedAt = new Map();
 // `from '../agent/runtime/orchestrator.js'` 就会被裸正则读成"web 在调 orchestrator.js"。
 // 两道排除：路径里的那一段前面必定是 `/`（成员访问不会），且后缀是模块扩展名。
 const MODULE_EXT = new Set(['js', 'ts', 'mjs', 'cjs', 'json', 'jsx', 'tsx']);
+const PORT_CALL = /(^|[^\w/$])orchestrator\.([A-Za-z_$][\w$]*)/g;
+
+// ⚠️ **成员集合必须从剥掉注释的文本里取**，否则一句注释就能把"某处调用被删掉了"
+// 伪装成"还在用"。这不是假想的：S11 之后的 web 模块整理把入站摄取搬进
+// `web/onebot/ingest.ts` 时，该文件头部注释里写了 `` `orchestrator.onIncoming` ``
+// （纯文档），当时本段扫的是原文，于是"把 `orchestrator` 改名成 `orc`"这个探针
+// **全绿** —— 端口唯一的 `onIncoming` 调用点已经消失，报告却说"一一对应"。
+// 同 `t-events.mjs` / `t-tasks.mjs` 的文本断言：剥注释才是对断言意图的忠实实现。
+// 行号仍从原文取（`stripComments` 会把多行块注释的换行吃掉，按它数行会漂），
+// 于是报错既能指准位置，又不会把注释里的提及当成调用。
 for (const f of SCAN_DIRS.flatMap((d) => walk(d))) {
   const rel = path.relative(ROOT, f).split(path.sep).join('/');
-  fs.readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
-    for (const m of line.matchAll(/(^|[^\w/$])orchestrator\.([A-Za-z_$][\w$]*)/g)) {
+  const raw = fs.readFileSync(f, 'utf8');
+  for (const line of stripComments(raw).split('\n')) {
+    for (const m of line.matchAll(PORT_CALL)) {
+      if (!MODULE_EXT.has(m[2])) used.add(m[2]);
+    }
+  }
+  raw.split('\n').forEach((line, i) => {
+    for (const m of line.matchAll(PORT_CALL)) {
       const name = m[2];
       if (MODULE_EXT.has(name)) continue;
-      used.add(name);
-      if (!usedAt.has(name)) usedAt.set(name, `${rel}:${i + 1}`);
+      // 只在"这个名字确实被真实代码用过"时才记位置，这样一条纯注释不会成为它的证据。
+      if (used.has(name) && !usedAt.has(name)) usedAt.set(name, `${rel}:${i + 1}`);
     }
   });
 }

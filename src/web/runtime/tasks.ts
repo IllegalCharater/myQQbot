@@ -1,7 +1,16 @@
-// 长期后台任务的描述符表（S9）。设计见 docs/global-registry-design.md §6。
+// 长期后台任务的**描述侧**（S9）。设计见 docs/global-registry-design.md §6。
 //
 // 这张表回答的问题是："这个应用里有哪些活着的长期任务，谁负责、怎么开、怎么停、能不能真的停掉。"
 // 它**只描述，不启动**——见下面第 1 条。
+//
+// ⚠️ **它与 `web/lifecycle.ts`（S11c 的执行侧）是一对，别把两者混起来**：
+//   • 本表（描述侧，纯数据）回答"**有哪些**长期任务、谁开谁停、`conformance` 是什么"；
+//   • `web/lifecycle.ts`（执行侧，纯编排）回答"**谁按什么顺序**把它们装起来、拆下来"。
+// 两边各写一份 id 字面量（本文件**不**被 `lifecycle.ts` import，`src/` 里除定义处外也无人
+// 引用 `LONG_TERM_TASKS`——有断言守），一致性由 `tests/t-lifecycle.mjs` 第 2 段**对账**：
+// 两个 id 集合必须相等、无重复、每个 id 恰好被清单的一条 entry 覆盖。**因此"加一行"是一个
+// 要动三处的动作**：本表、`lifecycle.ts` 的 `LIFECYCLE`、`app.ts` 的 `lifecycleDeps()`；
+// 只改一处会被套件拦下。另外，S11c 起本表**不再**是"谁按什么顺序启动"的事实源——那是清单。
 //
 // ⚠️ 三条禁令（都是设计稿 §6.2 的显式决定，不是风格偏好）：
 //
@@ -138,11 +147,11 @@ export const LONG_TERM_TASKS: LongTermTask[] = [
     enabledBy: null,
     configRefresh: 'not-applicable',
     unref: true,
-    start: { on: 'jmcomic', kind: 'export', name: 'initializeJmcomicQueue' },
+    start: { on: 'jmcomic', kind: 'export', name: 'initJmcomicQueue' },
     stop: { on: 'jmcomic', kind: 'export', name: 'stopJmcomicQueue' },
     stopCancelsPending: true,
     conformance: 'full',
-    note: '模块级单例。S10b 起 initializeJmcomicQueue 移出 Orchestrator 构造函数，' +
+    note: '模块级单例。S10b 起 initJmcomicQueue 移出 Orchestrator 构造函数，' +
       '改由 app.start() 启动、app.stop() 里在 onebot.close() 之前停止（上传阶段要用 onebot.call）。' +
       'stopCancelsPending 为真：stopJmcomicQueue 清的就是这个 setInterval 句柄（并顺带清 wake timer、置空 runtime）。'
   },
@@ -154,7 +163,7 @@ export const LONG_TERM_TASKS: LongTermTask[] = [
     configRefresh: 'not-applicable',
     unref: false,
     holdsProcessWhilePending: true,
-    start: { on: 'jmcomic', kind: 'export', name: 'initializeJmcomicQueue' },
+    start: { on: 'jmcomic', kind: 'export', name: 'initJmcomicQueue' },
     stop: { on: 'jmcomic', kind: 'export', name: 'stopJmcomicQueue' },
     // 只能阻止"下一次唤醒"（stopJmcomicQueue 清 wake timer + scheduleNextWake 的 !runtime 早退），
     // 停不掉**正在跑**的那一次下载 —— 所以是 partial。
@@ -186,7 +195,9 @@ export const LONG_TERM_TASKS: LongTermTask[] = [
       '于是 close() 真的停得住（同时不再白钉住事件循环）。S10c 之前那句"取消不掉已在等待中的重连"' +
       '只是表症：两处调度是裸 setTimeout、句柄没存，迟到的定时器会再进 #connectLoop 建第二个 ' +
       'WebSocket 覆盖 this.socket，connect()/reconnect() 刚作废旧 socket 的动作反而被漏掉（连接泄漏）。' +
-      'S10c 把这两条路径一起修了。另外改 snowluma.*Url/token 仍不会触发重连（§7.3 的已知缺口），' +
-      'RECONNECT_MIN_MS 硬编码、RECONNECT_MAX_MS 定义了却从未使用（附录 C，本阶段明确不做）。'
+      'S10c 把这两条路径一起修了。重连间隔是单一常量 RECONNECT_MIN_MS（3s、无限重试，不做指数退避）；' +
+      'RECONNECT_MAX_MS 零引用，S11b 已删。**S11b 起配置刷新语义也补上了**：改 snowluma 的 ' +
+      'wsUrl/httpUrl/accessToken/httpAccessToken 经 applyConfigPatch → OneBotClient.applyEndpoint ' +
+      '**比较后**重连（值没变不重连，所以保存一次没动端点的设置不会断连）。'
   }
 ];

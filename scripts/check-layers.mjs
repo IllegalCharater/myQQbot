@@ -43,6 +43,20 @@ for (const entry of fs.readdirSync(agentRoot, { withFileTypes: true })) {
     errors.push(`agent/${entry.name}: Agent 实现不得平铺在根目录`);
   }
 }
+
+// web 根目录只放**组装、入口、领域类型与读模型**；其余实现必须落进子目录。
+// 与 agent/ 那条规则同一个理由：没有这道闸门，搬进子目录的东西会一个一个搬回来。
+const webRoot = path.join(SRC, 'web');
+const WEB_GROUPS = ['http', 'runtime', 'routes', 'onebot'];
+const WEB_ROOT_ALLOW = new Set(['app.ts', 'server.ts', 'types.ts', 'usage-service.ts']);
+for (const group of WEB_GROUPS) {
+  if (!fs.existsSync(path.join(webRoot, group))) errors.push(`web/${group}: 缺少 web 分层目录`);
+}
+for (const entry of fs.readdirSync(webRoot, { withFileTypes: true })) {
+  if (entry.isFile() && SOURCE_EXT.test(entry.name) && !WEB_ROOT_ALLOW.has(entry.name)) {
+    errors.push(`web/${entry.name}: web 根目录只许放组装根/入口/领域类型/读模型，实现请落进子目录`);
+  }
+}
 for (const source of files) {
   const sourceRel = slash(path.relative(SRC, source));
   const sourceDomain = sourceRel.split('/')[0];

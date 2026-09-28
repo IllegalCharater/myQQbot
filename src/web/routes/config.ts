@@ -1,4 +1,4 @@
-import { readBody } from '../http.js';
+import { readBody } from '../http/http.js';
 import type { Route } from '../types.js';
 
 export const configRoutes: Route[] = [

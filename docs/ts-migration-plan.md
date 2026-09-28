@@ -32,7 +32,26 @@ src/
 │  ├─ tools/         工具统一入口、领域分组与执行
 │  ├─ maintenance/   主动冒泡、历史压缩与记忆整理
 │  └─ shared/        Agent 内共享类型与解析器
-└─ web/        HTTP 基础设施、路由、SSE 帧拼装、长期任务描述符表与领域接口
+└─ web/        组装根、HTTP/SSE 表面、领域路由、OneBot 接入侧与长期任务
+   ├─ app.ts            组装根：建对象图、接 OneBot 入站回调、起 HTTP/SSE、启停长期任务
+   ├─ server.ts         headless 入口（带副作用：import 即建 app、起服务、装信号处理器）
+   ├─ types.ts          web 领域共享类型（AppContext / AppHandle / Route / Reply）
+   ├─ usage-service.ts  用量与花费读模型（控制台表面与 /api/usage 共用）
+   ├─ http/             HTTP 与 SSE 表面
+   │  ├─ console.ts        控制台 HTTP 表面：SSE 端点、鉴权、路由分发、静态文件、状态快照、配置脱敏
+   │  ├─ event-projector.ts SSE 帧拼装（纯函数，`tests/t-sse-project.mjs` 逐字节钉住）
+   │  ├─ http.ts           请求/响应原语
+   │  ├─ router.ts         路由匹配与分发
+   │  └─ static-files.ts   静态文件服务
+   ├─ routes/           领域路由（8 个领域 + index）
+   ├─ onebot/           OneBot 接入侧（"那个 OneBot 端"自己的状态，与 `src/qq/` 的传输客户端分开）
+   │  ├─ snowluma.ts    SnowLuma 程序目录、子进程、日志环形缓冲、端口探活与 WebUI 地址
+   │  ├─ tokens.ts      令牌桥：候选收集、401 轮换、限频与去重签名
+   │  └─ ingest.ts      入站事件摄取：白名单、@ 名字解析、引用预览、合并转发展开、拍一拍
+   └─ runtime/          长期任务与退出路径
+      ├─ tasks.ts       长期任务描述符表（纯数据，回答"有哪些、谁开谁停"）
+      ├─ lifecycle.ts   长期任务装配清单（S11c；回答"谁按什么顺序装起来、拆下来"）
+      └─ shutdown.ts    退出路径的关停编排（S11a；纯逻辑、可单测，`server.ts` 只负责接到 process 上）
 
 ui/js/
 ├─ main.js     浏览器入口与页面编排
@@ -57,11 +76,15 @@ web
 
 `scripts/check-layers.mjs` 会阻止反向依赖。领域共享类型分别放在各自的 `types.ts` 中，不建立全局巨型类型文件。
 
+`agent/` 与 `web/` 还各有一条"根目录不得平铺实现"的硬规则，同由 `check-layers.mjs` 执行：`agent/` 的六个职责目录必须齐全且根目录不得有 `.ts`；`web/` 根目录只放行 `app.ts`/`server.ts`/`types.ts`/`usage-service.ts`（组装根、入口、领域类型、读模型），其余实现必须落进 `http/`、`runtime/`、`routes/`、`onebot/` 四个子目录之一。两条规则的判据相同——**是否触碰共享组件图**：只碰共享图的不搬，自己拥有私有状态的才搬。三项锚点（`app.ts`、`server.ts`、`types.ts`）不能挪位置，因为测试按字面路径读它们、还按函数名切 `app.ts` 的源码文本。嵌套层级本身不受检查（只按顶层目录判层）。
+
 `agent/` 对 `web/` 的跨模块面固化成端口 `src/agent/runtime/control-port.ts`（`AgentControlPort`），`Orchestrator implements` 它；`src/web/` 与 `electron/main.js` 只依赖这个接口，不依赖具体类。端口只做**编译期**检查（`implements` 与 `satisfies`），运行期零成本，也不含任何 `instanceof`/`Symbol` 品牌——`tests/t-orch.mjs`、`t-vision-log.mjs` 用普通对象字面量充当依赖，加运行期校验会当场打碎它们。配套的 `METHOD_CATALOG` 只作文档与测试引用，不参与任何运行时分发。
 
-长期后台任务的清点落在 `src/web/tasks.ts` 的 `LONG_TERM_TASKS`（6 行）。它是**纯数据**：描述 owner / 开关来源 / 配置刷新方式 / 启停入口 / 是否 unref / `conformance`，**不触发任何启停**，也不许在文件里出现调度调用；`start`/`stop` 存的是入口的名字而非函数引用，好让 `tests/t-tasks.mjs` 拿到真对象上去核对。请求作用域局部计时器不进这张表（有反向断言守），判定标准见 `docs/global-registry-design.md` §6.1。
+长期后台任务的清点落在 `src/web/runtime/tasks.ts` 的 `LONG_TERM_TASKS`（6 行）。它是**纯数据**：描述 owner / 开关来源 / 配置刷新方式 / 启停入口 / 是否 unref / `conformance`，**不触发任何启停**，也不许在文件里出现调度调用；`start`/`stop` 存的是入口的名字而非函数引用，好让 `tests/t-tasks.mjs` 拿到真对象上去核对。请求作用域局部计时器不进这张表（有反向断言守），判定标准见 `docs/global-registry-design.md` §6.1。
 
-**启停点只有一处**：长期任务一律在 `src/web/app.ts` 的 `start()` 里启动、在 `stop()` 里停止（成对出现），不靠模块加载期或构造函数副作用。已接管的样子参照 `price.feed`（S10a：`initPriceFeed`/`stopPriceFeed` 在 `src/llm/price-feed.ts`）、两个 jmcomic 任务（S10b：`initializeJmcomicQueue`/`stopJmcomicQueue` 在 `src/media/jmcomic.ts`，原先靠在 `Orchestrator` 构造函数里调用启动）与 `onebot.reconnect`（S10c：宿主就是 `OneBotClient`，停止入口就是 `app.stop()` 里的 `onebot.close()`；`src/qq/onebot.ts` 用私有字段 `#reconnectTimer` 存重连句柄，`close()`/`connect()`/`reconnect()` 都会取消掉已排定的那一次，**刻意不 unref**——有待重连时钉住进程是有意的）；计时器句柄行为由 `tests/t-timers.mjs` 用假计时器断言。**6 行长期任务里只剩 `jmcomic.worker` 是 `partial`**（停不掉正在执行的那一次下载），其余 5 行为 `full`。`stop()` 里停长期任务必须排在 `onebot.close()` 之前——在途的 QQ 上传调用还依赖传输层。
+**启停点只有一处**：长期任务一律在 `src/web/app.ts` 的 `start()` 里启动、在 `stop()` 里停止（成对出现），不靠模块加载期或构造函数副作用。**S11c 起这句话是结构性的**：`start()` 只调 `startLifecycle(deps)`、`stop()` 只调 `stopLifecycle(deps)`，顺序写在 `src/web/runtime/lifecycle.ts` 的 `LIFECYCLE` 数组里（`start` 正序、`stop` **逆序**，于是"停长期任务排在 `onebot.close()` 之前"由"`onebot.reconnect` 排第一位"自动满足）；`app.ts` 的 `lifecycleDeps()` 只负责把真模块递进去。清单的元素存**函数引用**（不是名字），`ids` 只作对账元数据，`import` 它不启动任何东西——三条都有断言（`tests/t-lifecycle.mjs` 第 2/3 段），因为"按名字分发的运行时注册表"是明令禁止的形态。配置刷新路径**不接清单**（`applyConfigPatch` 直接调 `initPriceFeed`：5 条里 3 条无条件，走清单会误重连、误拉起 jmcomic 队列）。已接管的样子参照 `price.feed`（S10a：`initPriceFeed`/`stopPriceFeed` 在 `src/llm/price-feed.ts`）、两个 jmcomic 任务（S10b：`initJmcomicQueue`/`stopJmcomicQueue` 在 `src/media/jmcomic.ts`，原先靠在 `Orchestrator` 构造函数里调用启动）与 `onebot.reconnect`（S10c：宿主就是 `OneBotClient`，停止入口就是 `onebot.close()`；`src/qq/onebot.ts` 用私有字段 `#reconnectTimer` 存重连句柄，`close()`/`connect()`/`reconnect()` 都会取消掉已排定的那一次，**刻意不 unref**——有待重连时钉住进程是有意的）；计时器句柄行为由 `tests/t-timers.mjs` 用假计时器断言。**6 行长期任务里只剩 `jmcomic.worker` 是 `partial`**（停不掉正在执行的那一次下载），其余 5 行为 `full`。**新增长期任务要动三处**：`LONG_TERM_TASKS`、`lifecycle.ts` 的 `LIFECYCLE`、`app.ts` 的 `lifecycleDeps()`——只改一处会被对账断言拦下。
+
+**端点（`snowluma` 的 ws/http 地址与令牌）只有一个写入口**：`applyConfigPatch` 把 `next.snowluma` 的四个字段交给 `OneBotClient.applyEndpoint(next)`，**它返回 `true`（真的变了）才** `onebot.reconnect()`——所以"保存了一次没动端点的设置"不会断连。归一化规则（去 httpUrl 尾斜杠、空 URL 回落默认值、空 token 真清空）与构造函数**共用同一份**，规则一旦在比较的那一侧另写一份，`…:3000/` 与 `…:3000` 就会被判成变更、每次保存都断一次连接。唯一例外是 `applyTokens`（401 轮换路径上必须先写 token 再无条件重连）。守护在 `tests/t-timers.mjs` 第 5 段。
 
 ## 3. Bot 对话调用链
 
@@ -248,9 +271,9 @@ npm run dev             # tsc --watch
 
 测试通过 `tests/lib/src.mjs` 加载 `dist/`，确保验证的是实际运行产物。新增 `t-*.mjs` 必须在 `tests/run.mjs` 的 ASSERT 或 DIAG 中显式归类，否则 runner 直接失败。
 
-当前重点回归包括动态窗口语义、摘要去重、当前窗口与独立历史分离、统一预算保护本轮消息、读图结果回填、`memory_query` 定向查询，以及 Web/UI 模块接线。
+当前重点回归包括动态窗口语义、摘要去重、当前窗口与独立历史分离、统一预算保护本轮消息、读图结果回填、`memory_query` 定向查询、主动冒泡的唤醒语义（`t-window.mjs` 第 15 段），以及 Web/UI 模块接线。
 
-长期任务与事件相关改动另有一组专项套件：`t-events.mjs`（事件名/载荷/注入类型/`session-update` 通道）、`t-sse-project.mjs`（SSE 帧逐字节）、`t-panel-wiring.mjs`（UI 订阅名跨边界）、`t-ports.mjs`（跨模块端口与 `implements`；另扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`——`.mjs` 不受 `tsc` 管，这条只能文本扫）、`t-tasks.mjs`（`LONG_TERM_TASKS` 描述符与 `conformance` 一致性）、`t-timers.mjs`（计时器句柄：起没起、停没停、有没有被"清掉又没重建"、待触发的那一次取消不取消得掉）。
+长期任务与事件相关改动另有一组专项套件：`t-events.mjs`（事件名/载荷/注入类型/`session-update` 通道）、`t-sse-project.mjs`（SSE 帧逐字节）、`t-panel-wiring.mjs`（UI 订阅名跨边界）、`t-ports.mjs`（跨模块端口与 `implements`；另扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`——`.mjs` 不受 `tsc` 管，这条只能文本扫）、`t-tasks.mjs`（`LONG_TERM_TASKS` 描述符与 `conformance` 一致性）、`t-timers.mjs`（计时器句柄：起没起、停没停、有没有被"清掉又没重建"、待触发的那一次取消不取消得掉）、`t-jmcomic.mjs`（漫画队列按"请求者 QQ + 漫画 ID"去重：完成后记录**留在** `jobs` 里而不是即时摘除，否则"同一用户短时间内不能重复提交"对**下载成功过**的漫画失效；窗口的计时起点是上传完成时刻而非创建时刻）、`t-lifecycle.mjs`（注册层执行侧：退出路径的信号接线与幂等、装配清单 ⇄ 描述符表对账、`app.start()/stop()` 的接线与逆序、无按键分发；S11d 起还守"被删的死代码与空转事件不许长回来"——`core/config.ts` 无任何计时器、三个文件再无 `emit`、`EventMap` 与 `vision-scan` 在 `src/` 绝迹，同时**正向**钉住 `routes/providers.ts` 里那个活着的 `visionScan` 局部对象；S11e 起还守 electron 的退出等待——`before-quit` 的**函数体**里必须有 `preventDefault(`、排在它前面的 `stopping` 守卫、promise 链上的 `.catch(`，以及 `.finally` 里那次 `app.quit()`，否则桌面端要么不退要么死循环）。
 
 发布前执行：
 
@@ -269,4 +292,5 @@ node scripts/sanitize-release.mjs --scan
 - 新增事件或长期后台任务前，先查 `docs/global-registry-design.md`：事件名与载荷类型的归属、长期任务的所有者/开关/停止入口、局部计时器的排除边界都在那里定义。
 - 修改外部 JSON 或模型响应处理时，先做运行时窄化，不用无注释的全局 `any`。
 - 不直接修改 `dist/`；不使用 TypeScript 路径别名；不省略 NodeNext import 的 `.js` 后缀。
+- 往 `agent/` 或 `web/` 里新增实现时，先看 `scripts/check-layers.mjs` 的两条根目录规则（`src/web/` 根只放行组装根、入口、领域类型与读模型）；搬动 `src/` 文件后**先 `rm -rf dist` 再 build**，因为 `npm run build` 不清理旧产物，留下的化石会让指向旧路径的测试照样通过。
 - 修改对话主链路后至少运行 `npm run check`。

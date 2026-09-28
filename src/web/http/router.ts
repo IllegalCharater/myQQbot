@@ -1,5 +1,5 @@
 import type { IncomingMessage } from 'node:http';
-import type { AppContext, HttpMethod, Reply, Route, RouteMatch } from './types.js';
+import type { AppContext, HttpMethod, Reply, Route, RouteMatch } from '../types.js';
 
 const METHODS = new Set<HttpMethod>(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 

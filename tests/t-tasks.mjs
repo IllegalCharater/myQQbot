@@ -1,4 +1,4 @@
-// 长期任务描述符表（S9）：`src/web/tasks.ts` 的 `LONG_TERM_TASKS`。
+// 长期任务描述符表（S9）：`src/web/runtime/tasks.ts` 的 `LONG_TERM_TASKS`。
 //
 // 这张表的价值全在"它说的和现实是不是一回事"。所以本套件不检查表自身的形状，而是拿表里的
 // 每一条声明**去现实里核对**：
@@ -21,7 +21,7 @@ import { ROOT, load, stripComments } from './lib/src.mjs';
 dataDir('qqagent-tasks-');
 const { ok, done } = checker();
 
-const { LONG_TERM_TASKS } = await load('web/tasks.js');
+const { LONG_TERM_TASKS } = await load('web/runtime/tasks.js');
 const { getConfig } = await load('core/config.js');
 
 // 手工登记的 id 清单。表里加一个任务是个**有意的动作**，必须同步登记到这里。
@@ -34,12 +34,12 @@ const EXPECTED_IDS = [
 // 这是"局部计时器不在表内"的可机检形态。
 const LOCALTIMER_ONLY_FILES = [
   'src/core/util.ts',                     // delay() 助手
-  'src/core/config.ts',                   // scheduleConfigSave（死代码，附录 C）
   'src/llm/llm.ts',                       // 重试退避 / 请求超时
   'src/llm/providers.ts',                 // 供应商请求超时 ×2
   'src/llm/vision-scan.ts',               // 扫图进度 flush（每 2s）
   'src/media/safe-fetch.ts',              // DNS 解析超时
-  'src/web/app.ts',                       // socket 超时 / 启动期端口轮询
+  'src/web/app.ts',                       // 启动期端口轮询的等待间隔（SnowLuma 就绪探测）
+  'src/web/onebot/snowluma.ts',           // 端口探活 socket 超时（从 app.ts 搬出，行为不变）
   'src/web/routes/chats.ts',              // getChatName 3s 兜底
   'src/agent/runtime/wake-scheduler.ts',  // 唤醒防抖 / 等待窗口 / 限速等待
   'electron/main.js'                      // 窗口加载前 2s 延时
@@ -113,8 +113,8 @@ const jmcomic = await load('media/jmcomic.js');
 ok('price.feed 标 full 是真的：price-feed 有 stopPriceFeed 导出（S10a 接管）',
   typeof priceFeed.stopPriceFeed === 'function',
   '导出被删掉的话表里的 full 就是谎话 → app.stop() 接线也会跟着断');
-ok('两个 jmcomic 任务已能接管：jmcomic 有 initializeJmcomicQueue / stopJmcomicQueue 导出（S10b）',
-  typeof jmcomic.initializeJmcomicQueue === 'function' && typeof jmcomic.stopJmcomicQueue === 'function',
+ok('两个 jmcomic 任务已能接管：jmcomic 有 initJmcomicQueue / stopJmcomicQueue 导出（S10b）',
+  typeof jmcomic.initJmcomicQueue === 'function' && typeof jmcomic.stopJmcomicQueue === 'function',
   'stopJmcomicQueue 被删掉的话表里的 full/partial 就是谎话 → app.stop() 接线也会跟着断');
 
 // 第三条实名断言（S10c）：`onebot.reconnect` 标 full 的**能力**是"重连定时器的句柄被存下来了"。
@@ -160,10 +160,10 @@ ok('表里写的每个启停入口都能在真对象/真模块上解析到',
 //        ② `src/` 里除定义处外没有任何文件引用它（否则它开始参与运行时逻辑了）。
 // 两处都**剥掉注释再扫**：这张表的注释里就要写"绝不包装 setTimeout / setInterval 全局"
 // 这类反模式说明，不剥的话注释本身会把断言打红（`stripComments` 的注释里记了同类误报）。
-const tasksSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/web/tasks.ts'), 'utf8'));
+const tasksSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/web/runtime/tasks.ts'), 'utf8'));
 const starters = [
   ['setInterval(', /setInterval\(/], ['setTimeout(', /setTimeout\(/],
-  ['initPriceFeed(', /initPriceFeed\(/], ['initializeJmcomicQueue(', /initializeJmcomicQueue\(/]
+  ['initPriceFeed(', /initPriceFeed\(/], ['initJmcomicQueue(', /initJmcomicQueue\(/]
 ].filter(([, re]) => re.test(tasksSrc)).map(([label]) => label);
 ok('tasks.ts 自身是纯数据：不调度、也不启动任何任务',
   starters.length === 0,
@@ -180,7 +180,7 @@ function walk(dir, out = []) {
 }
 const referenced = walk(SRC)
   .map((f) => path.relative(SRC, f).split(path.sep).join('/'))
-  .filter((f) => f !== 'web/tasks.ts')
+  .filter((f) => f !== 'web/runtime/tasks.ts')
   .filter((f) => stripComments(fs.readFileSync(path.join(SRC, f), 'utf8')).includes('LONG_TERM_TASKS'));
 ok('除定义处外 src/ 没有任何文件引用 LONG_TERM_TASKS（它只作文档与测试引用）',
   referenced.length === 0,

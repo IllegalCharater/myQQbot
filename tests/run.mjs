@@ -39,6 +39,8 @@ const ASSERT = [
   't-ports.mjs',           // 跨模块端口（implements 挂载、成员与外部调用对账、名录只作文档）
   't-tasks.mjs',           // 长期任务描述符表（6 行如实标注；反查局部计时器不在表内）
   't-timers.mjs',          // 长期任务的计时器句柄（start 起了什么、stop 有没有收干净）
+  't-jmcomic.mjs',         // 漫画队列去重（按请求者+漫画ID）与完成后记录留存
+  't-lifecycle.mjs',       // 注册层执行侧（关停路径、装配清单、清单与描述表对账）
   't-ui-modules.mjs',      // 原生 ES Module 入口、依赖图与资源完整性
   't-admin.mjs',           // 管理接口
   't-ui-render.mjs',       // UI 领域模块在假 DOM 下真跑一遍看 HTML

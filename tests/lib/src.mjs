@@ -54,7 +54,7 @@ export const readUI = (rel) => fs.readFileSync(uiFile(rel), 'utf8');
  * 剥掉注释，只留代码。给"文本扫描式断言"用。
  *
  * 为什么需要它：那类断言的意图是"这段代码里没有 X"，但**注释里提一嘴 X 会被误判**。
- * 实测踩到过两次：`src/web/tasks.ts` 的注释指向隔壁那张方法名录，把 t-ports 的
+ * 实测踩到过两次：`src/web/runtime/tasks.ts` 的注释指向隔壁那张方法名录，把 t-ports 的
  * "名录不参与分发"断言打红了（而注释不参与任何逻辑）；同理，注释里写一句
  * ``不要这样写 setInterval(fn, 1000)`` 也会打红 t-tasks 的"纯数据"断言。
  * 所以扫描前先剥注释，才是对断言意图的忠实实现。

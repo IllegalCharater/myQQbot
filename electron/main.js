@@ -174,7 +174,34 @@ app.whenReady().then(async () => {
   }
 });
 
-app.on('before-quit', () => {
+// 退出：先真正把核心关停完，再放行。
+//
+// 原先这里是 `try { core?.stop(); } catch {}` —— 同步调用、不 await，于是 Electron
+// 立刻开始拆窗口与进程，而核心那条 `app.stop()` 链（中止在跑的会话、停长期任务、
+// 关 OneBot、关 server）还在半路上：在途的 QQ 上传与内存里的整理结果被直接切断，
+// 关停日志也来不及打。S11a 给无头入口补的"等 stop() 落地再退"在这里同样成立，
+// 只是机制不同——先 preventDefault 拦下这次退出，等关停完自己再 quit 一次。
+//
+// 三个细节都不能省：
+//   • `stopping` 守卫：我们最后那次 `app.quit()` 会再次触发 before-quit，没有它就会
+//     preventDefault 拦下自己，退出变成死循环；
+//   • `quitting = true` 必须在最前面：退出期间窗口的 close 事件会先到，`quitting`
+//     还是 false 的话，关窗处理器会 preventDefault + 缩托盘，把退出挂住；
+//   • 关停放进 `.then` 而不是 `Promise.resolve(core.stop())`：后者一旦在实参求值阶段
+//     同步抛错，异常就逃出了这个处理器，`.catch` 接不住。
+//
+// 顺带：`proactive.bubble` 那个没 unref 的计时器到底会不会把进程钉住，只有真机能确认
+// （见 docs/global-registry-design.md §9.4）。
+let stopping = false;
+
+app.on('before-quit', (event) => {
   quitting = true;
-  try { core?.stop(); } catch { /* ignore */ }
+  if (stopping) return;                    // 第二次：上面那次关停已落地，放行
+  stopping = true;
+  if (!core) return;                       // 核心没起来过，没什么可等
+  event.preventDefault();
+  Promise.resolve()
+    .then(() => core.stop())
+    .catch((error) => console.error('[electron] 退出时关停失败:', error))
+    .finally(() => app.quit());
 });

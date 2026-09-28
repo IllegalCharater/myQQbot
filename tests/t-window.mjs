@@ -248,6 +248,61 @@ console.log('\n=== 14. 容量即时生效 ===');
   orc.abortAll();
 }
 
+// ── 15. 主动冒泡的唤醒带着 `proactive: true` ─────────────────────────
+//
+// 为什么这条在这里：`Orchestrator` 递给 `ProactiveController` 的那个 `wake` 回调，是
+// `{ proactive: true }` 的**唯一载体**。这个标志在 `wake-scheduler.wake()` 里做两件事——
+// 越过暂停闸门，以及**跳过整个响应档位判定**（含"窗口里没有未读就早退"那条）。
+//
+// 而 `candidates()` 挑的恰恰是**窗口里没有未读**的空闲群（`pending().length > 0` 就跳过）。
+// 所以这个标志一旦丢掉，主动冒泡不是"偶尔失灵"，而是**恒为 no-op**：每次都撞死在
+// `pending().length === 0` 的早退上。实测确认过：把 `{ proactive: true }` 去掉，
+// 全量 23 个套件**全绿**——在补上这一段之前，这条语义没有任何守护。
+console.log('\n=== 15. 主动机会：空闲群也能被唤醒 ===');
+{
+  const { store, orc, sessions } = harness();
+  const K = key();
+  // **必须把 allow 钉死成本群**：`ProactiveController.tick()` 是
+  // `candidates[Math.floor(Math.random() * candidates.length)]` —— 从**所有**合格群聊里随机挑一个。
+  // 存档是按 `QQ_AGENT_DATA_DIR` 落盘的，而整个套件共用一个临时目录，于是前面 9 个小节留下的
+  // 空闲群全都合格，本群被选中只有约 1/N 的概率。第一版没钉 allow，实测六次里挂三次
+  // （`❌ 压根没建会话`）——**一条会随机红的断言比没有断言更坏**，它会把 `npm run check` 变成抽奖。
+  updateConfig({
+    allow: { groups: [K.split(':')[1]] },
+    allowAllWhenEmpty: false,
+    proactive: { enabled: true, probability: 1, idleThresholdMs: 300000 }
+  });
+  // 只落存档、**不进窗口**，并且标成已读：这正是 candidates() 认的空闲群
+  // （久无消息、窗口里无未读）。不标已读的话，第一次 `ensure()` 播种会把这条未读
+  // 拉进窗口，`pending()` 就不是 0 了——那样无论有没有 proactive 标志都会往下走，
+  // 这条断言会退化成假的绿。
+  store.appendIncoming(K, { mid: 1, ts: 1700000000000, senderId: '555', senderName: '张三', text: '很久以前' });
+  store.markRead(K, { ids: [1] });
+  ok('前置：这个群是唯一的冒泡候选（窗口无未读 + 白名单只有它）',
+    orc.windows.pendingCount(K) === 0, `pending=${orc.windows.pendingCount(K)}`);
+
+  // 本套件没有假时钟，所以只在 `start()` 那一瞬截下它排的 15s tick，再手动触发；
+  // 截完立刻还原，避免影响后面的用例（同 t-timers 的 try/finally 约定）。
+  const realSetTimeout = globalThis.setTimeout;
+  let tick = null;
+  globalThis.setTimeout = (fn, ms) => (ms === 15000 ? (tick = fn) : realSetTimeout(fn, ms));
+  try { orc.startProactiveLoop(); } finally { globalThis.setTimeout = realSetTimeout; }
+  ok('截到了冒泡巡检的 tick', typeof tick === 'function');
+
+  if (typeof tick === 'function') await tick();
+  // tick 里 `deps.wake(...)` 是 fire-and-forget，给它一点时间落地
+  const created = await new Promise((resolve) => {
+    const iv = setInterval(() => {
+      const hit = [...sessions.current.values()].find((s) => s.chatKey === K);
+      if (hit) { clearInterval(iv); resolve(hit); }
+    }, 10);
+    setTimeout(() => { clearInterval(iv); resolve(null); }, 3000);
+  });
+  ok('主动唤醒真的建出了会话（丢掉 proactive: true 会恒在这里早退）',
+    created != null, created ? `session=${created.id} trigger=${JSON.stringify(created.trigger)}` : '压根没建会话');
+  orc.abortAll();
+}
+
 console.log(`\n${bad === 0 ? '✅ 全部通过' : `❌ ${bad} 项失败`}`);
 fs.rmSync(DIR, { recursive: true, force: true });
 process.exit(bad === 0 ? 0 : 1);

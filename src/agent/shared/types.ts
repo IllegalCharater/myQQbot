@@ -106,10 +106,3 @@ export interface PromptContext extends TriggerContext, Record<string, unknown> {
   session?: SessionRecord;
   stickerEntries?: StickerEntry[];
 }
-
-export type AgentPhase = 'waiting' | 'running';
-export interface AgentEventMap {
-  state: Record<string, unknown>;
-  session: Record<string, unknown>;
-  [event: string]: unknown;
-}

@@ -372,7 +372,6 @@ function normalizeConfigShape<T>(input: T): T {
 }
 
 let currentConfig: AppConfig | null = null;
-const saveTimers = new Map<string, NodeJS.Timeout>();
 
 /** 取当前生效配置（未初始化时从磁盘读）。 */
 export function getConfig(): AppConfig {
@@ -452,19 +451,4 @@ export function digestConfigForChat(chatKey: string) {
     maxChars: num(o.maxChars, base.maxChars),
     maxKeepChars: base.maxKeepChars   // 不按群覆盖，见上面 base 里的注释
   };
-}
-
-/** 防抖保存：高频小改动合并写盘。 */
-export function scheduleConfigSave() {
-  clearTimeout(saveTimers.get('cfg'));
-  saveTimers.set('cfg', setTimeout(() => {
-    try {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-      const tmp = `${CONFIG_FILE}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(getConfig(), null, 2), 'utf8');
-      fs.renameSync(tmp, CONFIG_FILE);
-    } catch (error) {
-      console.error('[config] 保存失败:', error);
-    }
-  }, 400));
 }

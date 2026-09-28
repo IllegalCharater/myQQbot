@@ -25,7 +25,7 @@ import { ROOT, load } from './lib/src.mjs';
 dataDir('qqagent-events-');
 const { EVENTS } = await load('core/events.js');
 // 第 6 段要用真投影函数：S7 的收益就是"这条通道终于通了"，光看载荷形状证不了它。
-const { projectSse } = await load('web/event-projector.js');
+const { projectSse } = await load('web/http/event-projector.js');
 
 const { ok, done } = checker();
 
@@ -229,13 +229,14 @@ ok('src/ 里没有任何 emit 注入点还写着宽松的 payload: unknown',
 // 上面那行 import type 还留着 AppEmit，文件照样"提到"它（第一版就漏掉了这种改法）。
 const TYPED_FILES = [
   'agent/maintenance/history-compactor.ts',
-  'agent/maintenance/memory-consolidator.ts',
   'agent/runtime/agent-runner.ts',
   'agent/runtime/orchestrator.ts',
   'agent/runtime/wake-scheduler.ts',
   'agent/shared/types.ts',
-  'llm/vision-scan.ts',
   'web/app.ts',
+  'web/http/console.ts',
+  'web/onebot/ingest.ts',
+  'web/onebot/snowluma.ts',
   'web/types.ts'
 ];
 const usingAppEmit = walk(SRC)

@@ -1,7 +1,7 @@
 import { getConfig } from '../../core/config.js';
 import { listOfficialPrices, resolveOfficialPrice } from '../../llm/model-prices.js';
 import { priceFeedStatus, refreshPriceFeed } from '../../llm/price-feed.js';
-import { errorMessage } from '../http.js';
+import { errorMessage } from '../http/http.js';
 import type { Route } from '../types.js';
 
 export const usageRoutes: Route[] = [

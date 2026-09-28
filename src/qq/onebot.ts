@@ -12,7 +12,18 @@ function isRecord(value: unknown): value is Record<string, unknown> { return val
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 const RECONNECT_MIN_MS = 3000;
-const RECONNECT_MAX_MS = 30000;
+// RECONNECT_MAX_MS = 30000 曾在这里，零引用（设计稿附录 C），S11b 删除。
+// 不做指数退避是有意的：本机回环、3s 常量足够，退避会改掉重连的可观察行为。
+
+/**
+ * 端点字段的归一化规则，**构造函数与 `applyEndpoint()` 共用同一份**。
+ * 共用不是为了少写两行：配置刷新时要回答"这个字段到底变了没有"，
+ * 而只要归一化规则在比较的那一侧另写一份，`http://127.0.0.1:3000/` 与
+ * `http://127.0.0.1:3000` 就会被判成变更 —— 用户每保存一次设置就断一次连接。
+ * 空地址回落到默认值（构造函数从来就表示不了"空地址"，实例字段不该被置成空串）。
+ */
+function normalizeWsUrl(value: unknown): string { return String(value || 'ws://127.0.0.1:3001'); }
+function normalizeHttpUrl(value: unknown): string { return String(value || 'http://127.0.0.1:3000').replace(/\/+$/, ''); }
 
 export class OneBotClient {
   wsUrl: string;
@@ -28,8 +39,8 @@ export class OneBotClient {
   statusListeners: Set<StatusHandler>;
 
   constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent }: { wsUrl?: unknown; httpUrl?: unknown; accessToken?: unknown; httpToken?: unknown; onEvent?: EventHandler }) {
-    this.wsUrl = String(wsUrl || 'ws://127.0.0.1:3001');
-    this.httpUrl = String(httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    this.wsUrl = normalizeWsUrl(wsUrl);
+    this.httpUrl = normalizeHttpUrl(httpUrl);
     this.accessToken = String(accessToken || '');
     // SnowLuma 允许给 WS 与 HTTP 配不同令牌；httpToken 缺省沿用 accessToken
     this.httpToken = String(httpToken || accessToken || '');
@@ -106,6 +117,43 @@ export class OneBotClient {
     this.#cancelReconnect();
     try { old?.close(); } catch { /* ignore */ }
     this.#connectLoop();
+  }
+
+  /**
+   * 把配置里的端点字段应用到实例上（配置刷新用，S11b）。返回**是否有字段真的变了** ——
+   * 调用方据此决定要不要 `reconnect()`：不变也重连的话，用户每保存一次设置都会断开一次
+   * WebSocket（面板上状态灯乱闪、正在收的事件丢一帧），而这完全没必要。
+   *
+   * 三条规则：
+   *   • `undefined` = 这个字段不动。配置里没有这一项，不等于要把它清空。
+   *   • 其余值走**与构造函数同一份归一化**（见 `normalizeWsUrl` / `normalizeHttpUrl`），
+   *     所以尾斜杠差异不算变更、空地址回落到默认值。
+   *   • 令牌是**真的清空**（构造函数对令牌也是 `String(v || '')`，空令牌本来就表示免鉴权）。
+   *     注意 httpToken 与 accessToken 的"留空沿用"配对规则在调用方（`app.ts`），
+   *     这里只管单个字段：它不该知道"httpAccessToken 为空时该用哪个 token"。
+   *
+   * 只改实例字段：**不重连、不发事件、不动已建的 socket**。重连与否是调用方的决策——
+   * `app.ts` 的 `applyConfigPatch` 比较后调 `reconnect()`，`start()` 只是补 URL（还没有连接）。
+   */
+  applyEndpoint(next: { wsUrl?: unknown; httpUrl?: unknown; accessToken?: unknown; httpToken?: unknown }): boolean {
+    let changed = false;
+    if (next.wsUrl !== undefined) {
+      const value = normalizeWsUrl(next.wsUrl);
+      if (value !== this.wsUrl) { this.wsUrl = value; changed = true; }
+    }
+    if (next.httpUrl !== undefined) {
+      const value = normalizeHttpUrl(next.httpUrl);
+      if (value !== this.httpUrl) { this.httpUrl = value; changed = true; }
+    }
+    if (next.accessToken !== undefined) {
+      const value = String(next.accessToken || '');
+      if (value !== this.accessToken) { this.accessToken = value; changed = true; }
+    }
+    if (next.httpToken !== undefined) {
+      const value = String(next.httpToken || '');
+      if (value !== this.httpToken) { this.httpToken = value; changed = true; }
+    }
+    return changed;
   }
 
   #connectLoop() {

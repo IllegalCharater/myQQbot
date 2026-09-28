@@ -25,7 +25,6 @@ export const EVENTS = {
   sessionEnd: 'session-end',
   memoryUpdate: 'memory-update',
   stickerUpdate: 'sticker-update',
-  visionScan: 'vision-scan',
   onebotStatus: 'onebot-status',
   snowlumaStatus: 'snowluma-status',
   snowlumaLog: 'snowluma-log',
@@ -72,18 +71,6 @@ export interface SnowlumaLogPayload {
 export interface StickerUpdatePayload {
   /** 只有单张变动（收藏/删除）带 id；批量刷新与缓存变更发 `{}`。 */
   id?: string;
-}
-
-export interface VisionScanPayload {
-  /** 只有 routes/providers.ts 的三条会带 phase；vision-scan.ts 自己发的两条不带。 */
-  phase?: 'start' | 'done' | 'error';
-  key?: string;
-  providerId?: string;
-  model?: string;
-  verdict?: 'vision' | 'no-vision' | 'unknown';
-  done?: number;
-  total?: number;
-  error?: string;
 }
 
 export interface MemoryUpdatePayload {
@@ -170,8 +157,13 @@ export interface OrchestratorPausePayload {
 // ── 事件名 → 载荷 ──
 /**
  * **刻意不写索引签名。** `[event: string]: unknown` 会让 `keyof` 退化成 string，
- * 于是新增或改名事件永远不会报错，强类型映射等于没做——`agent/shared/types.ts:106-110`
- * 的 `AgentEventMap` 就是那个反面教材，它今天已经没有任何使用者（附录 C）。
+ * 于是新增或改名事件永远不会报错，强类型映射等于没做。反过来说，"没有索引签名"这道
+ * 护栏只挡得住**声明**：护栏两侧（`EVENTS` 的值 与 `AppEventMap` 的键）由文件末尾的
+ * `EveryEventNameHasPayload` / `EveryPayloadHasEventName` 双向钉住，加一个事件名却忘了
+ * 加载荷类型（或反过来）都编译不过。
+ *
+ * 同一个反面教材曾经真的存在过：`agent/shared/types.ts` 的 `AgentEventMap` 就带着索引
+ * 签名，一整套"新事件不用登记"的静默退化因此合法。它已被 `AppEventMap` 取代并删除（S11d）。
  *
  * 键必须是 EVENTS 里的值，缺一个会被下面的编译期护栏拦下。
  */
@@ -194,7 +186,6 @@ export interface AppEventMap {
   'session-end': SessionEndPayload;
   'memory-update': MemoryUpdatePayload;
   'sticker-update': StickerUpdatePayload;
-  'vision-scan': VisionScanPayload;
   'onebot-status': OneBotStatusPayload;
   'snowluma-status': SnowlumaStatusPayload;
   'snowluma-log': SnowlumaLogPayload;

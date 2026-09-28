@@ -4,7 +4,7 @@ import { EVENTS } from '../../core/events.js';
 import { ROOT } from '../../core/paths.js';
 import { listModels } from '../../llm/llm.js';
 import { PERSONAS } from '../../core/prompt-catalog.js';
-import { errorMessage, isRecord, readBody } from '../http.js';
+import { errorMessage, isRecord, readBody } from '../http/http.js';
 import type { Route } from '../types.js';
 
 function localVersion(): string {

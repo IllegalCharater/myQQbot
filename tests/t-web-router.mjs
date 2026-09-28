@@ -3,8 +3,8 @@ import { load } from './lib/src.mjs';
 import { checker } from './lib/harness.mjs';
 
 const { ok, done, counts } = checker();
-const { matchRoute, dispatchRoute } = await load('web/router.js');
-const { readBody, writeReply } = await load('web/http.js');
+const { matchRoute, dispatchRoute } = await load('web/http/router.js');
+const { readBody, writeReply } = await load('web/http/http.js');
 
 const noop = async () => ({ status: 200, body: { ok: true } });
 const routes = [

@@ -4,7 +4,7 @@ import { detectMime } from '../../agent/tools/index.js';
 import { safeFetchBinary, validateImageUrl } from '../../media/safe-fetch.js';
 import { cachedPath } from '../../stickers/sticker-cache.js';
 import type { StickerPatch } from '../../stickers/types.js';
-import { errorMessage, isRecord, readBody } from '../http.js';
+import { errorMessage, isRecord, readBody } from '../http/http.js';
 import type { Route } from '../types.js';
 
 const imageHeaders = (mime: string, length: number): Record<string, string> => ({

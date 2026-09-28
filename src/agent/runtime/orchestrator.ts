@@ -17,7 +17,6 @@ import type { AppEmit } from '../../core/events.js';
 import { buildToolDefs } from '../tools/index.js';
 import { ContextWindowRegistry } from '../context/context-window.js';
 import { isRecord } from '../shared/json-parse.js';
-import type { RuntimeStateRegistry } from './runtime-state.js';
 import { ProactiveController } from '../maintenance/proactive-controller.js';
 import { MemoryConsolidator } from '../maintenance/memory-consolidator.js';
 import { HistoryCompactor } from '../maintenance/history-compactor.js';
@@ -29,7 +28,7 @@ import type { StickerManager } from '../../stickers/sticker-manager.js';
 import type { SendQueue } from '../../qq/sender.js';
 import type { SessionRegistry } from '../../chat/sessions.js';
 import type { OneBotClient } from '../../qq/onebot.js';
-import type { ChatRuntimeState, OrchestratorDependencies, ToolDefinition } from '../shared/types.js';
+import type { ChatRuntimeState, OrchestratorDependencies } from '../shared/types.js';
 import type { AgentControlPort } from './control-port.js';
 
 export class Orchestrator implements AgentControlPort {
@@ -40,9 +39,7 @@ export class Orchestrator implements AgentControlPort {
   sessions: SessionRegistry;
   onebot: OneBotClient;
   emit: AppEmit;
-  toolDefs: ToolDefinition[];
   windows: ContextWindowRegistry;
-  chatNameCache: Map<string, string>;
   wakeTimers: Map<string, ReturnType<typeof setTimeout>>;
   pendingWake: Set<string>;
   pendingSessions: Map<string, string>;
@@ -50,9 +47,7 @@ export class Orchestrator implements AgentControlPort {
   memoryConsolidator: MemoryConsolidator;
   runningChats: Set<string>;
   activeRuns: Map<string, string>;
-  runSeq: Map<string, number>;
   chatStates: Map<string, ChatRuntimeState>;
-  runtimeState: RuntimeStateRegistry;
   scheduler: WakeScheduler;
   compacting: Set<string>;
   historyCompactor: HistoryCompactor;
@@ -60,6 +55,9 @@ export class Orchestrator implements AgentControlPort {
   pauseReason: string | null;
   proactive: ProactiveController;
   aborted: boolean;
+
+  /** 群名缓存：groupId -> name，只有 `getChatName` / `#chatName` 用，不对类外暴露。 */
+  #chatNameCache = new Map<string, string>();
 
   constructor({ store, memory, stickers, sender, sessions, onebot, emit, windows = null }: OrchestratorDependencies) {
     this.store = store;
@@ -69,7 +67,10 @@ export class Orchestrator implements AgentControlPort {
     this.sessions = sessions;
     this.onebot = onebot;
     this.emit = emit;   // S10d：不再兜底建空总线，缺了编译不过（见 shared/types.ts 的说明）
-    this.toolDefs = buildToolDefs();
+    // 工具定义只在这里建一次、只递给下面的 WakeScheduler（它是 `AgentRunnerHost`，
+    // `runAgent(this, …)` 里的 `host` 就是 scheduler，不是本类）。所以它不需要是字段。
+    const toolDefs = buildToolDefs();
+
     // jmcomic 队列不在构造函数里启动（S10b）：长期任务一律在 app.start() 起、app.stop() 停，
     // 见 src/web/app.ts 与 AGENTS.md「事件与长期任务边界」。
 
@@ -80,11 +81,9 @@ export class Orchestrator implements AgentControlPort {
       capacity: () => Math.max(0, Number(getConfig().store?.maxContextMessages) || 0)
     });
 
-    this.chatNameCache = new Map();    // groupId -> name
     this.memoryConsolidator = new MemoryConsolidator({
       store: this.store,
       memory: this.memory,
-      emit: (event, payload) => this.emit(event, payload),
       isPaused: () => this.paused,
       isAborted: () => this.aborted
     });
@@ -110,20 +109,27 @@ export class Orchestrator implements AgentControlPort {
       sessions: this.sessions,
       onebot: this.onebot,
       windows: this.windows,
-      toolDefs: this.toolDefs,
+      toolDefs,
       emit: (event, payload) => this.emit(event, payload),
       getChatName: (groupId) => this.getChatName(groupId),
+      // 群友印象自动整理：触发条件是"印象条数超过阈值 **且** 距上次整理超过冷却时间"，
+      // 判定本身在 `MemoryConsolidator.maybeSchedule()` 里。
+      // 阈值原为硬编码 8，实测用户群里 5 位成员各 1 条印象（合计 5），5 > 8 恒 false
+      // → 自动整理永远不触发。改为可配置（`config.memory.consolidateMinImpressions`）
+      // 且默认值下调，避免在"人不多、印象还没攒起来"的群里彻底失灵。
       maybeConsolidateMemory: (chatKey) => this.memoryConsolidator.maybeSchedule(chatKey),
       isPaused: () => this.paused,
       isAborted: () => this.aborted
     });
+    // 下面这 6 行是**引用拷贝**，不是再建一份：`abortAll()` 里的 `chatStates.clear()`、
+    // 测试里的 `orc.pendingWake` 能生效，全靠门面与 scheduler 指的是同一个 Set/Map。
+    // 因此 scheduler 侧只能**改写容器内容**，绝不能替换容器本身
+    // （写成 `this.pendingWake = new Set()` 会让这里静默指向旧容器，而 `tsc` 不会报错）。
     this.wakeTimers = this.scheduler.wakeTimers;
     this.pendingWake = this.scheduler.pendingWake;
     this.pendingSessions = this.scheduler.pendingSessions;
     this.runningChats = this.scheduler.runningChats;
     this.activeRuns = this.scheduler.activeRuns;
-    this.runSeq = this.scheduler.runSeq;
-    this.runtimeState = this.scheduler.runtimeState;
     this.chatStates = this.scheduler.chatStates;
     this.historyCompactor = new HistoryCompactor({
       store: this.store,
@@ -144,7 +150,12 @@ export class Orchestrator implements AgentControlPort {
       runningChats: this.runningChats,
       isPaused: () => this.paused,
       isAborted: () => this.aborted,
-      wake: (chatKey) => this.wake(chatKey, { proactive: true })
+      // 主动冒泡的唤醒**刻意**不同于普通唤醒，`{ proactive: true }` 是这个区别的唯一载体
+      // （`wake-scheduler.ts` 的 `wake()`：`isPaused() && !proactive` 才早退、跳过响应档位
+      // 判定、不取触发批只带状态）。以前这里绕了一层 `this.wake(chatKey, {proactive:true})`，
+      // 那个门面方法没有任何别的调用者，且它多暴露了一个只有 scheduler 自己用的
+      // `waitingSessionId` —— 直接打给 scheduler，语义不变、对外面收窄。
+      wake: (chatKey) => this.scheduler.wake(chatKey, { proactive: true })
     });
     this.aborted = false;
   }
@@ -192,13 +203,6 @@ export class Orchestrator implements AgentControlPort {
     return this.scheduler.forceWake(chatKey);
   }
 
-  wake(
-    chatKey: string,
-    options: { proactive?: boolean; waitingSessionId?: string | null } = {}
-  ): Promise<void> {
-    return this.scheduler.wake(chatKey, options);
-  }
-
   /**
    * 取群名（公开版）。复用 #chatName 的缓存，供 HTTP 接口给 UI 显示用。
    * 与私有版的区别：这个不会因异常抛错，拿不到就返回空串（UI 自行退回显示群号）。
@@ -213,11 +217,11 @@ export class Orchestrator implements AgentControlPort {
 
   async #chatName(groupId: string | number): Promise<string> {
     const key = String(groupId);
-    if (this.chatNameCache.has(key)) return this.chatNameCache.get(key) ?? '';
+    if (this.#chatNameCache.has(key)) return this.#chatNameCache.get(key) ?? '';
     try {
       const info = await this.onebot.getGroupInfo(groupId);
       if (isRecord(info) && info.group_name) {
-        this.chatNameCache.set(key, String(info.group_name));
+        this.#chatNameCache.set(key, String(info.group_name));
         return String(info.group_name);
       }
     } catch { /* 拿不到就用群号 */ }
@@ -228,16 +232,6 @@ export class Orchestrator implements AgentControlPort {
 
   startProactiveLoop(): void {
     this.proactive.start();
-  }
-
-  // ── 群友印象自动整理 ──
-  // 触发条件（二者同时满足）：印象条数超过阈值，且距上次整理超过冷却时间。
-  //
-  // 阈值原为硬编码 8，实测用户群里 5 位成员各 1 条印象（合计 5），5 > 8 恒 false
-  // → 自动整理永远不触发。改为可配置（config.memory.consolidateMinImpressions），
-  // 且默认值下调，避免在"人不多、印象还没攒起来"的群里彻底失灵。
-  #maybeConsolidateMemory(chatKey: string): void {
-    this.memoryConsolidator.maybeSchedule(chatKey);
   }
 
   consolidateMemoryForChat(

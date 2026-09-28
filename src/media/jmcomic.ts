@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { DATA_DIR, ROOT } from '../core/config.js';
 
-const DUPLICATE_WINDOW_MS = 60_000;
+const DUPLICATE_WINDOW_MS = 10 * 60_000;
 const DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
 const INACTIVITY_TIMEOUT_MS = 5 * 60_000;
 const RESULT_PREFIX = '__QQ_AGENT_RESULT__';
@@ -188,19 +188,22 @@ function updateJob(job: JmJob, patch: Partial<JmJob>) {
   saveJobs();
 }
 
+/**
+ * 已完成任务的收尾：**只删日志，不把记录从 `jobs` 里摘掉**。
+ *
+ * 记录必须留着，否则去重对"下载成功过"的漫画等于不存在：`enqueueJmcomicDownload` 的两道闸门
+ * 都以 `jobs` 为数据源，成功即摘记录的话，用户拿到 PDF 后立刻再说一次就会建出第二条任务 ——
+ * Python 命中本地缓存后很快再上传一次 PDF，可以反复刷。记录改由每日清理
+ * （`cleanupDownloadCacheIfDue` 里的 `jobs = []`）统一收走。
+ *
+ * 已完成状态留在磁盘上是安全的：`loadJobs()` 只把 `downloading`/`uploading` 复位成待跑，
+ * `completed` 原样保留，重启后不会被重新上传。
+ */
 function cleanupCompletedJob(job: JmJob) {
-  const previous = jobs;
-  jobs = jobs.filter((item) => item.id !== job.id);
-  try {
-    saveJobs();
-  } catch (error) {
-    jobs = previous;
-    throw error;
-  }
   try {
     fs.rmSync(path.join(LOG_DIR, `${job.id}.log`), { force: true });
   } catch (error) {
-    // 任务记录已经成功清除，残留日志不应导致已上传文件被重复发送。
+    // completed 状态已经在盘上，残留日志不会导致已上传文件被重复发送。
     console.warn(`[jmcomic] 已完成任务 ${job.id} 的日志删除失败:`, errorMessage(error));
   }
 }
@@ -211,6 +214,15 @@ function isPending(job: JmJob): boolean {
 
 function commandKey(requesterId: unknown, comicId: string): string {
   return `${requesterId || 'unknown'}:${comicId}`;
+}
+
+/**
+ * 去重窗口的计时起点：已完成的任务从**上传完成时刻**算起，其余从创建时刻算起。
+ * 只看 `createdAt` 的话，一次"下载 + 上传"耗时超过窗口的任务在上传完成的当刻就已经过期，
+ * 防重对最常发生的那一类重复（刚拿到 PDF 又提交一次）形同虚设。
+ */
+function duplicateAnchorAt(job: JmJob): number {
+  return Number(job.uploadedAt || job.createdAt || 0);
 }
 
 function pythonCommand() {
@@ -384,12 +396,9 @@ async function uploadStage(job: JmJob) {
   } catch (error) {
     console.warn(`[jmcomic] 文件已上传，但聊天存档写入失败（${job.id}）:`, errorMessage(error));
   }
-  try {
-    cleanupCompletedJob(job);
-  } catch (error) {
-    // completed 状态仍保留在磁盘中，启动恢复不会重复上传；以后可人工清理。
-    console.warn(`[jmcomic] 已完成任务 ${job.id} 的缓存清理失败:`, errorMessage(error));
-  }
+  // 记录有意留着（去重靠它，见 cleanupCompletedJob 的说明），这里删的只是日志；
+  // 它内部已经吞掉删除失败，不会把异常漏进重传路径。
+  cleanupCompletedJob(job);
 }
 
 function nextRunnableJob() {
@@ -433,7 +442,7 @@ async function runWorker() {
 }
 
 /** 绑定运行时依赖，并恢复上次退出时未完成的任务。可重复调用。 */
-export function initializeJmcomicQueue({ onebot, sender, store }: JmRuntime) {
+export function initJmcomicQueue({ onebot, sender, store }: JmRuntime) {
   runtime = { onebot, sender, store };
   loadJobs();
   startCleanupTimer();
@@ -466,16 +475,19 @@ export function stopJmcomicQueue() {
 
 export function enqueueJmcomicDownload(ctx: JmContext, comicId: unknown) {
   loadJobs();
-  if (!runtime) initializeJmcomicQueue({ onebot: ctx.onebot, sender: ctx.sender, store: ctx.store });
+  if (!runtime) initJmcomicQueue({ onebot: ctx.onebot, sender: ctx.sender, store: ctx.store });
   const id = String(comicId ?? '').trim();
   if (!/^\d{1,20}$/.test(id)) throw new Error('漫画ID必须是 1 至 20 位数字');
 
   const now = Date.now();
   const key = commandKey(ctx.requesterId, id);
   if (jobs.find((job) => job.key === key && isPending(job))) throw new Error(`漫画 ${id} 已在队列中或正在处理，请等待完成`);
+  // 已完成的任务**仍然在 `jobs` 里**（见 cleanupCompletedJob），所以这条窗口也管得住
+  // "刚拿到 PDF 又提交一次"——那正是最常发生的重复。
   const recent = [...jobs].reverse().find((job) => job.key === key);
-  if (recent && now - Number(recent.createdAt || 0) < DUPLICATE_WINDOW_MS) {
-    const seconds = Math.ceil((DUPLICATE_WINDOW_MS - (now - recent.createdAt)) / 1000);
+  const elapsed = recent ? now - duplicateAnchorAt(recent) : Number.POSITIVE_INFINITY;
+  if (elapsed < DUPLICATE_WINDOW_MS) {
+    const seconds = Math.ceil((DUPLICATE_WINDOW_MS - elapsed) / 1000);
     throw new Error(`同一用户短时间内不能重复提交漫画 ${id}，请 ${seconds} 秒后再试`);
   }
 
