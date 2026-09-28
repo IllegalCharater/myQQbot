@@ -43,12 +43,12 @@ const { ok, done } = checker();
 
 // jmcomic 夹具：**必须在本文件第一次 `initJmcomicQueue()` 之前写盘**（下面第 2、3 段都会调它）。
 // 两条设计，缺一不可：
-//   • 状态是 pending（`upload_failed`）：`cleanupDownloadCacheIfDue` 只在整个队列空闲时才清空
+//   • 状态是 pending（`downloaded`）：`cleanupDownloadCacheIfDue` 只在整个队列空闲时才清空
 //     下载目录、`jobs = []` 并重新写盘，所以没有这个待办的话首跑清理会把夹具连同 jobs.json
 //     一起抹掉（它第一件事就是 `fs.rmSync(DOWNLOAD_DIR)`）。
 //   • `nextAttemptAt` 在**刚过去**（可跑）：第 2 段要靠它让 worker 真的进到 `uploadStage`
-//     的 `onebot.call` 那里，才能模拟"上传途中被停"。跑完那一轮后它自己会被挪到 10s 之后，
-//     于是第 3 段（真起 app）拿到的是一个**不可跑**的待办，不会去碰真 onebot。
+//     的 `onebot.call` 那里，才能模拟"上传途中被停"。跑完那一轮后它自己会被挪到 30s 之后，
+//     于是第 3 段（真起 app）拿到的是一个**不可跑**的待核验任务，不会去碰真 onebot。
 // 全局只加载一次 jobs（模块内 `loaded` 标志），所以三段共用同一个任务，顺序不能换。
 const JM_DIR = path.join(DATA, 'jmcomic');
 const JM_DOWNLOADS = path.join(DATA, 'downloads', 'jmcomic');
@@ -62,8 +62,8 @@ fs.writeFileSync(path.join(JM_DIR, 'jobs.json'), JSON.stringify({
   version: 1,
   jobs: [{
     id: 'jm_fixture', key: 't:1', comicId: '1', requesterId: 't', kind: 'private',
-    chatId: '1', chatKey: 'private:1', status: 'upload_failed',
-    downloadAttempts: 1, uploadAttempts: 1, pdfPath: JM_PDF, lastError: '',
+    chatId: '1', chatKey: 'private:1', status: 'downloaded',
+    downloadAttempts: 1, uploadAttempts: 0, pdfPath: JM_PDF, lastError: '',
     nextAttemptAt: Date.now() - 1000, createdAt: Date.now(), updatedAt: Date.now()
   }]
 }, null, 2), 'utf8');
@@ -182,7 +182,7 @@ const jmcomic = await load('media/jmcomic.js');
 
 await withFakeTimers(async (t) => {
   // 停队列**正发生在 worker 在途时**：fake 的 onebot.call 一被调到就停队列，再抛错。
-  // 抛错会走 uploadStage 的重试分支（任务留在 pending、nextAttemptAt 挪到 10s 后），
+  // 抛错会进入 upload_uncertain（任务留在 pending、nextAttemptAt 挪到 30s 后），
   // 于是后面还能拿它当"有待办"的夹具。
   //
   // 注意这一段**不能**用 `t.active()` 断句柄数：stub 是同步被调到的，所以 stopJmcomicQueue
@@ -206,7 +206,7 @@ await withFakeTimers(async (t) => {
   // 停之后重新 init：任务还在（stop 不清 jobs），所以 wake timer 会重新排出来。
   // 这条同时是"stop 没把用户的下载任务丢掉"的行为证据 —— jobs 真被清了的话，
   // scheduleNextWake 捞不到待办，这里就一个 timeout 都不会有。
-  // （上一轮上传失败已把 nextAttemptAt 挪到 10s 后，所以此刻它不可跑、不会碰 onebot。）
+  // （上一轮上传结果未知已把 nextAttemptAt 挪到 30s 后，所以此刻它不可跑、不会碰 onebot。）
   jmcomic.initJmcomicQueue({ onebot: {}, sender: {}, store: {} });
   await flush();
   ok('重新 init：jobs 没被 stop 清掉（wake timer 为那个待办重新排了出来）',

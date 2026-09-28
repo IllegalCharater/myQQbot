@@ -5,6 +5,7 @@ import { DATA_DIR, ROOT } from '../core/config.js';
 
 const DUPLICATE_WINDOW_MS = 10 * 60_000;
 const DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
+const UPLOAD_TIMEOUT_MS = 30 * 60_000;
 const INACTIVITY_TIMEOUT_MS = 5 * 60_000;
 const RESULT_PREFIX = '__QQ_AGENT_RESULT__';
 const SCRIPT_PATH = path.join(ROOT, 'python-tools', 'jmcomic_download.py');
@@ -16,9 +17,11 @@ const CLEANUP_STATE_FILE = path.join(JM_DIR, 'cleanup-state.json');
 const CACHE_CLEANUP_INTERVAL_MS = 24 * 60 * 60_000;
 const CACHE_CLEANUP_CHECK_MS = 60 * 60_000;
 const DOWNLOAD_RETRY_MS = [5_000, 30_000, 120_000];
-const UPLOAD_RETRY_MS = [10_000, 60_000, 300_000, 900_000, 1_800_000];
+// 上传请求一旦发出，超时/断线只表示“客户端没拿到结果”，不表示 QQ 没收到文件。
+// 首次核验前等 30 秒，随后逐步拉长；整个过程只查群文件列表，绝不盲目重传。
+const UPLOAD_VERIFY_RETRY_MS = [30_000, 60_000, 120_000, 300_000];
 
-type JobStatus = 'queued' | 'downloading' | 'downloaded' | 'uploading' | 'upload_failed' | 'failed' | 'completed';
+type JobStatus = 'queued' | 'downloading' | 'downloaded' | 'uploading' | 'upload_uncertain' | 'upload_failed' | 'failed' | 'completed';
 
 interface JmJob {
   id: string;
@@ -41,6 +44,10 @@ interface JmJob {
   failedAt?: number;
   uploadedAt?: number;
   cached?: boolean;
+  uploadStartedAt?: number;
+  uploadVerifyAttempts?: number;
+  uploadedFileId?: string;
+  completionSource?: 'response' | 'group-file-check';
 }
 
 interface JmRuntime {
@@ -90,7 +97,12 @@ function normalizeJob(value: unknown): JmJob | null {
     ...(typeof value.downloadedAt === 'number' ? { downloadedAt: value.downloadedAt } : {}),
     ...(typeof value.failedAt === 'number' ? { failedAt: value.failedAt } : {}),
     ...(typeof value.uploadedAt === 'number' ? { uploadedAt: value.uploadedAt } : {}),
-    ...(typeof value.cached === 'boolean' ? { cached: value.cached } : {})
+    ...(typeof value.cached === 'boolean' ? { cached: value.cached } : {}),
+    ...(typeof value.uploadStartedAt === 'number' ? { uploadStartedAt: value.uploadStartedAt } : {}),
+    ...(typeof value.uploadVerifyAttempts === 'number' ? { uploadVerifyAttempts: value.uploadVerifyAttempts } : {}),
+    ...(typeof value.uploadedFileId === 'string' ? { uploadedFileId: value.uploadedFileId } : {}),
+    ...(value.completionSource === 'response' || value.completionSource === 'group-file-check'
+      ? { completionSource: value.completionSource } : {})
   };
 }
 
@@ -174,9 +186,12 @@ function loadJobs() {
       job.status = 'queued';
       job.nextAttemptAt = Date.now();
       changed = true;
-    } else if (job.status === 'uploading') {
-      job.status = 'downloaded';
-      job.nextAttemptAt = Date.now();
+    } else if (job.status === 'uploading' || job.status === 'upload_failed') {
+      // 进程退出或旧版自动重试留下的上传状态都是“结果未知”：QQ/SnowLuma 可能已经
+      // 收到文件。恢复后只能核验，不能重新执行非幂等的 upload_*_file。
+      job.status = 'upload_uncertain';
+      job.uploadVerifyAttempts = Number(job.uploadVerifyAttempts || 0);
+      job.nextAttemptAt = Date.now() + UPLOAD_VERIFY_RETRY_MS[0];
       changed = true;
     }
   }
@@ -209,7 +224,7 @@ function cleanupCompletedJob(job: JmJob) {
 }
 
 function isPending(job: JmJob): boolean {
-  return ['queued', 'downloading', 'downloaded', 'uploading', 'upload_failed'].includes(job.status);
+  return ['queued', 'downloading', 'downloaded', 'uploading', 'upload_uncertain', 'upload_failed'].includes(job.status);
 }
 
 function commandKey(requesterId: unknown, comicId: string): string {
@@ -357,36 +372,18 @@ async function downloadStage(job: JmJob) {
   }
 }
 
-async function uploadStage(job: JmJob) {
-  let pdfPath;
-  try {
-    pdfPath = validatePdf(job.pdfPath);
-  } catch (error) {
-    updateJob(job, { status: 'queued', pdfPath: '', downloadAttempts: 0, lastError: errorMessage(error), nextAttemptAt: Date.now() });
-    return;
-  }
-  const attempt = Number(job.uploadAttempts || 0) + 1;
-  updateJob(job, { status: 'uploading', uploadAttempts: attempt, lastError: '' });
-  const params = job.kind === 'group'
-    ? { group_id: Number(job.chatId), file: pdfPath, name: `${job.comicId}.pdf` }
-    : { user_id: Number(job.chatId), file: pdfPath, name: `${job.comicId}.pdf` };
-  const action = job.kind === 'group' ? 'upload_group_file' : 'upload_private_file';
-  try {
-    await runtime?.onebot.call(action, params, 180_000);
-  } catch (error) {
-    const message = errorMessage(error);
-    if (attempt < UPLOAD_RETRY_MS.length) {
-      updateJob(job, { status: 'upload_failed', lastError: message, nextAttemptAt: Date.now() + UPLOAD_RETRY_MS[attempt - 1] });
-      return;
-    }
-    updateJob(job, { status: 'failed', lastError: `上传失败：${message}`, failedAt: Date.now(), nextAttemptAt: null });
-    await sendStatus(job, `❌ PDF 已生成，但上传失败：${message}`);
-    return;
-  }
+function responseFileId(value: unknown): string {
+  return isRecord(value) ? String(value.file_id ?? value.fileId ?? '') : '';
+}
 
-  // 从这里开始 OneBot 已明确返回成功，任何本地收尾失败都不能再触发上传重试。
+function completeUpload(job: JmJob, source: 'response' | 'group-file-check', fileId = '') {
+  // 从这里开始 OneBot 已明确返回成功，或群文件列表已经证明目标文件存在。
+  // 任何本地收尾失败都不能再把任务放回上传路径。
   try {
-    updateJob(job, { status: 'completed', uploadedAt: Date.now(), lastError: '', nextAttemptAt: null });
+    updateJob(job, {
+      status: 'completed', uploadedAt: Date.now(), lastError: '', nextAttemptAt: null,
+      completionSource: source, ...(fileId ? { uploadedFileId: fileId } : {})
+    });
   } catch (error) {
     console.warn(`[jmcomic] 文件已上传，但完成状态写入失败（${job.id}）:`, errorMessage(error));
     return;
@@ -396,14 +393,108 @@ async function uploadStage(job: JmJob) {
   } catch (error) {
     console.warn(`[jmcomic] 文件已上传，但聊天存档写入失败（${job.id}）:`, errorMessage(error));
   }
-  // 记录有意留着（去重靠它，见 cleanupCompletedJob 的说明），这里删的只是日志；
-  // 它内部已经吞掉删除失败，不会把异常漏进重传路径。
+  // 记录有意留着（去重靠它，见 cleanupCompletedJob 的说明），这里只删日志。
   cleanupCompletedJob(job);
+}
+
+function deferUploadVerification(job: JmJob, error: unknown) {
+  updateJob(job, {
+    status: 'upload_uncertain', lastError: errorMessage(error), uploadVerifyAttempts: 0,
+    nextAttemptAt: Date.now() + UPLOAD_VERIFY_RETRY_MS[0]
+  });
+  console.warn(`[jmcomic] 上传结果未知，将先核验而不是自动重传（${job.id}）:`, errorMessage(error));
+}
+
+async function uploadStage(job: JmJob) {
+  let pdfPath;
+  try {
+    pdfPath = validatePdf(job.pdfPath);
+  } catch (error) {
+    updateJob(job, { status: 'queued', pdfPath: '', downloadAttempts: 0, lastError: errorMessage(error), nextAttemptAt: Date.now() });
+    return;
+  }
+  const attempt = Number(job.uploadAttempts || 0) + 1;
+  updateJob(job, {
+    status: 'uploading', uploadAttempts: attempt, uploadStartedAt: Date.now(),
+    uploadVerifyAttempts: 0, lastError: ''
+  });
+  const params = job.kind === 'group'
+    ? { group_id: Number(job.chatId), file: pdfPath, name: `${job.comicId}.pdf` }
+    : { user_id: Number(job.chatId), file: pdfPath, name: `${job.comicId}.pdf` };
+  const action = job.kind === 'group' ? 'upload_group_file' : 'upload_private_file';
+  try {
+    const result = await runtime?.onebot.call(action, params, UPLOAD_TIMEOUT_MS);
+    completeUpload(job, 'response', responseFileId(result));
+  } catch (error) {
+    // upload_*_file 是非幂等动作。AbortError、断线乃至 HTTP 错误都不能证明服务端
+    // 没有继续执行；统一进入“结果未知”，后续只核验，不重复发送。
+    deferUploadVerification(job, error);
+  }
+}
+
+function matchingGroupFile(value: unknown, job: JmJob, pdfPath: string): Record<string, unknown> | null {
+  if (!isRecord(value) || !Array.isArray(value.files)) throw new Error('群文件列表返回格式无效');
+  const expectedName = `${job.comicId}.pdf`;
+  const expectedSize = fs.statSync(pdfPath).size;
+  for (const item of value.files) {
+    if (!isRecord(item)) continue;
+    const name = String(item.file_name ?? item.fileName ?? '');
+    const size = Number(item.file_size ?? item.fileSize ?? -1);
+    if (name === expectedName && size === expectedSize) return item;
+  }
+  return null;
+}
+
+async function uploadUncertainStage(job: JmJob) {
+  if (job.kind !== 'group') {
+    const message = `PDF 上传结果无法确认：${job.lastError || '连接在返回结果前中断'}`;
+    updateJob(job, { status: 'failed', lastError: message, failedAt: Date.now(), nextAttemptAt: null });
+    await sendStatus(job, '⚠️ PDF 上传结果无法确认；为避免重复发送，已停止自动重试。请先检查私聊文件。');
+    return;
+  }
+
+  let pdfPath: string;
+  try {
+    pdfPath = validatePdf(job.pdfPath);
+  } catch (error) {
+    updateJob(job, {
+      status: 'failed', lastError: `无法核验已上传文件：${errorMessage(error)}`,
+      failedAt: Date.now(), nextAttemptAt: null
+    });
+    await sendStatus(job, `❌ PDF 上传结果无法核验：${errorMessage(error)}`);
+    return;
+  }
+
+  const verifyAttempt = Number(job.uploadVerifyAttempts || 0) + 1;
+  try {
+    const result = await runtime?.onebot.call('get_group_root_files', { group_id: Number(job.chatId) });
+    const found = matchingGroupFile(result, job, pdfPath);
+    if (found) {
+      completeUpload(job, 'group-file-check', responseFileId(found));
+      console.info(`[jmcomic] 已通过群文件列表确认上传完成（${job.id}）`);
+      return;
+    }
+  } catch (error) {
+    console.warn(`[jmcomic] 第 ${verifyAttempt} 次核验群文件失败（${job.id}）:`, errorMessage(error));
+  }
+
+  const nextDelay = UPLOAD_VERIFY_RETRY_MS[verifyAttempt];
+  if (nextDelay !== undefined) {
+    updateJob(job, {
+      status: 'upload_uncertain', uploadVerifyAttempts: verifyAttempt,
+      nextAttemptAt: Date.now() + nextDelay
+    });
+    return;
+  }
+
+  const message = `连续 ${verifyAttempt} 次未在群文件中确认到 ${job.comicId}.pdf；为避免重复发送，未自动重传`;
+  updateJob(job, { status: 'failed', uploadVerifyAttempts: verifyAttempt, lastError: message, failedAt: Date.now(), nextAttemptAt: null });
+  await sendStatus(job, `⚠️ ${message}，请先检查群文件后再决定是否重新提交。`);
 }
 
 function nextRunnableJob() {
   const now = Date.now();
-  return jobs.find((job) => isPending(job) && Number(job.nextAttemptAt || 0) <= now) || null;
+  return jobs.find((job) => isPending(job) && job.nextAttemptAt !== null && Number(job.nextAttemptAt || 0) <= now) || null;
 }
 
 function scheduleNextWake() {
@@ -433,6 +524,7 @@ async function runWorker() {
     //    "对的写法"，改它不会有测试变红。
     while (runtime && (job = nextRunnableJob())) {
       if (job.status === 'queued' || job.status === 'downloading') await downloadStage(job);
+      else if (job.status === 'upload_uncertain' || job.status === 'upload_failed') await uploadUncertainStage(job);
       else await uploadStage(job);
     }
   } finally {
