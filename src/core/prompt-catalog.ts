@@ -123,6 +123,11 @@ export const TOOL_PROMPT_TEXT = {
     description: '查看某条消息里的图片/表情（视觉模型可以直接看懂）。消息文本出现 [图片] 时可用。id 用聊天记录里每条消息前的 #数字。',
     messageId: 'QQ 消息 id（聊天记录里的 #数字，可能为负数）',
   },
+  reverse_image_source: {
+    description: '仅当群友明确要求找图片出处、动画番名/集数、插画作者或图源时调用。不会把图片交给大模型；messageId 必须是含图片消息前的真实 #数字。动画截图用 anime，插画/画师/Pixiv/图源用 illustration，不明确用 unknown。工具结果是第三方匹配，只能称“可能来源”或“匹配结果”。',
+    messageId: '包含目标图片的 QQ 消息 id（聊天记录里的 #数字）',
+    intent: 'anime=动画/番/集数，illustration=插画/画师/Pixiv/图源，unknown=不明确'
+  },
   memory_append: {
     description: '记一条对群友的长期印象（下次运行会自动看到）。只记"以后和这个人打交道时用得上"的稳定印象：他的身份/关系、说话风格、爱玩的梗、雷点、常聊话题、别踩的坑。太临时的事情不要记。userId 必须填对方的 QQ 号（不知道就先调 get_active_members / get_recent_messages 查）；target 填备注名/群名片/昵称，用于展示。',
     userId: '对方 QQ 号（数字）',

@@ -1,6 +1,7 @@
 import { adminTools } from './admin-tools.js';
 import { chatActionTools } from './chat-actions.js';
 import { historyMediaTools } from './history-media.js';
+import { imageSourceTools } from './image-source.js';
 import { memoryTools } from './memory-tools.js';
 import { buildAllToolDefs } from './shared.js';
 import { webTools } from './web-tools.js';
@@ -20,6 +21,7 @@ export function buildToolDefs(): ToolDefinition[] {
   return [
     ...chat,
     ...history,
+    ...imageSourceTools(),
     ...memory,
     admin[0],
     ...web,

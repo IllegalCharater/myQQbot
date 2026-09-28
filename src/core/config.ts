@@ -103,6 +103,16 @@ export const DEFAULT_CONFIG = {
   security: {
     allowPrivateImageHosts: false           // true 时图片下载允许内网地址（仅本地测试/自建图床）
   },
+  imageSource: {
+    enabled: false,
+    traceMoe: { enabled: true, timeoutMs: 15000, minSimilarity: 0.87, maxResults: 3 },
+    sauceNao: { enabled: true, apiKey: '', timeoutMs: 20000, minSimilarity: 0.80, maxResults: 3 },
+    maxImageBytes: 8 * 1024 * 1024,
+    maxQueueLength: 5,
+    totalTimeoutMs: 35000,
+    cacheEnabled: true,
+    cacheTtlMs: 24 * 60 * 60 * 1000
+  },
   // SnowLuma / OneBot v11
   snowluma: {
     dir: '',                   // SnowLuma 程序目录；留空 = 自动探测项目内 ./snowluma
@@ -368,6 +378,28 @@ export function loadConfig(): AppConfig {
 function normalizeConfigShape<T>(input: T): T {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const root = input as Record<string, unknown>;
+  const imageSource = root.imageSource;
+  if (imageSource && typeof imageSource === 'object' && !Array.isArray(imageSource)) {
+    const c = imageSource as Record<string, unknown>;
+    const clamp = (value: unknown, min: number, max: number, fallback: number) => {
+      const n = Number(value); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    c.enabled = c.enabled === true;
+    c.maxImageBytes = Math.round(clamp(c.maxImageBytes, 1024, 20 * 1024 * 1024, 8 * 1024 * 1024));
+    c.maxQueueLength = Math.round(clamp(c.maxQueueLength, 0, 20, 5));
+    c.totalTimeoutMs = Math.round(clamp(c.totalTimeoutMs, 1000, 120000, 35000));
+    c.cacheEnabled = c.cacheEnabled !== false;
+    c.cacheTtlMs = Math.round(clamp(c.cacheTtlMs, 60000, 7 * 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000));
+    for (const [name, defaults] of [['traceMoe', [15000, 0.87, 3]], ['sauceNao', [20000, 0.80, 3]]] as const) {
+      const raw = c[name]; if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const p = raw as Record<string, unknown>;
+      p.enabled = p.enabled !== false;
+      p.timeoutMs = Math.round(clamp(p.timeoutMs, 1000, 60000, defaults[0]));
+      p.minSimilarity = clamp(p.minSimilarity, 0, 1, defaults[1]);
+      p.maxResults = Math.round(clamp(p.maxResults, 1, 10, defaults[2]));
+      if (name === 'sauceNao') p.apiKey = String(p.apiKey ?? '').trim();
+    }
+  }
   const store = root.store;
   if (store && typeof store === 'object' && !Array.isArray(store)) {
     const s = store as Record<string, unknown>;

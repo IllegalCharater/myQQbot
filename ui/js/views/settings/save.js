@@ -146,6 +146,19 @@ export async function saveConfig({ quiet = false } = {}) {
     };
   }
 
+  if (sec === 'image-source') {
+    const old = c.imageSource || {};
+    const key = val('#cfg-sauce-key', '').trim();
+    patch.imageSource = {
+      enabled: chk('#cfg-image-source-enabled', false),
+      traceMoe: { enabled: chk('#cfg-trace-enabled', true), timeoutMs: Number(val('#cfg-trace-timeout', 15000)), minSimilarity: Number(val('#cfg-trace-similarity', 0.87)), maxResults: Number(val('#cfg-trace-results', 3)) },
+      sauceNao: { ...(old.sauceNao || {}), enabled: chk('#cfg-sauce-enabled', true), timeoutMs: Number(val('#cfg-sauce-timeout', 20000)), minSimilarity: Number(val('#cfg-sauce-similarity', 0.8)), maxResults: Number(val('#cfg-sauce-results', 3)), ...(key && key !== '******' ? { apiKey: key } : {}) },
+      maxImageBytes: Number(val('#cfg-image-source-max-mib', 8)) * 1048576,
+      maxQueueLength: Number(val('#cfg-image-source-queue', 5)), totalTimeoutMs: Number(val('#cfg-image-source-total-timeout', 35000)),
+      cacheEnabled: chk('#cfg-image-source-cache', true), cacheTtlMs: old.cacheTtlMs || 86400000
+    };
+  }
+
   if (sec === 'persona') {
     patch.persona = {
       botName: val('#cfg-botname', c.persona.botName).trim() || '小鲸鱼',

@@ -176,6 +176,10 @@ export function createConsole(deps: ConsoleDeps): Console {
     }
     // 顶层 api：walk 已生成 hasApiKey，这里补一个简写的 hasKey 供旧代码读取
     if (isRecord(out.api)) out.api.hasKey = out.api.hasApiKey ?? Boolean(String(cfg.api?.apiKey ?? '').trim());
+    if (isRecord(out.imageSource) && isRecord(out.imageSource.sauceNao)) {
+      out.imageSource.sauceNao.hasApiKey = Boolean(String(cfg.imageSource?.sauceNao?.apiKey ?? '').trim());
+      delete out.imageSource.sauceNao.apiKey;
+    }
 
     return out;
   }

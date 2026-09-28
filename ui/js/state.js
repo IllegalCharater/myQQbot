@@ -24,6 +24,7 @@ export const TOOL_META = {
   get_recent_messages: { name: '翻聊天记录', cat: '查看', icon: '📜' },
   get_message_detail: { name: '看消息详情', cat: '查看', icon: '🔍' },
   get_message_images: { name: '看图片', cat: '查看', icon: '🖼️' },
+  reverse_image_source: { name: '找图源', cat: '查看', icon: '🔎' },
   get_active_members: { name: '看活跃群友', cat: '查看', icon: '👥' },
   read_forward: { name: '展开转发', cat: '查看', icon: '📨' },
   read_group_notice: { name: '看群公告', cat: '查看', icon: '📢' },

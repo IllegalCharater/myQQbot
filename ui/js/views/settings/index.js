@@ -10,7 +10,7 @@ import { clampInt, renderChatSection, sliderDesc, sliderToTierUI, sliderToTierUI
 import {
   renderAllowSection, renderApiSection, renderDesktopSection, renderMemorySettingsSection,
   renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderSearchSection,
-  renderTranscriptionSection
+  renderTranscriptionSection, renderImageSourceSection
 } from './sections.js';
 import { parseList, saveConfig } from './save.js';
 import { openBlocklistModal } from '../../parts/blocklist.js';
@@ -76,6 +76,7 @@ export function renderSettingsSidebar() {
   const menu = [
     ['api', '模型 API'],
     ['search', '搜索服务'],
+    ['image-source', '图片来源识别'],
     ['memory', '记忆'],
     ['persona', '人设'],
     ['allow', '聊天白名单'],
@@ -117,6 +118,7 @@ export function renderSettingsSection(c) {
   const sections = {
     api: () => renderApiSection(c),
     search: () => renderSearchSection(c),
+    'image-source': () => renderImageSourceSection(c),
     memory: () => renderMemorySettingsSection(c),
     persona: () => renderPersonaSection(c),
     allow: () => renderAllowSection(c),
@@ -136,6 +138,12 @@ export function renderSettingsSection(c) {
 }
 
 export function bindSettingsEvents(c) {
+  const testImageSource = $('#test-image-source-btn');
+  if (testImageSource) testImageSource.addEventListener('click', async () => {
+    const out = $('#image-source-test-result'); out.textContent = '测试中…';
+    try { const r = await api('/api/image-source/test', { method: 'POST', body: '{}' }); out.textContent = `trace.moe：${r.traceMoe ? '可用' : '失败'}；SauceNAO：${r.sauceNao}`; }
+    catch { out.textContent = '测试失败（未暴露任何密钥）'; }
+  });
   // 保存当前区块设置（通用保存按钮）。只有当前区块的字段才会被读取，不会 null 报错。
   const saveCfgBtn = $('#save-cfg-btn');
   if (saveCfgBtn) saveCfgBtn.addEventListener('click', async () => {

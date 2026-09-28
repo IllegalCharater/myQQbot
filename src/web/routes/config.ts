@@ -1,7 +1,23 @@
 import { readBody } from '../http/http.js';
 import type { Route } from '../types.js';
+import { SauceNaoProvider, TraceMoeProvider } from '../../media/image-source/index.js';
 
 export const configRoutes: Route[] = [
+  {
+    method: 'POST',
+    path: '/api/image-source/test',
+    async handle(ctx) {
+      const cfg = ctx.getConfig().imageSource;
+      const [trace, sauce] = await Promise.allSettled([
+        cfg.traceMoe.enabled ? new TraceMoeProvider().test(cfg.traceMoe.timeoutMs) : Promise.resolve(false),
+        cfg.sauceNao.enabled && cfg.sauceNao.apiKey ? new SauceNaoProvider().test(cfg.sauceNao.apiKey, cfg.sauceNao.timeoutMs) : Promise.resolve(false)
+      ]);
+      return { status: 200, body: {
+        traceMoe: trace.status === 'fulfilled' && trace.value,
+        sauceNao: !cfg.sauceNao.apiKey ? '未配置' : (sauce.status === 'fulfilled' && sauce.value ? '可用' : '失败')
+      } };
+    }
+  },
   {
     method: 'GET',
     path: '/api/config',

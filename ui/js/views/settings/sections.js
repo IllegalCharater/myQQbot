@@ -197,6 +197,27 @@ export function renderSearchSection(c) {
   `;
 }
 
+export function renderImageSourceSection(c) {
+  const s = c.imageSource || {};
+  const trace = s.traceMoe || {};
+  const sauce = s.sauceNao || {};
+  return `
+    <h3>图片来源识别</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-image-source-enabled" ${s.enabled ? 'checked' : ''} /><label for="cfg-image-source-enabled">启用图片来源识别</label></div>
+    <div class="hint">只在群友明确要求找图源时使用。trace.moe 用于动画截图；SauceNAO 用于二次元插画、同人图与来源站点。</div>
+    <div class="settings-divider"></div><h3>trace.moe</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-trace-enabled" ${trace.enabled !== false ? 'checked' : ''} /><label for="cfg-trace-enabled">启用 trace.moe</label></div>
+    <div class="field-row"><div class="field"><label>请求超时（毫秒）</label><input type="number" id="cfg-trace-timeout" value="${esc(trace.timeoutMs ?? 15000)}" /></div><div class="field"><label>最小置信度（0–1）</label><input type="number" step="0.01" id="cfg-trace-similarity" value="${esc(trace.minSimilarity ?? 0.87)}" /></div><div class="field"><label>最大结果数</label><input type="number" id="cfg-trace-results" value="${esc(trace.maxResults ?? 3)}" /></div></div>
+    <div class="settings-divider"></div><h3>SauceNAO</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-sauce-enabled" ${sauce.enabled !== false ? 'checked' : ''} /><label for="cfg-sauce-enabled">启用 SauceNAO</label></div>
+    <div class="field"><label>API Key</label><input type="password" id="cfg-sauce-key" value="${sauce.hasApiKey ? '******' : ''}" placeholder="${sauce.hasApiKey ? '已配置；留空不修改' : '未配置'}" autocomplete="new-password" /></div>
+    <div class="field-row"><div class="field"><label>请求超时（毫秒）</label><input type="number" id="cfg-sauce-timeout" value="${esc(sauce.timeoutMs ?? 20000)}" /></div><div class="field"><label>最低相似度（0–1）</label><input type="number" step="0.01" id="cfg-sauce-similarity" value="${esc(sauce.minSimilarity ?? 0.8)}" /></div><div class="field"><label>最大结果数</label><input type="number" id="cfg-sauce-results" value="${esc(sauce.maxResults ?? 3)}" /></div></div>
+    <div class="settings-divider"></div><h3>通用</h3>
+    <div class="field-row"><div class="field"><label>图片最大大小（MiB）</label><input type="number" id="cfg-image-source-max-mib" value="${esc(Math.round(Number(s.maxImageBytes || 8388608) / 1048576))}" /></div><div class="field"><label>队列最大长度</label><input type="number" id="cfg-image-source-queue" value="${esc(s.maxQueueLength ?? 5)}" /></div><div class="field"><label>总任务超时（毫秒）</label><input type="number" id="cfg-image-source-total-timeout" value="${esc(s.totalTimeoutMs ?? 35000)}" /></div></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-image-source-cache" ${s.cacheEnabled !== false ? 'checked' : ''} /><label for="cfg-image-source-cache">启用内存缓存（最多 100 条，默认 24 小时；不保存图片）</label></div>
+    <div style="display:flex;gap:8px;margin-top:10px"><button class="btn btn-small" id="test-image-source-btn" type="button">测试连接</button><span id="image-source-test-result" class="muted"></span></div>`;
+}
+
 export function renderMemorySettingsSection(c) {
   const mem = c.memory || {};
   const comp = c.compact || {};
