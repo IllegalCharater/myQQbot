@@ -56,7 +56,9 @@ const stickers = { sync: async () => ({ entries: [] }) };
 const onebot = { selfId: '999', selfNickname: '小鲸鱼', connected: true,
   sendText: async () => ({ message_id: 1 }), getGroupInfo: async () => ({ group_name: '测试群' }), call: async () => ({}) };
 const sender = new SendQueue({ onebot, store });
-const orc = new Orchestrator({ store, memory, stickers, sender, sessions, onebot });
+// S10d 起 emit 必填：这个实例下面真的会走到 compactChat → emit，所以这里是 8 个构造点里
+// 唯一一个"漏传就当场炸"的（其余 7 个静默拿到 undefined，只有被调用时才炸 —— 见 t-ports 第 1c 段）。
+const orc = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit: () => {} });
 
 const key = 'group:123';
 const base = Date.now() - 1000 * 3600;

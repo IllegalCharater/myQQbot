@@ -5,13 +5,14 @@
 // unknown，不武断下结论。
 // 结果持久化在 config.modelVision["providerId|||model"]，运行时用它门控看图工具。
 import { getConfig, updateConfig } from '../core/config.js';
+import { EVENTS } from '../core/events.js';
+import type { AppEmit } from '../core/events.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 
 type VisionVerdict = 'vision' | 'no-vision' | 'unknown';
 interface VisionResult { verdict: VisionVerdict; note: string; httpStatus: number | null; latencyMs: number | null }
 interface ScanProvider { id: string; baseURL?: string; apiKey?: string; models?: string[] }
 interface ScanTask { providerId: string; model: string; baseURL: string; apiKey: string }
-type ScanEmit = (event: 'vision-scan', payload: Record<string, unknown>) => void;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -116,7 +117,7 @@ export async function detectModelVision({ baseUrl, apiKey, model }: { baseUrl: s
  * 扫描目录（providerId 过滤可选）。并发受控，结果逐个写进 config 并通过 emit 汇报进度。
  * 返回 { total, results }。
  */
-export async function scanModelsVision({ providers = [], emit = null, limit = 3, timeoutMs = 25000, onlyProviderIds = null }: { providers?: ScanProvider[]; emit?: ScanEmit | null; limit?: number; timeoutMs?: number; onlyProviderIds?: string[] | null } = {}) {
+export async function scanModelsVision({ providers = [], emit = null, limit = 3, timeoutMs = 25000, onlyProviderIds = null }: { providers?: ScanProvider[]; emit?: AppEmit | null; limit?: number; timeoutMs?: number; onlyProviderIds?: string[] | null } = {}) {
   const tasks: ScanTask[] = [];
   for (const p of providers || []) {
     if (onlyProviderIds && !onlyProviderIds.includes(p.id)) continue;
@@ -157,7 +158,7 @@ export async function scanModelsVision({ providers = [], emit = null, limit = 3,
         });
         if (pending.size >= 5) flushPending();
     done += 1;
-    emit?.('vision-scan', { key, providerId: task.providerId, model: task.model, verdict: r.verdict, done, total });
+    emit?.(EVENTS.visionScan, { key, providerId: task.providerId, model: task.model, verdict: r.verdict, done, total });
   };
 
   // 简单并发池
@@ -167,7 +168,7 @@ export async function scanModelsVision({ providers = [], emit = null, limit = 3,
       const task = tasks[index++];
       await runTask(task).catch((error: unknown) => {
         done += 1;
-        emit?.('vision-scan', { key: `${task.providerId}|||${task.model}`, providerId: task.providerId, model: task.model, verdict: 'unknown', done, total, error: String(error instanceof Error ? error.message : error) });
+        emit?.(EVENTS.visionScan, { key: `${task.providerId}|||${task.model}`, providerId: task.providerId, model: task.model, verdict: 'unknown', done, total, error: String(error instanceof Error ? error.message : error) });
       });
     }
   });

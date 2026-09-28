@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { EVENTS } from '../../core/events.js';
 import { ROOT } from '../../core/paths.js';
 import { listModels } from '../../llm/llm.js';
 import { PERSONAS } from '../../core/prompt-catalog.js';
@@ -147,7 +148,7 @@ export const systemRoutes: Route[] = [
         const count = ctx.orchestrator.markChatSeen(chatKey);
         if (count > 0) marked[chatKey] = count;
       }
-      ctx.emit('chat-update', '*');
+      ctx.emit(EVENTS.chatUpdate, '*');
       return { status: 200, body: { ok: true, paused: false, marked } };
     },
   },

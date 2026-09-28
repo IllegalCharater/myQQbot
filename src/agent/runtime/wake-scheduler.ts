@@ -1,4 +1,5 @@
 import { getConfig, responseConfigForChat } from '../../core/config.js';
+import { EVENTS } from '../../core/events.js';
 import { sleep } from '../../core/util.js';
 import { evaluateWindowTrigger } from '../context/response-policy.js';
 import { resolveHistoryPolicy } from '../context/history-policy.js';
@@ -7,6 +8,7 @@ import { runAgent } from './agent-runner.js';
 import { errorMessage } from '../shared/json-parse.js';
 import { RuntimeStateRegistry } from './runtime-state.js';
 import type { AgentRunOptions } from './agent-runner.js';
+import type { AppEmit, SessionEndStatus } from '../../core/events.js';
 import type { ChatMessage, SessionRecord } from '../../chat/types.js';
 import type { ChatStore } from '../../chat/store.js';
 import type { MemoryStore } from '../../chat/memory.js';
@@ -26,7 +28,7 @@ export interface WakeSchedulerDependencies {
   onebot: OneBotClient;
   windows: ContextWindowRegistry;
   toolDefs: ToolDefinition[];
-  emit(event: string, payload?: unknown): unknown;
+  emit: AppEmit;
   getChatName(groupId: string | number): Promise<string>;
   maybeConsolidateMemory(chatKey: string): void;
   isPaused(): boolean;
@@ -42,7 +44,7 @@ export class WakeScheduler {
   readonly onebot: OneBotClient;
   readonly windows: ContextWindowRegistry;
   readonly toolDefs: ToolDefinition[];
-  readonly emit: (event: string, payload?: unknown) => unknown;
+  readonly emit: AppEmit;
   readonly runtimeState: RuntimeStateRegistry;
   readonly chatStates: Map<string, ChatRuntimeState>;
   readonly wakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -187,7 +189,7 @@ export class WakeScheduler {
    */
   markChatSeen(chatKey: string): number {
     const n = this.#consumeWindow(chatKey);
-    this.emit('chat-update', chatKey);
+    this.emit(EVENTS.chatUpdate, chatKey);
     return n;
   }
 
@@ -288,7 +290,7 @@ export class WakeScheduler {
           this.#discardWaiting(stale);   // 干净消失，不留"中止"（内部会退回静默态）
           this.pendingSessions.delete(chatKey);
         }
-        this.emit('chat-update', chatKey);
+        this.emit(EVENTS.chatUpdate, chatKey);
         // 定时器仍然保留：窗口内可能来新消息，届时重新预判
         // （批次打点不重置 —— 判定翻转不该让硬上限重新计时）
       } else {
@@ -310,7 +312,7 @@ export class WakeScheduler {
           s.trigger = unread;
           s.triggerText = unread.map((m) => `${m.senderName || m.senderId}: ${String(m.text || '').slice(0, 80)}`).join(' | ').slice(0, 500);
           this.sessions.update(s.id);
-          this.emit('session-update', s.id);
+          this.emit(EVENTS.sessionUpdate, { sessionId: s.id });
         } else {
           this.pendingSessions.delete(chatKey);
         }
@@ -324,12 +326,12 @@ export class WakeScheduler {
           waitUntil
         });
         this.pendingSessions.set(chatKey, session.id);
-        this.emit('session-start', { sessionId: session.id, chatKey, status: 'waiting', triggerSummary: summary });
+        this.emit(EVENTS.sessionStart, { sessionId: session.id, chatKey, status: 'waiting', triggerSummary: summary });
       }
       // 静默→回复：真正出现"等待中"会话才算进入回复态，
       // 与上面的反闪烁规则一致（没有可见的等待会话就对外维持静默）。
       this.#enterReplying(chatKey, { phase: 'waiting', waitingSessionId: this.pendingSessions.get(chatKey) ?? null });
-      this.emit('chat-update', chatKey);
+      this.emit(EVENTS.chatUpdate, chatKey);
       }
     }
 
@@ -363,7 +365,7 @@ export class WakeScheduler {
     this.sessions.discard(sessionId);
     // 回复态的出口之一：等待会话没了，就该对外回到静默态
     if (s?.chatKey) this.#exitReplying(s.chatKey);
-    this.emit('session-end', {
+    this.emit(EVENTS.sessionEnd, {
       sessionId,
       chatKey: s?.chatKey || '',
       status: 'discarded',
@@ -371,7 +373,15 @@ export class WakeScheduler {
     });
   }
 
-  #finishWaiting(sessionId: string, status: string, error = ''): void {
+  /**
+   * 收尾（留痕）一个"等待中"会话。与 `#discardWaiting` 的区别：这个会 `finish()`，
+   * 会话页上留下一条记录。
+   *
+   * `status` 收成 `SessionEndStatus`（S5）：今天 8 个调用点全部传 `'aborted'`，
+   * 但参数写成 `string` 的话载荷里的 status 就对不上 `SessionEndPayload` 的字面量联合——
+   * 收窄的是边界，不是行为。
+   */
+  #finishWaiting(sessionId: string, status: SessionEndStatus, error = ''): void {
     if (!sessionId) return;
     const s = this.sessions.current.get(sessionId);
     if (!s || s.status !== 'waiting') return;
@@ -379,7 +389,7 @@ export class WakeScheduler {
     this.sessions.finish(sessionId, status);
     // 所有中止路径的公共出口：暂停 / 未设模型 / 无未读 / 计时器触发时已暂停
     if (s.chatKey) this.#exitReplying(s.chatKey);
-    this.emit('session-end', { sessionId, chatKey: s.chatKey, status, error: s.error || null });
+    this.emit(EVENTS.sessionEnd, { sessionId, chatKey: s.chatKey, status, error: s.error || null });
   }
 
   /** 手动触发一次处理（UI 按钮）。 */
@@ -415,7 +425,7 @@ export class WakeScheduler {
         if (s && s.status === 'waiting') {
           s.waitUntil = Date.now() + 3000;
           this.sessions.update(waitingSessionId);
-          this.emit('session-update', waitingSessionId);
+          this.emit(EVENTS.sessionUpdate, { sessionId: waitingSessionId });
         }
       }
       setTimeout(() => {
@@ -454,7 +464,7 @@ export class WakeScheduler {
         const marked = this.#consumeWindow(chatKey);
         // 关键：让等待会话**干净消失**，而不是标成"中止"留在列表里
         if (waitingSessionId) this.#discardWaiting(waitingSessionId);
-        this.emit('chat-update', chatKey);
+        this.emit(EVENTS.chatUpdate, chatKey);
         if (marked) {
           console.log(`[orchestrator] ${chatKey} ${marked} 条未命中触发条件（响应档 ${responseDecision.responseTier}），已标记已读、不响应`);
         }
@@ -519,13 +529,13 @@ export class WakeScheduler {
       session.triggerSummary = triggerSummary;
       session.triggerText = triggerEntries.map((m) => `${m.senderName || m.senderId}: ${String(m.text || '').slice(0, 80)}`).join(' | ').slice(0, 500);
       this.sessions.update(session.id);
-      this.emit('session-update', session.id);
+      this.emit(EVENTS.sessionUpdate, { sessionId: session.id });
     } else {
       session = this.sessions.create({ chatKey, trigger: triggerEntries, triggerSummary });
-      this.emit('session-start', { sessionId: session.id, chatKey, triggerSummary });
+      this.emit(EVENTS.sessionStart, { sessionId: session.id, chatKey, triggerSummary });
     }
     this.activeRuns.set(chatKey, session.id);
-    this.emit('chat-update', chatKey);
+    this.emit(EVENTS.chatUpdate, chatKey);
 
     // ── 会话级重试 ──
     // 单次 API 请求内部已经会重试（见 chatCompletionWithRetry），
@@ -556,7 +566,7 @@ export class WakeScheduler {
           this.#resetSessionForRetry(session);
           session.activity = `出错重试 ${attempt}/${MAX_SESSION_ATTEMPTS - 1}…`;
           this.sessions.update(session.id);
-          this.emit('session-update', session.id);
+          this.emit(EVENTS.sessionUpdate, { sessionId: session.id });
           await new Promise((r) => setTimeout(r, wait));
         }
       }
@@ -564,7 +574,7 @@ export class WakeScheduler {
       if (lastError) {
         session.error = errorMessage(lastError);
         this.sessions.finish(session.id, 'error');
-        this.emit('session-end', { sessionId: session.id, chatKey, status: 'error', error: session.error });
+        this.emit(EVENTS.sessionEnd, { sessionId: session.id, chatKey, status: 'error', error: session.error });
         console.error(`[orchestrator] 运行 ${session.id} 出错:`, lastError);
       }
     } finally {
@@ -574,7 +584,7 @@ export class WakeScheduler {
       // 重试不可能重复进出状态。下面的 drain 会以 phase:'waiting' 再进来，
       // 所以"还在答话"期间状态并不会真正掉回静默（符合预期）。
       this.#exitReplying(chatKey);
-      this.emit('chat-update', chatKey);
+      this.emit(EVENTS.chatUpdate, chatKey);
     }
 
     // drain：运行期间来的新消息 → 再次新开会话处理（这是"确保看到所有发言"的关键）
@@ -609,7 +619,7 @@ export class WakeScheduler {
     live.llmRequests = [];
     live.usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0, calls: 0 };
     this.sessions.update(session.id);
-    this.emit('session-update', session.id);
+    this.emit(EVENTS.sessionUpdate, { sessionId: session.id });
   }
 
   async #runAgent(session: SessionRecord, options: AgentRunOptions): Promise<void> {

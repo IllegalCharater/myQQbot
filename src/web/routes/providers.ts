@@ -1,3 +1,4 @@
+import { EVENTS } from '../../core/events.js';
 import { chatCompletion, resolveApiKey } from '../../llm/llm.js';
 import { customSearch } from '../../media/web-search.js';
 import {
@@ -153,10 +154,10 @@ export const providerRoutes: Route[] = [
       const body = bodyRecord(await readBody(req).catch(() => ({})));
       const onlyProviderIds = Array.isArray(body.providerIds) ? body.providerIds.map(String) : null;
       visionScan.running = true;
-      ctx.emit('vision-scan', { phase: 'start' });
+      ctx.emit(EVENTS.visionScan, { phase: 'start' });
       void scanModelsVision({ providers: currentProviders(), emit: ctx.emit, onlyProviderIds, timeoutMs: 25_000, limit: 3 })
-        .then(({ total }) => ctx.emit('vision-scan', { phase: 'done', total }))
-        .catch((error: unknown) => ctx.emit('vision-scan', { phase: 'error', error: errorMessage(error) }))
+        .then(({ total }) => ctx.emit(EVENTS.visionScan, { phase: 'done', total }))
+        .catch((error: unknown) => ctx.emit(EVENTS.visionScan, { phase: 'error', error: errorMessage(error) }))
         .finally(() => { visionScan.running = false; });
       return { status: 202, body: { ok: true, started: true } };
     },

@@ -1,7 +1,7 @@
 # QQ Agent 当前架构与维护指南
 
 > 本文档描述当前代码，而不是迁移计划。TypeScript、目录分层、Web 路由拆分和 UI 模块化均已完成。
-> 最后更新：2026-09-27。
+> 最后更新：2026-09-28。
 
 ## 1. 当前状态
 
@@ -26,13 +26,13 @@ src/
 ├─ media/      安全下载、网页搜索、媒体任务
 ├─ stickers/   表情库、缓存与管理
 ├─ agent/      Agent 领域（内部继续按职责分层）
-│  ├─ runtime/       唤醒调度、运行状态与 Agent 循环
+│  ├─ runtime/       唤醒调度、运行状态、跨模块端口与 Agent 循环
 │  ├─ context/       当前窗口、响应策略与历史策略
 │  ├─ prompting/     动态提示词拼装与预算裁剪
 │  ├─ tools/         工具统一入口、领域分组与执行
 │  ├─ maintenance/   主动冒泡、历史压缩与记忆整理
 │  └─ shared/        Agent 内共享类型与解析器
-└─ web/        HTTP 基础设施、路由与领域接口
+└─ web/        HTTP 基础设施、路由、SSE 帧拼装、长期任务描述符表与领域接口
 
 ui/js/
 ├─ main.js     浏览器入口与页面编排
@@ -56,6 +56,12 @@ web
 ```
 
 `scripts/check-layers.mjs` 会阻止反向依赖。领域共享类型分别放在各自的 `types.ts` 中，不建立全局巨型类型文件。
+
+`agent/` 对 `web/` 的跨模块面固化成端口 `src/agent/runtime/control-port.ts`（`AgentControlPort`），`Orchestrator implements` 它；`src/web/` 与 `electron/main.js` 只依赖这个接口，不依赖具体类。端口只做**编译期**检查（`implements` 与 `satisfies`），运行期零成本，也不含任何 `instanceof`/`Symbol` 品牌——`tests/t-orch.mjs`、`t-vision-log.mjs` 用普通对象字面量充当依赖，加运行期校验会当场打碎它们。配套的 `METHOD_CATALOG` 只作文档与测试引用，不参与任何运行时分发。
+
+长期后台任务的清点落在 `src/web/tasks.ts` 的 `LONG_TERM_TASKS`（6 行）。它是**纯数据**：描述 owner / 开关来源 / 配置刷新方式 / 启停入口 / 是否 unref / `conformance`，**不触发任何启停**，也不许在文件里出现调度调用；`start`/`stop` 存的是入口的名字而非函数引用，好让 `tests/t-tasks.mjs` 拿到真对象上去核对。请求作用域局部计时器不进这张表（有反向断言守），判定标准见 `docs/global-registry-design.md` §6.1。
+
+**启停点只有一处**：长期任务一律在 `src/web/app.ts` 的 `start()` 里启动、在 `stop()` 里停止（成对出现），不靠模块加载期或构造函数副作用。已接管的样子参照 `price.feed`（S10a：`initPriceFeed`/`stopPriceFeed` 在 `src/llm/price-feed.ts`）、两个 jmcomic 任务（S10b：`initializeJmcomicQueue`/`stopJmcomicQueue` 在 `src/media/jmcomic.ts`，原先靠在 `Orchestrator` 构造函数里调用启动）与 `onebot.reconnect`（S10c：宿主就是 `OneBotClient`，停止入口就是 `app.stop()` 里的 `onebot.close()`；`src/qq/onebot.ts` 用私有字段 `#reconnectTimer` 存重连句柄，`close()`/`connect()`/`reconnect()` 都会取消掉已排定的那一次，**刻意不 unref**——有待重连时钉住进程是有意的）；计时器句柄行为由 `tests/t-timers.mjs` 用假计时器断言。**6 行长期任务里只剩 `jmcomic.worker` 是 `partial`**（停不掉正在执行的那一次下载），其余 5 行为 `full`。`stop()` 里停长期任务必须排在 `onebot.close()` 之前——在途的 QQ 上传调用还依赖传输层。
 
 ## 3. Bot 对话调用链
 
@@ -244,6 +250,8 @@ npm run dev             # tsc --watch
 
 当前重点回归包括动态窗口语义、摘要去重、当前窗口与独立历史分离、统一预算保护本轮消息、读图结果回填、`memory_query` 定向查询，以及 Web/UI 模块接线。
 
+长期任务与事件相关改动另有一组专项套件：`t-events.mjs`（事件名/载荷/注入类型/`session-update` 通道）、`t-sse-project.mjs`（SSE 帧逐字节）、`t-panel-wiring.mjs`（UI 订阅名跨边界）、`t-ports.mjs`（跨模块端口与 `implements`；另扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`——`.mjs` 不受 `tsc` 管，这条只能文本扫）、`t-tasks.mjs`（`LONG_TERM_TASKS` 描述符与 `conformance` 一致性）、`t-timers.mjs`（计时器句柄：起没起、停没停、有没有被"清掉又没重建"、待触发的那一次取消不取消得掉）。
+
 发布前执行：
 
 ```bash
@@ -258,6 +266,7 @@ node scripts/sanitize-release.mjs --scan
 - 判断是否响应必须使用无限制的 `pending()`，不能只看容量受限的 `batch()`。
 - `batch()`、`foldedCount()` 与 `seen()` 之间不得插入 `await`。
 - 新增模型可见固定指令必须先进入 `src/core/prompt-catalog.ts`，业务模块只引用 Catalog；同时明确唯一归属并纳入统一预算，避免跨 system/user/tool schema 重复注入。
+- 新增事件或长期后台任务前，先查 `docs/global-registry-design.md`：事件名与载荷类型的归属、长期任务的所有者/开关/停止入口、局部计时器的排除边界都在那里定义。
 - 修改外部 JSON 或模型响应处理时，先做运行时窄化，不用无注释的全局 `any`。
 - 不直接修改 `dist/`；不使用 TypeScript 路径别名；不省略 NodeNext import 的 `.js` 后缀。
 - 修改对话主链路后至少运行 `npm run check`。

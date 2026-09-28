@@ -1,4 +1,6 @@
 import { digestConfigForChat, getConfig } from '../../core/config.js';
+import { EVENTS } from '../../core/events.js';
+import type { AppEmit } from '../../core/events.js';
 import { PROMPT_CATALOG } from '../../core/prompt-catalog.js';
 import { formatShortTime } from '../../core/util.js';
 import { errorMessage, extractJsonObject } from '../shared/json-parse.js';
@@ -13,7 +15,7 @@ export interface HistoryCompactorDependencies {
   runningChats: Set<string>;
   pendingWake: Set<string>;
   memoryConsolidator: MemoryConsolidator;
-  emit(event: string, payload?: unknown): unknown;
+  emit: AppEmit;
   isPaused(): boolean;
   isAborted(): boolean;
 }
@@ -134,7 +136,7 @@ export class HistoryCompactor {
     }
 
     this.running.add(chatKey);
-    this.deps.emit('chat-update', chatKey);
+    this.deps.emit(EVENTS.chatUpdate, chatKey);
     try {
       // 摘要调用本身可能失败（网络、超时、限流、模型没配好）。这里**必须**接住：
       // 让异常穿出去的话，接口会把它当成 500 报给 UI，而这里其实是一次
@@ -191,7 +193,7 @@ export class HistoryCompactor {
       };
     } finally {
       this.running.delete(chatKey);
-      this.deps.emit('chat-update', chatKey);
+      this.deps.emit(EVENTS.chatUpdate, chatKey);
     }
   }
 

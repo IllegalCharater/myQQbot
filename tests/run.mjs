@@ -34,6 +34,11 @@ const ASSERT = [
   't-smoke.mjs',           // 端到端冒烟（真起 app 再 fetch）
   't-panel.mjs',           // 面板接口
   't-panel-wiring.mjs',    // 面板静态接线（ui/* 文本层）
+  't-sse-project.mjs',     // SSE 帧投影（event-projector 纯函数，逐字节）
+  't-events.mjs',          // 事件名一致性（发射点必须用 EVENTS.*，词表无空转名字）
+  't-ports.mjs',           // 跨模块端口（implements 挂载、成员与外部调用对账、名录只作文档）
+  't-tasks.mjs',           // 长期任务描述符表（6 行如实标注；反查局部计时器不在表内）
+  't-timers.mjs',          // 长期任务的计时器句柄（start 起了什么、stop 有没有收干净）
   't-ui-modules.mjs',      // 原生 ES Module 入口、依赖图与资源完整性
   't-admin.mjs',           // 管理接口
   't-ui-render.mjs',       // UI 领域模块在假 DOM 下真跑一遍看 HTML

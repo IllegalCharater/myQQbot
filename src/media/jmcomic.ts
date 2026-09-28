@@ -398,6 +398,10 @@ function nextRunnableJob() {
 }
 
 function scheduleNextWake() {
+  // 队列已停（stopJmcomicQueue 把 runtime 置空）：不许再排新的唤醒。
+  // 这条守卫是"停得住"的关键 —— runWorker 的 finally 会调到这里，
+  // 下载途中停队列时它本来会立刻排一个新 timer 把队列自己复活。
+  if (!runtime) return;
   if (wakeTimer) clearTimeout(wakeTimer);
   wakeTimer = null;
   const times = jobs.filter(isPending).map((job) => Number(job.nextAttemptAt || 0)).filter((time) => time > Date.now());
@@ -412,7 +416,13 @@ async function runWorker() {
   wakeTimer = null;
   try {
     let job;
-    while ((job = nextRunnableJob())) {
+    // `runtime &&` 是"停之后就不要再取活"的第二道闸门：stop 发生在某个任务中途时，
+    // 光靠 `nextRunnableJob()` 会把后面所有**已经可跑**的任务接着做完，stop 等于打折。
+    // ⚠️ 这道闸门**没有守护**（`tests/t-timers.mjs` 覆盖不到，已实测）：要观察到它的差别
+    //    需要夹具里同时有"可跑的任务 A（在它的上传回调里停队列）"和"可跑的任务 B"，
+    //    而夹具任务会留在内存里过继给套件的后面几段（会去碰真 onebot）。所以这里保持
+    //    "对的写法"，改它不会有测试变红。
+    while (runtime && (job = nextRunnableJob())) {
       if (job.status === 'queued' || job.status === 'downloading') await downloadStage(job);
       else await uploadStage(job);
     }
@@ -428,6 +438,30 @@ export function initializeJmcomicQueue({ onebot, sender, store }: JmRuntime) {
   loadJobs();
   startCleanupTimer();
   void runWorker();
+}
+
+/**
+ * 停止队列：解绑运行时依赖并清掉两个计时器。幂等。
+ *
+ * 由 `app.stop()` 在 `onebot.close()` **之前**调用（上传阶段还要用 onebot.call）。
+ *
+ * 语义说明（三处都不是随手的选择）：
+ *   - **只置空 `runtime`，不新增 `stopped` 标志位**。`runtime` 早就是"队列挂在活着的
+ *     app 上"的既有语义（`runWorker` 的 `!runtime`、`enqueueJmcomicDownload` 的懒初始化
+ *     都在判它），只是此前从没人把它置回 null。用标志位的话，stop 之后的一次 enqueue
+ *     会"只入库不干活"——工具回复"已加入队列"而队列永远不动，直到下次重启；
+ *     置空 runtime 则保留既有不变量：stop 之后再来一次 enqueue 会重新拉起队列
+ *     （工具至少说的是真话）。代价是"stop 可被一次 enqueue 撤销"——而 stop 只在退出
+ *     路径上被调用，那时 `abortAll()` 已跑完、不会再产生新的模型轮次，现实中到不了。
+ *   - **不清 `jobs`**：队列是持久化的，清了会丢掉用户已提交的下载任务。
+ *   - **不中断正在跑的那一次下载**：Python 子进程句柄是 `runPython` 的 promise 局部变量，
+ *     模块外拿不到。`runtime` 置空后它在收尾阶段会退化成空操作（各处都是 `runtime?.`），
+ *     本次下载的结果因此不会被发送出去。
+ */
+export function stopJmcomicQueue() {
+  runtime = null;
+  if (cleanupTimer) { clearInterval(cleanupTimer); cleanupTimer = null; }
+  if (wakeTimer) { clearTimeout(wakeTimer); wakeTimer = null; }
 }
 
 export function enqueueJmcomicDownload(ctx: JmContext, comicId: unknown) {

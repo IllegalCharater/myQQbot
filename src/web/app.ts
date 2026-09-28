@@ -9,6 +9,8 @@ import type { ChildProcess } from 'node:child_process';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getConfig, updateConfig } from '../core/config.js';
 import type { AppConfig } from '../core/config.js';
+import { EVENTS } from '../core/events.js';
+import type { AppEmit } from '../core/events.js';
 import type { OneBotEvent } from '../qq/types.js';
 import type { MediaEntry } from '../chat/types.js';
 import { ROOT, UI_DIR } from '../core/paths.js';
@@ -20,10 +22,12 @@ import { SendQueue } from '../qq/sender.js';
 import { SessionRegistry } from '../chat/sessions.js';
 import { Orchestrator } from '../agent/runtime/orchestrator.js';
 import { estimateCost, cacheHitRate } from '../llm/llm.js';
-import { initPriceFeed } from '../llm/price-feed.js';
+import { initPriceFeed, stopPriceFeed } from '../llm/price-feed.js';
+import { initializeJmcomicQueue, stopJmcomicQueue } from '../media/jmcomic.js';
 import { createEventBus, todayKey } from '../core/util.js';
 import { serveStatic } from './static-files.js';
 import { dispatchRoute } from './router.js';
+import { projectSse, writeSse } from './event-projector.js';
 import { errorMessage, isRecord, writeReply } from './http.js';
 import { routes } from './routes/index.js';
 import { buildUsageBreakdown, buildUsageStats } from './usage-service.js';
@@ -136,7 +140,7 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     if (!line.text) return;
     snowlumaLogs.push(line);
     if (snowlumaLogs.length > 500) snowlumaLogs.splice(0, snowlumaLogs.length - 500);
-    emit('snowluma-log', line);
+    emit(EVENTS.snowlumaLog, line);
   }
 
   function snowlumaStatus() {
@@ -196,12 +200,12 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
         child.on('exit', (code, signal) => {
           snowlumaProc = null;
           pushSnowlumaLog(`SnowLuma 进程已退出（code=${code ?? ''} signal=${signal ?? ''}）`, 'stderr');
-          emit('snowluma-status', { running: false, embedded: false, pid: null });
+          emit(EVENTS.snowlumaStatus, { running: false, embedded: false, pid: null });
         });
         child.on('error', (error) => {
           pushSnowlumaLog(`SnowLuma 启动失败：${errorMessage(error)}`, 'stderr');
         });
-        emit('snowluma-status', { running: true, embedded: true, pid: child.pid });
+        emit(EVENTS.snowlumaStatus, { running: true, embedded: true, pid: child.pid });
         return { ok: true, launched: true, embedded: true, pid: child.pid };
       } catch (error) {
         pushSnowlumaLog(`内置模式启动失败，尝试回退独立窗口：${errorMessage(error)}`, 'stderr');
@@ -255,50 +259,17 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
         snowlumaProcessGroup = false;
       }
       pushSnowlumaLog(`SnowLuma 进程已退出（code=${code ?? ''} signal=${signal ?? ''}）`, code ? 'stderr' : 'stdout');
-      emit('snowluma-status', { running: false, embedded: false, pid: null });
+      emit(EVENTS.snowlumaStatus, { running: false, embedded: false, pid: null });
     });
-    emit('snowluma-status', { running: true, embedded: true, pid: child.pid });
+    emit(EVENTS.snowlumaStatus, { running: true, embedded: true, pid: child.pid });
     return { ok: true, launched: true, embedded: true, pid: child.pid };
   }
 
-  const emit = (type: string, payload: unknown) => {
+  const emit: AppEmit = (type, payload) => {
     bus.emit(type, payload);
-    let line = null;
-    if (type === 'session-update' && isRecord(payload) && payload.sessionId) {
-      try {
-        // peek：只序列化、不修改，不需要 get() 那份全量 structuredClone
-        // （运行中的会话每次更新都广播，克隆大会话会拖慢事件投递）
-        const s = sessions?.peek(String(payload.sessionId));
-        if (s) {
-          line = `event: ${type}\ndata: ${JSON.stringify({
-            sessionId: s.id,
-            chatKey: s.chatKey,
-            startedAt: s.startedAt,
-            status: s.status,
-            waitUntil: s.waitUntil ?? null,
-            activity: s.activity ?? '',
-            webSearchCount: s.webSearchCount ?? 0,
-            rounds: s.rounds ?? 0,
-            usage: s.usage ?? null,
-            trigger: s.triggerSummary ?? '',
-            triggerSummary: s.triggerSummary ?? '',
-            messages: s.messages ?? [],
-            // sent/finishReason/error/endedAt 必须随 SSE 推下去：
-            // 曾经载荷里没有它们，"已发送到 QQ"徽标只能等 HTTP 轮询带回来；
-            // 而会话一结束轮询就不再拉详情（只刷 running/waiting），
-            // 用户只能手动刷新才看得到最终发言 —— 这就是"详情更新不及时"。
-            sent: s.sent ?? [],
-            finishReason: s.finishReason ?? null,
-            error: s.error ?? null,
-            endedAt: s.endedAt ?? null
-          })}\n\n`;
-        }
-      } catch { /* 失败就退回原 payload */ }
-    }
-    if (!line) line = `event: ${type}\ndata: ${JSON.stringify(payload ?? {})}\n\n`;
-    for (const res of sseClients) {
-      try { res.write(line); } catch { /* 客户端断开会由 close 清理 */ }
-    }
+    // 帧的拼装（含 session-update 的会话投影）在 event-projector.ts 里，
+    // 是纯函数、可单测；这里只负责"广播给所有 SSE 客户端"。
+    writeSse(sseClients, projectSse(type, payload, { sessions }));
   };
 
   // ── 组件 ──
@@ -315,18 +286,19 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   onebot.tokenCandidates = [];
   // onChange：bot 自己改库（收藏/改备注/发过）时也让面板那页刷新 —— 否则用户正看着
   // 表情页，模型在群里偷偷收藏了一张，页面不会动。
-  const stickers = new StickerManager(onebot, { onChange: () => emit('sticker-update', {}) });
+  const stickers = new StickerManager(onebot, { onChange: () => emit(EVENTS.stickerUpdate, {}) });
   const sender = new SendQueue({
     onebot, store,
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`)
   });
   const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit });
 
-  // 远程价格表：启动即初始化（内部幂等；URL 为空则完全不动）
-  initPriceFeed(cfg.api?.priceRemoteUrl || '');
+  // 长期任务一律在 start() 里启动、在 stop() 里停止（见 src/web/tasks.ts）。
+  // 这里不启动任何后台任务 —— 构造对象图不该有副作用，而且真正需要它们的是
+  // "端口监听成功 + 已连上 OneBot"之后的那个时刻。
 
   // OneBot 连接状态推送
-  onebot.onStatus((status) => emit('onebot-status', status));
+  onebot.onStatus((status) => emit(EVENTS.onebotStatus, status));
 
   // ── 从 SnowLuma 配置自动同步 OneBot 令牌 ──
   // SnowLuma 给每个登录过的账号生成独立随机 token（config/onebot_<uin>.json），
@@ -551,7 +523,7 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       text: text || '[图片]' ,
       media
     });
-    emit('chat-update', `${kind}:${id}`);
+    emit(EVENTS.chatUpdate, `${kind}:${id}`);
     orchestrator.onIncoming(`${kind}:${id}`, entry);
   }
 
@@ -596,7 +568,7 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       text,
       media: []
     });
-    emit('chat-update', chatKeyNow);
+    emit(EVENTS.chatUpdate, chatKeyNow);
     orchestrator.onIncoming(chatKeyNow, entry);
   }
 
@@ -708,7 +680,8 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
     if (next.compact?.enabled) orchestrator.startCompactLoop(); else orchestrator.stopCompactLoop();
     initPriceFeed(next.api?.priceRemoteUrl || '');
-    emit('status', { configUpdated: true });
+    // 与 orchestrator 的暂停事件曾共用 `'status'` 一个名字（§3.4 一），S4 拆开
+    emit(EVENTS.configApplied, { configUpdated: true });
     return next;
   }
 
@@ -851,6 +824,14 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     // 压缩巡检：启动时按当前开关决定是否拉起（默认关，会在 60s 后才第一次巡检）
     if (getConfig().compact?.enabled) orchestrator.startCompactLoop(); else orchestrator.stopCompactLoop();
+    // 远程价格表：这里才启动（内部幂等；URL 为空则完全不动）。
+    // 放在 start() 而不是 createApp()：它是长期任务，得和 stopPriceFeed() 配对，
+    // 而"端口没监听起来就不该有后台任务"也是它该有的语义。
+    initPriceFeed(getConfig().api?.priceRemoteUrl || '');
+    // jmcomic 队列：同上（S10b 从 Orchestrator 构造函数搬过来）。
+    // 只启动、不 loadJobs 的判断保持现状 —— loadJobs 本身幂等，且恢复上次未完成的任务
+    // 正是这个队列该在建队列时做的事。
+    initializeJmcomicQueue({ onebot, sender, store });
     log(`控制台已就绪：http://127.0.0.1:${port}`);
     log(`OneBot（SnowLuma）: ws=${getConfig().snowluma?.wsUrl} http=${getConfig().snowluma?.httpUrl}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
@@ -859,6 +840,12 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
 
   async function stop() {
     await orchestrator.abortAll();
+    // 长期任务先停（与 start() 里的启动点配对）：价格表定时器要清掉，
+    // 否则它虽然 unref 了不挡退出，但会在 stop() 之后还在跑。
+    stopPriceFeed();
+    // jmcomic 队列必须在 onebot.close() **之前**停：worker 的上传阶段要调
+    // runtime.onebot.call(...)，先关传输会把在途上传打断成半死状态。
+    stopJmcomicQueue();
     onebot.close();
     server.close();
     // 内置启动的 SnowLuma：QQ Agent 退出时一并关掉，避免留一个无窗口的后台进程。

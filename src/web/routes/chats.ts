@@ -2,6 +2,7 @@ import { errorMessage, isRecord, readBody } from '../http.js';
 import type { Route } from '../types.js';
 import path from 'node:path';
 import { collectInjectedDigests } from '../../agent/prompting/prompt-builder.js';
+import { EVENTS } from '../../core/events.js';
 
 interface ChatSummary extends Record<string, unknown> {
   key: string; lastTs: number; replying: boolean; phase: string; compacting: boolean; chatName: string;
@@ -12,7 +13,7 @@ export const chatRoutes: Route[] = [
     method: 'POST', path: /^\/api\/chats\/(group|private)_(\d+)\/compact$/, async handle(ctx, _req, match) {
       const chatKey = `${match?.[1]}:${match?.[2]}`;
       try {
-        const result = await ctx.orchestrator.compactChat(chatKey, { force: true }); ctx.emit('chat-update', chatKey);
+        const result = await ctx.orchestrator.compactChat(chatKey, { force: true }); ctx.emit(EVENTS.chatUpdate, chatKey);
         if (!result?.ok) return { status: 409, body: { ok: false, error: result?.note || '压缩未执行' } };
         return { status: 200, body: { ...result, chatKey } };
       } catch (error) { return { status: 500, body: { ok: false, error: errorMessage(error) } }; }
@@ -42,7 +43,7 @@ export const chatRoutes: Route[] = [
       if (text.length > 8_000) return { status: 400, body: { ok: false, error: '内容过长' } };
       const current = ctx.store.findByLocalId(chatKey, localId); if (!current) return { status: 404, body: { ok: false, error: '找不到这条记录' } };
       if (current.kind === 'digest') return { status: 400, body: { ok: false, error: '摘要由模型生成，不能手改；可以删除' } };
-      const message = ctx.store.updateByLocalId(chatKey, localId, { text }); ctx.emit('chat-update', chatKey);
+      const message = ctx.store.updateByLocalId(chatKey, localId, { text }); ctx.emit(EVENTS.chatUpdate, chatKey);
       return { status: 200, body: { ok: true, message } };
     },
   },
@@ -50,7 +51,7 @@ export const chatRoutes: Route[] = [
     method: 'DELETE', path: /^\/api\/chats\/(group|private)_(\d+)\/messages\/(\d+)$/, async handle(ctx, _req, match) {
       const chatKey = `${match?.[1]}:${match?.[2]}`; const localId = Number(match?.[3]); const result = ctx.store.deleteByLocalId(chatKey, localId);
       if (!result) return { status: 404, body: { ok: false, error: '找不到这条记录（可能已在别处删掉）' } };
-      ctx.orchestrator.reloadWindow(chatKey); ctx.emit('chat-update', chatKey);
+      ctx.orchestrator.reloadWindow(chatKey); ctx.emit(EVENTS.chatUpdate, chatKey);
       return { status: 200, body: { ok: true, removed: { id: result.removed.id, senderName: result.removed.senderName, ts: result.removed.ts },
         backup: result.backup ? path.basename(result.backup) : '', remaining: ctx.store.getChatMeta(chatKey).total } };
     },
@@ -60,7 +61,7 @@ export const chatRoutes: Route[] = [
       const chatKey = `${match?.[1]}:${match?.[2]}`; const body = await readBody(req).catch(() => ({})); const record = isRecord(body) ? body : {};
       const text = String(record.text ?? '').trim(); if (!text) return { status: 400, body: { ok: false, error: '备注内容不能为空' } };
       if (text.length > 2_000) return { status: 400, body: { ok: false, error: '备注过长（上限 2000 字）' } };
-      const note = ctx.store.insertNote(chatKey, { text, ts: Number(record.ts) || Date.now() }); ctx.emit('chat-update', chatKey);
+      const note = ctx.store.insertNote(chatKey, { text, ts: Number(record.ts) || Date.now() }); ctx.emit(EVENTS.chatUpdate, chatKey);
       return { status: 200, body: { ok: true, note } };
     },
   },
@@ -103,7 +104,7 @@ export const chatRoutes: Route[] = [
       if (!text) return { status: 400, body: { error: '消息内容为空' } };
       try {
         const kind = match?.[1] ?? ''; const id = match?.[2] ?? ''; const chatKey = `${kind}:${id}`;
-        const raw = await ctx.onebot.sendText(kind, id, text); ctx.store.appendSelf(chatKey, { text, ts: Date.now() }); ctx.emit('chat-update', chatKey);
+        const raw = await ctx.onebot.sendText(kind, id, text); ctx.store.appendSelf(chatKey, { text, ts: Date.now() }); ctx.emit(EVENTS.chatUpdate, chatKey);
         return { status: 200, body: { ok: true, messageId: isRecord(raw) ? raw.message_id ?? null : null } };
       } catch (error) { return { status: 502, body: { error: errorMessage(error) } }; }
     },

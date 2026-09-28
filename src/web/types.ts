@@ -6,7 +6,8 @@ import type { SessionRegistry } from '../chat/sessions.js';
 import type { OneBotClient } from '../qq/onebot.js';
 import type { SendQueue } from '../qq/sender.js';
 import type { StickerManager } from '../stickers/sticker-manager.js';
-import type { Orchestrator } from '../agent/runtime/orchestrator.js';
+import type { AgentControlPort } from '../agent/runtime/control-port.js';
+import type { AppEmit } from '../core/events.js';
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export type JsonHeaders = Record<string, string>;
@@ -26,8 +27,8 @@ export interface AppContext {
   onebot: OneBotClient;
   sender: SendQueue;
   stickers: StickerManager;
-  orchestrator: Orchestrator;
-  emit(type: string, payload: unknown): void;
+  orchestrator: AgentControlPort;
+  emit: AppEmit;
   getConfig(): AppConfig;
   updateConfig(patch: Record<string, unknown>): AppConfig;
   launchSnowluma(): Promise<unknown>;
@@ -59,10 +60,10 @@ export interface AppHandle {
   stickers: StickerManager;
   sender: SendQueue;
   sessions: SessionRegistry;
-  orchestrator: Orchestrator;
+  orchestrator: AgentControlPort;
   start(): Promise<number>;
   stop(): Promise<void>;
-  emit(type: string, payload: unknown): void;
+  emit: AppEmit;
   getConfig(): AppConfig;
   updateConfig(patch: Record<string, unknown>): AppConfig;
   launchSnowluma(): Promise<unknown>;

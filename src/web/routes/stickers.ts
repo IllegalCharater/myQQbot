@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { EVENTS } from '../../core/events.js';
 import { detectMime } from '../../agent/tools/index.js';
 import { safeFetchBinary, validateImageUrl } from '../../media/safe-fetch.js';
 import { cachedPath } from '../../stickers/sticker-cache.js';
@@ -23,7 +24,7 @@ export const stickerRoutes: Route[] = [
   {
     method: 'POST', path: '/api/stickers/sync', async handle(ctx) {
       try {
-        const data = await ctx.stickers.adminList('', 500, true); ctx.emit('sticker-update', {});
+        const data = await ctx.stickers.adminList('', 500, true); ctx.emit(EVENTS.stickerUpdate, {});
         return { status: 200, body: { ok: !data.syncError, count: data.total, fromCache: data.fromCache, error: data.syncError || '' } };
       } catch (error) { return { status: 502, body: { ok: false, error: errorMessage(error) } }; }
     },
@@ -34,7 +35,7 @@ export const stickerRoutes: Route[] = [
         const targets = ctx.stickers.entries.filter((entry) => entry.source !== 'qq' && !cachedPath(entry)); let cached = 0;
         const errors: Array<{ id: string; error: string }> = [];
         for (const item of targets.slice(0, 200)) { const result = await ctx.stickers.cacheOne(item.id); if (result.cached) cached += 1; else errors.push({ id: item.id, error: result.error || '缓存失败' }); }
-        const swept = ctx.stickers.sweep(); if (cached || swept) ctx.emit('sticker-update', {});
+        const swept = ctx.stickers.sweep(); if (cached || swept) ctx.emit(EVENTS.stickerUpdate, {});
         return { status: 200, body: { ok: true, cached, swept, failed: errors.length, errors: errors.slice(0, 5), remains: Math.max(0, targets.length - 200) } };
       } catch (error) { return { status: 502, body: { ok: false, error: errorMessage(error) } }; }
     },
@@ -65,7 +66,7 @@ export const stickerRoutes: Route[] = [
       const result = ctx.stickers.noteVerbose(ref, patch);
       if (result.ambiguous?.length) return { status: 409, body: { ok: false, error: `「${ref}」对应 ${result.ambiguous.length} 个表情，请用 id 指定：${result.ambiguous.map((entry) => entry.id).join(' / ')}`, candidates: result.ambiguous.map((entry) => ({ id: entry.id, desc: entry.desc, url: entry.url })) } };
       if (!result.entry) return { status: 404, body: { ok: false, error: '找不到这个表情' } };
-      ctx.emit('sticker-update', { id: result.entry.id }); const entry = result.entry;
+      ctx.emit(EVENTS.stickerUpdate, { id: result.entry.id }); const entry = result.entry;
       return { status: 200, body: { ok: true, sticker: { id: entry.id, localNote: entry.localNote || '', tags: entry.tags || [], usage: entry.usage || '', desc: entry.desc || '' } } };
     },
   },
@@ -75,7 +76,7 @@ export const stickerRoutes: Route[] = [
       const result = ctx.stickers.remove(ref);
       if (result.refused === 'qq') return { status: 409, body: { ok: false, error: '这是 QQ 收藏里的表情，本地删不掉（下次同步就会回来）。请到 QQ 里取消收藏。' } };
       if (!result.removed) return { status: 404, body: { ok: false, error: '找不到这个表情（删除只认 id / resId / md5 / 图片地址，不按备注名猜）' } };
-      ctx.emit('sticker-update', {}); return { status: 200, body: { ok: true, removed: { id: result.removed.id, desc: result.removed.desc || '' } } };
+      ctx.emit(EVENTS.stickerUpdate, {}); return { status: 200, body: { ok: true, removed: { id: result.removed.id, desc: result.removed.desc || '' } } };
     },
   },
 ];

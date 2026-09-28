@@ -4,6 +4,7 @@
 //
 // 工具命名去掉了 qq_ 前缀（更短，省 token）。
 import { getConfig } from '../../core/config.js';
+import { EVENTS } from '../../core/events.js';
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
 import { normalizeMessageList, unquoteJsonString, formatShortTime } from '../../core/util.js';
 import { formatStickerList } from '../../stickers/stickers.js';
@@ -133,13 +134,13 @@ export function buildAllToolDefs(): ToolDefinition[] {
   return [
     {
       name: 'send_message',
-      description: TOOL_PROMPT_TEXT[0],
+      description: TOOL_PROMPT_TEXT.send_message.description,
       parameters: {
         type: 'object',
         properties: {
-          messages: { description: TOOL_PROMPT_TEXT[1], oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
-          replyToMessageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[2] },
-          atUserId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[3] }
+          messages: { description: TOOL_PROMPT_TEXT.send_message.messages, oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+          replyToMessageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.send_message.replyToMessageId },
+          atUserId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.send_message.atUserId }
         },
         required: ['messages']
       },
@@ -152,7 +153,7 @@ export function buildAllToolDefs(): ToolDefinition[] {
             atUserId: args.atUserId ?? null
           });
           ctx.session.sent.push(...result.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
-          ctx.emit('session-update', ctx.session.id);
+          ctx.emit(EVENTS.sessionUpdate, { sessionId: ctx.session.id });
           const note = ['已发送。不要输出"已发送"类汇报，继续思考下一步或直接结束。'];
           if (result.failed.length) note.push(`（另有 ${result.failed.length} 条发送失败：${result.failed.map((f) => f.error).join('；')}——成功的不需要重发，失败的请稍后再试或减少条数）`);
           return ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), note: note.join('') });
@@ -163,13 +164,13 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'send_sticker',
-      description: TOOL_PROMPT_TEXT[4],
+      description: TOOL_PROMPT_TEXT.send_sticker.description,
       parameters: {
         type: 'object',
         properties: {
-          stickerId: { type: 'string', description: TOOL_PROMPT_TEXT[5] },
-          replyToMessageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[6] },
-          atUserId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[7] }
+          stickerId: { type: 'string', description: TOOL_PROMPT_TEXT.send_sticker.stickerId },
+          replyToMessageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.send_sticker.replyToMessageId },
+          atUserId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.send_sticker.atUserId }
         },
         required: ['stickerId']
       },
@@ -216,7 +217,7 @@ export function buildAllToolDefs(): ToolDefinition[] {
           }
           ctx.stickers.markUsed(sticker.id, String(ctx.session.triggerText || '').slice(0, 100));
           ctx.session.sent.push({ type: 'sticker', text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
-          ctx.emit('session-update', ctx.session.id);
+          ctx.emit(EVENTS.sessionUpdate, { sessionId: ctx.session.id });
           return ok({ sent: true, messageId: isRecord(result) ? result.message_id ?? null : null, note: '表情已发送。' });
         } catch (error) {
           return err(errorMessage(error));
@@ -225,12 +226,12 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'list_stickers',
-      description: TOOL_PROMPT_TEXT[8],
+      description: TOOL_PROMPT_TEXT.list_stickers.description,
       parameters: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: TOOL_PROMPT_TEXT[9] },
-          limit: { type: 'integer', description: TOOL_PROMPT_TEXT[10] }
+          query: { type: 'string', description: TOOL_PROMPT_TEXT.list_stickers.query },
+          limit: { type: 'integer', description: TOOL_PROMPT_TEXT.list_stickers.limit }
         }
       },
       async execute(ctx, args) {
@@ -244,10 +245,10 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'get_sticker_image',
-      description: TOOL_PROMPT_TEXT[11],
+      description: TOOL_PROMPT_TEXT.get_sticker_image.description,
       parameters: {
         type: 'object',
-        properties: { stickerId: { type: 'string', description: TOOL_PROMPT_TEXT[12] } },
+        properties: { stickerId: { type: 'string', description: TOOL_PROMPT_TEXT.get_sticker_image.stickerId } },
         required: ['stickerId']
       },
       async execute(ctx, args) {
@@ -271,14 +272,14 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'sticker_note',
-      description: TOOL_PROMPT_TEXT[13],
+      description: TOOL_PROMPT_TEXT.sticker_note.description,
       parameters: {
         type: 'object',
         properties: {
-          stickerId: { type: 'string', description: TOOL_PROMPT_TEXT[14] },
-          note: { type: 'string', description: TOOL_PROMPT_TEXT[15] },
-          tags: { type: 'array', items: { type: 'string' }, description: TOOL_PROMPT_TEXT[16] },
-          usage: { type: 'string', description: TOOL_PROMPT_TEXT[17] }
+          stickerId: { type: 'string', description: TOOL_PROMPT_TEXT.sticker_note.stickerId },
+          note: { type: 'string', description: TOOL_PROMPT_TEXT.sticker_note.note },
+          tags: { type: 'array', items: { type: 'string' }, description: TOOL_PROMPT_TEXT.sticker_note.tags },
+          usage: { type: 'string', description: TOOL_PROMPT_TEXT.sticker_note.usage }
         },
         required: ['stickerId']
       },
@@ -299,12 +300,12 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'collect_sticker',
-      description: TOOL_PROMPT_TEXT[18],
+      description: TOOL_PROMPT_TEXT.collect_sticker.description,
       parameters: {
         type: 'object',
         properties: {
-          messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[19] },
-          note: { type: 'string', description: TOOL_PROMPT_TEXT[20] }
+          messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.collect_sticker.messageId },
+          note: { type: 'string', description: TOOL_PROMPT_TEXT.collect_sticker.note }
         },
         required: ['messageId']
       },
@@ -335,10 +336,10 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'send_poke',
-      description: TOOL_PROMPT_TEXT[21],
+      description: TOOL_PROMPT_TEXT.send_poke.description,
       parameters: {
         type: 'object',
-        properties: { targetUserId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[22] } }
+        properties: { targetUserId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.send_poke.targetUserId } }
       },
       async execute(ctx, args) {
         try {
@@ -363,12 +364,12 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'get_recent_messages',
-      description: TOOL_PROMPT_TEXT[23],
+      description: TOOL_PROMPT_TEXT.get_recent_messages.description,
       parameters: {
         type: 'object',
         properties: {
-          limit: { type: 'integer', description: TOOL_PROMPT_TEXT[24] },
-          offset: { type: 'integer', description: TOOL_PROMPT_TEXT[25] }
+          limit: { type: 'integer', description: TOOL_PROMPT_TEXT.get_recent_messages.limit },
+          offset: { type: 'integer', description: TOOL_PROMPT_TEXT.get_recent_messages.offset }
         }
       },
       async execute(ctx, args) {
@@ -390,11 +391,11 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'read_forward',
-      description: TOOL_PROMPT_TEXT[26],
+      description: TOOL_PROMPT_TEXT.read_forward.description,
       parameters: {
         type: 'object',
         properties: {
-          messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[27] }
+          messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.read_forward.messageId }
         },
         required: ['messageId']
       },
@@ -439,10 +440,10 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'read_group_notice',
-      description: TOOL_PROMPT_TEXT[28],
+      description: TOOL_PROMPT_TEXT.read_group_notice.description,
       parameters: {
         type: 'object',
-        properties: { limit: { type: 'integer', description: TOOL_PROMPT_TEXT[29] } }
+        properties: { limit: { type: 'integer', description: TOOL_PROMPT_TEXT.read_group_notice.limit } }
       },
       async execute(ctx, args) {
         if (ctx.kind !== 'group') return err('群公告只在群聊里有，私聊没有公告可读。');
@@ -480,10 +481,10 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'get_active_members',
-      description: TOOL_PROMPT_TEXT[30],
+      description: TOOL_PROMPT_TEXT.get_active_members.description,
       parameters: {
         type: 'object',
-        properties: { limit: { type: 'integer', description: TOOL_PROMPT_TEXT[31] } }
+        properties: { limit: { type: 'integer', description: TOOL_PROMPT_TEXT.get_active_members.limit } }
       },
       async execute(ctx, args) {
         const members = ctx.store.activeMembers(ctx.chatKey, Math.min(20, Math.max(1, Number(args.limit) || 10)));
@@ -499,10 +500,10 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'get_message_detail',
-      description: TOOL_PROMPT_TEXT[32],
+      description: TOOL_PROMPT_TEXT.get_message_detail.description,
       parameters: {
         type: 'object',
-        properties: { messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[33] } },
+        properties: { messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.get_message_detail.messageId } },
         required: ['messageId']
       },
       async execute(ctx, args) {
@@ -520,10 +521,10 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'get_message_images',
-      description: TOOL_PROMPT_TEXT[34],
+      description: TOOL_PROMPT_TEXT.get_message_images.description,
       parameters: {
         type: 'object',
-        properties: { messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[35] } },
+        properties: { messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.get_message_images.messageId } },
         required: ['messageId']
       },
       async execute(ctx, args) {
@@ -571,14 +572,14 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'memory_append',
-      description: TOOL_PROMPT_TEXT[36],
+      description: TOOL_PROMPT_TEXT.memory_append.description,
       parameters: {
         type: 'object',
         properties: {
           category: { type: 'string', enum: ['memberImpression'] },
-          userId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[37] },
-          target: { type: 'string', description: TOOL_PROMPT_TEXT[38] },
-          content: { type: 'string', description: TOOL_PROMPT_TEXT[39] }
+          userId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.memory_append.userId },
+          target: { type: 'string', description: TOOL_PROMPT_TEXT.memory_append.target },
+          content: { type: 'string', description: TOOL_PROMPT_TEXT.memory_append.content }
         },
         required: ['category', 'userId', 'content']
       },
@@ -596,11 +597,11 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'memory_query',
-      description: TOOL_PROMPT_TEXT[40],
+      description: TOOL_PROMPT_TEXT.memory_query.description,
       parameters: {
         type: 'object',
         properties: {
-          userId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[41] }
+          userId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.memory_query.userId }
         },
         required: ['userId']
       },
@@ -617,14 +618,14 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'memory_remove',
-      description: TOOL_PROMPT_TEXT[42],
+      description: TOOL_PROMPT_TEXT.memory_remove.description,
       parameters: {
         type: 'object',
         properties: {
           category: { type: 'string', enum: ['memberImpression'] },
-          userId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT[43] },
-          target: { type: 'string', description: TOOL_PROMPT_TEXT[44] },
-          content: { type: 'string', description: TOOL_PROMPT_TEXT[45] }
+          userId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.memory_remove.userId },
+          target: { type: 'string', description: TOOL_PROMPT_TEXT.memory_remove.target },
+          content: { type: 'string', description: TOOL_PROMPT_TEXT.memory_remove.content }
         },
         required: ['category']
       },
@@ -639,7 +640,7 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'report_feedback',
-      description: TOOL_PROMPT_TEXT[46],
+      description: TOOL_PROMPT_TEXT.report_feedback.description,
       parameters: {
         type: 'object',
         properties: {
@@ -652,16 +653,16 @@ export function buildAllToolDefs(): ToolDefinition[] {
         const rawLevel = String(args.level ?? '');
         const level = ['info', 'warning', 'error'].includes(rawLevel) ? rawLevel : 'info';
         ctx.session.feedbacks.push({ level, message: String(args.message ?? '').slice(0, 500), at: Date.now() });
-        ctx.emit('feedback', { sessionId: ctx.session.id, chatKey: ctx.chatKey, level, message: String(args.message ?? '') });
+        ctx.emit(EVENTS.feedback, { sessionId: ctx.session.id, chatKey: ctx.chatKey, level, message: String(args.message ?? '') });
         return ok({ reported: true });
       }
     },
     {
       name: 'web_search',
-      description: TOOL_PROMPT_TEXT[47],
+      description: TOOL_PROMPT_TEXT.web_search.description,
       parameters: {
         type: 'object',
-        properties: { query: { type: 'string', description: TOOL_PROMPT_TEXT[48] } },
+        properties: { query: { type: 'string', description: TOOL_PROMPT_TEXT.web_search.query } },
         required: ['query']
       },
       async execute(ctx, args) {
@@ -678,10 +679,10 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'web_fetch',
-      description: TOOL_PROMPT_TEXT[49],
+      description: TOOL_PROMPT_TEXT.web_fetch.description,
       parameters: {
         type: 'object',
-        properties: { url: { type: 'string', description: TOOL_PROMPT_TEXT[50] } },
+        properties: { url: { type: 'string', description: TOOL_PROMPT_TEXT.web_fetch.url } },
         required: ['url']
       },
       async execute(ctx, args) {
@@ -701,11 +702,11 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'download_jmcomic',
-      description: TOOL_PROMPT_TEXT[51],
+      description: TOOL_PROMPT_TEXT.download_jmcomic.description,
       parameters: {
         type: 'object',
         properties: {
-          comicId: { type: 'string', pattern: '^\\d{1,20}$', description: TOOL_PROMPT_TEXT[52] }
+          comicId: { type: 'string', pattern: '^\\d{1,20}$', description: TOOL_PROMPT_TEXT.download_jmcomic.comicId }
         },
         required: ['comicId'],
         additionalProperties: false
@@ -721,10 +722,10 @@ export function buildAllToolDefs(): ToolDefinition[] {
     },
     {
       name: 'finish',
-      description: TOOL_PROMPT_TEXT[53],
+      description: TOOL_PROMPT_TEXT.finish.description,
       parameters: {
         type: 'object',
-        properties: { summary: { type: 'string', description: TOOL_PROMPT_TEXT[54] } },
+        properties: { summary: { type: 'string', description: TOOL_PROMPT_TEXT.finish.summary } },
         required: ['summary']
       },
       async execute(ctx, args) {

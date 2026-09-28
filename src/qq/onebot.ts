@@ -33,7 +33,7 @@ export class OneBotClient {
     this.accessToken = String(accessToken || '');
     // SnowLuma 允许给 WS 与 HTTP 配不同令牌；httpToken 缺省沿用 accessToken
     this.httpToken = String(httpToken || accessToken || '');
-    this.onEvent = onEvent || (() => {});
+    this.onEvent = onEvent || (() => { });
     this.socket = null;
     this.connected = false;
     this.everConnected = false;
@@ -43,7 +43,16 @@ export class OneBotClient {
     this.statusListeners = new Set();
   }
 
-  #closedByUs;
+  #closedByUs: boolean;
+
+  /**
+   * 待触发的重连定时器句柄。非 null ⟺ 有一次重连已经排定、还没触发。
+   * 存句柄是为了让 close()/connect()/reconnect() 能取消掉那一次：不存的话，
+   * 迟到的定时器会再进 #connectLoop 建第二个 WebSocket 覆盖 this.socket，
+   * 旧 socket 就再也没人关了（connect/reconnect 刚作废的那一个反而漏掉）。
+   * **刻意不 unref**：有重连待办时钉住进程是对的，unref 会让进程在等待重连期间可退出。
+   */
+  #reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   onStatus(fn: StatusHandler) {
     this.statusListeners.add(fn);
@@ -58,8 +67,31 @@ export class OneBotClient {
     }
   }
 
+  /**
+   * 排定下一次重连。**先清旧、再存新**：重复排定时旧句柄必须作废，
+   * 否则它会按旧的时间点触发一次多余的重连，而新句柄从此再也取消不掉它。
+   */
+  #scheduleReconnect() {
+    this.#cancelReconnect();
+    this.#reconnectTimer = setTimeout(() => {
+      this.#reconnectTimer = null; // 触发即失效，保持"非 null ⟺ 有待办"这条不变量
+      this.#connectLoop();
+    }, RECONNECT_MIN_MS);
+  }
+
+  /** 取消"已排定但尚未触发"的那一次重连。幂等。 */
+  #cancelReconnect() {
+    if (this.#reconnectTimer) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = null;
+    }
+  }
+
   async connect() {
     this.#closedByUs = false;
+    // 上一次连接留下的重连排定要一起作废：它会在新连接建好之后再建一个 socket
+    // 覆盖 this.socket，而新 socket 之外的那个就再也没人关了。
+    this.#cancelReconnect();
     this.#connectLoop();
   }
 
@@ -70,11 +102,16 @@ export class OneBotClient {
     const old = this.socket;
     this.socket = null;
     this.#closedByUs = false;
+    // 同一个病的另一半：待触发的重连定时器也要作废，否则它同样会再建一个 socket。
+    this.#cancelReconnect();
     try { old?.close(); } catch { /* ignore */ }
     this.#connectLoop();
   }
 
   #connectLoop() {
+    // 第二道闸门：第一道是 close()/connect()/reconnect() 里已经取消掉待触发的重连，
+    // 正常情况下走不到这里。留着是因为"不再建 socket"这条不变量不该依赖
+    // "每个排定重连的地方都记得判一次 #closedByUs"。
     if (this.#closedByUs) return;
     let url = this.wsUrl;
     if (this.accessToken) url += (url.includes('?') ? '&' : '?') + `access_token=${encodeURIComponent(this.accessToken)}`;
@@ -86,7 +123,7 @@ export class OneBotClient {
     } catch (error) {
       this.lastConnectError = errorText(error);
       this.#setStatus(false);
-      setTimeout(() => this.#connectLoop(), RECONNECT_MIN_MS);
+      this.#scheduleReconnect();
       return;
     }
     this.socket = socket;
@@ -115,7 +152,7 @@ export class OneBotClient {
     socket.on('close', () => {
       if (!isCurrent(socket)) return; // 旧连接的迟到 close：新连接已在处理
       this.#setStatus(false);
-      if (!this.#closedByUs) setTimeout(() => this.#connectLoop(), RECONNECT_MIN_MS);
+      if (!this.#closedByUs) this.#scheduleReconnect();
     });
     socket.on('error', (error) => {
       if (!isCurrent(socket)) return;
@@ -129,6 +166,9 @@ export class OneBotClient {
 
   close() {
     this.#closedByUs = true;
+    // 真正的"停"：不只要停止排定新的重连，还要撤掉已经排定的那一次。
+    // 只置 #closedByUs 的话那个定时器仍然活着，会白钉住事件循环最多 RECONNECT_MIN_MS。
+    this.#cancelReconnect();
     const old = this.socket;
     this.socket = null;
     try { old?.close(); } catch { /* ignore */ }

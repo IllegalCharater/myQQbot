@@ -1,4 +1,6 @@
 import { getConfig } from '../../core/config.js';
+import { EVENTS } from '../../core/events.js';
+import type { AppEmit } from '../../core/events.js';
 import { PROMPT_CATALOG } from '../../core/prompt-catalog.js';
 import { vendorOfConfig } from '../../llm/model-prices.js';
 import { buildSystemPrompt, buildUserPrompt } from '../prompting/prompt-builder.js';
@@ -15,7 +17,7 @@ import type { SendQueue } from '../../qq/sender.js';
 import type { SessionRegistry } from '../../chat/sessions.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
-import type { HistoryPolicyResult, ResponseDecision, ToolDefinition } from '../shared/types.js';
+import type { HistoryPolicyResult, ResponseDecision, ToolContext, ToolDefinition } from '../shared/types.js';
 import type { InlineToolCall } from '../shared/inline-tool-parser.js';
 import type { ChatRequestMessage } from '../../llm/types.js';
 import type { StickerEntry } from '../../stickers/types.js';
@@ -44,7 +46,7 @@ export interface AgentRunnerHost {
   windows: ContextWindowRegistry;
   toolDefs: ToolDefinition[];
   aborted: boolean;
-  emit(event: string, payload?: unknown): unknown;
+  emit: AppEmit;
   getChatName(groupId: string | number): Promise<string>;
 }
 
@@ -131,7 +133,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       session.historyLimit = historyInfo.historyCount;
     }
     host.sessions.update(session.id);
-    host.emit('session-update', session.id);
+    host.emit(EVENTS.sessionUpdate, { sessionId: session.id });
 
     const messages: ChatRequestMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -149,7 +151,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     });
     const openAiTools = toOpenAiTools(toolDefs);
 
-    const ctx = {
+    const ctx: ToolContext = {
       chatKey, kind, chatId,
       requesterId: String([...triggerEntries].reverse().find((m) => !m.self)?.senderId || ''),
       selfId: host.onebot.selfId,
@@ -161,7 +163,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       stickers: host.stickers,
       sender: host.sender,
       session,
-      emit: (type: string, payload?: unknown) => host.emit(type, payload)
+      emit: (type, payload) => host.emit(type, payload)
     };
 
     const maxRounds = Math.max(1, Number(cfg.api.maxRounds) || 12);
@@ -178,7 +180,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     const markActivity = (activity: unknown) => {
       session.activity = String(activity ?? '');
       host.sessions.update(session.id);
-      host.emit('session-update', session.id);
+      host.emit(EVENTS.sessionUpdate, { sessionId: session.id });
     };
     for (let round = 0; round < maxRounds && !finish; round++) {
       if (host.aborted) { host.sessions.finish(session.id, 'aborted'); return; }
@@ -199,7 +201,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       if (Number.isFinite(Number(requestTemperature))) requestSnapshot.temperature = Number(requestTemperature);
       llmRequests.push(requestSnapshot);
       host.sessions.update(session.id);
-      host.emit('session-update', session.id);
+      host.emit(EVENTS.sessionUpdate, { sessionId: session.id });
       // 网络抖动/5xx/429 会自动重试（同一轮请求，messages 不变，幂等不重复发言）
       const response = await chatCompletionWithRetry({ messages, tools: openAiTools });
       session.model = response.model || session.model;
@@ -269,7 +271,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
           uiLast.inlineParsed = true;
         }
         host.sessions.update(session.id);
-        host.emit('session-update', session.id);
+        host.emit(EVENTS.sessionUpdate, { sessionId: session.id });
       }
       if (!toolCalls.length) {
         // 没有工具调用 = 模型结束思考（文本不会发给 QQ）
@@ -317,7 +319,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
           pendingImageEntry = session.messages.length - 1;
         }
         host.sessions.update(session.id);
-        host.emit('session-update', session.id);
+        host.emit(EVENTS.sessionUpdate, { sessionId: session.id });
         if (name === 'finish') finish = true;
       }
       messages.push(...toolResults.map(({ role, tool_call_id, name, content }) => ({ role, tool_call_id, content, name })));
@@ -329,11 +331,13 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     // 收尾：发过话 = done；没发 = noreply（这是正常选项）
     const status = session.error ? 'error' : (session.sent.length > 0 ? 'done' : 'noreply');
     host.sessions.finish(session.id, status);
-    host.emit('session-end', {
+    host.emit(EVENTS.sessionEnd, {
       sessionId: session.id,
       chatKey,
       status,
-      sent: session.sent.length,
+      // 叫 sentCount 而不是 sent：session.sent 是**数组**（每条发出的消息），
+      // 这里刻意发条数。同名异物在 SSE 投影里也有个 `sent: 数组`，别混。
+      sentCount: session.sent.length,
       finishReason: session.finishReason,
       usage: session.usage
     });

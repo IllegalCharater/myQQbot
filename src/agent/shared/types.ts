@@ -8,6 +8,7 @@ import type { SendQueue } from '../../qq/sender.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { SessionRegistry } from '../../chat/sessions.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
+import type { AppEmit } from '../../core/events.js';
 
 export type ToolArguments = Record<string, unknown>;
 export interface ToolContentPart extends Record<string, unknown> { type: string }
@@ -33,7 +34,7 @@ export interface ToolContext extends Record<string, unknown> {
   stickers: StickerManager;
   sender: SendQueue;
   session: SessionRecord & { sent: unknown[]; feedbacks: unknown[] };
-  emit(event: string, payload?: unknown): unknown;
+  emit: AppEmit;
   triggerEntries?: ChatMessage[];
 }
 
@@ -78,7 +79,11 @@ export interface OrchestratorDependencies {
   sender: SendQueue;
   sessions: SessionRegistry;
   onebot: OneBotClient;
-  emit?: ((event: string, payload?: unknown) => unknown) | null;
+  // S10d 起 **必填**：以前 Orchestrator 会在缺省时兜底建一个 createEventBus()，
+  // 于是"忘了传 emit"的调用点静默拿到一个只有自己的空总线——发出的帧没人收，
+  // 而 `tsc` 管不到（tests/ 不在 tsconfig 的 include 里）。现在缺了直接编译不过，
+  // 测试侧由 tests/t-ports.mjs 第 1c 段的文本扫描守（见那里的注释）。
+  emit: AppEmit;
   windows?: ContextWindowRegistry | null;
 }
 

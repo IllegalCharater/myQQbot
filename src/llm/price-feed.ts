@@ -172,8 +172,25 @@ export async function refreshPriceFeed(url: string) {
 }
 
 /**
+ * 停止定时刷新（应用退出时由 app.stop() 调用）。幂等。
+ *
+ * 保留 `status.url` 与最后一次快照（`source`/`count`/`fetchedAt`/`ok`），
+ * 面板在停止后不至于变成空白；只把 `enabled` 置假，表示"不再自动刷新"。
+ * 也不清价格表本身 —— 与"拉取失败不清表"同一条原则：总有一张表可用。
+ */
+export function stopPriceFeed() {
+  if (timer) { clearInterval(timer); timer = null; }
+  status.enabled = false;
+}
+
+/**
  * 初始化远程价格表：吃缓存 → 立即拉 → 起定时检查。
- * 幂等：URL 没变就什么都不做（配置保存时会再次调这里）。
+ * 幂等：URL 没变**且定时器还活着**就什么都不做（配置保存时会再次调这里）。
+ *
+ * ⚠️ 早退判定必须**带 `timer` 条件、且排在 `stopPriceFeed()` 之前**。
+ *    只判 `url + enabled` 的话，第二次同 URL 调用会先清掉定时器再早退，
+ *    小时级刷新从此永久停摆、且完全静默（状态页只看到 fetchedAt 越来越旧）——
+ *    而配置保存（applyConfigPatch → initPriceFeed）就会触发同 URL 的第二次调用。
  *
  * ⚠️ 所有不带 await 的调用都挂 .catch(() => {})：
  *    refreshPriceFeed 内部已全 catch，这里是第二道保险 ——
@@ -181,13 +198,13 @@ export async function refreshPriceFeed(url: string) {
  */
 export function initPriceFeed(url: string) {
   url = String(url || '').trim();
-  if (timer) { clearInterval(timer); timer = null; }
   if (!url) {
+    stopPriceFeed();
     status.url = '';
-    status.enabled = false;
     return;
   }
-  if (status.url === url && status.enabled) return;   // 同 URL 已初始化过
+  if (status.url === url && status.enabled && timer) return;   // 同 URL 且定时器还在：无事可做
+  stopPriceFeed();                 // 换 URL 或重建：先把旧定时器停干净
   status.url = url;
   status.enabled = true;
   applyDiskCache(url);            // 先用缓存顶上，拉到新的再覆盖

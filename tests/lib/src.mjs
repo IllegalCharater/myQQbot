@@ -49,3 +49,39 @@ export const SOURCE_REL = 'src';
 export const UI_DIR = path.join(ROOT, 'ui');
 export const uiFile = (rel) => path.join(UI_DIR, rel);
 export const readUI = (rel) => fs.readFileSync(uiFile(rel), 'utf8');
+
+/**
+ * 剥掉注释，只留代码。给"文本扫描式断言"用。
+ *
+ * 为什么需要它：那类断言的意图是"这段代码里没有 X"，但**注释里提一嘴 X 会被误判**。
+ * 实测踩到过两次：`src/web/tasks.ts` 的注释指向隔壁那张方法名录，把 t-ports 的
+ * "名录不参与分发"断言打红了（而注释不参与任何逻辑）；同理，注释里写一句
+ * ``不要这样写 setInterval(fn, 1000)`` 也会打红 t-tasks 的"纯数据"断言。
+ * 所以扫描前先剥注释，才是对断言意图的忠实实现。
+ *
+ * 用状态机跳过字符串字面量里的 `//`（如 URL），**保留换行**以便按行统计。
+ * 已知边界：模板串里的 `${}` 会被当成字符串内容（`` `${X}` `` 里的 X 会被剥掉），
+ * 反引号内再嵌反引号也会算错。这两处在本仓库的扫描对象里不出现；真要扫那种代码，
+ * 换真解析器，别在这个助手上加正则。
+ */
+export function stripComments(src) {
+  let out = '', i = 0, quote = null;
+  while (i < src.length) {
+    const c = src[i], n = src[i + 1];
+    if (quote) {
+      out += c;
+      if (c === '\\') { out += n ?? ''; i += 2; continue; }
+      if (c === quote) quote = null;
+      i++; continue;
+    }
+    if (c === "'" || c === '"' || c === '`') { quote = c; out += c; i++; continue; }
+    if (c === '/' && n === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (c === '/' && n === '*') {
+      i += 2;
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i += 2; continue;
+    }
+    out += c; i++;
+  }
+  return out;
+}

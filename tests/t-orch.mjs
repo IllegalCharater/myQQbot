@@ -24,7 +24,9 @@ const onebot = { selfId: '999', selfNickname: '小鲸鱼', connected: true,
   sendText: async () => ({ message_id: 1 }), sendSticker: async () => ({ message_id: 2 }),
   sendPoke: async () => ({}), getGroupInfo: async () => ({ group_name: '测试群' }), call: async () => ({}) };
 const sender = new SendQueue({ onebot, store });
-const orc = new Orchestrator({ store, memory, stickers, sender, sessions, onebot });
+// S10d 起 `emit` 是**必填**（Orchestrator 不再兜底建空总线）。本套件只读状态、不验事件，
+// 给一个空实现即可 —— 但**不能省**：省了 dist 里会拿到 undefined，`emit(...)` 当场抛。
+const orc = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit: () => {} });
 
 const key = 'group:123';
 const now = Date.now();
@@ -42,7 +44,7 @@ orc.abortAll();
 console.log('abortAll 未抛错 ✓ | chatStates 已清空:', orc.chatStates.size === 0, '| sender.replying 已清空:', sender.replying.size === 0);
 
 console.log('\n=== 2. 等待窗口：maxWaitMs=4000，连发续命 ===');
-const orc2 = new Orchestrator({ store, memory, stickers, sender, sessions, onebot });
+const orc2 = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit: () => {} });
 updateConfig({ reply: { maxWaitMs: 4000 }, wakeDelayMs: 2000 });
 const t1 = Date.now();
 orc2.scheduleWake(key);
@@ -61,7 +63,7 @@ orc2.abortAll();
 console.log('abortAll 后状态:', JSON.stringify(orc2.chatState(key)), '(应为 null)');
 
 console.log('\n=== 3. 骰子固定（窗口预判与 wake 共用同一颗）===');
-const orc3 = new Orchestrator({ store, memory, stickers, sender, sessions, onebot });
+const orc3 = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit: () => {} });
 updateConfig({ store: { contextSliderPos: 55, historyCount: 5 } });
 orc3.scheduleWake(key);
 const r1 = orc3.chatState(key).roll;
@@ -71,12 +73,12 @@ orc3.abortAll();
 
 console.log('\n=== 4. 压缩闸门 ===');
 updateConfig({ compact: { enabled: true, minMessagesToCompact: 50, keepRecentMessages: 100, maxMessagesPerRound: 400 } });
-const orc4 = new Orchestrator({ store, memory, stickers, sender, sessions, onebot });
+const orc4 = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit: () => {} });
 console.log('条数不够:', JSON.stringify(await orc4.compactChat(key)));
 store.drainUnread(key);
 say(120); store.drainUnread(key);
 console.log('正在等待聚批时应拒绝:', JSON.stringify(await (async () => { orc4.scheduleWake(key); const r = await orc4.compactChat(key); orc4.abortAll(); return r; })()));
-const orc5 = new Orchestrator({ store, memory, stickers, sender, sessions, onebot });
+const orc5 = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit: () => {} });
 // 模型不可达 → 摘要失败 → 必须零改动
 const before = store.recent(key, { limit: 10000 }).length;
 const t2 = Date.now();

@@ -112,7 +112,7 @@ ok('存在 chatVisibleMessages()', /function chatVisibleMessages\(\)/.test(js));
 ok('滚动加载按过滤后的长度判断', /const total = chatVisibleMessages\(\)\.length;/.test(js),
   '若用 state.chatMessages.length，搜索态下会永远以为"后面还有"');
 ok('表格填充用过滤后的列表',
-  /const newestFirst = chatVisibleMessages\(\);\n  \/\/ 有查找词时/.test(js));
+  /const newestFirst = chatVisibleMessages\(\);\r?\n  \/\/ 有查找词时/.test(js));
 ok('过滤态一次性显示全部命中（分页账目才不会和"匹配 K 条"打架）',
   /state\.chatMsgLimit = String\(state\.chatQuery \|\| ''\)\.trim\(\)/.test(js));
 ok('排序缓存仍按引用记忆（没被改成每次重排）', /chatMsgSortCache\.src !== src/.test(js));
@@ -133,7 +133,7 @@ ok('备注行有独立样式 .note-row', css.includes('.archive-table .note-row'
 console.log('\n═══ 历史摘要：设置项 ↔ 接线 ↔ 保存分支 ═══');
 // 一、顶部块：刷新钩子挂对了地方
 ok('顶部块的刷新挂在 updateChatMessagesBody 末尾（轮询/SSE/查找/翻页都汇到这里）',
-  /updateChatMessagesMeta\(newestFirst\);\n(?:.*\n)*?\s+updateChatDigestBlock\(\);/.test(js));
+  /updateChatMessagesMeta\(newestFirst\);\r?\n(?:.*\r?\n)*?\s+updateChatDigestBlock\(\);/.test(js));
 ok('删除委托同时挂在表格和顶部块上（复用同一段处理）',
   /\$\('#chat-msg-body'\)\.addEventListener\('click', onRowOp\)/.test(js)
   && /\$\('#chat-digest-list'\)\.addEventListener\('click', onRowOp\)/.test(js));
@@ -263,6 +263,24 @@ ok('删掉最后一条印象时提示成员文件也会被删', js.includes('记
 ok('QQ 收藏的删除按钮是禁用的并写明原因', /QQ 收藏不能在这里删/.test(js));
 ok('表情编辑弹窗说明 desc 不可编辑', js.includes('每次同步都会被源数据盖回来'));
 ok('说明了改动只影响下一轮运行', js.includes('下一轮'));
+
+console.log('\n═══ SSE 事件名：发射端与订阅端必须同名 ═══');
+// 两边分居两层两种写法（`src/core/events.ts` 是 TS 常量表，`ui/js` 是裸字符串），
+// 改名时最容易只改一边：帧照发、面板却再也不刷新，而且**不会报任何错**。
+// S4 拆 'status' 时的真实风险就是这个，所以在这里做一次跨边界比对。
+// （发射端不许出现字面量由 t-events.mjs 守，这边只管"订阅的名字得有出处"。）
+const eventsTs = fs.readFileSync(path.join(process.cwd(), 'src/core/events.ts'), 'utf8');
+const eventNames = [...eventsTs.matchAll(/^\s+\w+: '([\w-]+)',?$/gm)].map((m) => m[1]);
+const subscribed = [...js.matchAll(/es\.addEventListener\('([\w-]+)'/g)].map((m) => m[1]);
+const unknownEvents = [...new Set(subscribed)].filter((n) => !eventNames.includes(n));
+ok('UI 订阅的每个事件名都在 core/events.ts 的词表里',
+  eventNames.length > 0 && unknownEvents.length === 0,
+  unknownEvents.length
+    ? `${unknownEvents.join('、')} 不在 EVENTS 里 → 发射端改了名而订阅端没跟上，或拼错了`
+    : `词表里一个名字都没解析出来（长度 ${eventNames.length}）`);
+ok("S4 拆出的两个名字 UI 都订上了：config-applied / orchestrator-pause",
+  subscribed.includes('config-applied') && subscribed.includes('orchestrator-pause'));
+ok("旧的 'status' 事件名订阅端已不再出现", !subscribed.includes('status'));
 
 console.log(`\n════ 通过 ${pass} / 失败 ${fail} ════`);
 process.exit(fail === 0 ? 0 : 1);

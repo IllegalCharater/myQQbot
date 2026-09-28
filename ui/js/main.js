@@ -348,7 +348,10 @@ function connectSSE() {
     refreshStatus();
     if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true });
   });
-  es.addEventListener('status', () => refreshStatus());
+  // 这两个名字原先共用一个 'status'（载荷还互不相容），拆开后各接各的：
+  // 配置改动与暂停/恢复都只影响状态条，所以行为与拆分前一致。
+  es.addEventListener('config-applied', () => refreshStatus());
+  es.addEventListener('orchestrator-pause', () => refreshStatus());
   es.addEventListener('snowluma-status', () => { refreshStatus(); if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true }); });
   es.addEventListener('snowluma-log', (ev) => {
     const d = JSON.parse(ev.data);

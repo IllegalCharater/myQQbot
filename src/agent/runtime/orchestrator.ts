@@ -12,9 +12,9 @@
 // 只是不叠加触发 —— 运行结束后 drain 会接着处理。
 // 不同会话之间并行，受 maxConcurrentRuns 全局限流。
 import { getConfig } from '../../core/config.js';
-import { createEventBus } from '../../core/util.js';
+import { EVENTS } from '../../core/events.js';
+import type { AppEmit } from '../../core/events.js';
 import { buildToolDefs } from '../tools/index.js';
-import { initializeJmcomicQueue } from '../../media/jmcomic.js';
 import { ContextWindowRegistry } from '../context/context-window.js';
 import { isRecord } from '../shared/json-parse.js';
 import type { RuntimeStateRegistry } from './runtime-state.js';
@@ -30,15 +30,16 @@ import type { SendQueue } from '../../qq/sender.js';
 import type { SessionRegistry } from '../../chat/sessions.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { ChatRuntimeState, OrchestratorDependencies, ToolDefinition } from '../shared/types.js';
+import type { AgentControlPort } from './control-port.js';
 
-export class Orchestrator {
+export class Orchestrator implements AgentControlPort {
   store: ChatStore;
   memory: MemoryStore;
   stickers: StickerManager;
   sender: SendQueue;
   sessions: SessionRegistry;
   onebot: OneBotClient;
-  emit: (event: string, payload?: unknown) => unknown;
+  emit: AppEmit;
   toolDefs: ToolDefinition[];
   windows: ContextWindowRegistry;
   chatNameCache: Map<string, string>;
@@ -60,16 +61,17 @@ export class Orchestrator {
   proactive: ProactiveController;
   aborted: boolean;
 
-  constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, windows = null }: OrchestratorDependencies) {
+  constructor({ store, memory, stickers, sender, sessions, onebot, emit, windows = null }: OrchestratorDependencies) {
     this.store = store;
     this.memory = memory;
     this.stickers = stickers;
     this.sender = sender;
     this.sessions = sessions;
     this.onebot = onebot;
-    this.emit = typeof emit === 'function' ? emit : ((bus) => bus.emit.bind(bus))(createEventBus());
+    this.emit = emit;   // S10d：不再兜底建空总线，缺了编译不过（见 shared/types.ts 的说明）
     this.toolDefs = buildToolDefs();
-    initializeJmcomicQueue({ onebot, sender, store });
+    // jmcomic 队列不在构造函数里启动（S10b）：长期任务一律在 app.start() 起、app.stop() 停，
+    // 见 src/web/app.ts 与 AGENTS.md「事件与长期任务边界」。
 
     // 动态上下文窗口（每会话一个，见 src/context-window.js）。
     // 容量每次现读配置 —— 设置页改上限要即时生效，不能在构造时固化。
@@ -281,7 +283,9 @@ export class Orchestrator {
   setPaused(paused: boolean, reason = 'manual'): void {
     this.paused = !!paused;
     this.pauseReason = this.paused ? reason : null;
-    this.emit('status', { paused: this.paused, pauseReason: this.pauseReason });
+    // 曾经与 app.ts 的配置变更共用 `'status'` 一个名字，载荷却互不相容（§3.4 一），
+    // S4 拆成独立通道：订阅方按名字就能判断该刷什么。
+    this.emit(EVENTS.orchestratorPause, { paused: this.paused, pauseReason: this.pauseReason });
   }
 
   async abortAll() {

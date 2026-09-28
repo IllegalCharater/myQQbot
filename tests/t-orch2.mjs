@@ -21,7 +21,8 @@ const mk = () => {
   const stickers = { sync: async () => ({ entries: [] }) };
   const onebot = { selfId: '999', selfNickname: '小鲸鱼', connected: true, sendText: async () => ({ message_id: 1 }), sendSticker: async () => ({ message_id: 2 }), sendPoke: async () => ({}), getGroupInfo: async () => ({ group_name: '测试群' }), call: async () => ({}) };
   const sender = new SendQueue({ onebot, store });
-  return { store, sessions, orc: new Orchestrator({ store, memory, stickers, sender, sessions, onebot }), sender };
+  // S10d 起 emit 必填（见 tests/t-ports.mjs 第 1c 段）；本套件不验事件，给空实现。
+  return { store, sessions, orc: new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit: () => {} }), sender };
 };
 const key = 'group:123';
 const waitingOf = (orc) => { const id = orc.pendingSessions.get(key); return id ? orc.sessions.get(id) : null; };

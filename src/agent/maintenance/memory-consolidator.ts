@@ -5,6 +5,7 @@ import { chatCompletion } from '../../llm/llm.js';
 import { currentProviders } from '../../llm/providers.js';
 import { isSystemRecord } from '../../chat/store.js';
 import { errorMessage, extractJsonObject } from '../shared/json-parse.js';
+import type { AppEmit } from '../../core/events.js';
 import type { ChatStore } from '../../chat/store.js';
 import type { MemoryStore } from '../../chat/memory.js';
 import type { ChatRequestMessage } from '../../llm/types.js';
@@ -30,7 +31,7 @@ interface ConsolidateIssue { userId: string; name: string; reason: string }
 export interface MemoryConsolidatorDependencies {
   store: ChatStore;
   memory: MemoryStore;
-  emit(event: string, payload?: unknown): unknown;
+  emit: AppEmit;
   isPaused(): boolean;
   isAborted(): boolean;
 }
