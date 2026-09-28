@@ -87,6 +87,16 @@ const savedJobs = () => JSON.parse(fs.readFileSync(JOBS_FILE, 'utf8')).jobs;
 
 // ── 1. 真跑一次上传：完成后记录必须留在 jobs.json 里 ──
 const jmcomic = await load('media/jmcomic.js');
+const { DEFAULT_CONFIG } = await load('core/config.js');
+const configuredPython = structuredClone(DEFAULT_CONFIG);
+configuredPython.jmcomic.pythonPath = path.join(DATA, 'configured-python.exe');
+const configuredCommand = jmcomic.resolveJmcomicPythonCommand(configuredPython);
+const fallbackCommand = jmcomic.resolveJmcomicPythonCommand(DEFAULT_CONFIG);
+ok('Python 解释器优先读取 jmcomic.pythonPath，空值保持原有环境变量回退',
+  configuredCommand.command === configuredPython.jmcomic.pythonPath
+  && configuredCommand.prefix.length === 0
+  && fallbackCommand.command === process.env.JMCOMIC_PYTHON
+  && fallbackCommand.prefix.length === 0);
 jmcomic.initJmcomicQueue(fakeRuntime);
 await flush();
 

@@ -140,6 +140,35 @@ console.log('\n=== 3. 取图失败（图床 404）→ 如实报错，没有注�
   env.orc.abortAll();
 }
 
+// ═══ 4. 模型思考期间消息被删 → 本轮快照仍能供读图工具使用 ═══
+console.log('\n=== 4. 实时存档变化不影响本轮图片快照 ===');
+{
+  const delayedModel = await fakeModelServer({ model: 'stub-vision', delayMs: 120 });
+  updateConfig({ api: { baseUrl: delayedModel.url, model: 'stub-vision', maxRounds: 4 } });
+  delayedModel.script = [
+    { tool_calls: [toolCall('get_message_images', { messageId: 72 }, 'c1')] },
+    { content: '快照里的图片仍然可见。' }
+  ];
+  const env = boot('group:126');
+  const entry = env.store.appendIncoming(env.key, {
+    mid: 72, ts: Date.now(), senderId: '555', senderName: '张三', text: '[图片]',
+    media: [{ kind: 'image', url: `${base}/ok.png` }]
+  });
+  env.orc.scheduleWake(env.key, 0);
+  const deadline = Date.now() + 3000;
+  while (delayedModel.requests.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  env.store.deleteByLocalId(env.key, entry.id);
+  const s = await waitDone(env);
+  const readCall = s?.messages.find((m) => m.toolCall?.name === 'get_message_images');
+  ok('模型首轮返回前删掉实时存档，本轮读图仍从触发快照成功',
+    !!readCall && !readCall.toolCall.isError && String(readCall.toolCall.result).includes('图片内容'),
+    JSON.stringify(readCall?.toolCall));
+  env.orc.abortAll();
+  delayedModel.close();
+}
+
 model.close();
 image.close();
 process.exit(done() ? 0 : 1);

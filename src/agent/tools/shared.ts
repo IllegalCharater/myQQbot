@@ -529,7 +529,12 @@ export function buildAllToolDefs(): ToolDefinition[] {
       },
       async execute(ctx, args) {
         try {
-          const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
+          const target = String(args.messageId);
+          // 本轮快照优先：模型作出工具决定前可能已经思考/下载了很久，实时存档可能
+          // 因容量裁剪、面板删除或压缩而失去这条消息。触发批是模型实际看见的事实源；
+          // 查询历史图片时再回落到实时存档。
+          const entry = (ctx.triggerEntries || []).find((message) => String(message.mid) === target)
+            ?? ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
           let urls = (entry.media || []).filter((m) => m.kind === 'image' && m.url).map((m) => String(m.url));
           if (!urls.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);

@@ -151,7 +151,7 @@ ok('每个 id 恰好被一条 entry 覆盖（无重复）',
   ' —— 重复意味着同一次 initialize 被调两遍');
 
 // enabled 闸门与描述表的 `enabledBy` 行为等价：两条布尔任务跟着真配置翻转，
-// 其余三条恒真（它们的判定在各模块内部，见 lifecycle.ts 的 ALWAYS 注释）。
+// 其余四条恒真（它们的判定在各模块内部，见 lifecycle.ts 的 ALWAYS 注释）。
 const { getConfig, updateConfig } = await load('core/config.js');
 const entryFor = (id) => LIFECYCLE.find((e) => e.ids.includes(id));
 const restore = getConfig();
@@ -168,8 +168,8 @@ ok('proactive.bubble / compact.sweep 的 enabled 跟着真配置的点分路径�
   && entryFor('proactive.bubble').enabled(cfgB) === false && entryFor('compact.sweep').enabled(cfgB) === true,
   `proactive=${entryFor('proactive.bubble').enabled(cfgA)}/${entryFor('proactive.bubble').enabled(cfgB)} ` +
   `compact=${entryFor('compact.sweep').enabled(cfgA)}/${entryFor('compact.sweep').enabled(cfgB)}`);
-const alwaysIds = ['onebot.reconnect', 'price.feed', 'jmcomic.cleanup'];
-ok('其余三条恒真（开关留在入口内部：initPriceFeed(\'\') 等价于 stopPriceFeed()，jmcomic 无配置依赖）',
+const alwaysIds = ['onebot.reconnect', 'price.feed', 'jmcomic.cleanup', 'transcription.worker'];
+ok('其余四条恒真（开关留在入口内部：转写入口自行校验 enabled/config，jmcomic 无配置依赖）',
   alwaysIds.every((id) => entryFor(id).enabled(cfgA) === true && entryFor(id).enabled(cfgB) === true),
   alwaysIds.filter((id) => entryFor(id).enabled(cfgA) !== true).join(',') || '（都恒真）');
 updateConfig({ proactive: { enabled: previous.proactive }, compact: { enabled: previous.compact } });
@@ -192,7 +192,8 @@ const EXPECTED_ENTRY_IDS = [
   ['proactive.bubble'],
   ['compact.sweep'],
   ['price.feed'],
-  ['jmcomic.cleanup', 'jmcomic.worker']
+  ['jmcomic.cleanup', 'jmcomic.worker'],
+  ['transcription.worker']
 ];
 ok('清单的 entry 顺序与 id 归属（手工登记：**改这里的顺序就是改行为**）',
   JSON.stringify(LIFECYCLE.map((e) => e.ids)) === JSON.stringify(EXPECTED_ENTRY_IDS),
@@ -201,8 +202,8 @@ ok('手工登记的序列长度与清单一致（新增 entry 必须同步登记
   EXPECTED_ENTRY_IDS.length === LIFECYCLE.length,
   `清单 ${LIFECYCLE.length} 条、登记 ${EXPECTED_ENTRY_IDS.length} 条`);
 
-const EXPECTED_START = ['onebot.connect', 'proactive.start', 'compact.start', 'priceFeed.init', 'jmcomic.init'];
-const EXPECTED_STOP = ['jmcomic.stop', 'priceFeed.stop', 'compact.stop', 'proactive.stop', 'onebot.close'];
+const EXPECTED_START = ['onebot.connect', 'proactive.start', 'compact.start', 'priceFeed.init', 'jmcomic.init', 'transcription.start'];
+const EXPECTED_STOP = ['transcription.stop', 'jmcomic.stop', 'priceFeed.stop', 'compact.stop', 'proactive.stop', 'onebot.close'];
 
 function spyDeps(config, seq) {
   return {
@@ -224,7 +225,8 @@ function spyDeps(config, seq) {
     // 与无按键分发的文本扫描）一条都没跑过，而人看到的只是一个 TypeError。
     // 下面那条"spy ⇄ lifecycle.ts 结构对账"就是为这类静默中止加的：它把运行期崩溃
     // 变成一条普通的红。标号与属性名统一用 `jmcomic.init`，与 `priceFeed.init` 同形。
-    jmcomic: { init: () => seq.push('jmcomic.init'), stop: () => seq.push('jmcomic.stop') }
+    jmcomic: { init: () => seq.push('jmcomic.init'), stop: () => seq.push('jmcomic.stop') },
+    transcription: { start: () => seq.push('transcription.start'), stop: () => seq.push('transcription.stop') }
   };
 }
 
@@ -260,7 +262,7 @@ ok('spy deps 与 lifecycle.ts 真正读的 `deps.*` 逐一对得上（写错属�
 const allOn = { proactive: { enabled: true }, compact: { enabled: true }, api: { priceRemoteUrl: 'http://x/p.json' } };
 const seq = [];
 await startLifecycle(spyDeps(allOn, seq));
-ok('startLifecycle 按清单顺序启动（connect → 冒泡 → 压缩 → 价格表 → jmcomic）',
+ok('startLifecycle 按清单顺序启动（connect → 冒泡 → 压缩 → 价格表 → jmcomic → 转写）',
   JSON.stringify(seq) === JSON.stringify(EXPECTED_START),
   `实际 ${JSON.stringify(seq)}`);
 ok('全开时每一条 entry 都真的被调用（不是"顺序对但漏了谁"）',
@@ -277,8 +279,8 @@ ok('onebot.close() 是逆序里最后一个（"停长期任务排在 onebot.clos
 
 const seqOff = [];
 await startLifecycle(spyDeps({ proactive: { enabled: false }, compact: { enabled: false }, api: {} }, seqOff));
-ok('闸门关着的那两条不进启动序列，恒真的三条照常',
-  JSON.stringify(seqOff) === JSON.stringify(['onebot.connect', 'priceFeed.init(空 URL)', 'jmcomic.init']),
+ok('闸门关着的那两条不进启动序列，恒真的四条照常',
+  JSON.stringify(seqOff) === JSON.stringify(['onebot.connect', 'priceFeed.init(空 URL)', 'jmcomic.init', 'transcription.start']),
   `实际 ${JSON.stringify(seqOff)}`);
 
 // 接线事实（文本）。函数体按 `\n  }` 收尾切：start/stop 都嵌在 createApp 里，本体缩进更深。
@@ -313,7 +315,7 @@ const moduleEntryNames = (owner) => LONG_TERM_TASKS
 const DEPS_NAMES = [
   ...moduleEntryNames('price-feed'),
   ...moduleEntryNames('jmcomic'),
-  'getConfig', 'onebot', 'orchestrator'
+  'getConfig', 'onebot', 'orchestrator', 'transcription'
 ];
 const missingDeps = [...new Set(DEPS_NAMES)].filter((name) => !new RegExp(`\\b${name}\\b`).test(depsBody));
 ok('deps 里递的是真模块，且用的是描述表里的名字（假 deps 的模块级测试证明不了这一点）',

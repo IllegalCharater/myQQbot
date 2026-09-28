@@ -24,6 +24,7 @@
 - 使用新消息窗口、分档历史深度与统一字符预算控制上下文成本
 - 保存本地消息存档、会话记录和群友长期记忆
 - 支持图片理解、网页搜索、表情包、引用、@ 和戳一戳
+- 可选的视频 URL 转写：流式提取音频并调用腾讯云录音文件识别极速版
 - 统计模型调用量、Token 用量和估算费用
 - 提供 Electron 桌面控制台、托盘运行和明暗主题
 
@@ -46,6 +47,7 @@
 - Node.js 20 或更高版本
 - 一个兼容 OneBot v11 正向 WebSocket 的 QQ 协议端
 - 一个 OpenAI 兼容模型 API
+- 可选：启用视频转写时需要 FFmpeg，并开通腾讯云录音文件识别极速版
 
 SnowLuma 可作为协议端使用，但它是独立第三方项目，不包含在本仓库中，并受其自身 EULA 和使用条款约束。
 
@@ -109,6 +111,39 @@ npm test             # 先 build，再跑 tests/ 下的套件
 - 历史摘要字数是摘要通道自己的候选上限，最终仍受统一字符预算约束。
 
 请从低频响应开始测试，确认行为符合预期后再逐步开放使用范围。
+
+### 视频 URL 转写（可选）
+
+群聊或私聊发送 `/转写 <视频URL>` 后，机器人会立即回执任务号，再由单并发后台队列完成
+FFmpeg 音频提取与腾讯云录音文件识别极速版请求。该命令只接受公网 `http://` / `https://`
+地址；本机、内网、链路本地、云元数据地址以及重定向到这些地址的请求都会被拒绝。
+
+当前实现调用极速版独立 HTTPS 接口，将临时 MP3 作为二进制请求体直接上传，不经过 COS，也不创建
+公开音频 URL。单音频按官方限制最多 2 小时且不超过 100 MiB；配置中的时长和大小只能进一步收紧。
+完整视频不会先下载落盘：FFmpeg 只访问进程内的本地安全代理，临时 MP3 与长结果文本在任务结束后删除。
+
+凭证沿用服务端配置加载与递归脱敏机制，不提供前端输入框。生产环境建议通过 systemd 环境变量注入：
+
+```ini
+Environment="QQ_AGENT_TRANSCRIPTION_ENABLED=true"
+Environment="TENCENTCLOUD_APP_ID=<your-app-id>"
+Environment="TENCENTCLOUD_SECRET_ID=<your-secret-id>"
+Environment="TENCENTCLOUD_SECRET_KEY=<your-secret-key>"
+Environment="FFMPEG_PATH=/usr/bin/ffmpeg"
+```
+
+`TENCENTCLOUD_APP_ID` 是腾讯云账号的数字 AppID；运行身份需要录音文件识别极速版权限。日志只记录
+任务 ID、状态、音频大小、耗时和错误码，不记录原始 URL、请求签名、识别文本或凭证。
+
+FFmpeg 路径由 `transcription.ffmpegPath` 读取。漫画下载使用的 Python 解释器可在 `data/config.json`
+中显式指定；`pythonPath` 留空时继续使用原有的 `JMCOMIC_PYTHON`、本机环境和 conda 回退逻辑：
+
+```json
+{
+  "transcription": { "ffmpegPath": "/usr/bin/ffmpeg" },
+  "jmcomic": { "pythonPath": "/opt/conda/envs/my_bot/bin/python" }
+}
+```
 
 ## 数据与隐私
 

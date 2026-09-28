@@ -10,7 +10,8 @@
 //     read 字段里。存档的 read 降级成**只写不读的展示镜像**（消费时一次性下沉，供面板
 //     显示未读），窗口除了"首次播种一次"和"写镜像"之外不碰存档、也不依赖它。
 //
-// 窗口里只放**对方发来的消息**（self / 压缩摘要 / 人工备注一律不收）：
+// 窗口里只放**可唤醒的对方消息**（self / 压缩摘要 / 人工备注 / 已由确定性处理器
+// 接管的 wakeEligible:false 消息一律不收）：
 // 【本次唤醒】的语义是"你还没看过的最新消息"，机器人自己的话由【过去状态】以"我"出现。
 //
 // ── 三个状态，务必分清（混淆任意两个都会出难查的 bug）──
@@ -24,7 +25,7 @@
 // ⚠️ **本类不写存档。** 唯一的下沉通道是 settled[]：消费时攒下"已看过"的 id，由调用方
 //    （orchestrator 的 #consumeWindow）一次性写进存档的 read 字段。窗口自己从不读 read
 //    （唯一例外：首次播种时用它还原游标）。
-import { isSystemRecord } from '../../chat/store.js';
+import { isWakeEligibleIncoming } from '../../chat/store.js';
 import type { ChatStore } from '../../chat/store.js';
 import type { ChatMessage } from '../../chat/types.js';
 
@@ -89,7 +90,7 @@ export class ContextWindow {
    * @returns {boolean} 是否真的收进来了
    */
   push(entry: ChatMessage | null | undefined): boolean {
-    if (!entry || entry.self || isSystemRecord(entry)) return false;
+    if (!isWakeEligibleIncoming(entry)) return false;
     const id = Number(entry.id) || 0;
     if (id <= 0 || id <= this.#maxPushedId) return false;
     this.#maxPushedId = id;

@@ -153,6 +153,9 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
 
     const ctx: ToolContext = {
       chatKey, kind, chatId,
+      // ContextWindow.batch() 给的是深拷贝；把它随本轮工具上下文固定下来，
+      // 读图时即使实时存档已裁剪/删除该消息，也仍能读取本轮真正看见的媒体定位信息。
+      triggerEntries,
       requesterId: String([...triggerEntries].reverse().find((m) => !m.self)?.senderId || ''),
       selfId: host.onebot.selfId,
       selfNickname,

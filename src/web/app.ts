@@ -13,6 +13,7 @@ import { SessionRegistry } from '../chat/sessions.js';
 import { Orchestrator } from '../agent/runtime/orchestrator.js';
 import { initPriceFeed, stopPriceFeed } from '../llm/price-feed.js';
 import { initJmcomicQueue, stopJmcomicQueue } from '../media/jmcomic.js';
+import { VideoTranscriptionQueue } from '../media/video-transcription.js';
 import { createEventBus } from '../core/util.js';
 import { projectSse, writeSse } from './http/event-projector.js';
 import { startLifecycle, stopLifecycle } from './runtime/lifecycle.js';
@@ -79,6 +80,7 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     onebot, store,
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`)
   });
+  const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log });
   const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit });
 
   // 长期任务一律在 start() 里启动、在 stop() 里停止（见 src/web/tasks.ts）。
@@ -99,7 +101,7 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // 白名单判断、@ 名字解析、引用预览、合并转发展开与拍一拍都在 `web/onebot/ingest.ts`
   // 里（`atNameCache` 与引用预览上限是摄取器自己的状态，组装根不需要知道）。
   // 组装根只把 OneBot 的入站回调接到 `ingest.handle()` 上。
-  const ingest = createIngest({ onebot, store, orchestrator, emit, getConfig, log });
+  const ingest = createIngest({ onebot, store, sender, orchestrator, transcription, emit, getConfig, log });
 
   // ── 控制台 HTTP 表面 ──
   // SSE 端点、鉴权、路由分发、静态文件、状态快照（`buildStatus`）与配置脱敏
@@ -154,7 +156,8 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       sender,
       store,
       priceFeed: { init: initPriceFeed, stop: stopPriceFeed },
-      jmcomic: { init: initJmcomicQueue, stop: stopJmcomicQueue }
+      jmcomic: { init: initJmcomicQueue, stop: stopJmcomicQueue },
+      transcription: { start: () => transcription.start(), stop: () => transcription.stop() }
     };
   }
 

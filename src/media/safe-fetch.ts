@@ -199,6 +199,11 @@ function readBounded(res: IncomingMessage, maxBytes: number, asText: boolean): P
 
 interface RequestResult { statusCode: number; redirect?: string; body?: string | Buffer; contentType?: string }
 
+export interface SafeStreamResult {
+  url: URL;
+  response: IncomingMessage;
+}
+
 // 使用已校验的 IP 发起请求（保留 Host/SNI），从根上消除 DNS rebinding。
 function requestOnce(url: URL, ip: string, { asBinary = false, maxBytes = 50000 }: { asBinary?: boolean; maxBytes?: number } = {}): Promise<RequestResult> {  return new Promise((resolve, reject) => {
     const mod = url.protocol === 'https:' ? https : http;
@@ -231,6 +236,64 @@ function requestOnce(url: URL, ip: string, { asBinary = false, maxBytes = 50000 
     req.on('error', reject);
     req.end();
   });
+}
+
+/**
+ * 打开一个经过 SSRF 校验的流式响应。每次重定向都会重新做协议、主机与 DNS 校验，
+ * 真正发请求时固定到已经校验过的 IP，避免 DNS rebinding。调用方负责消费/销毁 response。
+ *
+ * 这是给 FFmpeg 本地流式代理用的低层入口：不缓存完整响应，也不把用户 URL 交给 shell。
+ */
+export async function openSafeStream(urlString: unknown, {
+  method = 'GET', headers = {}, signal, maxRedirects = MAX_REDIRECTS
+}: {
+  method?: 'GET' | 'HEAD';
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  maxRedirects?: number;
+} = {}): Promise<SafeStreamResult> {
+  let { url, ip } = await validateFetchUrl(urlString);
+  for (let i = 0; i <= maxRedirects; i++) {
+    const response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const mod = url.protocol === 'https:' ? https : http;
+      const port = url.port || (url.protocol === 'https:' ? 443 : 80);
+      const req = mod.request({
+        hostname: ip,
+        port,
+        path: url.pathname + url.search,
+        method,
+        headers: {
+          ...headers,
+          host: url.host,
+          'user-agent': 'qq-agent-transcription/1.0',
+          accept: '*/*'
+        },
+        servername: url.protocol === 'https:' ? url.hostname : undefined,
+        rejectUnauthorized: url.protocol === 'https:',
+        timeout: 20_000,
+        signal
+      }, resolve);
+      req.on('timeout', () => req.destroy(new Error(`请求超时：${url.hostname}`)));
+      req.on('error', reject);
+      req.end();
+    });
+
+    const statusCode = response.statusCode || 0;
+    if ([301, 302, 303, 307, 308].includes(statusCode)) {
+      const location = String(response.headers.location || '');
+      response.resume();
+      if (!location) throw new Error(`重定向缺少 Location: ${statusCode}`);
+      const next = new URL(location, url).toString();
+      ({ url, ip } = await validateFetchUrl(next));
+      continue;
+    }
+    if (statusCode < 200 || statusCode >= 300) {
+      response.resume();
+      throw new Error(`远程媒体返回 HTTP ${statusCode}`);
+    }
+    return { url, response };
+  }
+  throw new Error('重定向次数过多，已停止');
 }
 
 const MAX_REDIRECTS = 5;

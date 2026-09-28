@@ -27,7 +27,7 @@ const { getConfig } = await load('core/config.js');
 // 手工登记的 id 清单。表里加一个任务是个**有意的动作**，必须同步登记到这里。
 const EXPECTED_IDS = [
   'proactive.bubble', 'compact.sweep', 'price.feed',
-  'jmcomic.cleanup', 'jmcomic.worker', 'onebot.reconnect'
+  'jmcomic.cleanup', 'jmcomic.worker', 'transcription.worker', 'onebot.reconnect'
 ];
 
 // 只含局部计时器的文件（附录 B 里那 17 处的宿主）。它们**不许**作为任何一行的 owner——
@@ -46,7 +46,7 @@ const LOCALTIMER_ONLY_FILES = [
 ];
 
 const ids = LONG_TERM_TASKS.map((t) => t.id).sort();
-ok('任务表恰好是这 6 个 id（不多不少）',
+ok('任务表恰好是这 7 个 id（不多不少）',
   ids.length === EXPECTED_IDS.length && ids.every((id, i) => id === [...EXPECTED_IDS].sort()[i]),
   `表里是 ${ids.join('、')}；清单是 ${[...EXPECTED_IDS].sort().join('、')}`);
 
@@ -135,9 +135,11 @@ ok('onebot 的重连调度只有一处，且句柄被存进 #reconnectTimer（S1
 // （S10b 已经把 jmcomic 队列移出构造函数，但"用原型"这条仍然成立：本段不需要实例。）
 const { Orchestrator } = await load('agent/runtime/orchestrator.js');
 const { OneBotClient } = await load('qq/onebot.js');
+const { VideoTranscriptionQueue } = await load('media/video-transcription.js');
 const RESOLVERS = {
   Orchestrator: () => Orchestrator.prototype,
   OneBotClient: () => OneBotClient.prototype,
+  VideoTranscriptionQueue: () => VideoTranscriptionQueue.prototype,
   'price-feed': () => priceFeed,
   jmcomic: () => jmcomic
 };

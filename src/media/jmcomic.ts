@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { DATA_DIR, ROOT } from '../core/config.js';
+import { DATA_DIR, ROOT, getConfig } from '../core/config.js';
+import type { AppConfig } from '../core/config.js';
 
 const DUPLICATE_WINDOW_MS = 10 * 60_000;
 const DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
@@ -246,7 +247,9 @@ function duplicateAnchorAt(job: JmJob): number {
   return Number(job.uploadedAt || job.createdAt || 0);
 }
 
-function pythonCommand() {
+export function resolveJmcomicPythonCommand(config: AppConfig = getConfig()) {
+  const configured = String(config.jmcomic?.pythonPath || '').trim();
+  if (configured) return { command: configured, prefix: [] as string[] };
   if (process.env.JMCOMIC_PYTHON) return { command: process.env.JMCOMIC_PYTHON, prefix: [] };
   if (process.platform === 'win32') {
     const direct = 'E:\\anaconda\\envs\\my_bot\\python.exe';
@@ -275,7 +278,7 @@ function validatePdf(pdfPath: unknown): string {
 
 function runPython(job: JmJob): Promise<PythonResult> {
   ensureDirs();
-  const { command, prefix } = pythonCommand();
+  const { command, prefix } = resolveJmcomicPythonCommand();
   const logFile = path.join(LOG_DIR, `${job.id}.log`);
   return new Promise<PythonResult>((resolve, reject) => {
     const child = spawn(command, [...prefix, SCRIPT_PATH, job.comicId, DOWNLOAD_DIR], {

@@ -16,10 +16,10 @@
 //   3. **import 本文件不启动任何东西**：启动只能由 `app.start()` 调 `startLifecycle()`，
 //      停止只能由 `app.stop()` 调 `stopLifecycle()`。套件在假计时器下 import 一次来钉它。
 //
-// 能力（connect/close、两个巡检、价格表、jmcomic 队列）**全部由 `deps` 递进来**，本文件里
+// 能力（connect/close、两个巡检、价格表、jmcomic 队列、视频转写）**全部由 `deps` 递进来**，本文件里
 // 对下层模块只有 `import type`（编译期擦除，`dist/web/lifecycle.js` 不 require 任何下层模块）。
 // 这不只是为了好看：只有这样，"顺序"才是一个能在假 `deps` 上被**逐条观察**到的性质
-// （§9.3 的 spy 断言），否则五个 entry 里有一半只能靠"把代码读一遍"来确认。真正把模块函数
+// （§9.3 的 spy 断言），否则六个 entry 里有一半只能靠"把代码读一遍"来确认。真正把模块函数
 // 递进来的地方是 `app.ts` 的 `lifecycleDeps()`——**"装的是什么"在 app，"按什么顺序装"在这里**。
 //
 // ⚠️ 顺序即语义，两条都是结构性质而非约定：
@@ -43,7 +43,7 @@ export interface LifecycleJmRuntime {
 
 /**
  * 清单要的全部能力。**每一项都必须能在假对象上替换**——套件就是靠这个数组之外的一层
- * 把五个 entry 的调用顺序逐条记下来的（否则价格表与 jmcomic 是直接 import 的单例，
+ * 把六个 entry 的调用顺序逐条记下来的（否则价格表与 jmcomic 是直接 import 的单例，
  * 顺序只能靠读代码）。所以这里只放**最少必要**的方法，不放整个类。
  */
 export interface LifecycleDeps {
@@ -62,6 +62,7 @@ export interface LifecycleDeps {
   store: ChatStore;
   priceFeed: { init(url: string): void; stop(): void };
   jmcomic: { init(runtime: LifecycleJmRuntime): void; stop(): void };
+  transcription: { start(): void | Promise<void>; stop(): void | Promise<void> };
 }
 
 export interface LifecycleEntry {
@@ -91,9 +92,10 @@ const ALWAYS = () => true;
 
 /**
  * 装配清单，**按 S11c 之前 `app.start()` 里的真实启动顺序**排列：
- * connect → 冒泡 → 压缩 → 价格表 → jmcomic。（对照 `app.ts` 的 git 历史可见原六行调用。）
+ * connect → 冒泡 → 压缩 → 价格表 → jmcomic → 视频转写。前五个是 S11c 收口的原顺序，
+ * 转写作为新增任务排在最后，确保停止时先取消转写，再拆 OneBot 传输层。
  *
- * 停止时逆序：jmcomic → 价格表 → 压缩 → 冒泡 → `onebot.close()`。
+ * 停止时逆序：视频转写 → jmcomic → 价格表 → 压缩 → 冒泡 → `onebot.close()`。
  * 与 S11c 之前相比唯一调换的一对是"价格表 ↔ jmcomic"（原先 `stopPriceFeed()` 在前）：
  * 两者互不依赖，属**可观察但良性**的变化，已记入设计稿 §8.2 与真机冒烟清单。
  */
@@ -138,6 +140,12 @@ export const LIFECYCLE: readonly LifecycleEntry[] = [
     enabled: ALWAYS,
     start: (deps) => deps.jmcomic.init({ onebot: deps.onebot, sender: deps.sender, store: deps.store }),
     stop: (deps) => deps.jmcomic.stop()
+  },
+  {
+    ids: ['transcription.worker'],
+    enabled: ALWAYS,
+    start: (deps) => deps.transcription.start(),
+    stop: (deps) => deps.transcription.stop()
   }
 ];
 

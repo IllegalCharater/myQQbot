@@ -186,6 +186,26 @@ export const DEFAULT_CONFIG = {
     maxPerHour: 500,
     hardSplitAt: 4000       // QQ 硬限制切分（0 = 不限制）
   },
+  // 视频 URL 转写。密钥可留空并由服务端环境变量注入；控制台配置响应会按 secret 字段脱敏，
+  // 设置页不提供这些凭证的输入框，避免把腾讯云长期密钥带到浏览器。
+  transcription: {
+    enabled: false,
+    appId: '',
+    secretId: '',
+    secretKey: '',
+    engineType: '16k_zh',
+    ffmpegPath: 'ffmpeg',
+    ffmpegTimeoutMs: 15 * 60 * 1000,
+    flashTimeoutMs: 5 * 60 * 1000,
+    maxDurationSeconds: 2 * 60 * 60, // 录音文件识别极速版官方硬上限
+    maxAudioBytes: 100 * 1024 * 1024,
+    maxSourceBytes: 256 * 1024 * 1024,
+    resultMaxChars: 3500
+  },
+  // 漫画下载 Python 解释器。留空时保持原探测链：JMCOMIC_PYTHON → Windows 固定环境 → conda my_bot。
+  jmcomic: {
+    pythonPath: ''
+  },
   // 主动开话题（可选）
   proactive: {
     enabled: false,

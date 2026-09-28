@@ -20,6 +20,9 @@ import {
 } from '../../qq/onebot.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { OneBotEvent } from '../../qq/types.js';
+import type { SendQueue } from '../../qq/sender.js';
+import { parseTranscriptionCommand } from '../../media/video-transcription.js';
+import type { VideoTranscriptionQueue } from '../../media/video-transcription.js';
 import { errorMessage, isRecord } from '../http/http.js';
 
 // ── 白名单判断（移植自原版 allowed()） ───────────────────────────────────
@@ -38,16 +41,34 @@ export interface Ingest {
   handle(event: OneBotEvent): Promise<void>;
 }
 
-export function createIngest({ onebot, store, orchestrator, emit, getConfig, log }: {
+export function createIngest({ onebot, store, sender, orchestrator, transcription, emit, getConfig, log }: {
   onebot: OneBotClient;
   store: ChatStore;
+  sender: Pick<SendQueue, 'sendTextBatch'>;
   /** 只用到 `onIncoming`——跨模块方法面走端口，不依赖 Orchestrator 具体类。 */
   orchestrator: AgentControlPort;
+  transcription: Pick<VideoTranscriptionQueue, 'enqueue'>;
   emit: AppEmit;
   getConfig: () => AppConfig;
   log: (...args: unknown[]) => void;
 }): Ingest {
   const atNameCache = new Map<string, string>(); // groupId:userId -> name
+  // OneBot 的 message 回调不会等待异步摄取完成；引用解析、@ 名片查询和合并转发展开
+  // 一旦让出事件循环，后到的简单消息就可能先落库。按 chatKey 串行即可保住本地 id、
+  // 动态窗口与真实到达顺序的一致性，同时不会让一个慢群阻塞其它聊天。
+  const ingestTails = new Map<string, Promise<void>>();
+
+  function enqueueIngest(chatKey: string, task: () => Promise<void>): Promise<void> {
+    const previous = ingestTails.get(chatKey) ?? Promise.resolve();
+    // 前一条失败不能毒死整条链；它自己的 rejected promise 仍返回给调用方记录日志。
+    const current = previous.catch(() => {}).then(task);
+    ingestTails.set(chatKey, current);
+    return current.finally(() => {
+      // 旧任务完成时，不能误删后来已经接到 Map 末尾的新任务。
+      if (ingestTails.get(chatKey) === current) ingestTails.delete(chatKey);
+    });
+  }
+
   async function resolveAtName(groupId: unknown, userId: unknown): Promise<string | null> {
     const key = `${groupId}:${userId}`;
     if (atNameCache.has(key)) return atNameCache.get(key) ?? null;
@@ -112,6 +133,13 @@ export function createIngest({ onebot, store, orchestrator, emit, getConfig, log
     const media: MediaEntry[] = (segments ? extractMediaFromSegments(segments) : [])
       .filter((item): item is Record<string, unknown> & { kind: string } => typeof item.kind === 'string')
       .map((item) => ({ ...item, kind: item.kind }));
+    // 不改 `src/qq` 的通用入站解析：视频只在接入层补成媒体定位信息，供显式 `/转写`
+    // 命令取 URL。file 只有本身就是 http(s) URL 时才可作为回退，不把本地路径当 URL。
+    for (const segment of segments || []) {
+      if (!isRecord(segment) || segment.type !== 'video' || !isRecord(segment.data)) continue;
+      const candidate = String(segment.data.url || segment.data.file || '').trim();
+      media.push({ kind: 'video', ...(candidate ? { url: candidate } : {}), file: String(segment.data.file || '') });
+    }
 
     let text;
     if (segments) {
@@ -152,18 +180,46 @@ export function createIngest({ onebot, store, orchestrator, emit, getConfig, log
     }
 
     if (!text && !media.length) return;
+    const chatKey = `${kind}:${id}`;
+    const isTranscriptionCommand = /^\/转写(?:\s|\[视频\]|$)/u.test(String(text || '').trim());
     // 条目要**当面交给**编排器（onIncoming 的第二个参数）：上下文窗口的入窗入口
-    // 只有它一个，少传一次窗口与存档就会静默分叉（那条消息永远不会被回应）。
-    const entry = store.appendIncoming(`${kind}:${id}`, {
+    // 只有它一个，少传一次窗口与存档就会静默分叉。确定性命令是唯一例外：它通过
+    // wakeEligible:false 原子落成已读历史，窗口及其兜底同步都会明确排除它。
+    const entry = store.appendIncoming(chatKey, {
       mid: typeof event.message_id === 'string' || typeof event.message_id === 'number' ? event.message_id : null,
       ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
       senderId,
       senderName,
       text: text || '[图片]',
-      media
+      media,
+      wakeEligible: !isTranscriptionCommand
     });
-    emit(EVENTS.chatUpdate, `${kind}:${id}`);
-    orchestrator.onIncoming(`${kind}:${id}`, entry);
+    emit(EVENTS.chatUpdate, chatKey);
+
+    // `/转写` 是确定性命令，不进入 LLM。先把它作为已读存档保留，再只做校验、入队和即时回执；
+    // FFmpeg 与 ASR 极速版请求全部在单并发后台 worker 里运行，不占住 OneBot 入站处理链。
+    if (isTranscriptionCommand) {
+      try {
+        const url = parseTranscriptionCommand(text, media);
+        if (!url) return;
+        const job = transcription.enqueue({
+          chatKey,
+          url,
+          replyToMessageId: typeof event.message_id === 'string' || typeof event.message_id === 'number'
+            ? event.message_id : null
+        });
+        await sender.sendTextBatch(chatKey, `已开始处理（任务 ${job.id.slice(0, 8)}）`, {
+          replyToMessageId: event.message_id
+        });
+      } catch (error) {
+        await sender.sendTextBatch(chatKey, error instanceof Error ? error.message : '转写任务创建失败', {
+          replyToMessageId: event.message_id
+        }).catch(() => log('[transcribe] task=unassigned code=ONEBOT_SEND_FAILED'));
+      }
+      return;
+    }
+
+    orchestrator.onIncoming(chatKey, entry);
   }
 
   async function ingestPoke(event: OneBotEvent) {
@@ -211,7 +267,7 @@ export function createIngest({ onebot, store, orchestrator, emit, getConfig, log
     orchestrator.onIncoming(chatKeyNow, entry);
   }
 
-  async function handle(event: OneBotEvent) {
+  async function dispatch(event: OneBotEvent) {
     if (!event || typeof event !== 'object') return;
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
       // 自己发的消息（message_sent / self_id 相同）不触发处理（发送时已自行记录）
@@ -225,6 +281,26 @@ export function createIngest({ onebot, store, orchestrator, emit, getConfig, log
       return ingestPoke(event);
     }
     // meta/心跳等事件忽略
+  }
+
+  function handle(event: OneBotEvent): Promise<void> {
+    if (!event || typeof event !== 'object') return Promise.resolve();
+    if ((event.post_type === 'message' || event.post_type === 'message_sent')
+      && event.message_type === 'group' && event.group_id != null) {
+      const id = String(event.group_id);
+      return enqueueIngest(`group:${id}`, () => dispatch(event));
+    }
+    if ((event.post_type === 'message' || event.post_type === 'message_sent')
+      && event.message_type === 'private' && event.user_id != null) {
+      const id = String(event.user_id);
+      return enqueueIngest(`private:${id}`, () => dispatch(event));
+    }
+    if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_type === 'poke') {
+      const isGroup = event.group_id != null;
+      const id = isGroup ? String(event.group_id) : String(event.user_id ?? '');
+      return enqueueIngest(`${isGroup ? 'group' : 'private'}:${id}`, () => dispatch(event));
+    }
+    return dispatch(event);
   }
 
   return { handle };

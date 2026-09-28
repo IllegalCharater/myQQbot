@@ -18,6 +18,8 @@ export interface ChatMessage extends Record<string, unknown> {
   senderName: string;
   self: boolean;
   read: boolean;
+  /** false = 已由确定性处理器接管，只进存档/历史，不进入动态唤醒窗口。 */
+  wakeEligible?: boolean;
   mid?: string | number | null;
   kind?: string;
   media?: MediaEntry[];

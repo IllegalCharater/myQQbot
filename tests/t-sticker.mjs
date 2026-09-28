@@ -375,6 +375,15 @@ truthy('转成了 data URL 交给视觉模型', !!got && got.image_url.url.start
 eq('字节没被打歪', Buffer.from(got.image_url.url.split(',')[1], 'base64').equals(PNG), true);
 truthy('前面还带一句说明', (out.content || []).some((p) => p.type === 'text' && p.text.includes('972644978')));
 
+out = await imgMsgTool.execute({
+  ...ctxImg,
+  triggerEntries: [{ mid: 'snapshot-only', media: [{ kind: 'image', url: `${img3.url}/ok.png` }] }],
+  store: { findByMid: () => null }
+}, { messageId: 'snapshot-only' });
+truthy('实时存档已裁剪时，读图仍优先使用本轮触发快照',
+  Array.isArray(out.content) && !out.isError,
+  JSON.stringify(out).slice(0, 200));
+
 let replacedImages = null;
 const staleCtx = {
   ...ctxImg,

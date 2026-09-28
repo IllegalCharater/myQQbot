@@ -10,9 +10,9 @@
 //   senderName:群名片/昵称（自己发送的为 botName）
 //   text:      解析后的纯文本（[图片] 等占位符已内联）
 //   self:      是否是机器人自己发的
-//   read:      已读状态。**由动态上下文窗口（src/context-window.js）消费时单向下沉的
-//              展示镜像**，面板用它画未读角标；触发判定不再看它（看窗口的游标）。
-//              唯一例外：窗口首次播种时用它的前缀还原游标（见 ContextWindow#seed）。
+//   read:      已读状态。通常由动态上下文窗口消费时单向下沉，面板用它画未读角标；
+//              触发判定不再看它（看窗口的游标）。两个显式例外：窗口首次播种用 read
+//              前缀还原游标；wakeEligible:false 的确定性命令在落库时直接写成已读。
 //   reply:     可选 { sender, text }：该消息引用/回复的对象摘要
 //   media:     可选 [{ kind, url, file, faceId, summary }] 原始媒体定位信息
 // }
@@ -29,7 +29,17 @@ interface ChatState {
   archivedCount?: number;
 }
 
-interface IncomingInput { mid?: string | number | null; ts?: number; senderId?: unknown; senderName?: unknown; text?: unknown; reply?: unknown; media?: MediaEntry[] }
+interface IncomingInput {
+  mid?: string | number | null;
+  ts?: number;
+  senderId?: unknown;
+  senderName?: unknown;
+  text?: unknown;
+  reply?: unknown;
+  media?: MediaEntry[];
+  /** false = 确定性命令已接管；保留在历史里，但不进入 Agent 的动态唤醒窗口。 */
+  wakeEligible?: boolean;
+}
 function errorText(error: unknown): unknown { return error instanceof Error ? error.message : error; }
 
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
@@ -58,6 +68,11 @@ function archiveFile(chatKey: string) {
  */
 export function isSystemRecord(m: ChatMessage | null | undefined) {
   return m?.kind === 'digest' || m?.kind === 'note';
+}
+
+/** 是否属于动态唤醒窗口；确定性命令仍是用户消息，只是不再交给 LLM。 */
+export function isWakeEligibleIncoming(m: ChatMessage | null | undefined): m is ChatMessage {
+  return !!m && !m.self && !isSystemRecord(m) && m.wakeEligible !== false;
 }
 
 function loadChat(chatKey: string): ChatState {
@@ -113,9 +128,10 @@ export class ChatStore {
     return { chatKey, total: st.messages.length, unread, lastTs: last?.ts ?? 0, lastText: last?.text ?? '' };
   }
 
-  /** 追加一条收到的消息（未读）。返回写入的条目。 */
-  appendIncoming(chatKey: string, { mid, ts, senderId, senderName, text, reply = null, media = [] }: IncomingInput) {
+  /** 追加一条收到的消息；默认未读，wakeEligible:false 时原子落成已读历史。 */
+  appendIncoming(chatKey: string, { mid, ts, senderId, senderName, text, reply = null, media = [], wakeEligible = true }: IncomingInput) {
     const st = this.#state(chatKey);
+    const eligible = wakeEligible !== false;
     const entry = {
       id: st.nextLocalId++,
       mid: mid ?? null,
@@ -124,7 +140,10 @@ export class ChatStore {
       senderName: String(senderName ?? ''),
       text: String(text ?? ''),
       self: false,
-      read: false,
+      // 确定性命令在同一次落盘里就成为已读；避免 append + markRead 两次写盘之间
+      // 出现窗口同步，也避免窗口只认游标时把它重新捞成未处理消息。
+      read: !eligible,
+      ...(eligible ? {} : { wakeEligible: false }),
       reply: reply || null,
       media: Array.isArray(media) ? media : []
     };
@@ -232,7 +251,7 @@ export class ChatStore {
   }
 
   /**
-   * 最新的 `limit` 条**对方发来的消息**（排除机器人自己、压缩摘要、人工备注），旧→新。
+   * 最新的 `limit` 条**可唤醒的对方消息**（排除机器人、系统记录与确定性命令），旧→新。
    * `limit <= 0` = 全部。
    *
    * 为什么需要它（不能直接拿 recent() 顶）：recent() 把 self/摘要/备注也算进条数，
@@ -242,7 +261,7 @@ export class ChatStore {
    */
   recentIncoming(chatKey: string, { limit = 0 }: { limit?: number } = {}) {
     const st = this.#state(chatKey);
-    const all = st.messages.filter((m) => !m.self && !isSystemRecord(m));
+    const all = st.messages.filter(isWakeEligibleIncoming);
     const n = Math.max(0, Number(limit) || 0);
     return n > 0 ? all.slice(-n) : all;
   }
@@ -258,7 +277,7 @@ export class ChatStore {
     const st = this.#state(chatKey);
     for (let i = st.messages.length - 1; i >= 0; i--) {
       const m = st.messages[i];
-      if (!m.self && !isSystemRecord(m)) return Number(m.id) || 0;
+      if (isWakeEligibleIncoming(m)) return Number(m.id) || 0;
     }
     return 0;
   }

@@ -22,11 +22,11 @@
 // 2. **绝不包装 `setTimeout` / `setInterval` 全局。** 那样会静默吞掉按 §6.1 分界线排除掉的
 //    那 17 个局部计时器（LLM 超时、重试退避、限速等待、单次扫图 flush…），把"排除清单"
 //    变成谎言。局部计时器**不进这张表**，`tests/t-tasks.mjs` 有一条反向断言钉住。
-// 3. **`conformance` 必须如实标注**，做不到的不许写成能力。S9 落地时 6 个任务里有 4 个
+// 3. **`conformance` 必须如实标注**，做不到的不许写成能力。S9 落地时原有 6 个任务里有 4 个
 //    （`price.feed` / 两个 jmcomic / `onebot.reconnect`）**无法被真正接管**，因为接管它们
 //    要先改启动、配置刷新或退出流程——那是 S9 及之前的禁止项。S10+ 解禁后逐步接管，
 //    每步翻一个：S10a 收下 `price.feed`，S10b 收下两个 jmcomic（worker 如实标 `partial`：
-//    停不掉正在跑的那一次下载），S10c 收下 `onebot.reconnect`——**至此 6 个任务的启停入口
+//    停不掉正在跑的那一次下载），S10c 收下 `onebot.reconnect`——**至此原有 6 个任务的启停入口
 //    全部到位**，没有任何一个任务还靠构造函数副作用启动，`partial` 只剩"停不掉正在跑的那一次"
 //    这一种成因（`jmcomic.worker`）。
 //
@@ -43,9 +43,9 @@ export interface TaskEntry {
   /**
    * 承载这个名字的对象：
    * - `'Orchestrator'` / `'OneBotClient'` → 类方法，套件在原型或真实例上解析；
-   * - `'price-feed'` / `'jmcomic'` → 模块导出，套件在该模块的导出上解析。
+   * - `'price-feed'` / `'jmcomic'` → 模块导出；`VideoTranscriptionQueue` → 类方法。
    */
-  on: 'Orchestrator' | 'OneBotClient' | 'price-feed' | 'jmcomic';
+  on: 'Orchestrator' | 'OneBotClient' | 'VideoTranscriptionQueue' | 'price-feed' | 'jmcomic';
   kind: 'method' | 'export';
   name: string;
 }
@@ -88,7 +88,7 @@ export interface LongTermTask {
 }
 
 /**
- * 6 个长期任务。**不含** `wake.debounce`：那是每会话的唤醒防抖，按 §6.1 的分界线
+ * 7 个长期任务（原有 6 个 + 视频转写 worker）。**不含** `wake.debounce`：那是每会话的唤醒防抖，按 §6.1 的分界线
  * （生命周期是否长于一次请求或一次会话）属于局部计时器，`tests/t-tasks.mjs` 有一条
  * 反向断言专门钉它不在表内——设计稿 §6.3 的表里把它列为第 7 行"排除"是清点时的写法，
  * 不是表的一行。
@@ -177,6 +177,22 @@ export const LONG_TERM_TASKS: LongTermTask[] = [
       'runtime?.），结果不会发出去。另一条语义：stop 之后再来一次 enqueueJmcomicDownload 会重新拉起队列' +
       '（懒初始化保留，避免工具回复"已加入队列"而队列永远不动）；现实中到不了 —— stop 只在退出路径上调用，' +
       '那时 abortAll() 已跑完、不会再产生新的模型轮次。'
+  },
+  {
+    id: 'transcription.worker',
+    owner: 'src/media/video-transcription.ts',
+    label: '视频 URL 转写单并发 worker（FFmpeg → 腾讯云录音文件识别极速版）',
+    enabledBy: null,
+    configRefresh: 'not-applicable',
+    unref: false,
+    holdsProcessWhilePending: true,
+    start: { on: 'VideoTranscriptionQueue', kind: 'method', name: 'start' },
+    stop: { on: 'VideoTranscriptionQueue', kind: 'method', name: 'stop' },
+    stopCancelsPending: true,
+    conformance: 'full',
+    note: 'app.start() 检查 FFmpeg 并启用队列；入队只排一个可取消的 wake，worker 始终单并发。' +
+      'stop() 会清 wake、拒绝尚未执行的任务、终止当前 FFmpeg，并等待 worker 收尾与临时文件清理；' +
+      '运行中会持有进程，避免无信号退出时静默丢任务。'
   },
   {
     id: 'onebot.reconnect',
