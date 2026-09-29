@@ -45,5 +45,14 @@ export const DATA_DIR: string = process.env.QQ_AGENT_DATA_DIR || path.join(ROOT,
 /** 前端静态目录（面板 `ui/`）。 */
 export const UI_DIR: string = path.join(ROOT, 'ui');
 
+/**
+ * Python 工具目录（**全部** Python 脚本的唯一去处）。
+ *
+ * 放在这里而不是各调用方自己 `path.join(ROOT, 'python-tools', 'xxx.py')`：脚本一旦
+ * 挪窝，散落的字面量只会在运行期炸（`spawn` 一个不存在的文件不会在编译期报错）。
+ * 依赖清单也在这个目录里（`requirements.txt`），见 `core/python-runtime.ts`。
+ */
+export const PYTHON_TOOLS_DIR: string = path.join(ROOT, 'python-tools');
+
 /** 配置文件。 */
 export const CONFIG_FILE: string = path.join(DATA_DIR, 'config.json');

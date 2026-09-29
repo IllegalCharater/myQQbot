@@ -19,7 +19,7 @@
 
 ```text
 src/
-├─ core/       配置、路径、通用函数、档位滑条
+├─ core/       配置、路径、Python 运行时解析、通用函数、档位滑条
 ├─ llm/        模型请求、供应商、价格、视觉能力探测
 ├─ chat/       消息存档、长期记忆、会话记录
 ├─ qq/         OneBot 客户端、发送队列、Markdown 转纯文本
@@ -76,6 +76,25 @@ web
 
 `scripts/check-layers.mjs` 会阻止反向依赖。领域共享类型分别放在各自的 `types.ts` 中，不建立全局巨型类型文件。
 
+### Python 工具（仓库根 `python-tools/`）
+
+Python 脚本不在 `src/` 里，但它们的**位置与解释器**是后端的一部分，所以收敛成一处（2026-09-29）：
+
+```text
+python-tools/
+├─ jmcomic_download.py          漫画下载（Cmd 提交的下载任务）
+├─ pic_image_search_worker.py   搜图 worker（PicImageSearch 常驻进程，JSON Lines 走 stdin/stdout）
+└─ requirements.txt             **两个工具共用的唯一依赖清单**
+```
+
+- **脚本路径常量只在 `src/core/python-runtime.ts`**（`JMCOMIC_SCRIPT` / `PIC_IMAGE_SEARCH_SCRIPT`，由 `src/core/paths.ts` 的 `PYTHON_TOOLS_DIR` 拼出）。调用方自己写 `path.join(ROOT, 'python-tools', 'x.py')` 是禁止的：改名不报编译错误，`spawn` 一个不存在的文件连日志都没有。守护是 `tests/t-paths.mjs` 第 5 段。
+- **搜图是"Node 一个通用 provider + 引擎分发在 Python"**：`src/media/image-source/pic-image-search-provider.ts` 是**唯一**的 provider，它只做转发——`search(engine, buffer, mime, timeoutMs, maxResults, signal?, engineOptions?)` 把引擎名连同图片一起递给 `pic-image-search-client.ts`，`test(engine, …)` 则是把客户端的 `ping()` 包成**吞异常返回 `false`** 的形式（设置页按钮的路径：库没装是"不可用"，不是抛给页面）。**引擎的类名、家族与字段归一化全部只在 Python**（worker 的 `ENGINE_CLASS_CANDIDATES` 与几张映射表），Node 侧的映射实现也只有一份（客户端的 `toImageSourceResult`）。按引擎的 `enabled`、`apiKey`（**只走 stdin，绝不进 argv**）与 `similarity >= minSimilarity` 过滤**仍留在 Node**，因为它们是 Node 自己的配置。**不要**再按引擎长出一个 provider 类。
+- **worker 由长期任务表接管**（`image-source.pic-worker`，`imageSource.enabled` 门控、**默认 `false`**）：启动入口是显式的 `initPicImageSearch()`（预热，失败只记日志），停止入口是 `closePicImageSearchClient()`（关子进程并 fail 掉所有在途请求）。**懒启动保留**——预热不是唯一入口，预热失败不影响首次搜索，`test()` 之后也不会留下一个没人收的子进程。
+- **分发策略与缓存都在 `reverse-image-source-service.ts`**：引擎表 `ENGINE_ROWS`（一段配置一行）与顺序表 `ORDER`（按 `SearchIntent`）都是显式声明的，加引擎 = 加一行 + 定位置；`anime_trace` **有意不入表**（它是 trace.moe 的中文别名，同一远端服务，入了表会有两条路打同一个接口）。缓存存的是**单个引擎的响应**而非整轮结论，键 = `引擎 + 图片 hash + maxResults + 引擎参数指纹`，**失败从不写缓存**——旧版按图片 hash 缓存整轮结论，换 intent 会命中另一个引擎的答案（第二个引擎根本没被问过），失败也会被冻结 `cacheTtlMs`。`SearchOutput.cached` 只表示"本次一次远端调用都没发"。队列保持全局单并发（下游是串行读 stdin 的单进程 worker）。
+- **解释器只从 `python.path` 读**，解析链唯一实现在 `resolvePythonCommand()`：`python.path` → `QQ_AGENT_PYTHON` → Windows 固定环境 → `conda run -n my_bot python`，返回值带 `source`（`config`/`env-primary`/`windows-direct`/`conda`）供面板显示"当前生效的是哪一层"。**不要给新工具另加解释器环境变量**——两个工具用同一个解释器，各加一个的结果是"装了 A 库的环境跑不了 B"，报错却指向库缺失。旧别名 `JMCOMIC_PYTHON` 已于 2026-09-29 **正式废弃并从链上删除**，同一原因。
+- **解释器探测与依赖自检**（`src/core/python-probe.ts` + 两个 `POST /api/system/python-*` 端点）：`probePython()` 用配置的解释器跑一次 `-c` 脚本（`find_spec` + `importlib.metadata.version`），回答"生效层级 / 命令 / 版本 / 两个库装没装"；`runSelfCheck()` 跑 `pic_image_search_worker.py --self-check` 并把输出**原文**（stderr 优先）带回来——worker 头部那几张待验证的映射表要靠这段原文对齐。三条边界：两个端点**只读已保存的配置、刻意忽略请求体**（接受请求体里的路径等于开一个"用 HTTP 启动任意本机程序"的一步接口，唯一写入口仍是鉴权过的 `POST /api/config`，故 UI 必须先保存再探测）；它们是**请求作用域**短命子进程，**不进 `LONG_TERM_TASKS`**、不碰常驻 worker 客户端单例；argv 里**不含任何密钥**。测试用注入的假 `spawn`（`SpawnLike` 是最小结构类型，无 `instanceof`），安全网是"`python.path` 指向不存在的程序"，所以套件永不真启动解释器。
+- 字段迁移：旧的 `jmcomic.pythonPath` 已并入顶层 `python.path`，由 `normalizeConfigShape` **迁移**（`delete root.jmcomic` 是必需的：`updateConfig` 的 `deepMerge(getConfig(), patch)` 只加键不删键，不显式删就永远留在用户的 `config.json` 里）。`python.path` 的**空串是合法值**，含义是"走自动探测链"，所以保存端不要兜非空默认值。守护在 `tests/t-jmcomic.mjs` 第 1、1b、1c 段（解析优先级、来源层级、探测/自检模块）与 `tests/t-admin.mjs`（两个端点的真 app 断言：请求体里的可执行路径必须被忽略）。
+
 Bot 的可选扩展能力主体统一落在 `src/media/<feature>/`；例如每日热搜位于
 `src/media/hot-search/`。Web 层只保留路由、配置表面与组装接线。`media` 与 `qq` 同属 T1，
 扩展能力不能直接 import `qq/` 实现，发送等需求通过由 `web/app.ts` 注入的最小结构化端口完成。
@@ -84,9 +103,9 @@ Bot 的可选扩展能力主体统一落在 `src/media/<feature>/`；例如每�
 
 `agent/` 对 `web/` 的跨模块面固化成端口 `src/agent/runtime/control-port.ts`（`AgentControlPort`），`Orchestrator implements` 它；`src/web/` 与 `electron/main.js` 只依赖这个接口，不依赖具体类。端口只做**编译期**检查（`implements` 与 `satisfies`），运行期零成本，也不含任何 `instanceof`/`Symbol` 品牌——`tests/t-orch.mjs`、`t-vision-log.mjs` 用普通对象字面量充当依赖，加运行期校验会当场打碎它们。配套的 `METHOD_CATALOG` 只作文档与测试引用，不参与任何运行时分发。
 
-长期后台任务的清点落在 `src/web/runtime/tasks.ts` 的 `LONG_TERM_TASKS`（8 行：原有 6 行 + `transcription.worker` + `hot-search.daily-broadcast`）。它是**纯数据**：描述 owner / 开关来源 / 配置刷新方式 / 启停入口 / 是否 unref / `conformance`，**不触发任何启停**，也不许在文件里出现调度调用；`start`/`stop` 存的是入口的名字而非函数引用，好让 `tests/t-tasks.mjs` 拿到真对象上去核对。请求作用域局部计时器不进这张表（有反向断言守），判定标准见 `docs/global-registry-design.md` §6.1。
+长期后台任务的清点落在 `src/web/runtime/tasks.ts` 的 `LONG_TERM_TASKS`（9 行：原有 6 行 + `transcription.worker` + `hot-search.daily-broadcast` + `image-source.pic-worker`）。它是**纯数据**：描述 owner / 开关来源 / 配置刷新方式 / 启停入口 / 是否 unref / `conformance`，**不触发任何启停**，也不许在文件里出现调度调用；`start`/`stop` 存的是入口的名字而非函数引用，好让 `tests/t-tasks.mjs` 拿到真对象上去核对。请求作用域局部计时器不进这张表（有反向断言守），判定标准见 `docs/global-registry-design.md` §6.1。
 
-**启停点只有一处**：长期任务一律在 `src/web/app.ts` 的 `start()` 里启动、在 `stop()` 里停止（成对出现），不靠模块加载期或构造函数副作用。**S11c 起这句话是结构性的**：`start()` 只调 `startLifecycle(deps)`、`stop()` 只调 `stopLifecycle(deps)`，顺序写在 `src/web/runtime/lifecycle.ts` 的 `LIFECYCLE` 数组里（`start` 正序、`stop` **逆序**，于是"停长期任务排在 `onebot.close()` 之前"由"`onebot.reconnect` 排第一位"自动满足）；`app.ts` 的 `lifecycleDeps()` 只负责把真模块递进去。清单的元素存**函数引用**（不是名字），`ids` 只作对账元数据，`import` 它不启动任何东西——三条都有断言（`tests/t-lifecycle.mjs` 第 2/3 段），因为"按名字分发的运行时注册表"是明令禁止的形态。配置刷新路径**不接清单**（`applyConfigPatch` 只重应用确实支持热刷新的能力；当前 7 条 entry 中有 5 条无条件，不能整表重跑）。已接管的样子参照 `price.feed`、两个 jmcomic 任务、`onebot.reconnect`、`transcription.worker`，以及 `hot-search.daily-broadcast`（`node-cron` + `Asia/Shanghai`，配置保存经 `applyConfigPatch` 只重建自己的计划）。**8 行长期任务里只剩 `jmcomic.worker` 是 `partial`**（停不掉正在执行的那一次下载），其余 7 行为 `full`。**新增长期任务要动三处**：`LONG_TERM_TASKS`、`lifecycle.ts` 的 `LIFECYCLE`、`app.ts` 的 `lifecycleDeps()`——只改一处会被对账断言拦下。
+**启停点只有一处**：长期任务一律在 `src/web/app.ts` 的 `start()` 里启动、在 `stop()` 里停止（成对出现），不靠模块加载期或构造函数副作用。**S11c 起这句话是结构性的**：`start()` 只调 `startLifecycle(deps)`、`stop()` 只调 `stopLifecycle(deps)`，顺序写在 `src/web/runtime/lifecycle.ts` 的 `LIFECYCLE` 数组里（`start` 正序、`stop` **逆序**，于是"停长期任务排在 `onebot.close()` 之前"由"`onebot.reconnect` 排第一位"自动满足）；`app.ts` 的 `lifecycleDeps()` 只负责把真模块递进去。清单的元素存**函数引用**（不是名字），`ids` 只作对账元数据，`import` 它不启动任何东西——三条都有断言（`tests/t-lifecycle.mjs` 第 2/3 段），因为"按名字分发的运行时注册表"是明令禁止的形态。配置刷新路径**不接清单**（`applyConfigPatch` 只重应用确实支持热刷新的能力；当前 8 条 entry 中有 5 条无条件，不能整表重跑）。已接管的样子参照 `price.feed`、两个 jmcomic 任务、`onebot.reconnect`、`transcription.worker`、`hot-search.daily-broadcast`（`node-cron` + `Asia/Shanghai`，配置保存经 `applyConfigPatch` 只重建自己的计划），以及 `image-source.pic-worker`（`imageSource.enabled` 门控，**默认 `false`**，不用搜图的部署完全不付 Python 冷启动；启动入口 `initPicImageSearch()` 预热且**预热失败只记日志、不外抛**——没装 `PicImageSearch` 是"搜图不可用"，不该掀翻 `app.start()`）。**9 行长期任务里只剩 `jmcomic.worker` 是 `partial`**（停不掉正在执行的那一次下载），其余 8 行为 `full`。**新增长期任务要动三处**：`LONG_TERM_TASKS`、`lifecycle.ts` 的 `LIFECYCLE`、`app.ts` 的 `lifecycleDeps()`——只改一处会被对账断言拦下。
 
 **端点（`snowluma` 的 ws/http 地址与令牌）只有一个写入口**：`applyConfigPatch` 把 `next.snowluma` 的四个字段交给 `OneBotClient.applyEndpoint(next)`，**它返回 `true`（真的变了）才** `onebot.reconnect()`——所以"保存了一次没动端点的设置"不会断连。归一化规则（去 httpUrl 尾斜杠、空 URL 回落默认值、空 token 真清空）与构造函数**共用同一份**，规则一旦在比较的那一侧另写一份，`…:3000/` 与 `…:3000` 就会被判成变更、每次保存都断一次连接。唯一例外是 `applyTokens`（401 轮换路径上必须先写 token 再无条件重连）。守护在 `tests/t-timers.mjs` 第 5 段。
 
@@ -328,9 +347,11 @@ npm run dev             # tsc --watch
 
 当前重点回归包括动态窗口语义、摘要去重、当前窗口与独立历史分离、统一预算保护本轮消息、读图结果回填、`memory_query` 定向查询、主动冒泡的唤醒语义（`t-window.mjs` 第 15 段），以及 Web/UI 模块接线。
 
-长期任务与事件相关改动另有一组专项套件：`t-events.mjs`（事件名/载荷/注入类型/`session-update` 通道）、`t-sse-project.mjs`（SSE 帧逐字节）、`t-panel-wiring.mjs`（UI 订阅名跨边界）、`t-ports.mjs`（跨模块端口与 `implements`；另扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`——`.mjs` 不受 `tsc` 管，这条只能文本扫）、`t-tasks.mjs`（`LONG_TERM_TASKS` 描述符与 `conformance` 一致性）、`t-timers.mjs`（计时器句柄：起没起、停没停、有没有被"清掉又没重建"、待触发的那一次取消不取消得掉）、`t-transcription.mjs`（视频命令、SSRF、单并发状态机、凭证脱敏）、`t-jmcomic.mjs`（漫画队列按"请求者 QQ + 漫画 ID"去重：完成后记录**留在** `jobs` 里而不是即时摘除，否则"同一用户短时间内不能重复提交"对**下载成功过**的漫画失效；窗口的计时起点是上传完成时刻而非创建时刻）、`t-jmcomic-upload.mjs`（上传超时/断连与重启遗留的 `uploading` 统一进入 `upload_uncertain`：群文件按文件名和大小查群文件列表，私聊按文件名和大小查好友消息历史，核验期间不再次调用非幂等的上传动作）、`t-lifecycle.mjs`（注册层执行侧：退出路径的信号接线与幂等、装配清单 ⇄ 描述符表对账、`app.start()/stop()` 的接线与逆序、无按键分发；S11d 起还守"被删的死代码与空转事件不许长回来"——`core/config.ts` 无任何计时器、三个文件再无 `emit`、`EventMap` 与 `vision-scan` 在 `src/` 绝迹，同时**正向**钉住 `routes/providers.ts` 里那个活着的 `visionScan` 局部对象；S11e 起还守 electron 的退出等待——`before-quit` 的**函数体**里必须有 `preventDefault(`、排在它前面的 `stopping` 守卫、promise 链上的 `.catch(`，以及 `.finally` 里那次 `app.quit()`，否则桌面端要么不退要么死循环）。
+长期任务与事件相关改动另有一组专项套件：`t-events.mjs`（事件名/载荷/注入类型/`session-update` 通道）、`t-sse-project.mjs`（SSE 帧逐字节）、`t-panel-wiring.mjs`（UI 订阅名跨边界 + 设置页接线：Python 工具那段的 id 解析、保存分支必须写 `patch.python.path` 且**兜底仍是空串**、两个按钮必须先 `saveConfig` 再打探测端点）、`t-ports.mjs`（跨模块端口与 `implements`；另扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`——`.mjs` 不受 `tsc` 管，这条只能文本扫）、`t-tasks.mjs`（`LONG_TERM_TASKS` 描述符与 `conformance` 一致性）、`t-timers.mjs`（计时器句柄：起没起、停没停、有没有被"清掉又没重建"、待触发的那一次取消不取消得掉）、`t-transcription.mjs`（视频命令、SSRF、单并发状态机、凭证脱敏）、`t-jmcomic.mjs`（漫画队列按"请求者 QQ + 漫画 ID"去重：完成后记录**留在** `jobs` 里而不是即时摘除，否则"同一用户短时间内不能重复提交"对**下载成功过**的漫画失效；窗口的计时起点是上传完成时刻而非创建时刻；2026-09-29 起还守 Python 解释器的解析优先级（`python.path` > `QQ_AGENT_PYTHON` > Windows 固定环境 / conda）、每一层报出的 `source`、探测与自检模块（假 `spawn` 注入：非 JSON 输出、非零退出、超时 kill、输出截断、`--self-check` 确实进了 argv），以及旧配置迁移——`jmcomic.pythonPath` 搬进 `python.path` 后旧键必须消失，且保存一次**不会被写回**，因为 `updateConfig` 的 `deepMerge` 只加键不删键，漏掉那句 `delete` 的话内存里看着对、盘上却永远留着；安全网也换了形态：早先靠 `JMCOMIC_PYTHON` 指一个不存在的程序，现在把 `python.path` 写进夹具 `config.json`（`config` 优先级最高，不再依赖"某台机器上恰好有这个变量"），并另配一条正向断言证明安全网真的生效）、`t-jmcomic-upload.mjs`（上传超时/断连与重启遗留的 `uploading` 统一进入 `upload_uncertain`：群文件按文件名和大小查群文件列表，私聊按文件名和大小查好友消息历史，核验期间不再次调用非幂等的上传动作）、`t-lifecycle.mjs`（注册层执行侧：退出路径的信号接线与幂等、装配清单 ⇄ 描述符表对账、`app.start()/stop()` 的接线与逆序、无按键分发；S11d 起还守"被删的死代码与空转事件不许长回来"——`core/config.ts` 无任何计时器、三个文件再无 `emit`、`EventMap` 与 `vision-scan` 在 `src/` 绝迹，同时**正向**钉住 `routes/providers.ts` 里那个活着的 `visionScan` 局部对象；S11e 起还守 electron 的退出等待——`before-quit` 的**函数体**里必须有 `preventDefault(`、排在它前面的 `stopping` 守卫、promise 链上的 `.catch(`，以及 `.finally` 里那次 `app.quit()`，否则桌面端要么不退要么死循环）。
 
 每日热搜另有 `t-hot-search.mjs`，覆盖 ApiZero 匿名/Bearer 请求、429/5xx/超时重试、字段缺失与空榜、标题去重、按条目分页、白名单目标、重启后当天不重复以及手动/定时互斥。
+
+搜图另有 `t-image-source.mjs`，五段：① 通用 provider 的薄适配——参数按**位次**原样转发（含 `engineOptions` 里的 `apiKey`）、错误码原样透传（`RATE_LIMIT` / `QUOTA_EXHAUSTED` / `TIMEOUT`）、`test()` 走 `ping()` 且**从不抛**（ping 返回 `false` 或直接抛异常都收敛成 `false`）；② **服务层的分发第一次有了直接断言**——用注入的假 provider（`PicImageSearchPort` 是编译期端口，测试用对象字面量顶替，没有 `instanceof`）实测 `intent` 决定的先后顺序（`anime` 先 `trace.moe`、`illustration` 先 `saucenao`）、逐引擎的 `timeoutMs`/`maxResults`/`mime`、`similarity < minSimilarity` 过滤、关闭或空 `apiKey` 的引擎被跳过，以及 `failures` 标签仍是 `trace:` / `sauce:`（这条字符串会进模型可见文本）。为了让 `loadSafeImage` 真的下载到字节，这一段用**回环 HTTP 服务**（`security.allowPrivateImageHosts` 临时打开，跑完复原——先例是 `t-sticker.mjs`），因此它必须排在"被 SSRF 挡下"那条断言**之后**；③ 同一段窗口内另有**缓存**用例（共用同一个 service 实例才有缓存可言）：同引擎同图第二次不发远端调用、**换 intent 不会被另一个引擎的缓存顶替**（旧实现按图片 hash 缓存整轮结论，这条在旧实现下会红）、失败不进缓存、`maxResults` 与引擎参数指纹都进键；④ `formatImageSourceResult` 的输出形状（此前一条断言都没有）——集数与时间点彼此独立、`time === 0` 是合法值、缺失字段兜底而不是印出 `undefined`；⑤ 文本断言钉住原生 fetch 已绝迹：`src/media/image-source/` 下不再出现 `saucenao.com` / `api.trace.moe` / `TraceMoeProvider` / `SauceNaoProvider` / `fetchImpl`，两个按引擎的 provider 文件不存在，服务层源码里不出现 `anime_trace`（它是 trace.moe 的别名，不许加成第三个引擎）。
 
 发布前执行：
 

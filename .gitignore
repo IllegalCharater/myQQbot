@@ -22,6 +22,14 @@ task_plan.md
 # 依赖
 node_modules/
 
+# Python 字节码缓存。
+# `python-tools/` 是**要提交的源码**，而跑一次任何脚本都会在它旁边留下
+# `__pycache__/*.pyc`（含解释器版本号、且随解释器变化）。不挡的话，
+# 一次 `git add -A` 就会把它们带进版本库。
+__pycache__/
+*.pyc
+*.pyo
+
 # 运行时临时文件
 .trash/
 *.tmp

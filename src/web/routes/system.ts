@@ -2,10 +2,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EVENTS } from '../../core/events.js';
 import { ROOT } from '../../core/paths.js';
+import { probePython, runSelfCheck } from '../../core/python-probe.js';
 import { listModels } from '../../llm/llm.js';
 import { PERSONAS } from '../../core/prompt-catalog.js';
 import { errorMessage, isRecord, readBody } from '../http/http.js';
 import type { Route } from '../types.js';
+
+/**
+ * 自检的忙等闸门。与 `routes/providers.ts` 的 `visionScan.running` 同款：面板靠这一条 HTTP
+ * 的 409 + 自己禁用按钮避免连点两次，它是**真在用的本地状态**，不是事件残留。
+ *
+ * 这是**请求作用域**状态（一次自检 = 一个短命子进程），所以不进 `LONG_TERM_TASKS`。
+ */
+const pythonSelfCheck = { running: false };
 
 function localVersion(): string {
   try {
@@ -126,6 +135,26 @@ export const systemRoutes: Route[] = [
       const current = Array.isArray(cfg.customPersonas) ? cfg.customPersonas : [];
       ctx.updateConfig({ customPersonas: current.filter((_item, itemIndex) => itemIndex !== index) });
       return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    method: 'POST', path: '/api/system/python-probe',
+    // **刻意忽略请求体**：解释器路径只能来自已保存的配置。接受请求体里的路径等于开了一个
+    // "用 HTTP 启动任意本机程序"的一步接口，而唯一的写入口是鉴权过的 `POST /api/config`。
+    // 设置页的按钮也是先保存本页、再调这里（用户已确认的行为）。
+    async handle(ctx) {
+      try { return { status: 200, body: await probePython(ctx.getConfig()) }; }
+      catch (error) { return { status: 500, body: { ok: false, error: errorMessage(error) } }; }
+    },
+  },
+  {
+    method: 'POST', path: '/api/system/python-selfcheck',
+    async handle(ctx) {
+      if (pythonSelfCheck.running) return { status: 409, body: { ok: false, error: '已有一条自检正在进行' } };
+      pythonSelfCheck.running = true;
+      try { return { status: 200, body: await runSelfCheck(ctx.getConfig()) }; }
+      catch (error) { return { status: 500, body: { ok: false, error: errorMessage(error) } }; }
+      finally { pythonSelfCheck.running = false; }
     },
   },
   {

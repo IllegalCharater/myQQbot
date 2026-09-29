@@ -352,6 +352,33 @@ eq('删掉最后一条 → memberGone=true（成员文件一并消失，UI 必�
 ok('成员文件确实没了', !fs.existsSync(path.join(DIR, 'memory', 'group_200', '888.json')));
 eq('DELETE 内容对不上 → 404', (await api2('/api/memory-files/group_200/impressions', { method: 'DELETE', body: JSON.stringify({ userId: '888', content: '没这条' }) })).status, 404);
 
+// ── Python 解释器探测 / 依赖自检 ──
+// 两个端点都**只读已保存的配置**：请求体里的路径一律忽略（否则等于凭空开一个
+// "用 HTTP 启动任意本机程序"的一步接口）。这里用**不存在的** python.path，
+// 所以整段不会真的启动任何解释器。
+console.log('\n-- Python 解释器探测 / 自检 --');
+const NO_SUCH_PY = path.join(DIR, 'no-such-python.exe');
+updateConfig({ python: { path: NO_SUCH_PY } });
+
+const probe = await api2('/api/system/python-probe', {
+  method: 'POST',
+  body: JSON.stringify({ path: process.execPath, command: process.execPath })
+});
+eq('POST /api/system/python-probe → 200（探测失败也不抛给通用兜底）', probe.status, 200);
+eq('用的命令来自已保存配置，请求体里的可执行路径被忽略',
+  probe.body.command, NO_SUCH_PY);
+eq('解析层级如实报 config（面板要显示"当前生效的是哪一层"）', probe.body.source, 'config');
+eq('路径下没文件时 exists=false，且不 spawn', probe.body.exists, false);
+eq('ok=false', probe.body.ok, false);
+ok('错误文案带上具体路径（只说"启动失败"会让人以为是自己环境缺库）',
+  String(probe.body.error || '').includes(NO_SUCH_PY), J(probe.body));
+
+const selfcheck = await api2('/api/system/python-selfcheck', { method: 'POST', body: '{}' });
+eq('POST /api/system/python-selfcheck → 200', selfcheck.status, 200);
+eq('自检未通过如实报 ok=false', selfcheck.body.ok, false);
+ok('spawn 失败原文进了 output（面板照登，不润色）',
+  /无法启动 Python/.test(String(selfcheck.body.output || '')), J(selfcheck.body));
+
 // ── 未授权时不得放行（authorize 在 token 为空时默认放行，这里只验证带错 token 的情况）──
 updateConfig({ server: { token: 'sekret' } });
 eq('带错 token → 401（写操作也走同一道闸）', (await api2('/api/stickers/sticker_qq1', { method: 'DELETE', headers: { 'x-console-token': 'wrong' } })).status, 401);

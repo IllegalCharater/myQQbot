@@ -15,6 +15,8 @@
 
 > **同日的另一次改动与注册层无关，仅记录以免路径对不上**：`web/` 按功能与层级搬进 `http/` 与 `runtime/` 两个子目录（纯搬运，不改文件名、不改函数体），并把"根目录只留组装/入口/领域类型/读模型"写成 `check-layers.mjs` 的机检规则。八个文件的映射表与一条**必须记住的操作事实**（`npm run build` 不清理 `dist/`，搬完文件必须先 `rm -rf dist`）见 `design` §7.6，证伪探针见 §9.5 第 25 项。本条**不属于任何迁移步骤**，没有新增或删除任何事件、端口、长期任务。
 
+> **同日的又一次改动（同样不属于迁移步骤，记录以免路径对不上）**：搜图链路收敛成"**Node 一个通用 provider + 引擎知识在 Python**"——`saucenao-provider.ts` 与 `trace-moe-provider.ts` 两个原生 fetch 实现**整体删除**，改由 `src/media/image-source/pic-image-search-provider.ts`（唯一 provider，只做转发）驱动常驻 worker（`python-tools/pic_image_search_worker.py`，引擎的类名/家族/字段归一化都在它那里）。**`LONG_TERM_TASKS` 因此多出第 9 行** `image-source.pic-worker`（宿主 `src/media/image-source/pic-image-search-client.ts`，`imageSource.enabled` 门控、**默认 `false`**，`conformance: 'full'`——`close()` 关子进程并 fail 掉在途请求），`LIFECYCLE` 加一条排在**最后**（于是逆序停止时第一个被收掉，不拖 OneBot 传输层），`app.ts` 的 `lifecycleDeps()` 相应加 `imageSource`，`t-tasks.mjs` / `t-lifecycle.mjs` 的期望清单同步登记。**注册层四件产物的形态没有任何变化**（没有新事件、没有新端口、没有按键分发）。它给"局部计时器 vs 长期任务"的分界带来一个新形态：这一行的长期资源是**子进程**，不是计时器，而 `t-tasks.mjs` 第 2 段那条"owner 文件里必须有 `setInterval(`/`setTimeout(`"只能扫到该文件里的**请求超时**——**为错误的理由通过**，`design` 附录 B 末尾的增量说明已如实记下。
+
 ## 目标
 
 未来建立一个静态、强类型的全局注册层，集中描述核心事件与业务方法绑定，并统一管理真正的长期后台任务。该工作必须先完成协议与生命周期设计，本阶段不新增注册表代码。

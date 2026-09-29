@@ -64,6 +64,14 @@ export interface LifecycleDeps {
   jmcomic: { init(runtime: LifecycleJmRuntime): void; stop(): void };
   transcription: { start(): void | Promise<void>; stop(): void | Promise<void> };
   hotSearch: { start(): void | Promise<void>; stop(): void | Promise<void> };
+  /**
+   * 搜图常驻 worker 的启停。抽成 `start`/`stop` 而不是直接递那两个模块函数，是为了与其余
+   * 能力同形（本文件对下层模块只有 `import type`，一行运行期 import 都没有）。
+   *
+   * `initPicImageSearch` 内部自己吞掉预热失败 —— 没装 PicImageSearch 是"搜图不可用"，
+   * 不该让 `startLifecycle` 抛出去把整个 `app.start()` 掀翻。
+   */
+  imageSource: { start(): void | Promise<void>; stop(): void | Promise<void> };
 }
 
 export interface LifecycleEntry {
@@ -93,10 +101,11 @@ const ALWAYS = () => true;
 
 /**
  * 装配清单，**按 S11c 之前 `app.start()` 里的真实启动顺序**排列：
- * connect → 冒泡 → 压缩 → 价格表 → jmcomic → 视频转写。前五个是 S11c 收口的原顺序，
- * 转写作为新增任务排在最后，确保停止时先取消转写，再拆 OneBot 传输层。
+ * connect → 热搜 → 冒泡 → 压缩 → 价格表 → jmcomic → 视频转写 → 搜图 worker。
+ * 前五个是 S11c 收口的原顺序；转写与搜图 worker 是后加的两个，都排在最后，
+ * 于是停止时它们**最先**被收掉，不会拖着 OneBot 传输层一起等。
  *
- * 停止时逆序：视频转写 → jmcomic → 价格表 → 压缩 → 冒泡 → `onebot.close()`。
+ * 停止时逆序：搜图 worker → 视频转写 → jmcomic → 价格表 → 压缩 → 冒泡 → 热搜 → `onebot.close()`。
  * 与 S11c 之前相比唯一调换的一对是"价格表 ↔ jmcomic"（原先 `stopPriceFeed()` 在前）：
  * 两者互不依赖，属**可观察但良性**的变化，已记入设计稿 §8.2 与真机冒烟清单。
  */
@@ -155,6 +164,20 @@ export const LIFECYCLE: readonly LifecycleEntry[] = [
     enabled: ALWAYS,
     start: (deps) => deps.transcription.start(),
     stop: (deps) => deps.transcription.stop()
+  },
+  {
+    // 排在最后 ⇒ 逆序停止时**第一个**被收掉：先在退出流程的最前面关掉 Python 子进程，
+    // 不让它挂在后面跟 OneBot 传输层一起等。它与 onebot 之间没有任何依赖（搜图只走
+    // 自己的 stdin/stdout），所以这个位置是自由的，选它只是为了让"新增任务排最后"这条
+    // 从转写开始的先例保持一致。
+    ids: ['image-source.pic-worker'],
+    // 与 proactive / compact 同形：配置闸门在清单里判，默认 false —— 不用搜图的部署
+    // 完全不付这次 Python 冷启动。注意 `stopLifecycle` **不按 enabled 过滤**，所以
+    // "启动时关着、退出时被停一次"是正常的：`closePicImageSearchClient()` 在单例不存在时
+    // 直接返回 resolved promise，零副作用。
+    enabled: (config) => config.imageSource?.enabled === true,
+    start: (deps) => deps.imageSource.start(),
+    stop: (deps) => deps.imageSource.stop()
   }
 ];
 

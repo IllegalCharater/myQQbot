@@ -150,7 +150,7 @@ ok('每个 id 恰好被一条 entry 覆盖（无重复）',
   `清单里有重复 id：[${manifestIds.filter((id, i) => manifestIds.indexOf(id) !== i).join(',')}]` +
   ' —— 重复意味着同一次 initialize 被调两遍');
 
-// enabled 闸门与描述表的 `enabledBy` 行为等价：两条布尔任务跟着真配置翻转，
+// enabled 闸门与描述表的 `enabledBy` 行为等价：三条布尔任务跟着真配置翻转，
 // 其余五条恒真（它们的判定在各模块内部，见 lifecycle.ts 的 ALWAYS 注释）。
 const { getConfig, updateConfig } = await load('core/config.js');
 const entryFor = (id) => LIFECYCLE.find((e) => e.ids.includes(id));
@@ -174,6 +174,19 @@ ok('其余五条恒真（开关留在入口内部：热搜/转写入口自行校
   alwaysIds.filter((id) => entryFor(id).enabled(cfgA) !== true).join(',') || '（都恒真）');
 updateConfig({ proactive: { enabled: previous.proactive }, compact: { enabled: previous.compact } });
 
+// 第三条闸门：搜图 worker **默认关闭**（不用搜图的部署不该付这次 Python 冷启动）。
+// 闸门写的是 `=== true` 而不是真值判断，所以 `undefined`（老配置里没有这个键）与 `false`
+// 都必须判成"不开"—— 这是 `t-image-source` 之外**唯一**能证明它真的可选的地方。
+const { DEFAULT_CONFIG } = await load('core/config.js');
+ok('出厂的 imageSource.enabled 默认是 false（新部署不会凭空多一个 Python 子进程）',
+  DEFAULT_CONFIG.imageSource.enabled === false);
+const baseCfg = getConfig();
+const picGate = (enabled) => entryFor('image-source.pic-worker').enabled({ ...baseCfg, imageSource: enabled });
+ok('image-source.pic-worker 的闸门认 `=== true`：true 才开，false / undefined 都判成不开',
+  picGate({ enabled: true }) === true && picGate({ enabled: false }) === false
+  && picGate(undefined) === false && picGate({}) === false,
+  `true=${picGate({ enabled: true })} false=${picGate({ enabled: false })} undefined=${picGate(undefined)} 空对象=${picGate({})}`);
+
 // 清单不许 import 那张描述表：对账是套件的职责，不是运行期的职责。
 const lifecycleSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/web/runtime/lifecycle.ts'), 'utf8'));
 ok('lifecycle.ts 不 import tasks.ts（id 两边各写一份，一致性由本套件的对账负责）',
@@ -194,7 +207,8 @@ const EXPECTED_ENTRY_IDS = [
   ['compact.sweep'],
   ['price.feed'],
   ['jmcomic.cleanup', 'jmcomic.worker'],
-  ['transcription.worker']
+  ['transcription.worker'],
+  ['image-source.pic-worker']
 ];
 ok('清单的 entry 顺序与 id 归属（手工登记：**改这里的顺序就是改行为**）',
   JSON.stringify(LIFECYCLE.map((e) => e.ids)) === JSON.stringify(EXPECTED_ENTRY_IDS),
@@ -203,8 +217,8 @@ ok('手工登记的序列长度与清单一致（新增 entry 必须同步登记
   EXPECTED_ENTRY_IDS.length === LIFECYCLE.length,
   `清单 ${LIFECYCLE.length} 条、登记 ${EXPECTED_ENTRY_IDS.length} 条`);
 
-const EXPECTED_START = ['onebot.connect', 'hotSearch.start', 'proactive.start', 'compact.start', 'priceFeed.init', 'jmcomic.init', 'transcription.start'];
-const EXPECTED_STOP = ['transcription.stop', 'jmcomic.stop', 'priceFeed.stop', 'compact.stop', 'proactive.stop', 'hotSearch.stop', 'onebot.close'];
+const EXPECTED_START = ['onebot.connect', 'hotSearch.start', 'proactive.start', 'compact.start', 'priceFeed.init', 'jmcomic.init', 'transcription.start', 'imageSource.start'];
+const EXPECTED_STOP = ['imageSource.stop', 'transcription.stop', 'jmcomic.stop', 'priceFeed.stop', 'compact.stop', 'proactive.stop', 'hotSearch.stop', 'onebot.close'];
 
 function spyDeps(config, seq) {
   return {
@@ -228,7 +242,8 @@ function spyDeps(config, seq) {
     // 变成一条普通的红。标号与属性名统一用 `jmcomic.init`，与 `priceFeed.init` 同形。
     jmcomic: { init: () => seq.push('jmcomic.init'), stop: () => seq.push('jmcomic.stop') },
     transcription: { start: () => seq.push('transcription.start'), stop: () => seq.push('transcription.stop') },
-    hotSearch: { start: () => seq.push('hotSearch.start'), stop: () => seq.push('hotSearch.stop') }
+    hotSearch: { start: () => seq.push('hotSearch.start'), stop: () => seq.push('hotSearch.stop') },
+    imageSource: { start: () => seq.push('imageSource.start'), stop: () => seq.push('imageSource.stop') }
   };
 }
 
@@ -261,10 +276,10 @@ ok('spy deps 与 lifecycle.ts 真正读的 `deps.*` 逐一对得上（写错属�
     missingMethods.length ? `spy 上缺这些方法：${missingMethods.join('、')}` : ''
   ].filter(Boolean).join('；'));
 
-const allOn = { proactive: { enabled: true }, compact: { enabled: true }, api: { priceRemoteUrl: 'http://x/p.json' } };
+const allOn = { proactive: { enabled: true }, compact: { enabled: true }, api: { priceRemoteUrl: 'http://x/p.json' }, imageSource: { enabled: true } };
 const seq = [];
 await startLifecycle(spyDeps(allOn, seq));
-ok('startLifecycle 按清单顺序启动（connect → 热搜 → 冒泡 → 压缩 → 价格表 → jmcomic → 转写）',
+ok('startLifecycle 按清单顺序启动（connect → 热搜 → 冒泡 → 压缩 → 价格表 → jmcomic → 转写 → 搜图 worker）',
   JSON.stringify(seq) === JSON.stringify(EXPECTED_START),
   `实际 ${JSON.stringify(seq)}`);
 ok('全开时每一条 entry 都真的被调用（不是"顺序对但漏了谁"）',
@@ -281,7 +296,7 @@ ok('onebot.close() 是逆序里最后一个（"停长期任务排在 onebot.clos
 
 const seqOff = [];
 await startLifecycle(spyDeps({ proactive: { enabled: false }, compact: { enabled: false }, api: {} }, seqOff));
-ok('闸门关着的那两条不进启动序列，恒真的五条照常',
+ok('闸门关着的那三条不进启动序列，恒真的五条照常（imageSource 这里缺席 = undefined，也不许开）',
   JSON.stringify(seqOff) === JSON.stringify(['onebot.connect', 'hotSearch.start', 'priceFeed.init(空 URL)', 'jmcomic.init', 'transcription.start']),
   `实际 ${JSON.stringify(seqOff)}`);
 
@@ -317,7 +332,7 @@ const moduleEntryNames = (owner) => LONG_TERM_TASKS
 const DEPS_NAMES = [
   ...moduleEntryNames('price-feed'),
   ...moduleEntryNames('jmcomic'),
-  'getConfig', 'onebot', 'orchestrator', 'transcription', 'hotSearch'
+  'getConfig', 'onebot', 'orchestrator', 'transcription', 'hotSearch', 'imageSource'
 ];
 const missingDeps = [...new Set(DEPS_NAMES)].filter((name) => !new RegExp(`\\b${name}\\b`).test(depsBody));
 ok('deps 里递的是真模块，且用的是描述表里的名字（假 deps 的模块级测试证明不了这一点）',
@@ -326,6 +341,17 @@ ok('deps 里递的是真模块，且用的是描述表里的名字（假 deps �
     DEPS_NAMES.length >= 7 ? '' : `只从 LONG_TERM_TASKS 推出 ${DEPS_NAMES.length} 个入口名（owner 锚点失效了？）`,
     missingDeps.length ? `lifecycleDeps() 的实参里少了：${missingDeps.join(' / ')}` : ''
   ].filter(Boolean).join('；'));
+
+// 搜图 worker 单独钉一次：它的 owner 文件名（`pic-image-search-client.ts`）与任务表里的模块别名
+// （`pic-image-search`）不同名，所以上面那条**按 owner 反推名字**的手法够不着它 —— 而那正是
+// "递的是真模块而不是空实现"这条断言唯一的着力点。这里改从真模块导出取名字（`.name`），
+// 于是导出被改名时这条会跟着红，不用手工同步字面量。
+const { initPicImageSearch, closePicImageSearchClient } = await load('media/image-source/pic-image-search-client.js');
+ok('lifecycleDeps() 里搜图 worker 递的是真模块函数（不是 `() => {}` 那种空实现）',
+  typeof initPicImageSearch === 'function' && typeof closePicImageSearchClient === 'function'
+  && depsBody.includes(initPicImageSearch.name) && depsBody.includes(closePicImageSearchClient.name),
+  `导出存在？${typeof initPicImageSearch === 'function'}/${typeof closePicImageSearchClient === 'function'}；` +
+  `deps 里出现？${depsBody.includes(initPicImageSearch.name)}/${depsBody.includes(closePicImageSearchClient.name)}`);
 
 // 清单 vs 被禁的注册表：这是两者之间**唯一**的机检边界。
 const srcFiles = [];

@@ -231,9 +231,14 @@ export const DEFAULT_CONFIG = {
     maxCallsPerChatPerHour: 3,
     maxCallsPerDay: 10
   },
-  // 漫画下载 Python 解释器。留空时保持原探测链：JMCOMIC_PYTHON → Windows 固定环境 → conda my_bot。
-  jmcomic: {
-    pythonPath: ''
+  // ── Python 工具（`python-tools/`）共用的解释器 ──
+  // **两个工具只有一个入口**：漫画下载（jmcomic_download.py）与搜图 worker
+  // （pic_image_search_worker.py）都从 `python.path` 读解释器。原先是钉在漫画那一段里的
+  // `jmcomic.pythonPath`，已经搬到这里并迁移（见 normalizeConfigShape）。
+  // 留空时按 core/python-runtime.ts 的解析链回落：QQ_AGENT_PYTHON → Windows 固定环境 →
+  // conda my_bot（旧的 JMCOMIC_PYTHON 别名已废弃删除）。依赖装法见 python-tools/requirements.txt。
+  python: {
+    path: ''
   },
   // 主动开话题（可选）
   proactive: {
@@ -445,6 +450,33 @@ function normalizeConfigShape<T>(input: T): T {
     }
     delete r.maxPerMinute;
   }
+
+  // ── Python 解释器：jmcomic.pythonPath → python.path（迁移，不是搬走） ──
+  //
+  // 旧字段钉在漫画那一段里，但两个 Python 工具用的是同一个解释器，所以它搬到了顶层。
+  // **为什么是迁移而不是直接删**：README 一直教用户手改 config.json 写
+  // `jmcomic.pythonPath`，直接删会让那些配置**静默失效**——解释器回落成默认探测链，
+  // 用户看到的是"漫画下载突然要 conda 了"，而没有任何地方提示他重填。搬一次的成本是
+  // 这几行，收益是那批人的配置照旧生效。同款先例见上面的 contextTier → contextSliderPos。
+  //
+  // 这里 `delete` 是**必须的**：updateConfig 走的是 `deepMerge(getConfig(), patch)`，
+  // 它只会往对象里加键、不会删盘上已有的键，所以不显式删，旧键会一直在 config.json 里
+  // 留着（`deepMerge` 把 override 的所有键都抄进去，包括它不认识的）。
+  const python = root.python;
+  if (python && typeof python === 'object' && !Array.isArray(python)) {
+    (python as Record<string, unknown>).path = String((python as Record<string, unknown>).path ?? '').trim();
+  }
+  const legacyJmcomic = root.jmcomic;
+  if (legacyJmcomic && typeof legacyJmcomic === 'object' && !Array.isArray(legacyJmcomic)) {
+    const legacyPath = String((legacyJmcomic as Record<string, unknown>).pythonPath ?? '').trim();
+    const currentPath = python && typeof python === 'object' && !Array.isArray(python)
+      ? String((python as Record<string, unknown>).path ?? '').trim()
+      : '';
+    // 两边都有时以新字段为准（用户已经自己填过新位置，不要用旧的把它盖回去）。
+    if (legacyPath && !currentPath) root.python = { path: legacyPath };
+    delete root.jmcomic;
+  }
+
   return input;
 }
 

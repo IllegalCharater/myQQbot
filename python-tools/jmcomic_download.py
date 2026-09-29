@@ -66,9 +66,10 @@ def get_comic_pdf(comic_id, download_dir):
         from jmcomic import Feature, download_album
     except ImportError as error:
         raise RuntimeError(
-            "Conda 环境 my_bot 未安装 jmcomic，请执行 "
-            "conda run -n my_bot python -m pip install jmcomic，"
-            "或用 JMCOMIC_PYTHON 指定其他已安装该模块的解释器"
+            "当前 Python 解释器未安装 jmcomic。请用**同一个**解释器装一遍项目依赖："
+            f"{sys.executable} -m pip install -r python-tools/requirements.txt"
+            "（两个 Python 工具共用一个解释器，路径在设置页「Python 工具」里配置，"
+            "也可以用环境变量 QQ_AGENT_PYTHON 指定）"
         ) from error
 
     numeric_id = int(comic_id)

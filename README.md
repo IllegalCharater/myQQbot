@@ -121,7 +121,13 @@ trace.moe（动画截图 → 番名 / 集数 / 时间点）和 SauceNAO（二次
 模型自己决定（它会看到工具返回的结果或错误原因），所以群里不会出现工具代发的固定提示。
 
 SauceNAO 需要 API Key，只能从设置页填写（输入框只允许写入或替换，服务端不会把原值返回浏览器；
-未配置时该 provider 会被跳过，只走 trace.moe）。
+未配置时 SauceNAO 这一路会被跳过，只走 trace.moe）。
+
+搜索本身由一个常驻的 Python worker 执行（引擎的请求构造与结果字段归一化都在 Python 侧，用的是
+[PicImageSearch](https://pypi.org/project/PicImageSearch/) 库），所以开启这项功能前请按下面“Python 工具”
+一节把依赖装到配置的解释器里。没装时不会静默失败：设置页的“测试连接”与工具结果都会直接说明
+库没装上、以及该往哪个解释器装。这个 worker 只在设置页开启本功能后才会启动，关掉或退出应用时
+子进程会被收掉。
 
 两个第三方接口都有配额（SauceNAO 免费额度尤其紧），因此配置里有“每群每小时上限”（默认 5）与
 “全局每日上限”（默认 30）两个调用闸门，超限时工具直接失败并告知原因。闸门只统计发起了几次查询，
@@ -198,15 +204,49 @@ Environment="FFMPEG_PATH=/usr/bin/ffmpeg"
 `TENCENTCLOUD_APP_ID` 是腾讯云账号的数字 AppID；运行身份需要录音文件识别极速版权限。日志只记录
 任务 ID、状态、音频大小、耗时和错误码，不记录原始 URL、请求签名、识别文本或凭证。
 
-FFmpeg 路径由 `transcription.ffmpegPath` 读取。漫画下载使用的 Python 解释器可在 `data/config.json`
-中显式指定；`pythonPath` 留空时继续使用原有的 `JMCOMIC_PYTHON`、本机环境和 conda 回退逻辑：
+FFmpeg 路径由 `transcription.ffmpegPath` 读取。
+
+### Python 工具
+
+项目里的 Python 工具都放在 `python-tools/`，**共用同一个解释器**：
+
+| 脚本 | 用途 |
+| --- | --- |
+| `jmcomic_download.py` | 下载漫画并生成 PDF |
+| `pic_image_search_worker.py` | 搜图 worker（PicImageSearch 常驻进程） |
+
+依赖合并成一份，装一次即可（把 `<python>` 换成下面配置的那个解释器）：
+
+```bash
+<python> -m pip install -r python-tools/requirements.txt
+```
+
+解释器在设置页「Python 工具」里填，也可以直接改 `data/config.json` 的顶层 `python.path`。
+填的是**解释器可执行文件**的完整路径，留空则自动探测：
 
 ```json
 {
   "transcription": { "ffmpegPath": "/usr/bin/ffmpeg" },
-  "jmcomic": { "pythonPath": "/opt/conda/envs/my_bot/bin/python" }
+  "python": { "path": "/opt/conda/envs/my_bot/bin/python" }
 }
 ```
+
+`python.path` 留空时的探测顺序：环境变量 `QQ_AGENT_PYTHON` → Windows 固定环境
+`E:\anaconda\envs\my_bot\python.exe` → `conda run -n my_bot python`。
+
+> 旧版本用的 `jmcomic.pythonPath` 已并入 `python.path`。老配置**会自动迁移**，不必重填；
+> 首次保存设置后旧键会从 `config.json` 里移除。
+> 更早的环境变量别名 `JMCOMIC_PYTHON` 已于 2026-09-29 **正式废弃**（两个工具共用一个解释器，
+> 各给一个变量的结果是"装了 A 库的那个环境跑不了 B"），不再参与探测。
+
+填完不确定对不对，用同一页的两个按钮自查（两者都是**先保存本页、再按已保存的值探测**）：
+
+- **测试解释器**：显示当前生效的是哪一层来源、实际用的命令、解释器版本，以及 `PicImageSearch`
+  与 `jmcomic` 能否 import。路径填错时会直接告诉你"这个路径下没有文件"，不必等搜图失败再反推。
+  这里的库检查只是廉价提示。
+- **跑一遍依赖自检**：用配置的解释器执行 `python-tools/pic_image_search_worker.py --self-check`，
+  把它的输出原文（含 stderr）显示出来。**这才是搜图依赖的权威检查** —— 库版本、引擎类名与字段
+  是否与 worker 的假设一致，只有它会说。
 
 ## 数据与隐私
 

@@ -2,7 +2,7 @@
 //
 // 这张表的价值全在"它说的和现实是不是一回事"。所以本套件不检查表自身的形状，而是拿表里的
 // 每一条声明**去现实里核对**：
-//   1. 6 行齐全，id 集合固定（手工登记，同 t-ports 的 PORT_METHODS 模式）；
+//   1. 9 行齐全，id 集合固定（手工登记，同 t-ports 的 PORT_METHODS 模式）；
 //   2. 每行 owner 文件真实存在，且里面确实有调度调用（防"表里躺着一个不存在的任务"）；
 //   3. **[反向] 局部计时器不在表内** —— 这是设计稿 §6.1 分界线的守护，也是本套件最重要的一段：
 //      最容易犯的错就是把 LLM 超时、重试退避、单次扫图 flush 这些也算成"长期任务"收进表，
@@ -28,11 +28,12 @@ const { getConfig } = await load('core/config.js');
 const EXPECTED_IDS = [
   'proactive.bubble', 'compact.sweep', 'price.feed',
   'jmcomic.cleanup', 'jmcomic.worker', 'transcription.worker', 'onebot.reconnect',
-  'hot-search.daily-broadcast'
+  'hot-search.daily-broadcast', 'image-source.pic-worker'
 ];
 
-// 只含局部计时器的文件（附录 B 里那 17 处的宿主）。它们**不许**作为任何一行的 owner——
-// 这是"局部计时器不在表内"的可机检形态。
+// 只含局部计时器的文件（设计稿附录 B 点名排除的那些局部计时器的宿主）。它们**不许**作为任何一行的 owner——
+// 这是"局部计时器不在表内"的可机检形态。这里的清单是**文件**不是计数：附录 B 里的汇总数（17/18/19…）
+// 各条增量说明各写一次，已经漂了（2026-09-29 实测共 33 处调度调用点、其中长期任务 9 处），**别按数字核对**。
 const LOCALTIMER_ONLY_FILES = [
   'src/core/util.ts',                     // delay() 助手
   'src/llm/llm.ts',                       // 重试退避 / 请求超时
@@ -42,13 +43,14 @@ const LOCALTIMER_ONLY_FILES = [
   'src/web/app.ts',                       // 启动期端口轮询的等待间隔（SnowLuma 就绪探测）
   'src/web/onebot/snowluma.ts',           // 端口探活 socket 超时（从 app.ts 搬出，行为不变）
   'src/media/hot-search/api-client.ts',       // 单次 ApiZero 请求的 8 秒超时
+  'src/core/python-probe.ts',                 // 解释器探测 15s / 依赖自检 60s 的硬超时（请求作用域）
   'src/web/routes/chats.ts',              // getChatName 3s 兜底
   'src/agent/runtime/wake-scheduler.ts',  // 唤醒防抖 / 等待窗口 / 限速等待
   'electron/main.js'                      // 窗口加载前 2s 延时
 ];
 
 const ids = LONG_TERM_TASKS.map((t) => t.id).sort();
-ok('任务表恰好是这 8 个 id（不多不少）',
+ok('任务表恰好是这 9 个 id（不多不少）',
   ids.length === EXPECTED_IDS.length && ids.every((id, i) => id === [...EXPECTED_IDS].sort()[i]),
   `表里是 ${ids.join('、')}；清单是 ${[...EXPECTED_IDS].sort().join('、')}`);
 
@@ -140,13 +142,15 @@ const { Orchestrator } = await load('agent/runtime/orchestrator.js');
 const { OneBotClient } = await load('qq/onebot.js');
 const { VideoTranscriptionQueue } = await load('media/video-transcription.js');
 const { HotSearchScheduler } = await load('media/hot-search/scheduler.js');
+const picImageSearch = await load('media/image-source/pic-image-search-client.js');
 const RESOLVERS = {
   Orchestrator: () => Orchestrator.prototype,
   OneBotClient: () => OneBotClient.prototype,
   VideoTranscriptionQueue: () => VideoTranscriptionQueue.prototype,
   HotSearchScheduler: () => HotSearchScheduler.prototype,
   'price-feed': () => priceFeed,
-  jmcomic: () => jmcomic
+  jmcomic: () => jmcomic,
+  'pic-image-search': () => picImageSearch
 };
 const unresolved = [];
 for (const t of LONG_TERM_TASKS) {

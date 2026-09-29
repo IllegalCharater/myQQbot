@@ -9,8 +9,8 @@ import { applyProviderPick, bindModelDdDismiss, renderModelColumn, renderProvide
 import { clampInt, renderChatSection, sliderDesc, sliderToTierUI, sliderToTierUI_tierToSlider } from '../../parts/chat-settings.js';
 import {
   renderAllowSection, renderApiSection, renderDesktopSection, renderMemorySettingsSection,
-  renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderSearchSection,
-  renderTranscriptionSection, renderImageSourceSection
+  renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderPythonSection,
+  renderSearchSection, renderTranscriptionSection, renderImageSourceSection
 } from './sections.js';
 import { parseList, saveConfig } from './save.js';
 import { openBlocklistModal } from '../../parts/blocklist.js';
@@ -82,6 +82,7 @@ export function renderSettingsSidebar() {
     ['allow', '聊天白名单'],
     ['hotsearch', '每日热搜播报'],
     ['transcription', '音视频转写'],
+    ['python', 'Python 工具'],
     ['chat', '聊天设置'],
     ['desktop', '桌面端'],
     ['onebot', 'OneBot（SnowLuma）']
@@ -124,6 +125,7 @@ export function renderSettingsSection(c) {
     allow: () => renderAllowSection(c),
     hotsearch: () => renderHotSearchSection(c),
     transcription: () => renderTranscriptionSection(c),
+    python: () => renderPythonSection(c),
     chat: () => renderChatSection(c),
     desktop: () => renderDesktopSection(c),
     onebot: () => renderOnebotSection(c)
@@ -158,6 +160,66 @@ export function bindSettingsEvents(c) {
       actions.startListPoller();   // 刷新间隔可能刚被改过，用新值重启轮询
     } catch (e) {
       $('#cfg-save-result').textContent = `保存失败：${e.message}`;
+    }
+  });
+
+  // ── Python 工具：解释器探测 / 依赖自检 ──
+  // 两个按钮都**先保存本页再探测**（刻意如此）：只有保存过的值才是后端真正会用的那个，
+  // 否则页面显示的是"刚敲进去的路径"而不是"生效的路径" —— 而解释器填错时后端报的错
+  // （"环境里没有某某库"）与填对但库没装完全一样，看不出区别。
+  // 后端那边也**拒绝从请求体取路径**（见 routes/system.ts），所以这里必须真的保存。
+  const pySourceNames = {
+    config: '本页填写的路径（python.path）',
+    'env-primary': '环境变量 QQ_AGENT_PYTHON',
+    'windows-direct': 'Windows 固定环境',
+    conda: 'conda run -n my_bot python'
+  };
+  const pythonTest = $('#cfg-python-test');
+  if (pythonTest) pythonTest.addEventListener('click', async () => {
+    const out = $('#cfg-python-test-result');
+    out.textContent = '保存并测试中…';
+    try {
+      await saveConfig({ quiet: true });
+    } catch (e) {
+      out.textContent = `保存失败，未探测：${e.message}`;
+      return;
+    }
+    try {
+      const r = await api('/api/system/python-probe', { method: 'POST', body: '{}' });
+      const parts = [`来源：${pySourceNames[r.source] || r.source}`, `命令：${r.command}`];
+      if (r.exists === false) parts.push('⚠️ 这个路径下没有文件');
+      const dep = (name) => (r.interpreter?.deps?.[name] ? `${name} ${r.interpreter.deps[name]}` : `${name} 未安装`);
+      if (r.interpreter) parts.push(`Python ${r.interpreter.version}`, dep('PicImageSearch'), dep('jmcomic'));
+      if (r.error) parts.push(`❌ ${r.error}`);
+      out.textContent = parts.join(' · ');
+    } catch (e) {
+      out.textContent = `测试失败：${e.message}`;
+    }
+  });
+  const pythonCheck = $('#cfg-python-selfcheck');
+  if (pythonCheck) pythonCheck.addEventListener('click', async () => {
+    const out = $('#cfg-python-test-result');
+    const pre = $('#cfg-python-selfcheck-output');
+    pre.style.display = 'block';
+    pre.textContent = '保存并运行中…（conda 冷启动时可能要等十几秒）';
+    out.textContent = '';
+    pythonCheck.disabled = true;
+    try {
+      try {
+        await saveConfig({ quiet: true });
+      } catch (e) {
+        pre.textContent = `保存失败，未运行自检：${e.message}`;
+        return;
+      }
+      const r = await api('/api/system/python-selfcheck', { method: 'POST', body: '{}' });
+      out.textContent = r.ok ? '自检通过 ✓' : `自检未通过（退出码 ${r.exitCode ?? '—'}${r.timedOut ? '，已超时终止' : ''}）`;
+      // 原文照登，不做润色：worker 头部那几张待验证的映射表要靠这段输出对齐。
+      pre.textContent = r.output || '（没有输出）';
+    } catch (e) {
+      out.textContent = '自检失败';
+      pre.textContent = `自检请求失败：${e.message}`;
+    } finally {
+      pythonCheck.disabled = false;
     }
   });
 

@@ -225,6 +225,13 @@ export async function saveConfig({ quiet = false } = {}) {
     };
   }
 
+  if (sec === 'python') {
+    const p = c.python || {};
+    // 空串是**合法值**，含义是"没配，走自动探测链"（见 core/python-runtime.ts），
+    // 所以这里不像 ffmpegPath 那样兜一个非空默认值——兜了反而会把"留空"变成"填 ffmpeg"。
+    patch.python = { path: val('#cfg-python-path', p.path || '').trim() };
+  }
+
   if (sec === 'chat') {
     patch.wakeDelayMs = Number(val('#cfg-wakedelay', c.wakeDelayMs)) || 2000;
     patch.drainDelayMs = Number(val('#cfg-draindelay', c.drainDelayMs)) || 1200;

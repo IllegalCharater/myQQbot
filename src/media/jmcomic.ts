@@ -1,15 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { DATA_DIR, ROOT, getConfig } from '../core/config.js';
-import type { AppConfig } from '../core/config.js';
+import { DATA_DIR, getConfig } from '../core/config.js';
+import { JMCOMIC_SCRIPT, resolvePythonCommand } from '../core/python-runtime.js';
 
 const DUPLICATE_WINDOW_MS = 10 * 60_000;
 const DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
 const UPLOAD_TIMEOUT_MS = 30 * 60_000;
 const INACTIVITY_TIMEOUT_MS = 5 * 60_000;
 const RESULT_PREFIX = '__QQ_AGENT_RESULT__';
-const SCRIPT_PATH = path.join(ROOT, 'python-tools', 'jmcomic_download.py');
 const JM_DIR = path.join(DATA_DIR, 'jmcomic');
 const DOWNLOAD_DIR = path.join(DATA_DIR, 'downloads', 'jmcomic');
 const JOBS_FILE = path.join(JM_DIR, 'jobs.json');
@@ -247,18 +246,6 @@ function duplicateAnchorAt(job: JmJob): number {
   return Number(job.uploadedAt || job.createdAt || 0);
 }
 
-export function resolveJmcomicPythonCommand(config: AppConfig = getConfig()) {
-  const configured = String(config.jmcomic?.pythonPath || '').trim();
-  if (configured) return { command: configured, prefix: [] as string[] };
-  if (process.env.JMCOMIC_PYTHON) return { command: process.env.JMCOMIC_PYTHON, prefix: [] };
-  if (process.platform === 'win32') {
-    const direct = 'E:\\anaconda\\envs\\my_bot\\python.exe';
-    if (fs.existsSync(direct)) return { command: direct, prefix: [] };
-    return { command: 'conda.exe', prefix: ['run', '--no-capture-output', '-n', 'my_bot', 'python'] };
-  }
-  return { command: 'conda', prefix: ['run', '--no-capture-output', '-n', 'my_bot', 'python'] };
-}
-
 function validatePdf(pdfPath: unknown): string {
   const resolved = path.resolve(String(pdfPath || ''));
   const root = path.resolve(DOWNLOAD_DIR) + path.sep;
@@ -278,10 +265,11 @@ function validatePdf(pdfPath: unknown): string {
 
 function runPython(job: JmJob): Promise<PythonResult> {
   ensureDirs();
-  const { command, prefix } = resolveJmcomicPythonCommand();
+  // 解释器与脚本路径都来自 core/python-runtime（两个 Python 工具共用一条解析链）。
+  const { command, prefix } = resolvePythonCommand(getConfig());
   const logFile = path.join(LOG_DIR, `${job.id}.log`);
   return new Promise<PythonResult>((resolve, reject) => {
-    const child = spawn(command, [...prefix, SCRIPT_PATH, job.comicId, DOWNLOAD_DIR], {
+    const child = spawn(command, [...prefix, JMCOMIC_SCRIPT, job.comicId, DOWNLOAD_DIR], {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -327,7 +315,10 @@ function runPython(job: JmJob): Promise<PythonResult> {
       appendLog(chunk);
       stderr = (stderr + chunk.toString('utf8')).slice(-50_000);
     });
-    child.on('error', (error) => finish(reject, new Error(`无法启动 my_bot Python：${error.message}`)));
+    // 报出**实际用的那个命令**，而不是写死 "my_bot"。解释器可能来自 python.path /
+    // QQ_AGENT_PYTHON / Windows 固定环境 / conda 回退中的任意一条，只说 "my_bot" 会让
+    // 一个填错的 python.path 看起来像 conda 环境缺库。
+    child.on('error', (error) => finish(reject, new Error(`无法启动 Python（${command}）：${error.message}`)));
     child.on('close', (code) => {
       if (settled) return;
       const line = stdout.split(/\r?\n/).reverse().find((item) => item.startsWith(RESULT_PREFIX));

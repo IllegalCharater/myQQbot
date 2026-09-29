@@ -629,12 +629,12 @@ S11c 补上**执行侧**：`src/web/runtime/lifecycle.ts` 的 `LIFECYCLE`。两�
 
 1. **两边各写一份 id 字面量，靠套件对账。** `lifecycle.ts` **不 import `tasks.ts`**——一旦 import，运行期就多了一层"读表才知道装什么"的间接，而那正是被禁的注册表形态（`t-tasks.mjs` 另有一条"`src/` 除定义处外无人引用 `LONG_TERM_TASKS`"的断言）。对账落在 `tests/t-lifecycle.mjs` 第 2 段：两边 id 集合必须相等、无重复、每个 id 恰好被一条 entry 覆盖。**因此"表里加一行"从 S11c 起是一个要动两处的动作**，只改一处会被套件拦下。
 2. **一个 entry 可以覆盖多个 id，反过来不行。** `jmcomic.cleanup` 与 `jmcomic.worker` 合成**一条** entry：清理定时器与 worker 由同一次 `initJmcomicQueue` 拉起，拆成两条会把同一个入口调两遍。**注意这里的理由（S11c 实测更正）**：规划时写的"拆开会造出两个 interval、`t-timers.mjs` 的'恰好 2'当场红"**是错的**——`startCleanupTimer()` 有 `if (cleanupTimer) return;` 的护栏（`media/jmcomic.ts:151`），`runWorker` 也有单 worker 护栏，实测把 entry 拆成两条后 `t-timers.mjs` **41 条断言全绿**。真正拦下它的是本步新加的登记式断言（它能看见 `jmcomic.initialize` 跑了两次），而不是计时器套件。合并依然是对的形态——理由是"一条 entry 代表一次真实的装配动作"，只是这个理由**不能用行为故障来背书**。
-3. **执行清单不参与配置刷新。** `applyConfigPatch` 那条路径**不接清单**：当前 6 条 entry 里有 4 条是 `ALWAYS`，走清单会误调 `onebot.connect()`（重连整条链路）、`initJmcomicQueue()` 与转写启动检查。理由写在 `lifecycle.ts` 头部。
+3. **执行清单不参与配置刷新。** `applyConfigPatch` 那条路径**不接清单**：当前 8 条 entry 里有 5 条是 `ALWAYS`，走清单会误调 `onebot.connect()`（重连整条链路）、`initJmcomicQueue()` 与转写启动检查，以及搜图 worker 的预热（它有 `imageSource.enabled` 闸门兜着，但配置保存本来只该刷新真正支持热刷新的能力）。理由写在 `lifecycle.ts` 头部。
 
 
 ### 6.3 任务映射表（**S9 已落地为 `LONG_TERM_TASKS`**）
 
-`conformance` 列是本文最重要的产出之一——它如实标注了"今天能不能被真正接管"。S9 清点时有 6 个任务；视频转写接入后新增 `transcription.worker`，所以**下表当前 8 行里有 7 行是任务，最后一行 `wake.debounce` 是清点时的"排除"写法**，落地表里没有它（它是 `tests/t-tasks.mjs` 的反向断言目标，见 §9.3）：
+`conformance` 列是本文最重要的产出之一——它如实标注了"今天能不能被真正接管"。**下表是 S9 清点（+ 视频转写）时的快照，不是当前任务清单**：S9 清点时有 6 个任务，视频转写接入后新增 `transcription.worker`，所以表里 8 行中有 7 行是任务，最后一行 `wake.debounce` 是清点时的"排除"写法，落地表里没有它（它是 `tests/t-tasks.mjs` 的反向断言目标，见 §9.3）。**此后新增的任务（`hot-search.daily-broadcast`、`image-source.pic-worker`）不往这张表里加行**——它们的形态与"一行一个计时器"不匹配（前者由 `node-cron` 持句柄，后者持有的是**子进程**而非计时器）；当前任务数与 `conformance` 分布看**附录 B 末尾的增量说明**（当前 9 行，只有 `jmcomic.worker` 是 `partial`）。
 
 | id | 归属 / 位置 | 开关来源 | 配置刷新 | unref | 今天的停止入口 | conformance |
 |---|---|---|---|---|---|---|
@@ -657,7 +657,7 @@ S11c 补上**执行侧**：`src/web/runtime/lifecycle.ts` 的 `LIFECYCLE`。两�
 - **⚠️ `price.feed` 那个"同 URL 早退"是个真 bug，S10a 才修**。原实现（`price-feed.ts:184`）是**先无条件 `clearInterval` 再判早退**：`if (timer) { clearInterval(timer); timer = null; }` 在前，`if (status.url === url && status.enabled) return;` 在后。于是**第二次带着同一个 URL 调用它**（`applyConfigPatch` → `initPriceFeed`，**任何一次 UI 保存配置都会走到**）会清掉定时器然后直接 return，**不重建** → 小时级刷新从此永久停摆，而状态页只看得到一个越来越旧的 `fetchedAt`，没有任何报错。S9 的 `conformance: 'partial'` 与那句"配置保存时重新 init 会先清掉旧 timer，所以**能换 URL**"其实描述的就是这个 bug 的一面。修法是**把清理挪到早退之后**（`stopPriceFeed()` 承担清理），早退条件再显式带上 `&& timer`（表达"enabled ⟺ 定时器活着"这条不变量）。教训与 §9.5 第 12 项同源：**"形状看着对"的代码会瞒过所有人**——早退看着像幂等，实际是停摆。
 - **`onebot.reconnect`（S10c 已接管）**：原先 `connect()` 置 `#closedByUs = false` 后进循环，两处重连调度都是**裸 `setTimeout`，句柄没存**。设计稿当时把后果写成"`close()` 取消不掉已经在等待中的那一次"——**那只是表症，实测把这个病看得更清楚**：① 句柄没存也没 unref，那个定时器会**把事件循环钉住最多 `RECONNECT_MIN_MS`**（影响退出语义）；② 更要紧的是 `connect()` / `reconnect()` 也清不掉它 —— 迟到的定时器会再进 `#connectLoop` **建第二个 WebSocket 覆盖 `this.socket`**，而调用方刚作废旧 socket 的动作反而被漏掉，那个 socket 从此再也没人关（**连接泄漏**，`reconnect()` 原有的注释描述的正是这个病的另一面）。S10c 的落地形态：新增私有字段 `#reconnectTimer:55`（**非 null ⟺ 有一次重连排定待触发**，回调里先置 null 再进循环）、`#scheduleReconnect():74`（**先清旧、再存新**）、`#cancelReconnect():83`；两处排定（`:126` 建 socket 失败、`:155` close 事件）改为调 `#scheduleReconnect()`；`close():167` / `connect():90` / `reconnect():99` 三处都调 `#cancelReconnect()`。**刻意不 unref**——保留"有重连待办时钉住进程"的语义。`#connectLoop:115` 的 `#closedByUs` 早退**保留**，但它现在只是**第二道闸门**（第一道是"根本不再排定"），注释已写明。`RECONNECT_MIN_MS = 3000`（`:14`）仍是硬编码，这是**有意选择**：本机回环上 3s 常量足够，做指数退避会改掉重连的可观察行为（现有断言只钉首跳，退避的后半段无人测）。原先并列的 `RECONNECT_MAX_MS = 30000`（`:15`）**零引用**，**S11b 已删**（附录 C），原位留两行注释说明为什么不做退避——死常量留着会让人以为重连有上限。
 - **⚠️ 上表的行号是清点时的快照**，S3–S8 的改动让一部分漂移了（`wake-scheduler.ts`、`history-compactor.ts`、`app.ts`、`vision-scan.ts`、`routes/chats.ts` 等；完整对照表见附录 B 的说明）。**稳定的键是 `owner` 与 `id`，不是行号**；查证时按内容找，别按行号跳。
-- **落地形态**：S9 的 `LONG_TERM_TASKS` 原为 6 行，视频转写接入后为 7 行（上表除 `wake.debounce` 外全部落在表里）。`owner` 写**实际持有计时器的模块**，不是 `Orchestrator` 这个门面（同 `METHOD_CATALOG` 的写法：`startProactiveLoop` 只是转调 `ProactiveController`）。`conformance` 的判定规则（`full ⇒ start && stop && stopCancelsPending`；`partial ⇒ (start && !stop) || (stop && !stopCancelsPending)`；`none ⇒ !start`）写在 `tasks.ts` 头部注释里，`tests/t-tasks.mjs` 按**同一条规则**断言——改规则要同时改两处。
+- **落地形态**：S9 的 `LONG_TERM_TASKS` 原为 6 行，视频转写接入后为 7 行（上表除 `wake.debounce` 外全部落在表里；**今天 9 行**——又接入 `hot-search.daily-broadcast` 与 `image-source.pic-worker`，见附录 B 末尾的增量说明）。`owner` 写**实际持有计时器的模块**，不是 `Orchestrator` 这个门面（同 `METHOD_CATALOG` 的写法：`startProactiveLoop` 只是转调 `ProactiveController`）。`conformance` 的判定规则（`full ⇒ start && stop && stopCancelsPending`；`partial ⇒ (start && !stop) || (stop && !stopCancelsPending)`；`none ⇒ !start`）写在 `tasks.ts` 头部注释里，`tests/t-tasks.mjs` 按**同一条规则**断言——改规则要同时改两处。
 
 ### 6.4 列得出但接管不了的，登记为后续工作
 
@@ -915,7 +915,7 @@ stopSnowluma()
 |---|---|---|
 | SSE 投影正确性 | 纯函数直接调用（S1 之后） | 新增 `t-sse-project.mjs` |
 | 事件名 / 载荷一致性 | 建**真** `Orchestrator` + 收集式 `emit`，驱动一次唤醒后断言 | 模式已有：`t-orch.mjs:19-27` |
-| 任务表完整性与诚实性 | 拿表里每一条声明**去现实里核对**：当前 8 个 id 齐全、owner 文件真在调度、开关路径能在真配置里取到值、`conformance` 与启停入口相符；**反向**：局部计时器不在表内 | `t-tasks.mjs`（已落地） |
+| 任务表完整性与诚实性 | 拿表里每一条声明**去现实里核对**：当前 9 个 id 齐全、owner 文件真在调度、开关路径能在真配置里取到值、`conformance` 与启停入口相符；**反向**：局部计时器不在表内 | `t-tasks.mjs`（已落地） |
 | 层级与类型约束 | 静态检查 | `scripts/check-layers.mjs`（S2/S8）、`npm run typecheck`（S6） |
 | 端到端 | 真 `createApp()` 起服务再 fetch | `t-smoke.mjs:63-64` |
 | Agent 分层与 Catalog | 静态断言 | `t-agent-structure.mjs` |
@@ -1178,6 +1178,10 @@ stopSnowluma()
 
 > **每日热搜接入后的当前增量**：`hot-search.daily-broadcast` 是第 8 个长期任务，由 `node-cron` 持有日程句柄（因此不增加上面的原生长期任务调度点计数）。ApiZero 客户端另有一处请求作用域的 8 秒 `setTimeout`，所以局部计时器增为 19 处。`HotSearchScheduler.stop()` 会销毁未来计划并等待在途播报收尾；配置保存经 `applyConfigPatch` 只重建这一条计划，不重跑整张生命周期清单。
 
+> **搜图 worker 接入后的当前增量**：`image-source.pic-worker` 是**第 9 个**长期任务，宿主是 `src/media/image-source/pic-image-search-client.ts`。它长期持有的资源是 **Python 子进程**，不是计时器——该文件里的三处 `setTimeout`（等就绪、`probe` 等待、退出等待）与 `reverse-image-source-service.ts` 的总超时都是**请求作用域**的，所以 §6.3 的"长期任务调度点 9 处"不变。**推论：`tests/t-tasks.mjs` 第 2 段那条"owner 文件里必须有 `setInterval(`/`setTimeout(`"对这一行是为错误的理由通过的**——它扫到的是请求超时，不是"这个任务持有的长期资源"；那条断言的形态与"子进程型任务"不匹配，本次未改，记在这里免得后人以为它验证了什么。启动闸门 `imageSource.enabled` **默认 `false`**（不用搜图的部署不付 Python 冷启动）；`conformance` 为 `full`（`closePicImageSearchClient()` 关子进程并 fail 掉所有在途请求），启停入口是 `initPicImageSearch` / `closePicImageSearchClient`，装配清单里排**最后**（于是逆序停止时第一个被收掉）。
+>
+> ⚠️ **顺带实测（与本次改动无关的既有漂移）**：本节几条增量说明里的"局部计时器 17 / 16 / 18 / 19 处"**与源码对不上**。按同一 grep 口径（`grep -rnE "(setTimeout|setInterval)\s*\(" src/ electron/`，排除 `ReturnType<typeof setTimeout>`）重数：当前共 **33 行**命中，其中属于长期任务的 **9 处**，其余 **24 处**（含 `snowluma.ts:117` 的 `socket.setTimeout`，按本附录口径也算局部计时器）。**结论照旧：稳定的事实是"文件名 + 内容"，汇总数会漂**——下次做 §6.1 清点时统一重核一次，别再逐个增量地 +1。
+
 > ⚠️ 本节原先写"7 个"，把 §6.3 表里标着"排除"的 `wake.debounce` 也算进来了。**它是局部计时器**（下表的 `wake-scheduler.ts:336` 就是它），按 §6.1 的分界线不进任务表，而是 `tests/t-tasks.mjs` 反向断言的目标。
 >
 > ⚠️ **本附录、§6.3 与附录 C 的行号是清点时的快照**，S3–S8 的改动让一部分漂移了。**稳定的键是文件名 + 内容描述，不是行号**；查证时按内容找。S9 收尾时逐条重核（`grep -nE "set(Timeout|Interval)\(" src/ electron/`）的结果：
@@ -1211,7 +1215,9 @@ stopSnowluma()
 
 > **S11 之后（web 模块整理）：本附录的计数一个都没变，但两处宿主文件换了。** `app.ts` 里那两处（socket 超时、启动期端口轮询）——**socket 超时随 SnowLuma 控制器搬进了 `src/web/onebot/snowluma.ts`**，启动期端口轮询仍在 `app.ts` 的 `start()` 里。上表已按文件（不带行号）记录。**"9 个任务调度点"与"16 处局部计时器"的总数不变**：这次整理一行 `setInterval` / `setTimeout` 都没增删（搬的是**宿主**，不是计时器）。`tests/t-tasks.mjs` 的 `LOCALTIMER_ONLY_FILES` 同步加了 `src/web/onebot/snowluma.ts`，`app.ts` 那行保留（它仍持有端口轮询那处）。上面几条提到的 `app.ts:791/814/865` 等行号**再次作废**——组装根从 881 行缩到 392 行。
 
-**局部计时器（16 处，排除在注册层之外）**：
+> **解释器探测 / 依赖自检接入后的当前增量**：新增 `src/core/python-probe.ts`，其中一处 `setTimeout`（探测 15s / 自检 60s 的硬超时，按调用方的 `deps.timeoutMs` 取）。它是**请求作用域**的短命子进程等待——一次探测或一次自检，与长期任务无关，**不进 `LONG_TERM_TASKS`**；宿主也不是任何任务的 owner（已加进 `t-tasks.mjs` 的 `LOCALTIMER_ONLY_FILES`）。所以**局部计时器 16 → 17 处**，§6.3 的"9 个任务调度点"不变。两个端点（`POST /api/system/python-probe` / `-selfcheck`）本身只有一次 HTTP 调用的生命周期，唯一的模块级状态是自检的忙等布尔（`pythonSelfCheck.running`），与 `routes/providers.ts` 的 `visionScan` 同款、同样**零计时器**。
+
+**局部计时器（17 处，排除在注册层之外）**：
 
 | 位置 | 用途 | 生命周期 |
 |---|---|---|
@@ -1226,6 +1232,7 @@ stopSnowluma()
 | `web/onebot/snowluma.ts` | 端口探活 socket 超时 | 单次连接 |
 | `web/app.ts` | 启动期 SnowLuma 端口轮询（1s × 20） | 单次启动 |
 | `web/routes/chats.ts:78` | `getChatName` 3s 兜底 | 单次请求 |
+| `core/python-probe.ts` | 解释器探测 / 依赖自检的硬超时（15s / 60s） | 单次请求 |
 | `electron/main.js:131` | 窗口加载前的 2s 延时 | 单次启动 |
 | `agent/runtime/wake-scheduler.ts:336` | 每会话唤醒防抖 | 单条消息（按会话清理） |
 | `agent/runtime/wake-scheduler.ts:421` | 等待窗口相关调度 | 单会话轮次 |

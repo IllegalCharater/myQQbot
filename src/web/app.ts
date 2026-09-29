@@ -27,6 +27,7 @@ import { errorMessage, isRecord } from './http/http.js';
 import type { AppHandle, CreateAppOptions } from './types.js';
 import { HotSearchScheduler } from '../media/hot-search/scheduler.js';
 import { createHotSearchAdminActions } from '../media/hot-search/admin-actions.js';
+import { initPicImageSearch, closePicImageSearchClient } from '../media/image-source/index.js';
 
 export type { AppHandle, CreateAppOptions } from './types.js';
 
@@ -187,7 +188,9 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       priceFeed: { init: initPriceFeed, stop: stopPriceFeed },
       jmcomic: { init: initJmcomicQueue, stop: stopJmcomicQueue },
       transcription: { start: () => transcription.start(), stop: () => transcription.stop() },
-      hotSearch: { start: () => hotSearchScheduler.start(), stop: () => hotSearchScheduler.stop() }
+      hotSearch: { start: () => hotSearchScheduler.start(), stop: () => hotSearchScheduler.stop() },
+      // 搜图 worker 自己吞掉预热失败（没装库不该掀翻 app.start()），所以这里直接递真函数即可。
+      imageSource: { start: initPicImageSearch, stop: () => closePicImageSearchClient() }
     };
   }
 

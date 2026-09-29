@@ -1,0 +1,23 @@
+# 本项目全部 Python 工具的依赖。**只有这一份** —— 新增 Python 工具时依赖加在这里，
+# 不要在工具旁边另开一份（两份清单必然漂移，最终没人知道该装哪个）。
+#
+#   python-tools/jmcomic_download.py      → jmcomic（漫画下载）
+#   python-tools/pic_image_search_worker.py → PicImageSearch（搜图 worker）
+#
+# 安装（两个工具共用一个解释器，路径由配置项 `python.path` 指定）：
+#
+#     <python> -m pip install -r python-tools/requirements.txt
+#
+# <python> 就是 `python.path` 里填的那个解释器；留空时按 `src/core/python-runtime.ts`
+# 的解析链回落：QQ_AGENT_PYTHON → JMCOMIC_PYTHON（已废弃）→ Windows 固定环境 →
+# conda run -n my_bot python。也可以直接在设置页「Python 工具」里填。
+
+# 漫画下载（python-tools/jmcomic_download.py）
+jmcomic
+
+# 搜图 worker（python-tools/pic_image_search_worker.py）。
+# 下限按「带 Network 客户端 + 异步 search()」这条线定。**没有钉上限**：
+# worker 的属性访问全部走候选名链（见该文件头部 ⚑未验证 段），遇到版本不匹配时
+# 表现成「某字段空了」而不是「搜图挂了」，所以放宽比钉死更安全。
+# 想钉死就在目标解释器上先跑 `pic_image_search_worker.py --self-check`，再把版本写进这里。
+PicImageSearch

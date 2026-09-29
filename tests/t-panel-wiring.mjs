@@ -94,6 +94,52 @@ ok('页面保存时钳制极速版 7200 秒 / 100 MiB 硬上限',
   /maxDurationSeconds: clampInt\([^\n]+, 1, 7200, 7200\)/.test(transcriptionSave)
   && /maxAudioBytes: clampInt\([^\n]+, 1, 100, 100\) \* 1048576/.test(transcriptionSave));
 
+console.log('\n═══ Python 工具设置（解释器路径） ═══');
+// 这个字段是整个仓库里唯一能让用户从"Python 环境不对"里自救的旋钮，而它此前
+// 一条断言都没有：id 改名、保存分支被删、被好心兜一个非空默认值（把"留空走自动
+// 探测链"变成"写死一个路径"）—— 四套件全绿，症状是搜图/漫画悄悄不可用。
+ok('设置侧栏有独立的 Python 工具入口并接到渲染函数',
+  /\['python', 'Python 工具'\]/.test(js)
+  && /python: \(\) => renderPythonSection\(c\)/.test(js));
+for (const id of [
+  'cfg-python-path', 'cfg-python-test', 'cfg-python-selfcheck',
+  'cfg-python-test-result', 'cfg-python-selfcheck-output'
+]) {
+  ok(`#${id} 已加入设置模板`, new RegExp(`id="${id}"`).test(js));
+  ok(`#${id} 可解析`, resolves(id));
+}
+const pythonSave = seg("if (sec === 'python')", "if (sec === 'chat')");
+ok('Python 保存分支生成 patch.python.path',
+  /patch\.python = \{ path: val\('#cfg-python-path'/.test(pythonSave));
+// 空串是合法值（含义是"没配，走自动探测链"，见 core/python-runtime.ts）。兜一个
+// 非空默认值会把"留空"变成"填一个写死的路径"，而用户根本看不出自己没配。
+ok('python.path 的兜底必须仍是空串：不许出现非空字符串默认值',
+  /val\('#cfg-python-path', p\.path \|\| ''\)/.test(pythonSave)
+  && !/val\('#cfg-python-path',[^)]*'[^']+'/.test(pythonSave)
+  && !/val\('#cfg-python-path',[^)]*"[^"]+"/.test(pythonSave));
+
+const pythonBlock = segmentOf(settingsJs, '// ── Python 工具：解释器探测 / 依赖自检 ──', '// ── 每日热搜播报 ──');
+ok('「测试解释器」按钮绑了 click 监听',
+  /\$\('#cfg-python-test'\)/.test(pythonBlock) && /pythonTest\.addEventListener\('click'/.test(pythonBlock));
+ok('「跑一遍依赖自检」按钮绑了 click 监听',
+  /\$\('#cfg-python-selfcheck'\)/.test(pythonBlock) && /pythonCheck\.addEventListener\('click'/.test(pythonBlock));
+// 后端有意**拒绝从请求体取可执行文件路径**（否则等于凭空开一个"用 HTTP 启动任意
+// 本机程序"的一步接口），所以"先存本页再探测"不是体验选择而是唯一通路：不保存，
+// 探的就是"刚敲进输入框的字符串"，而它跟后端真正会用的那个值可以不一样。
+ok('两个按钮都先保存本页再探测',
+  (pythonBlock.match(/await saveConfig\(\{ quiet: true \}\)/g) || []).length === 2
+  && pythonBlock.indexOf('await saveConfig({ quiet: true })') < pythonBlock.indexOf('/api/system/python-probe'));
+ok('探测请求不带路径（路径只能经鉴权过的 POST /api/config 写入）',
+  /api\('\/api\/system\/python-probe', \{ method: 'POST', body: '\{\}' \}\)/.test(pythonBlock)
+  && !/JSON\.stringify\(\{[^}]*path/.test(pythonBlock));
+ok('自检请求同样不带路径，且走的是同一个「已保存配置」入口',
+  /api\('\/api\/system\/python-selfcheck', \{ method: 'POST', body: '\{\}' \}\)/.test(pythonBlock)
+  && pythonBlock.indexOf('await saveConfig({ quiet: true })') < pythonBlock.indexOf('/api/system/python-selfcheck'));
+ok('自检原文用 textContent 照登（不拼 HTML、不截断：那几张待验证的映射表要靠原文对齐）',
+  /pre\.textContent = r\.output \|\| /.test(pythonBlock) && !/pre\.innerHTML/.test(pythonBlock));
+ok('自检按钮跑完会复位（finally 里恢复 disabled，否则一次失败就永久禁用）',
+  /finally \{\s*\r?\n\s*pythonCheck\.disabled = false;/.test(pythonBlock));
+
 const REGIONS = {
   '表情包页': stickerJs,
   '存档页': chatJs,

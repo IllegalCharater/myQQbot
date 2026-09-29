@@ -431,6 +431,42 @@ export function renderTranscriptionSection(c) {
     <div class="hint">转写按次计费，所以模型自主调用时受这两项限制（<code>/转写</code> 命令不受限）。超限时工具直接失败并说明原因。</div>`;
 }
 
+export function renderPythonSection(c) {
+  const p = c.python || {};
+  return `
+    <h3>Python 工具</h3>
+    <div class="hint" style="margin-bottom:10px">
+      项目里有两个 Python 工具，<strong>共用这一个解释器</strong>：漫画下载
+      （<code>python-tools/jmcomic_download.py</code>）与搜图 worker
+      （<code>python-tools/pic_image_search_worker.py</code>）。两个工具的依赖也合并成一份
+      <code>python-tools/requirements.txt</code>，装一次即可。
+    </div>
+    <div class="field"><label>Python 解释器路径</label>
+      <input type="text" id="cfg-python-path" value="${esc(p.path || '')}"
+        placeholder="留空则自动探测；例如 E:\\anaconda\\envs\\my_bot\\python.exe" />
+      <div class="hint">
+        填<strong>解释器可执行文件</strong>的完整路径，不是环境目录。这个解释器里需要装好上面那份依赖：
+        <code>&lt;上面的路径&gt; -m pip install -r python-tools/requirements.txt</code>
+      </div>
+      <div class="hint">
+        留空时的探测顺序：环境变量 <code>QQ_AGENT_PYTHON</code> → Windows 固定环境
+        <code>E:\\anaconda\\envs\\my_bot\\python.exe</code> → <code>conda run -n my_bot python</code>。
+        依赖缺失时搜图 worker 会在启动日志里给出确切的安装命令。
+      </div>
+      <div class="hint">
+        下面两个按钮都<strong>先保存本页、再按已保存的值探测</strong>（所以填完直接点即可）。
+        「测试解释器」只看解析层级与两个库装没装；「跑一遍依赖自检」才是权威检查——它真的把
+        搜图 worker 跑起来解释自己的库，输出原文照登。
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+        <button class="btn btn-small" id="cfg-python-test" type="button">测试解释器</button>
+        <button class="btn btn-small" id="cfg-python-selfcheck" type="button">跑一遍依赖自检</button>
+        <span id="cfg-python-test-result" class="muted"></span>
+      </div>
+      <pre id="cfg-python-selfcheck-output" style="display:none;white-space:pre-wrap;max-height:420px;overflow:auto;margin-top:10px"></pre>
+    </div>`;
+}
+
 // 表情包积极程度档位：[值, 显示名]
 export function renderDesktopSection(c) {
   return `

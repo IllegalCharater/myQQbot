@@ -43,9 +43,9 @@ export interface TaskEntry {
   /**
    * 承载这个名字的对象：
    * - `'Orchestrator'` / `'OneBotClient'` → 类方法，套件在原型或真实例上解析；
-   * - `'price-feed'` / `'jmcomic'` → 模块导出；其余名字 → 类方法。
+   * - `'price-feed'` / `'jmcomic'` / `'pic-image-search'` → 模块导出；其余名字 → 类方法。
    */
-  on: 'Orchestrator' | 'OneBotClient' | 'VideoTranscriptionQueue' | 'HotSearchScheduler' | 'price-feed' | 'jmcomic';
+  on: 'Orchestrator' | 'OneBotClient' | 'VideoTranscriptionQueue' | 'HotSearchScheduler' | 'price-feed' | 'jmcomic' | 'pic-image-search';
   kind: 'method' | 'export';
   name: string;
 }
@@ -88,7 +88,7 @@ export interface LongTermTask {
 }
 
 /**
- * 8 个长期任务（原有 6 个 + 视频转写 worker + 每日热搜播报）。**不含** `wake.debounce`：那是每会话的唤醒防抖，按 §6.1 的分界线
+ * 9 个长期任务（原有 6 个 + 视频转写 worker + 每日热搜播报 + 搜图常驻 worker）。**不含** `wake.debounce`：那是每会话的唤醒防抖，按 §6.1 的分界线
  * （生命周期是否长于一次请求或一次会话）属于局部计时器，`tests/t-tasks.mjs` 有一条
  * 反向断言专门钉它不在表内——设计稿 §6.3 的表里把它列为第 7 行"排除"是清点时的写法，
  * 不是表的一行。
@@ -229,5 +229,29 @@ export const LONG_TERM_TASKS: LongTermTask[] = [
       'RECONNECT_MAX_MS 零引用，S11b 已删。**S11b 起配置刷新语义也补上了**：改 snowluma 的 ' +
       'wsUrl/httpUrl/accessToken/httpAccessToken 经 applyConfigPatch → OneBotClient.applyEndpoint ' +
       '**比较后**重连（值没变不重连，所以保存一次没动端点的设置不会断连）。'
+  },
+  {
+    id: 'image-source.pic-worker',
+    owner: 'src/media/image-source/pic-image-search-client.ts',
+    label: '搜图常驻 worker（PicImageSearch 子进程，JSON Lines 走 stdin/stdout）',
+    enabledBy: { path: 'imageSource.enabled', kind: 'boolean' },
+    configRefresh: 'not-applicable',
+    // 子进程的 stdio 管道句柄会把事件循环钉住（客户端从不 unref 它），所以它确实影响退出语义。
+    unref: false,
+    start: { on: 'pic-image-search', kind: 'export', name: 'initPicImageSearch' },
+    stop: { on: 'pic-image-search', kind: 'export', name: 'closePicImageSearchClient' },
+    stopCancelsPending: true,
+    conformance: 'full',
+    note: '模块级单例持有的常驻 Python 子进程。在此之前它的生命周期是"谁先搜图谁负责把它拉起来"' +
+      '（纯惰性 spawn 副作用，没有一个地方能回答它该何时起何时止）；现在由 app.start() 经 ' +
+      'initPicImageSearch 预热、app.stop() 经 closePicImageSearchClient 收掉。预热顺带让**群里第一张图**' +
+      '不必再等一次解释器 + PicImageSearch 的 import（那次等待原本算在用户请求的 totalTimeoutMs 里）。' +
+      '门控是 imageSource.enabled（**默认 false**），不用搜图的部署完全不付这次冷启动；' +
+      '预热失败只记日志、绝不外抛 —— 没装库是"搜图不可用"，不该掀翻 app.start() 把 QQ 连接一起拖下水。' +
+      'stopCancelsPending 为真：close() 会 failPending 掉所有在途请求，并等子进程真的退出（宽限 3s 后强杀）。' +
+      '**已知代价**：unref 为 false 意味着它必须活到我们主动关掉它为止，所以**没有收到信号的非正常退出' +
+      '（强杀 / 崩溃）会留下一个孤儿 Python 进程**，那一侧只能靠操作系统回收；Windows 上尤其如此，' +
+      '因为 TerminateProcess 不走 worker 的 SIGTERM 处理器。另：解释器路径（python.path）在 spawn 时读取，' +
+      '改它需要重启才生效，刻意不接 applyConfigPatch（与配置刷新路径只热刷价格表 / 热搜计划同一决定）。'
   }
 ];
