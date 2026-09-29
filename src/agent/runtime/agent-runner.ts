@@ -186,6 +186,13 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     };
 
     const maxRounds = Math.max(1, Number(cfg.api.maxRounds) || 12);
+    // 工具调用后的普通文本很容易被模型误当成“已经回复”，但本桥接程序只认发送工具。
+    // 给这种协议偏差一次独立纠正机会；它不是业务重试，更不能把普通文本直接代发到 QQ。
+    // 纠正最多一次，模型下一轮仍可用 finish / 空内容选择沉默，避免强迫回复或形成循环。
+    let roundLimit = maxRounds;
+    let calledTool = false;
+    let sentExternalAction = false;
+    let protocolCorrectionUsed = false;
     let finish = false;
     let webSearchCount = 0;
     // 刚往会话记录里压过一条「N 张图片已作为图像输入注入模型」时，记下它的下标。
@@ -201,7 +208,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       host.sessions.update(session.id);
       host.emit(EVENTS.sessionUpdate, { sessionId: session.id });
     };
-    for (let round = 0; round < maxRounds && !finish; round++) {
+    for (let round = 0; round < roundLimit && !finish; round++) {
       if (host.aborted) { host.sessions.finish(session.id, 'aborted'); return; }
       markActivity('正在思考…');
       // 在调用前保存这一轮真正交给 chat/completions 的完整输入。messages 会随工具轮次增长，
@@ -293,9 +300,20 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
         host.emit(EVENTS.sessionUpdate, { sessionId: session.id });
       }
       if (!toolCalls.length) {
+        // 已经执行过工具后，模型常把普通 content 误当成“已经回复”。普通文本不能直接
+        // 代发（里面可能是思考或内部说明），所以只追加一次目录里的协议纠正，再让模型
+        // 自己决定调用发送工具还是保持沉默。额外加一轮额度，确保 maxRounds 边界上也能纠正。
+        if (calledTool && !sentExternalAction && session.sent.length === 0 && finalText.trim() && !protocolCorrectionUsed) {
+          protocolCorrectionUsed = true;
+          roundLimit += 1;
+          messages.push({ role: 'user', content: PROMPT_CATALOG.user.toolProtocolCorrection });
+          continue;
+        }
         // 没有工具调用 = 模型结束思考（文本不会发给 QQ）
         break;
       }
+
+      calledTool = true;
 
       const toolResults: Array<ChatRequestMessage & { tool_call_id?: string; name?: string; isError?: boolean }> = [];
       const imageUserMessages: ChatRequestMessage[] = [];
@@ -312,6 +330,9 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
         session.webSearchCount = webSearchCount;
         markActivity(`正在调用 ${name}…`);
         const result = await executeTool(toolDefs, ctx, name, argsRaw);
+        // 文本与表情发送成功会写入 session.sent；拍一拍是外部发送动作，但既有账本不记录它，
+        // 因此单独记住，避免它成功后又被协议纠正误判成“尚未发送”。
+        if (session.sent.length > 0 || (name === 'send_poke' && !result.isError)) sentExternalAction = true;
         // 工具结果：文本走 tool 消息；图片（parts 数组）不能塞进 tool 消息——
         // 很多 OpenAI 兼容端点不接受。做法：tool 消息只带文本，图片随后以 user 消息补发
         // （[{type:'text'},{type:'image_url'}]），这是兼容面最广的视觉输入方式。

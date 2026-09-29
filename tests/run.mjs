@@ -50,7 +50,8 @@ const ASSERT = [
   't-ui-modules.mjs',      // 原生 ES Module 入口、依赖图与资源完整性
   't-admin.mjs',           // 管理接口
   't-ui-render.mjs',       // UI 领域模块在假 DOM 下真跑一遍看 HTML
-  't-vision-log.mjs'       // 读图 → 会话记录回填（假模型端点跑整轮）
+  't-vision-log.mjs',      // 读图 → 会话记录回填（假模型端点跑整轮）
+  't-tool-protocol.mjs'    // 工具后普通文本 → 一次协议纠正；仍可选择沉默
 ];
 
 // ── 诊断脚本：只打印行为、没有断言、永远退 0，默认不跑（--all 才带上） ──
