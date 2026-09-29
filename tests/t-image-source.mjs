@@ -447,6 +447,71 @@ ok('引擎表与顺序表都是显式声明的（`Record<EngineWhich, EngineRow>
 ok('AnimeTrace 没有被加成第三个引擎（它是 trace.moe 的别名，不是独立服务）',
   !svcSrc.includes('anime_trace'));
 
+// ── ⑨ 引擎名是跨进程的手工镜像 ───────────────────────────────────
+// `types.ts` 的 `PicImageSearchEngine` ↔ 客户端的 `PIC_IMAGE_SEARCH_ENGINES` 有编译期覆盖
+// 断言，但 **Python 那一侧谁都没管**：worker 的 `ENGINE_CLASS_CANDIDATES` 少一个键、多一个
+// 键，Node 这边不会有任何动静（`.py` 不进 `tsc`，也没有任何套件读它）。
+//
+// 本段有两条断言，**它们的能力边界不一样，别把后一条当前一条用**：
+//   ① 键集合比对（下面第一条）—— 引擎少一个/多一个会红。但它**只比键**：把 `baidu` 的候选从
+//      `("BaiDu","Baidu")` 改回 `("Baidu",)`，键集合照样对得上，实测全绿。
+//   ② `MEASURED_FIRST_CANDIDATE`（下面第二条）—— 钉住**实测到的类名**。实测踩到过：`baidu`
+//      曾写成 `("Baidu",)`，而库里导出的名字是 `BaiDu`（大写的 D），于是那个引擎**永远解析
+//      不到**：既不出现在 ready 事件的 engines 里，真去请求也报 PROVIDER_UNAVAILABLE。而静态
+//      清单里 `baidu` 一直都在，谁也不觉得缺 —— 类名的拼写只能靠**带库的机器**实测
+//      （`--self-check`）看出来，本地推不出来。所以 ② 钉的是**实测结论**，不是可推导的规则：
+//      它挡不住"库改名"，只挡得住"有人把已经实测对的名字又改回去"。库里真改名了 → 重跑一次
+//      `--self-check`，同时改 worker 的表与这一行。
+const { PIC_IMAGE_SEARCH_ENGINES } = await load('media/image-source/pic-image-search-client.js');
+const workerPath = path.join(ROOT, 'python-tools', 'pic_image_search_worker.py');
+const workerSrc = fs.readFileSync(workerPath, 'utf8');
+/** 取 Python 里某个 dict 字面量的表体，并**按行丢掉注释**（`#` 开头的行不参与匹配）。 */
+const pyTable = (name) => {
+  const body = (workerSrc.match(new RegExp(`${name}[^=]*=\\s*\\{([\\s\\S]*?)\\n\\}`)) || [])[1] || '';
+  const lines = body.split(/\r?\n/).filter((l) => !l.trim().startsWith('#')).join('\n');
+  return {
+    body,
+    lines,
+    keys: [...lines.matchAll(/^\s*"([\w.]+)"\s*:/gm)].map((m) => m[1]),
+    values: [...lines.matchAll(/^\s*"[\w.]+"\s*:\s*"([\w.]+)"/gm)].map((m) => m[1]),
+    /** 键 → 候选元组（`"k": ("A", "B"),` 括号里那一串）。 */
+    candidates: new Map([...lines.matchAll(/^\s*"([\w.]+)"\s*:\s*\(([^)]*)\)/gm)]
+      .map((m) => [m[1], [...m[2].matchAll(/"(\w+)"/g)].map((x) => x[1])]))
+  };
+};
+const classTable = pyTable('ENGINE_CLASS_CANDIDATES');
+const nodeEngines = [...PIC_IMAGE_SEARCH_ENGINES].sort();
+ok('worker 的引擎键与 Node 的引擎名逐字相同（跨进程镜像，没有编译器管它）',
+  classTable.keys.length > 0
+  && JSON.stringify([...classTable.keys].sort()) === JSON.stringify(nodeEngines),
+  `worker=[${[...classTable.keys].sort().join(',')}] node=[${nodeEngines.join(',')}]`);
+
+// 2026-09-29 在目标解释器上跑 `--self-check` 实测到的**库导出的类名**（PicImageSearch 3.12.11，
+// 结论与理由写在 worker 头部 ⚑ c 条）。断言的是"实测名在候选链里、**够得着**"，不是"必须排第一"
+// —— 顺序另有语义（`google_lens` 的 `Google` 近亲、`tineye` 的老版本名都刻意排在后面）。
+const MEASURED_CLASS_NAMES = {
+  'saucenao': 'SauceNAO', 'trace.moe': 'TraceMoe', 'baidu': 'BaiDu', 'bing': 'Bing',
+  'google_lens': 'GoogleLens', 'yandex': 'Yandex', 'tineye': 'Tineye'
+};
+const unreachable = Object.entries(MEASURED_CLASS_NAMES)
+  .filter(([key, cls]) => !(classTable.candidates.get(key) ?? []).includes(cls))
+  .map(([key, cls]) => `${key} 候选中没有 ${cls}（现在是 [${(classTable.candidates.get(key) ?? []).join(',')}]）`);
+ok('各引擎的候选链都还够得着实测到的类名（`Baidu`/`BaiDu` 那种拼写错误骗得过上面那条）',
+  unreachable.length === 0,
+  `${unreachable.join('；')} —— 实测名是从 worker 头部 ⚑ c 条抄来的，改表时别把它改掉；`
+  + '库里真改名了要重跑 `--self-check` 并同时改这两处');
+
+// 归一化器是**按家族**挑的（`ENGINE_FAMILY.get(engine, "web")`），而家族名与引擎名是两套字面量：
+// 家族键拼错 → 静默退回通用 "web" 提取表（字段全丢但不报错）；家族的**值**拼错 → 更糟，
+// `_NORMALIZERS[...]` 直接 KeyError。两种都在这里挡住。
+const familyTable = pyTable('ENGINE_FAMILY');
+const normalizers = pyTable('_NORMALIZERS');
+ok('worker 的引擎家族表指向真实存在的引擎与归一化器（拼错会静默退回通用提取表）',
+  familyTable.keys.length > 0 && normalizers.keys.length > 0
+  && familyTable.keys.every((k) => classTable.keys.includes(k))
+  && familyTable.values.every((v) => normalizers.keys.includes(v)),
+  `family=[${familyTable.keys.join(',')}] → [${familyTable.values.join(',')}] normalizers=[${normalizers.keys.join(',')}]`);
+
 // 必须是 process.exit(done() …)：done() 只**返回**布尔值、自己从不退出（见 lib/harness.mjs:27），
 // 而 run.mjs 单看子进程的退出码判定成败。这里原先是一句裸 `done();`，于是本套件**永远退 0** ——
 // 断言红成一片，run.mjs 照样报 ✅。（实测：30 通过 / 5 失败的一次运行，run.mjs 显示全绿。）

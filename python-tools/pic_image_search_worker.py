@@ -56,22 +56,41 @@ minSimilarity —— 那些是 Node 侧服务层的事，在这里重复一份�
 5. **超时以 Node 侧为准**，这里的 timeoutMs 只是兜底（Node 的计时器不会因本进程繁忙而迟到）。
 
 ═══════════════════════════════════════════════════════════════════════════════
-⚑未验证 的地方（本文件是在**没有装 PicImageSearch 的机器上**写的）
+⚑ 与真实库的对账状态（2026-09-29 首次实测）
 ═══════════════════════════════════════════════════════════════════════════════
 
-以下几处必须靠 `--self-check` 在目标解释器上实测确认后才能钉死：
+本文件最初是在**没有装 PicImageSearch 的机器上**写的，版本相关的事实全是候选链。2026-09-29
+在目标解释器上跑了一次
 
-  a. 结果访问器：3.x 用过 `.raw`（原始 JSON dict），4.x 用 `.results`（解析后的对象列表）。
-     本文件两个都试、**只接受 list**，因此两种形态都能活。
-  b. 各项属性的**真实名字**（similarity / title / from 还是 from_ / image 还是 thumbnail …）。
-     全部走 _pick() 的候选名数组，取不到就退化成 None 而不是抛异常 —— 一次改名应该表现成
-     「某个字段空了」（用户看得见、能报告），而不是「整个搜图功能挂了」。
-  c. 引擎类名：Baidu / Bing / GoogleLens / Google / Yandex / TinEye 在不同版本下改过名。
-     走 ENGINE_CLASS_CANDIDATES 候选表。
-  d. 入参名与能否直接喂 bytes：见 _input_param 与 _call_search 的说明。**这一条最危险**。
+    <python.path 那个解释器> python-tools/pic_image_search_worker.py --self-check
 
-先跑 `<python.path 那个解释器> python-tools/pic_image_search_worker.py --self-check`，
-把输出贴回来，再把上面几张表钉死。
+（实测环境：Python 3.10.12 / PicImageSearch 3.12.11）四条对账如下：
+
+  a. 结果访问器（`.raw` / `.results`）—— **仍未定**。`_items()` 两个都试、**只接受 list**，
+     所以两种版本形态都能活，悬着也不会炸。自检会打印返回类型与其字段，据此可以钉死。
+  b. 结果条目的字段名 —— **仍未定**（自检现在会把条目类声明的字段列出来，对着 `_normalize_*`
+     的候选链读：哪个字段是空的就改哪个）。取不到一律退化成 None 而不是抛异常，所以这一条
+     即使不准，表现也是"某个字段空了"（用户看得见、能报告），不是"搜图功能挂了"。
+  c. 引擎类名 —— **已实测确认**。红过一次的是 `baidu`：库里导出的名字是 **`BaiDu`**（大写的
+     D），不是 `Baidu`，于是那个引擎**永远解析不到**。`ENGINE_CLASS_CANDIDATES` 已改。
+     实测到的名字（括号里是库里同时存在、但**不该**用的同名近亲）：
+     `SauceNAO` / `TraceMoe`（另有 `AnimeTrace`，同一个远端服务）/ `BaiDu` / `Bing` /
+     `GoogleLens`（另有 `Google`，那是按关键词搜、不收图）/ `Yandex` / `Tineye`。
+     这份结论钉在 `tests/t-image-source.mjs` 第 ⑨ 段的 `MEASURED_FIRST_CANDIDATE` 里。注意
+     同段那条键集合比对**管不着**这件事：把 `BaiDu` 改回 `Baidu` 实测全绿。
+  d. 入参名与能否直接喂 bytes —— **已实测确认，是好消息**。每个引擎的 search() 都是
+     `search(self, url=None, file: Union[str, bytes, pathlib.Path, NoneType] = None, **kwargs)`：
+     **参数名恒为 `file`，且可以直接喂 bytes**。所以默认的 `INPUT_MODE=auto` 先走 bytes 是对的，
+     `_call_search` 里那个临时文件降级是**纯保险**（正常永远不该触发），也就不必设
+     `IMAGE_SOURCE_INPUT_MODE=file`。
+
+  另有一条实测：`Network(internal=False, proxies=None, headers=None, cookies=None, timeout=30,
+  verify_ssl=True, http2=False)`。构造函数确实收 `timeout`（本文件的 `timeout=30` 生效），
+  但那个参数是**复数 `proxies`** —— 写成 `proxy` 会被 `_filtered_call` 静默丢掉（行为无差，
+  只是看着像配了代理）。
+
+改过 `ENGINE_CLASS_CANDIDATES` / `_normalize_*` / `_input_param` 里的任何一张表之后，**再跑一次
+`--self-check` 并把结论写回上面这几条** —— 这张表是那几处唯一的判据来源。
 """
 
 from __future__ import annotations
@@ -120,8 +139,20 @@ ENGINE_CLASS_CANDIDATES: dict[str, tuple[str, ...]] = {
     # anime_trace 与 trace.moe 是同一个引擎的两个名字（AnimeTrace 是它的中文叫法）。
     # 候选里带上 AnimeTrace 只是为了兼容把两者分开实现的版本。
     "anime_trace": ("TraceMoe", "AnimeTrace"),
-    "baidu": ("Baidu",),
+    # ⚠️ 库导出的名字是 **BaiDu**（大写的 D），不是 Baidu。2026-09-29 实测（PicImageSearch
+    # 3.12.11）发现原先只写 Baidu，于是这个键**永远解析不到**：`baidu` 既不出现在
+    # ready 事件的 engines 里，真去请求也会报 PROVIDER_UNAVAILABLE。
+    # 之所以一直没被发现：**Node 与 Python 各有一份引擎名清单，两边没有任何东西比对**
+    # （`types.ts` ↔ `PIC_IMAGE_SEARCH_ENGINES` 有编译期断言，Python 这一侧谁都管不着）。
+    # 守护分两半，各自只看得见一半（`tests/t-image-source.mjs` 第 ⑨ 段）：
+    #   ① 跨进程的**键集合**比对 —— 引擎少一个/多一个会红，但**看不见类名拼写**
+    #      （把这里的 BaiDu 改回 Baidu，实测该套件仍全绿）；
+    #   ② `MEASURED_FIRST_CANDIDATE` —— 钉住 2026-09-29 实测到的类名，改回 Baidu 会红。
+    #      它钉的是**实测结论**不是可推导的规则：库里真改名了，要重跑 `--self-check`
+    #      并同时改这一行与那张表（本地没有库，推不出来）。
+    "baidu": ("BaiDu", "Baidu"),
     "bing": ("Bing",),
+    # GoogleLens 必须排在 Google 前面：`Google` 在库里是**按关键词搜**的另一个类，不收图。
     "google_lens": ("GoogleLens", "Google"),
     "yandex": ("Yandex",),
     "tineye": ("TinEye", "Tineye"),
@@ -629,7 +660,12 @@ class Worker:
             raise ProviderFailure(E_PROVIDER_UNAVAILABLE, "PicImageSearch 里没有 Network 类")
         assert self._stack is not None
         try:
-            network = _filtered_call(network_cls, timeout=30, proxy=None)
+            # 实测签名是 `Network(internal=False, proxies=None, headers=None, cookies=None,
+            # timeout=30, verify_ssl=True, http2=False)` —— 注意是**复数 `proxies`**。
+            # 两个参数都写在这里是为了让"我们想要什么"是显式的（超时 30s、不用代理）：
+            # `_filtered_call` 会按签名过滤，版本里没有的参数自动丢掉，不会抛。
+            # 顺带一提，这里的 30s 是**兜底**：真正的超时以 Node 侧为准（见模块头硬约束 5）。
+            network = _filtered_call(network_cls, timeout=30, proxies=None)
         except Exception as exc:  # noqa: BLE001 —— 参数表差异 → 退回零参构造
             log(f"Network 构造失败，改用无参构造：{type(exc).__name__}: {exc}")
             network = network_cls()
@@ -699,9 +735,11 @@ class Worker:
     def _input_param(self, engine_obj: Any, engine: str) -> str:
         """挑出这个引擎的 search() 用哪个参数名收图片。
 
-        ⚑未验证 的一处：绝大多数版本叫 `file`，但也有叫 `image` / `image_path` 的。
-        挑错名字的后果不是崩，而是**过滤之后一个参数都没传**，引擎拿着空输入去请求 ——
-        白烧一次配额还拿到一个看不懂的错误。所以宁可在这里显式报错。
+        **已实测（PicImageSearch 3.12.11）**：每个引擎都是
+        `search(self, url=None, file: Union[str, bytes, pathlib.Path, NoneType] = None, **kwargs)`，
+        所以名字恒为 `file`，候选链里后面那几个（image / image_path / img / path）是给
+        "某个版本改过名"留的保险。挑错名字的后果不是崩，而是**过滤之后一个参数都没传**，
+        引擎拿着空输入去请求 —— 白烧一次配额还拿到一个看不懂的错误。所以宁可在这里显式报错。
         """
         cached = self._input_params.get(engine)
         if cached:
@@ -741,15 +779,20 @@ class Worker:
     async def _call_search(self, engine_obj: Any, engine: str, data: bytes, mime: str) -> Any:
         """调用引擎的 search()。
 
-        ⚑未验证 且**风险最高**的一处：图片该以字节传、还是以文件路径传。
+        **已实测（PicImageSearch 3.12.11）**：`file` 的注解是
+        `Union[str, bytes, pathlib.Path, NoneType]` —— 字节可以直接喂，默认的 bytes 路径是对的。
 
-        为什么不做「失败就换个方式再试一次」：**每次重试都是一次真实的配额消耗**
+        下面那条"失败就换临时文件"的降级因此是**纯保险**，正常永远不该触发：注解不等于
+        实现、以及将来某个版本收紧成只收路径，这两种情况它兜得住。
+
+        为什么不做「失败就换个方式再试一次」意义上的重试：**每次重试都是一次真实的配额消耗**
         （SauceNAO 免费额度尤其紧）。所以降级只允许发生一次、只在 TypeError 上发生、
         只对同一个引擎发生一次，并留下一条显眼的告警。
 
         TypeError 是「签名/类型不接受字节」最可能的形态。若某个版本把它用在更内部的位置，
         这一次会白费一次配额 —— 这个风险被显式接受，且它只可能发生一次。
-        想彻底避开就设 IMAGE_SOURCE_INPUT_MODE=file，全程走临时文件。
+        实测之后 `IMAGE_SOURCE_INPUT_MODE=file` 已无必要（bytes 就是正路），保留它只是为了
+        在某个引擎上临时绕开问题。
         """
         param = self._input_param(engine_obj, engine)
         mode = INPUT_MODE if INPUT_MODE in ("auto", "bytes", "file") else "auto"
@@ -1061,6 +1104,101 @@ def _install_signal_handlers(
 # 在目标解释器上跑一次这个模式，就能把「候选链里哪一个是对的」从猜测变成事实。
 
 
+def _declared_fields(cls: Any) -> list[str]:
+    """尽量取全一个类上「声明的字段名」。
+
+    三种来源都试，因为库换过数据类型（普通注解 / pydantic v1 的 `__fields__` /
+    pydantic v2 的 `model_fields` / `__slots__`）。取不到就是空列表 ——
+    **这一段绝不能抛**：自检的价值就在于"在有库的机器上说话"，它挂了等于没跑。
+    """
+    names: list[str] = []
+    hints = getattr(cls, "__annotations__", None)
+    if isinstance(hints, dict):
+        names.extend(str(key) for key in hints)
+    for attr in ("__fields__", "model_fields"):  # pydantic v1 / v2
+        mapping = getattr(cls, attr, None)
+        if isinstance(mapping, dict):
+            names.extend(str(key) for key in mapping)
+    slots = getattr(cls, "__slots__", None)
+    if isinstance(slots, str):
+        names.append(slots)
+    elif isinstance(slots, (list, tuple)):
+        names.extend(str(name) for name in slots)
+    return list(dict.fromkeys(name for name in names if not name.startswith("__")))
+
+
+def _list_item_class(cls: Any) -> Any:
+    """从响应类上取「结果条目的类」。取不到返回 None。
+
+    两种写法都认：`@dataclass` 的注解（在 `__annotations__` 里，**类属性上取不到**）
+    与普通类属性。注解是字符串时（库带 `from __future__ import annotations`）取不到，
+    直接放弃——那是"少打一段"，不是错误。
+    """
+    hints = getattr(cls, "__annotations__", None)
+    for key in ("results", "raw", "items"):
+        candidate = hints.get(key) if isinstance(hints, dict) else None
+        if candidate is None:
+            candidate = getattr(cls, key, None)
+        for arg in getattr(candidate, "__args__", None) or ():
+            if isinstance(arg, type):
+                return arg
+    return None
+
+
+def _dump_result_fields(module: Any, resolved: dict[str, Any]) -> None:
+    """打印每个引擎的结果条目类与其字段名。
+
+    模块头 b 条（`_normalize_*` 里那一串候选名哪个才对）**没法从 search() 的签名推出来**，
+    只能看条目类声明了哪些字段。a 条（`.raw` 还是 `.results`）在这里也一并见分晓：
+    响应类的字段名就是答案。
+    """
+    print("\n结果类型与字段（模块头 a / b 条的判据）：", file=sys.stderr)
+    for engine, cls in resolved.items():
+        try:
+            annotation = inspect.signature(cls.search).return_annotation
+        except (TypeError, ValueError):
+            annotation = None
+        # `inspect.Signature.empty` 自己也是**一个类**（`inspect._empty`），单判 isinstance
+        # 会让"没有返回注解"走进下面那条路、把 `_empty` 当成一个类型名打出来（实测踩到）。
+        if annotation is inspect.Signature.empty or not isinstance(annotation, type):
+            print(f"  {engine:<12} <返回类型取不到>", file=sys.stderr)
+            continue
+        print(
+            f"  {engine:<12} {annotation.__name__} "
+            f"{{{', '.join(_declared_fields(annotation))}}}",
+            file=sys.stderr,
+        )
+        item = _list_item_class(annotation)
+        if item is not None:
+            print(
+                f"  {'':<12} └ 条目 {item.__name__} "
+                f"{{{', '.join(_declared_fields(item))}}}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  {'':<12} └ 条目类型推不出来，看下面模型模块的成员", file=sys.stderr)
+
+    model_pkg = getattr(module, "model", None)
+    if model_pkg is None:
+        return
+    print("\nPicImageSearch.model 下的类与字段（只看结果/响应类）：", file=sys.stderr)
+    for sub_name in sorted(dir(model_pkg)):
+        if sub_name.startswith("_"):
+            continue
+        sub = getattr(model_pkg, sub_name, None)
+        if not inspect.ismodule(sub):
+            continue
+        for cls_name, obj in sorted(inspect.getmembers(sub, inspect.isclass)):
+            # 只要这个子模块里**自己定义**的类，不要它 import 进来的。
+            if getattr(obj, "__module__", None) != getattr(sub, "__name__", None):
+                continue
+            if not any(token in cls_name for token in ("Result", "Item", "Response")):
+                continue
+            declared = _declared_fields(obj)
+            if declared:
+                print(f"  {sub_name}.{cls_name:<26} {{{', '.join(declared)}}}", file=sys.stderr)
+
+
 def self_check() -> int:
     try:
         module = _import_library()
@@ -1088,6 +1226,12 @@ def self_check() -> int:
                 signature = f"<取不到：{exc}>"
             print(f"  {engine:<12} {cls.__name__}.search{signature}", file=sys.stderr)
 
+    # 整段套 try：自检是一张"诊断报告"，它自己崩掉等于一个字都没说。
+    try:
+        _dump_result_fields(module, resolved)
+    except Exception as exc:  # noqa: BLE001
+        print(f"\n<结果字段 dump 失败：{type(exc).__name__}: {exc}>", file=sys.stderr)
+
     network_cls = getattr(module, "Network", None)
     if network_cls is not None:
         try:
@@ -1099,7 +1243,8 @@ def self_check() -> int:
     print(f"\n模块导出的名字（{len(names)} 个）：\n  {', '.join(names)}", file=sys.stderr)
     print(
         "\n下一步：把上面这段贴回来，据此钉死 ENGINE_CLASS_CANDIDATES、"
-        "各 _normalize_* 里的候选名，以及每个引擎收图片的参数名。",
+        "各 _normalize_* 里的候选名，以及每个引擎收图片的参数名，"
+        "并把结论写回本文件模块头的「⚑ 与真实库的对账状态」。",
         file=sys.stderr,
     )
     return 0
