@@ -135,7 +135,7 @@ ok('探测请求不带路径（路径只能经鉴权过的 POST /api/config 写�
 ok('自检请求同样不带路径，且走的是同一个「已保存配置」入口',
   /api\('\/api\/system\/python-selfcheck', \{ method: 'POST', body: '\{\}' \}\)/.test(pythonBlock)
   && pythonBlock.indexOf('await saveConfig({ quiet: true })') < pythonBlock.indexOf('/api/system/python-selfcheck'));
-ok('自检原文用 textContent 照登（不拼 HTML、不截断：那几张待验证的映射表要靠原文对齐）',
+ok('自检原文用 textContent 照登（不拼 HTML、不截断：worker 的映射表要靠原文做回归对账）',
   /pre\.textContent = r\.output \|\| /.test(pythonBlock) && !/pre\.innerHTML/.test(pythonBlock));
 ok('自检按钮跑完会复位（finally 里恢复 disabled，否则一次失败就永久禁用）',
   /finally \{\s*\r?\n\s*pythonCheck\.disabled = false;/.test(pythonBlock));

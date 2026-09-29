@@ -23,9 +23,11 @@
 // 3. **stdout 是外部输入，一律按 `unknown` 窄化。** worker 保证只写 JSON，但那是一句
 //    承诺不是一个类型；库里某个 print() 就会污染它，所以解析失败只记日志、不抛异常。
 //
-// ⚑ 仍未验证：worker 里的字段映射表（`⚑未验证` 那一段）是在**没装 PicImageSearch
-// 的机器上**写的。本文件把那些坑如实传出来（错误码、detail），但搜索路径本身还没有在
-// 任何一台机器上跑通过。先跑 `--self-check` 把 worker 的表钉死，再启用这条链路。
+// ⚑ 对账状态：worker 里的字段映射表（`⚑ 与真实库的对账状态` 那一段）是在**没装
+// PicImageSearch 的机器上**写的，2026-09-29 已在目标解释器上用 `--self-check` 跑过三次、
+// 四条已全部收口（并据此修掉了两个真机 bug：trace.moe 时间恒为 `00:00`、标题变成来源 URL）。
+// 本文件把那些坑如实传出来（错误码、detail）。**仍未验证的是搜索路径的真机往返**——
+// 表对了不等于远端活着，第一次真跑仍然要人工看一遍。
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';

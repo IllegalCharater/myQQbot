@@ -206,8 +206,9 @@ export async function probePython(config: PythonPathConfig = {}, deps: ProbeDeps
 /**
  * 在配置的解释器上跑 `pic_image_search_worker.py --self-check`，把它的输出原样带回来。
  *
- * **不做任何润色或截断之外的处理**：那段输出是"库到底长什么样"的第一手材料，worker 头部
- * 4 张未验证的映射表要靠它对齐（例如 `search()` 的入参名、能否直接喂 bytes）。取 `stderr`
+ * **不做任何润色或截断之外的处理**：那段输出是"库到底长什么样"的第一手材料。worker 头部
+ * 那 4 条对账 2026-09-29 已全部收口（见该文件模块头），所以此后这个入口的用途是**回归 /
+ * 升级探测**（换了 PicImageSearch 版本、或改了 worker 里任何一张映射表）。取 `stderr`
  * 优先，因为 `self_check()` 全打在 stderr（库缺失时返回 2）。
  */
 export async function runSelfCheck(config: PythonPathConfig = {}, deps: ProbeDeps = {}): Promise<SelfCheckReport> {

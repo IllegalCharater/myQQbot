@@ -56,42 +56,65 @@ minSimilarity —— 那些是 Node 侧服务层的事，在这里重复一份�
 5. **超时以 Node 侧为准**，这里的 timeoutMs 只是兜底（Node 的计时器不会因本进程繁忙而迟到）。
 
 ═══════════════════════════════════════════════════════════════════════════════
-⚑ 与真实库的对账状态（2026-09-29 首次实测）
+⚑ 与真实库的对账状态（2026-09-29 实测，四条已全部收口）
 ═══════════════════════════════════════════════════════════════════════════════
 
 本文件最初是在**没有装 PicImageSearch 的机器上**写的，版本相关的事实全是候选链。2026-09-29
-在目标解释器上跑了两次
+在目标解释器上跑了**三次**
 
     <python.path 那个解释器> python-tools/pic_image_search_worker.py --self-check
 
-（实测环境：Python 3.10.12 / PicImageSearch 3.12.11）四条对账如下：
+（实测环境：Python 3.10.12 / PicImageSearch 3.12.11）三次各钉下一件事：① 第一次先要"每个
+引擎的返回类型"，由此发现**响应类在类上一个字段都不声明**（属性是在 `__init__` 里 `self.x = …`
+赋的），以及 `google_lens` 是唯一有两个形态的引擎；② 第二次拿到引擎名与 22 个导出名；
+③ 第三次拿到**真实字段名**，a / b 两条随之收口，并当场挖出 e 条那两个活 bug。四条对账如下：
 
-  a. 结果访问器（`.raw` / `.results`）—— **边界已实测清楚，值还没读到**。第一次自检打出了每个
-     引擎的返回类型，两个事实：① `google_lens` 是**唯一有两个形态的** —— 返回
-     `Union[GoogleLensResponse, GoogleLensExactMatchesResponse]`，其余 7 个各是一个类；
-     ② 响应类**在类上一个字段都不声明**（第一次 dump 打出来是一片 `{}`），属性是在 `__init__`
-     里 `self.x = …` 赋的，所以"访问器到底叫什么"只能从那里读。`_items()` 两个都试、**只接受
-     list** 因此是对的写法（两种版本形态都能活、悬着不会炸）—— **不要改成只认一个**。
-  b. 结果条目的字段名 —— **同上：边界清楚了，值还差一次点击**。自检现在从四个来源取字段名
-     （MRO 上的注解 / pydantic 的 `__fields__`·`model_fields` / `__slots__` /
-     **`__init__` 里赋值的 `STORE_ATTR` 字节码**），并从"响应类的 `__init__` 构造了哪个类"
-     （`LOAD_GLOBAL`）与模型子模块两处找条目类；对着 `_normalize_*` 的候选链读：哪个字段是空的
-     就改哪个。取不到一律退化成 None 而不是抛异常，所以这一条即使不准，表现也是"某个字段空了"
-     （用户看得见、能报告），不是"搜图功能挂了"。
+  a. 结果访问器（`.raw` / `.results`）—— **已实测确认**。两个响应类里**都没有 `results`**：
+     `SauceNAOResponse{…, raw, …}`、`TraceMoeResponse{frameCount, error, origin, url, raw}`，
+     条目列表就在 **`.raw`**（基类 `BaseSearchResponse{origin, url, raw}` 也是同一个约定）。
+     `_items()` 因此把 `raw` 排到候选第一位，`results` 只留给别的版本。**仍然只接受
+     list/tuple**：`raw` 在别的引擎上是原始 dict，这条防线不能拆。
+  b. 结果条目的字段名 —— **已实测确认**，`_normalize_*` 的候选链已按实测名对齐（实测名在前，
+     取不到的旧猜测留在后面当别的版本的兜底，不删）：
+       SauceNAOItem : similarity, thumbnail, index_id, index_name, hidden, title, url,
+                      ext_urls, author, author_url, source, origin
+       TraceMoeItem : anime_info, idMal, title_native, title_english, title_romaji,
+                      title_chinese, anilist, synonyms, isAdult, type, format, start_date,
+                      end_date, cover_image, filename, episode, From, To, similarity,
+                      video, image, origin, url, thumbnail, title
+     另注意两条"看着有、其实不会生效"的：`TraceMoeItem.idMal` 是 **MyAnimeList** 的 id（拿它拼
+     `anilist.co/anime/{id}` 是错的链接，所以刻意不用）；`SauceNAOItem` **没有 `characters`**
+     —— 库不解析它，那个键恒为空。
   c. 引擎类名 —— **已实测确认**。红过一次的是 `baidu`：库里导出的名字是 **`BaiDu`**（大写的
      D），不是 `Baidu`，于是那个引擎**永远解析不到**。`ENGINE_CLASS_CANDIDATES` 已改。
      实测到的名字（括号里是库里同时存在、但**不该**用的同名近亲）：
      `SauceNAO` / `TraceMoe`（另有 `AnimeTrace`，同一个远端服务）/ `BaiDu` / `Bing` /
      `GoogleLens`（另有 `Google`，那是按关键词搜、不收图）/ `Yandex` / `Tineye`。
-     这份结论钉在 `tests/t-image-source.mjs` 第 ⑨ 段的 `MEASURED_FIRST_CANDIDATE` 里。注意
+     这份结论钉在 `tests/t-image-source.mjs` 第 ⑨ 段的 `MEASURED_CLASS_NAMES` 里。注意
      同段那条键集合比对**管不着**这件事：把 `BaiDu` 改回 `Baidu` 实测全绿。
   d. 入参名与能否直接喂 bytes —— **已实测确认，是好消息**。每个引擎的 search() 都是
      `search(self, url=None, file: Union[str, bytes, pathlib.Path, NoneType] = None, **kwargs)`：
      **参数名恒为 `file`，且可以直接喂 bytes**。所以默认的 `INPUT_MODE=auto` 先走 bytes 是对的，
      `_call_search` 里那个临时文件降级是**纯保险**（正常永远不该触发），也就不必设
      `IMAGE_SOURCE_INPUT_MODE=file`。
+  e. **a / b 那次实测顺带挖出两个活 bug，都已在代码里修掉**。它们不是"字段名对不上"，而是
+     "名字对了、取法错了"——正是只有真实字段名到手才看得见的那一类：
+     ① **trace.moe 的时间戳此前恒为 `00:00`**。库的字段名是**大写开头的 `From` / `To`**
+        （沿用 trace.moe 原始响应的键名），而候选链里写的是 `from`/`from_`/`time`/`at`/`start`
+        —— `getattr(item, 'from')` 恒为 None，于是每条结果都走"取不到"。这**不是**无害的：
+        `time` 一旦写进结果，`result-formatter.ts` 就会打印它（判据是 `time != null`），
+        表现是"每条都印 00:00"，与"接口没给时间"长得一模一样 —— 正是 formatter 那段注释
+        点名的症状，从 Python 这一侧又被引入了回来。
+     ② **动画结果的标题会变成来源串**。候选链里有一条"`origin` 本身是字符串标题"的兜底，
+        可 `origin` 是基类字段（来源站点），`_first_text(origin)` 直接把那串 URL 当成了标题，
+        而且它排在真正的 `title` **前面** → 标题永远轮不到 `title`。同一个坑的另一半：
+        `_pick("https://…", "title")` 取到的是 **`str.title` 这个内置方法**（`getattr` 不区分
+        属性与方法）。现在探属性前一律先过 `_attr_node`（字符串/数字/列表一律挡掉）。
+     顺带把 `time` 的兜底口径改成**取不到就不写这个键**（原为写 `0.0`）：写 0 会让 formatter
+     的"字段在不在"判据失效，等于把 ① 的症状再引入一次。真值 `From: 0`（正好片头）照写，
+     `0.0` 不是空值、`_drop_empty` 不会丢它。
 
-  第二次实测（同日、改完 dump 之后）另外确认三件事：① 8 个引擎名**全部**可解析，`baidu →
+  第二次实测（同日）另外确认三件事：① 8 个引擎名**全部**可解析，`baidu →
   BaiDu` 与 `google_lens → GoogleLens`（不是那个按关键词搜的 `Google`）都对，说明候选链的
   顺序在起作用；② `TinEye` **不在** 3.12.11 的 22 个导出里（导出的是 `Tineye`），候选顺序已把
   实测名摆到前面；③ 那 22 个名字里另有 `Ascii2D` / `Copyseeker` / `EHentai` / `Iqdb` / `Lenso`
@@ -104,9 +127,15 @@ minSimilarity —— 那些是 Node 侧服务层的事，在这里重复一份�
   只是看着像配了代理）。
 
 改过 `ENGINE_CLASS_CANDIDATES` / `_normalize_*` / `_input_param` 里的任何一张表之后，**再跑一次
-`--self-check` 并把结论写回上面这几条** —— 这张表是那几处唯一的判据来源。a / b 两条现在还差
-的就是这一次点击：dump 的取数路径已经按实测修好（第一版取不到，因为只试了"类上声明的注解"，
-而本库一个都不声明）。
+`--self-check` 并把结论写回上面这几条** —— 这张表是那几处唯一的判据来源。**这四条 2026-09-29
+已全部收口，所以此后重跑这件事的用途是「回归 / 升级探测」**（换了 PicImageSearch 版本、或改了
+表里任何一行），不是"补未知"。dump 的取数路径是按实测修的（第一版取不到，因为只试了"类上声明
+的注解"，而本库一个都不声明），所以它现在打出来的字段名可以**直接**与本文件比对，不必再猜。
+
+本文件仍有**两条 ⚑ 与对账无关的未知**，由代码里的 `⚑未验证` 标出（不收进上面四条，因为
+`--self-check` 看不见它们）：`_enter_network` 里 Network 是**异步**还是**同步**上下文管理器
+（随版本而变，进错模式抛 TypeError）；以及各 `_normalize_*` 里那些"旧猜测"候选名是否在**别的
+版本**上更管用（实测名已在前，猜的名留着当兜底）。
 """
 
 from __future__ import annotations
@@ -164,7 +193,7 @@ ENGINE_CLASS_CANDIDATES: dict[str, tuple[str, ...]] = {
     # 守护分两半，各自只看得见一半（`tests/t-image-source.mjs` 第 ⑨ 段）：
     #   ① 跨进程的**键集合**比对 —— 引擎少一个/多一个会红，但**看不见类名拼写**
     #      （把这里的 BaiDu 改回 Baidu，实测该套件仍全绿）；
-    #   ② `MEASURED_FIRST_CANDIDATE` —— 钉住 2026-09-29 实测到的类名，改回 Baidu 会红。
+    #   ② `MEASURED_CLASS_NAMES` —— 钉住 2026-09-29 实测到的类名，改回 Baidu 会红。
     #      它钉的是**实测结论**不是可推导的规则：库里真改名了，要重跑 `--self-check`
     #      并同时改这一行与那张表（本地没有库，推不出来）。
     "baidu": ("BaiDu", "Baidu"),
@@ -357,7 +386,8 @@ def _classify(exc: BaseException, engine: str) -> ProviderFailure:
 
 # ── 字段提取：候选名 + 兜底 ──────────────────────────────────────────────────
 #
-# 这一整段是「⚑未验证」的集中地。原则见模块头 b 条：取不到就退化成 None，绝不抛异常。
+# 这一整段的候选名已按 2026-09-29 的实测对齐（**实测名在前**，取不到的旧猜测留在后面当别的
+# 版本的兜底，不删）。原则见模块头 b 条：取不到就退化成 None，绝不抛异常。
 
 
 def _pick(obj: Any, *names: str) -> Any:
@@ -405,18 +435,44 @@ def _as_int(value: Any) -> int | None:
     return None if number is None else int(number)
 
 
+def _attr_node(value: Any) -> Any:
+    """只有 `value` 是个「像对象的东西」时才返回它，否则 None。
+
+    **防的是字符串的同名方法**：`_pick("https://trace.moe", "title")` 取到的是 `str.title`
+    这个内置方法 —— `getattr` 不区分属性与方法，于是标题会被渲染成方法对象或者那串 URL。
+    实测踩到过（见模块头 ⚑ e 条 ②）。
+    """
+    if value is None or isinstance(value, (str, bytes, int, float, bool, list, tuple, set)):
+        return None
+    return value
+
+
+def _scalar_id(value: Any) -> Any:
+    """只把 `int` 或纯数字字符串当 id 用；URL / 对象 / None 一律不认。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return value
+    return None
+
+
 def _items(response: Any) -> list[Any]:
     """从响应对象里取出结果条目列表。
 
-    ⚑未验证 的关键点之一：3.x 的 `.raw` 是**原始 JSON dict**，4.x 的 `.results` 才是
-    解析后的对象列表。这里两个都试、**只接受 list/tuple** —— 于是 `.raw` 是 dict 时会被
-    自然跳过，不会把整个响应体当成一条结果。
+    ⚑ 已实测（2026-09-29）：**两个响应类里都没有 `results`**，条目列表就在 **`.raw`** ——
+    `SauceNAOResponse{…, raw, …}`、`TraceMoeResponse{frameCount, error, origin, url, raw}`，
+    基类 `BaseSearchResponse{origin, url, raw}` 也是同一个约定。所以 `raw` 排在候选第一位。
+    `results` 留着只是给别的版本，**别因为它排在后面就删掉**。
+
+    仍然**只接受 list/tuple**：`raw` 在别的引擎上是原始 JSON dict，这条防线不能拆。
     """
     if response is None:
         return []
     if isinstance(response, (list, tuple)):
         return list(response)
-    for attr in ("results", "raw", "items", "data"):
+    for attr in ("raw", "results", "items", "data"):
         value = getattr(response, attr, None)
         if isinstance(value, (list, tuple)):
             return list(value)
@@ -437,7 +493,17 @@ def _drop_empty(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_saucenao(raw_item: Any) -> dict[str, Any]:
-    """SauceNAO → 归一化条目。⚑未验证：属性名全部走候选链。"""
+    """SauceNAO → 归一化条目。
+
+    ⚑ 已实测（2026-09-29）：`SauceNAOItem` 的字段是
+    `similarity, thumbnail, index_id, index_name, hidden, title, url, ext_urls, author,
+    author_url, source, origin` —— 候选链里第一个名字全部命中，后面的旧猜测（`similarity_score`
+    / `index` / `jp_name` / `material` 等）留着给别的版本，**不删**。
+
+    两条要点：① 库**不解析** `characters`，所以下面那个键恒为空（`_drop_empty` 会去掉它，
+    展示层不会冒出空行）—— 键保留给会解析它的库版本；② `ext_urls` 是数组、`url` 是字符串，
+    两者都在，先取 `ext_urls`（那是真正的来源站点，`url` 只是 SauceNAO 的结果页）。
+    """
     similarity = _as_float(_pick(raw_item, "similarity", "similarity_score"))
     # 原协议里 similarity 是 "87.5" 这种百分数字符串；库的 item 可能已经归一化。
     # 两种量纲都认：> 1 视为百分数。**跨边界的值恒为 0..1**。
@@ -477,21 +543,36 @@ def _normalize_saucenao(raw_item: Any) -> dict[str, Any]:
 def _tracemoe_title(raw_item: Any) -> tuple[str, str]:
     """trace.moe 的标题与 AniList id。
 
-    库把 AniList 详情放在 origin / anilist 里（可能是 dict 也可能是对象），标题再嵌一层
-    chinese/native/romaji/english。**这一段在各引擎里形状差异最大**，候选链也最长。
+    ⚑ 已实测（2026-09-29）：库里 `TraceMoeItem` **直接**给了四个平铺标题字段
+    （`title_chinese` / `title_native` / `title_romaji` / `title_english`）与一个通用的
+    `title`，另有 `anime_info` / `anilist` / `idMal`。所以**实测名放最前**（中文优先，与旧
+    provider 的口径一致），嵌套路径（`anime_info`/`anilist`/`origin` 里的 `title` 子树）
+    只作别的版本的兜底，通用 `title` 排最后。
+
+    ⚠️ 两条实测踩到的雷，改这段之前先读 ⚑ e 条：
+    ① `origin` 是**基类字段（来源站点）**，不是标题 —— 旧版把"origin 本身是字符串时当标题"
+       当兜底，于是那串来源 URL 会顶掉真正的 `title`（它排在 `title` 前面）；
+    ② 对字符串取 `title` 会拿到 **`str.title` 内置方法**，所以探属性前必须先过 `_attr_node`。
+    `idMal` **刻意不用**：那是 MyAnimeList 的 id，拿它拼 `anilist.co/anime/{id}` 是错的链接。
     """
-    origin = _pick(raw_item, "origin", "anilist", "anilist_info")
+    info = _pick(raw_item, "anime_info")
+    fallback = _pick(raw_item, "anilist", "anilist_info", "origin")
     anilist_id = _first_text(
         _pick(raw_item, "anilist_id", "anilistId"),
-        _pick(origin, "id"),
+        _scalar_id(_pick(raw_item, "anilist")),
+        _pick(_attr_node(info), "id"),
+        _pick(_attr_node(fallback), "id"),
     )
-    title_node = _pick(origin, "title")
+    title_node = _pick(_attr_node(info), "title") or _pick(_attr_node(fallback), "title")
     title = _first_text(
-        _pick(title_node, "chinese", "zh"),
-        _pick(title_node, "native", "jp"),
-        _pick(title_node, "romaji", "en", "english"),
-        # origin 本身就是个字符串标题的实现也存在
-        origin if not isinstance(origin, (dict,)) and not hasattr(origin, "__dict__") else None,
+        _pick(raw_item, "title_chinese"),
+        _pick(raw_item, "title_native"),
+        _pick(raw_item, "title_romaji"),
+        _pick(raw_item, "title_english"),
+        # 嵌套写法（其它版本）：origin/anime_info 里的 title 子树再分语言
+        _pick(_attr_node(title_node), "chinese", "zh"),
+        _pick(_attr_node(title_node), "native", "jp"),
+        _pick(_attr_node(title_node), "romaji", "en", "english"),
         _pick(raw_item, "title", "name", "filename"),
     )
     if not title and anilist_id:
@@ -500,11 +581,13 @@ def _tracemoe_title(raw_item: Any) -> tuple[str, str]:
 
 
 def _normalize_trace_moe(raw_item: Any) -> dict[str, Any]:
-    """trace.moe / anime_trace → 归一化条目。"""
+    """trace.moe / anime_trace → 归一化条目。字段名已实测（见模块头 ⚑ b/e 条）。"""
     title, anilist_id = _tracemoe_title(raw_item)
     episode = _pick(raw_item, "episode", "ep", "part")
-    # "from" 是 Python 关键字，但 getattr 取它没问题；有些版本写成 from_ 或 time。
-    seconds = _as_float(_pick(raw_item, "from", "from_", "time", "at", "start"))
+    # 实测：库的字段名是**大写开头的 `From` / `To`**（trace.moe 原始响应的键名），
+    # 小写的 `from` 恒取不到 —— 那正是"每条结果都印 00:00"的成因（⚑ e 条 ①）。
+    # `To` 不取：Node 侧 `ImageSourceResult` 没有对应槽位，取了也没人渲染。
+    seconds = _as_float(_pick(raw_item, "From", "from", "from_", "time", "at", "start"))
     url = _first_text(_pick(raw_item, "url", "anilist_url"))
     if not url and anilist_id:
         url = f"https://anilist.co/anime/{anilist_id}"
@@ -513,11 +596,14 @@ def _normalize_trace_moe(raw_item: Any) -> dict[str, Any]:
             "similarity": _as_float(_pick(raw_item, "similarity")),
             "title": title,
             "episode": None if episode is None else _as_text(episode),
-            # 原实现取不到时间时写 0（不是省略）——formatter 会把它格式化成 00:00。
-            # 保持这个口径，别让「没有时间」与「第 0 秒」在展示上分叉。
-            "time": 0.0 if seconds is None else seconds,
+            # **取不到时间就不写这个键**（旧版写 0.0）。写 0 会让 formatter 的"字段在不在"
+            # 判据失效 —— 它会照印 `00:00`，与"接口没给"长得一模一样（那正是 ⚑ e 条 ① 的症状）。
+            # 真值 `From: 0`（正好片头）照写：`0.0` 不是空值，`_drop_empty` 不会把它丢掉。
+            "time": seconds,
             "url": url,
-            "previewUrl": _first_text(_pick(raw_item, "image", "preview", "thumbnail", "cover")),
+            "previewUrl": _first_text(
+                _pick(raw_item, "image", "thumbnail", "cover_image", "preview", "cover")
+            ),
         }
     )
 
@@ -672,7 +758,9 @@ class Worker:
         """构造并进入 Network 客户端。
 
         ⚑未验证：不同版本对 Network 是异步上下文管理器还是同步上下文管理器并不一致，
-        所以两条路都留着 —— 进错模式会直接抛 TypeError，白瞎一次启动。
+        所以两条路都留着 —— 进错模式会直接抛 TypeError，白瞎一次启动。这是**对账之外的**
+        那条未知（见模块头末尾）：`--self-check` 只打 `Network.__init__` 的签名，看不见
+        这一点，所以它不随上面四条一起收口。
         """
         network_cls = getattr(self._module, "Network", None)
         if network_cls is None:

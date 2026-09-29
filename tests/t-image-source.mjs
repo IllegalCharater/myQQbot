@@ -455,7 +455,7 @@ ok('AnimeTrace 没有被加成第三个引擎（它是 trace.moe 的别名，不
 // 本段有两条断言，**它们的能力边界不一样，别把后一条当前一条用**：
 //   ① 键集合比对（下面第一条）—— 引擎少一个/多一个会红。但它**只比键**：把 `baidu` 的候选从
 //      `("BaiDu","Baidu")` 改回 `("Baidu",)`，键集合照样对得上，实测全绿。
-//   ② `MEASURED_FIRST_CANDIDATE`（下面第二条）—— 钉住**实测到的类名**。实测踩到过：`baidu`
+//   ② `MEASURED_CLASS_NAMES`（下面第二条）—— 钉住**实测到的类名**。实测踩到过：`baidu`
 //      曾写成 `("Baidu",)`，而库里导出的名字是 `BaiDu`（大写的 D），于是那个引擎**永远解析
 //      不到**：既不出现在 ready 事件的 engines 里，真去请求也报 PROVIDER_UNAVAILABLE。而静态
 //      清单里 `baidu` 一直都在，谁也不觉得缺 —— 类名的拼写只能靠**带库的机器**实测
@@ -511,6 +511,41 @@ ok('worker 的引擎家族表指向真实存在的引擎与归一化器（拼错
   && familyTable.keys.every((k) => classTable.keys.includes(k))
   && familyTable.values.every((v) => normalizers.keys.includes(v)),
   `family=[${familyTable.keys.join(',')}] → [${familyTable.values.join(',')}] normalizers=[${normalizers.keys.join(',')}]`);
+
+// ── ⑩ 字段名也是（更隐蔽的）跨进程实测结论 ─────────────────────────
+// 上面几条守"引擎名/家族"这层镜像；这一层守的是 `_normalize_*` 的**取值方式**。区别在于
+// 后者失效时**没有声音**：字段名取不到一律退化成 None，接口照回 200，只是某一段内容悄悄空掉。
+// 2026-09-29 那次 `--self-check` 实测（结论写在 worker 头部 ⚑ a/b/e 条）就挖出两个这样的活 bug：
+//   ① trace.moe 的时间戳字段是**大写开头的 `From`**，候选链里只有小写 `from` → 每条结果都印 00:00；
+//   ② 标题链里有一条"`origin` 是字符串就当标题"的兜底，而 origin 是基类字段（来源站点）——
+//      那串 URL 会顶掉真标题（它还排在 `title` 前面）。同一个坑的另一半：`_pick("…", "title")`
+//      取到的是 `str.title` 内置方法。
+// 这些都是**带库的机器上实测出来的**，本地推不出来；所以下面钉的是实测结论本身。
+//
+// 取函数体时**按行丢掉整行注释**（`#` 开头）——不能直接全文 `includes`：worker 的注释里就写着
+// `From` 与那句被删掉的 `origin if not isinstance`（那是在记这次实测的教训），全文扫描会让
+// 注释把"代码已经改回去了"伪装成"还在"。**锚定到具体调用**，别退化成裸 `includes`、也别只写
+// 字段名：**docstring 不是注释、这一层丢不掉** —— 第三条断言初版写的是
+// `/title_chinese[\s\S]*title_native/`，实测把代码里的 `title_chinese` 删掉后它**照样绿**，
+// 因为那几个名字原样躺在 `_tracemoe_title` 的 docstring 里（证伪探针撞出来的假绿）。
+const pyBody = (name) => {
+  const src = workerSrc.split(/\r?\n/).filter((l) => !l.trim().startsWith('#')).join('\n');
+  return (src.match(new RegExp(`^def ${name}\\([\\s\\S]*?\\n(?=\\S)`, 'm')) || [''])[0];
+};
+const traceBody = pyBody('_normalize_trace_moe');
+ok('trace.moe 的时间取的是实测名 `From`（小写 `from` 在真库上恒为 None → 每条都印 00:00）',
+  /seconds\s*=\s*_as_float\(_pick\(raw_item,\s*"From"/.test(traceBody),
+  '时间戳字段实测叫 `From`/`To`（trace.moe 原始响应的键名）。改回小写则真机表现为'
+  + '"每条结果都是 00:00"，与"接口没给时间"长得一模一样 —— worker 头部 ⚑ e 条 ①');
+ok('取不到时间时**不写** `time` 键（写 0 会让 formatter 的"字段在不在"判据失效，重新印出 00:00）',
+  /"time":\s*seconds/.test(traceBody) && !/0\.0\s+if\s+seconds/.test(traceBody),
+  '`result-formatter.ts` 判的是 `time != null`，所以数据层写 0 等于替模型"编"了一个第 0 分 0 秒')
+const titleBody = pyBody('_tracemoe_title');
+ok('trace.moe 标题按 中文 → 原生 → 罗马音 取实测的平铺字段，且不再拿 `origin` 当标题（那是来源站点）',
+  /_pick\(raw_item, "title_chinese"\)[\s\S]*_pick\(raw_item, "title_native"\)[\s\S]*_pick\(raw_item, "title_romaji"\)/.test(titleBody)
+  && !/origin if not isinstance/.test(titleBody),
+  '实测 `TraceMoeItem` 直接给了 title_chinese/title_native/title_romaji/title_english；'
+  + '旧版那条"origin 是字符串就当标题"的兜底会让来源 URL 顶掉真标题（它排在 `title` 前面）')
 
 // 必须是 process.exit(done() …)：done() 只**返回**布尔值、自己从不退出（见 lib/harness.mjs:27），
 // 而 run.mjs 单看子进程的退出码判定成败。这里原先是一句裸 `done();`，于是本套件**永远退 0** ——
