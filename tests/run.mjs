@@ -44,6 +44,7 @@ const ASSERT = [
   't-image-source.mjs',    // 图片来源识别（Provider、队列、缓存、脱敏与 UI 接线）
   't-media-tools.mjs',     // 模型自主调用的两个能力工具（取榜单 / 转写、配额闸门与按配置过滤）
   't-jmcomic.mjs',         // 漫画队列去重（按请求者+漫画ID）与完成后记录留存
+  't-jmcomic-callback.mjs',// 漫画 Python 结果帧与上传完成后的 Agent 回流
   't-jmcomic-upload.mjs',  // 漫画上传超时/重启恢复只核验，不盲目重传
   't-lifecycle.mjs',       // 注册层执行侧（关停路径、装配清单、清单与描述表对账）
   't-ui-modules.mjs',      // 原生 ES Module 入口、依赖图与资源完整性

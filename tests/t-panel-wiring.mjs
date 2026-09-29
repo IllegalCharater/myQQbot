@@ -187,13 +187,16 @@ ok('过滤态一次性显示全部命中（分页账目才不会和"匹配 K 条
   /state\.chatMsgLimit = String\(state\.chatQuery \|\| ''\)\.trim\(\)/.test(js));
 ok('排序缓存仍按引用记忆（没被改成每次重排）', /chatMsgSortCache\.src !== src/.test(js));
 ok('每行渲染出 改 / 删 两个操作', /data-op="edit"/.test(js) && /data-op="del"/.test(js));
-// 「不给改」的两种 kind 由同一个判断守着：isDigest || isTranscript。
+// 「不给改」的三种 kind 由同一个判断守着：摘要 + 两种机器任务结果。
 // 分别断言各自的禁用理由文案，删掉任何一支都会红。
 const noEditGuard = /const ops = \(isDigest \|\| isTranscript/.test(js);
 ok('摘要行不给"改"（后端也会 400，前端不该给个点了报错的按钮）',
   noEditGuard && js.includes('摘要由模型生成，不能手改'));
 ok('转写结果行同样不给"改"（面板的「改」走的是插人工备注那条路，会把机器正文悄悄变成手写批注）',
   noEditGuard && js.includes('转写结果由任务生成，不能手改') && /const isTranscript = m\.kind === 'transcript'/.test(js));
+ok('漫画完成回调同样不给"改"，并有独立 kind 判定',
+  noEditGuard && js.includes('漫画下载结果由任务生成，不能手改')
+  && /const isJmcomicResult = m\.kind === 'jmcomic-result'/.test(js));
 ok('摘要行仍然给"删"（后端 DELETE 不拦摘要，只拦 PATCH）',
   /\+ '<button class="btn btn-small btn-danger" data-op="del"/.test(js)
   && !/title="摘要由模型生成，不能手改；可以删除"/.test(js));
@@ -208,6 +211,7 @@ ok('操作走事件委托（轮询会换掉 tbody 的 innerHTML）',
 ok('切换会话时清空查找词', /state\.chatQuery = '';/.test(js));
 ok('备注行有独立样式 .note-row', css.includes('.archive-table .note-row'));
 ok('转写结果行有独立样式 .transcript-row', css.includes('.archive-table .transcript-row'));
+ok('漫画完成回调行有独立样式 .jmcomic-result-row', css.includes('.archive-table .jmcomic-result-row'));
 
 console.log('\n═══ 历史摘要：设置项 ↔ 接线 ↔ 保存分支 ═══');
 // 一、顶部块：刷新钩子挂对了地方

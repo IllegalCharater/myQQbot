@@ -487,6 +487,9 @@ body {
    再换一种色调，让"这段是机器转出来的"一眼可辨 —— 它和摘要一样不能手改。 */
 .archive-table .transcript-row td { background: rgba(200,160,90,.07); }
 .archive-table .transcript-row .w { color: var(--orange); font-style: italic; }
+/* 漫画下载完成回调：文件已经上传，这一行只是唤醒 Agent 的机器结果。 */
+.archive-table .jmcomic-result-row td { background: rgba(120,200,140,.07); }
+.archive-table .jmcomic-result-row .w { color: var(--green); font-style: italic; }
 .archive-table .ops { white-space: nowrap; width: 1%; }
 .archive-table .ops .btn { padding: 2px 7px; font-size: 11.5px; }
 

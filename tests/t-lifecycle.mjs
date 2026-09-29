@@ -341,6 +341,8 @@ ok('deps 里递的是真模块，且用的是描述表里的名字（假 deps �
     DEPS_NAMES.length >= 7 ? '' : `只从 LONG_TERM_TASKS 推出 ${DEPS_NAMES.length} 个入口名（owner 锚点失效了？）`,
     missingDeps.length ? `lifecycleDeps() 的实参里少了：${missingDeps.join(' / ')}` : ''
   ].filter(Boolean).join('；'));
+ok('jmcomic 生命周期依赖带真实完成回调（PDF 上传后才能回流 Agent）',
+  /onCompleted:\s*deliverJmcomicCompletion/.test(depsBody), depsBody);
 
 // 搜图 worker 单独钉一次：它的 owner 文件名（`pic-image-search-client.ts`）与任务表里的模块别名
 // （`pic-image-search`）不同名，所以上面那条**按 owner 反推名字**的手法够不着它 —— 而那正是

@@ -86,10 +86,21 @@ ok('备注：标出「备注」', note.includes('备注'));
 ok('备注：可以改也可以删', note.includes('data-op="edit"') && note.includes('data-op="del"'));
 ok('备注：不冒充任何群友（没有 senderName 或"我"）', !/小明|>我</.test(note));
 
+const jmResult = sandbox.chatMsgRowHtml({
+  id: 10, ts: Date.parse('2026-09-24T10:08:00'), senderId: '', senderName: '漫画下载',
+  text: '漫画 1253981 的 PDF 已上传到当前会话', self: false, read: false,
+  kind: 'jmcomic-result', media: []
+});
+ok('漫画回调：走 jmcomic-result-row 独立样式并标成「漫画」',
+  jmResult.includes('jmcomic-result-row') && jmResult.includes('>漫画<'));
+ok('漫画回调：任务生成的记录不能手改，但仍可删除',
+  !jmResult.includes('data-op="edit"') && jmResult.includes('data-op="del"')
+  && jmResult.includes('漫画下载结果由任务生成，不能手改'));
+
 console.log('\n  ── 未读 / XSS ──');
-const unread = sandbox.chatMsgRowHtml({ id: 10, ts: Date.now(), senderId: '1', senderName: '小红', text: '在吗', self: false, read: false, kind: null, media: [] });
+const unread = sandbox.chatMsgRowHtml({ id: 11, ts: Date.now(), senderId: '1', senderName: '小红', text: '在吗', self: false, read: false, kind: null, media: [] });
 ok('未读行带 unread 类', unread.includes('unread'));
-const evil = sandbox.chatMsgRowHtml({ id: 11, ts: Date.now(), senderId: '1', senderName: '<img src=x onerror=alert(1)>', text: '"><script>alert(1)</script>', self: false, read: true, kind: null, media: [] });
+const evil = sandbox.chatMsgRowHtml({ id: 12, ts: Date.now(), senderId: '1', senderName: '<img src=x onerror=alert(1)>', text: '"><script>alert(1)</script>', self: false, read: true, kind: null, media: [] });
 ok('发送者名里的 HTML 被转义', !evil.includes('<img src=x') && evil.includes('&lt;img'));
 ok('正文里的 script 被转义', !evil.includes('<script>') && evil.includes('&lt;script&gt;'));
 

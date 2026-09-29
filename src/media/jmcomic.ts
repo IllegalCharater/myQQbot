@@ -54,6 +54,10 @@ interface JmRuntime {
   onebot: { call(action: string, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown> };
   sender: { sendTextBatch(chatKey: string, messages: unknown[]): Promise<unknown> };
   store: { appendSelf(chatKey: string, input: { text: unknown; ts?: number; mid?: string | number | null }): unknown };
+  /** 测试可注入假子进程；生产环境缺省使用 node:child_process.spawn。 */
+  spawnProcess?: typeof spawn;
+  /** PDF 已被 OneBot 明确接收后，把完成事实回流给 Agent。 */
+  onCompleted?: JmcomicCompletionSink;
 }
 
 interface JmContext extends JmRuntime {
@@ -69,6 +73,16 @@ interface PythonResult {
   cached?: boolean;
   [key: string]: unknown;
 }
+
+export interface JmcomicCompletion {
+  chatKey: string;
+  comicId: string;
+  cached: boolean;
+  source: 'response' | 'group-file-check' | 'private-history-check';
+  fileId: string;
+}
+
+export type JmcomicCompletionSink = (input: JmcomicCompletion) => void | Promise<void>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -269,7 +283,8 @@ function runPython(job: JmJob): Promise<PythonResult> {
   const { command, prefix } = resolvePythonCommand(getConfig());
   const logFile = path.join(LOG_DIR, `${job.id}.log`);
   return new Promise<PythonResult>((resolve, reject) => {
-    const child = spawn(command, [...prefix, JMCOMIC_SCRIPT, job.comicId, DOWNLOAD_DIR], {
+    const spawnProcess = runtime?.spawnProcess ?? spawn;
+    const child = spawnProcess(command, [...prefix, JMCOMIC_SCRIPT, job.comicId, DOWNLOAD_DIR], {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -280,12 +295,13 @@ function runPython(job: JmJob): Promise<PythonResult> {
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     let lastPersistedHeartbeat = 0;
 
-    const finish = <T>(fn: (value: T) => void, value: T) => {
-      if (settled) return;
+    const finish = <T>(fn: (value: T) => void, value: T): boolean => {
+      if (settled) return false;
       settled = true;
       if (hardTimer) clearTimeout(hardTimer);
       if (idleTimer) clearTimeout(idleTimer);
       fn(value);
+      return true;
     };
     const stop = (message: string) => {
       try { child.kill(); } catch { /* ignore */ }
@@ -307,9 +323,48 @@ function runPython(job: JmJob): Promise<PythonResult> {
       heartbeat();
     };
 
+    /**
+     * Python 用 RESULT_PREFIX 输出一帧最终结果。和搜图 worker 的 JSON Lines 回调同一原则：
+     * **帧到达就是任务完成**，不能继续等待进程 close。jmcomic/图片下载器可能留下仍存活的
+     * 非 daemon 线程；那时 PDF 已经生成、结果也 flush 出来了，但旧实现会一直卡在
+     * `downloading`，永远走不到上传阶段。
+     *
+     * stdout 可能任意分块，所以每次都从累计尾部重新找最后一帧；JSON 尚未收全时解析失败，
+     * 下一块到达后自然再试。close 仍保留为“没有结果帧/异常退出”的兜底。
+     */
+    const settleFromResultFrame = (): boolean => {
+      if (settled) return true;
+      const line = stdout.split(/\r?\n/).reverse().find((item) => item.startsWith(RESULT_PREFIX));
+      if (!line) return false;
+      let result: Record<string, unknown> | null = null;
+      try {
+        const parsed: unknown = JSON.parse(line.slice(RESULT_PREFIX.length));
+        result = isRecord(parsed) ? parsed : null;
+      } catch {
+        return false;
+      }
+      if (result?.ok !== true) {
+        const didFinish = finish(reject, new Error(String(result?.error || stderr.trim() || 'Python 返回下载失败')));
+        if (didFinish) try { child.kill(); } catch { /* ignore */ }
+        return true;
+      }
+      try {
+        const value: PythonResult = { ...result, ok: true, pdfPath: validatePdf(result.pdfPath) };
+        const didFinish = finish(resolve, value);
+        // 结果帧写出前 PDF 已经原子换入最终路径；此后 Python 的工作已经结束。若第三方库
+        // 留下后台线程，就主动收掉进程，避免它继续钉住 Node/Electron。
+        if (didFinish) try { child.kill(); } catch { /* ignore */ }
+      } catch (error) {
+        const didFinish = finish(reject, error);
+        if (didFinish) try { child.kill(); } catch { /* ignore */ }
+      }
+      return true;
+    };
+
     child.stdout.on('data', (chunk) => {
       appendLog(chunk);
       stdout = (stdout + chunk.toString('utf8')).slice(-300_000);
+      settleFromResultFrame();
     });
     child.stderr.on('data', (chunk) => {
       appendLog(chunk);
@@ -321,21 +376,8 @@ function runPython(job: JmJob): Promise<PythonResult> {
     child.on('error', (error) => finish(reject, new Error(`无法启动 Python（${command}）：${error.message}`)));
     child.on('close', (code) => {
       if (settled) return;
-      const line = stdout.split(/\r?\n/).reverse().find((item) => item.startsWith(RESULT_PREFIX));
-      let result: Record<string, unknown> | null = null;
-      try {
-        const parsed: unknown = line ? JSON.parse(line.slice(RESULT_PREFIX.length)) : null;
-        result = isRecord(parsed) ? parsed : null;
-      } catch { /* handled below */ }
-      if (code !== 0 || result?.ok !== true) {
-        finish(reject, new Error(String(result?.error || stderr.trim() || `Python 异常退出（${code}）`)));
-        return;
-      }
-      try {
-        finish(resolve, { ...result, ok: true, pdfPath: validatePdf(result.pdfPath) });
-      } catch (error) {
-        finish(reject, error);
-      }
+      if (settleFromResultFrame()) return;
+      finish(reject, new Error(String(stderr.trim() || `Python 异常退出（${code}）`)));
     });
     heartbeat();
     hardTimer = setTimeout(() => stop('下载超过 30 分钟，已终止'), DOWNLOAD_TIMEOUT_MS);
@@ -376,7 +418,7 @@ function responseFileId(value: unknown): string {
   return isRecord(value) ? String(value.file_id ?? value.fileId ?? '') : '';
 }
 
-function completeUpload(job: JmJob, source: 'response' | 'group-file-check' | 'private-history-check', fileId = '') {
+async function completeUpload(job: JmJob, source: 'response' | 'group-file-check' | 'private-history-check', fileId = '') {
   // 从这里开始 OneBot 已明确返回成功，或群文件列表已经证明目标文件存在。
   // 任何本地收尾失败都不能再把任务放回上传路径。
   try {
@@ -395,6 +437,21 @@ function completeUpload(job: JmJob, source: 'response' | 'group-file-check' | 'p
   }
   // 记录有意留着（去重靠它，见 cleanupCompletedJob 的说明），这里只删日志。
   cleanupCompletedJob(job);
+  const sink = runtime?.onCompleted;
+  if (sink) {
+    try {
+      await sink({
+        chatKey: job.chatKey,
+        comicId: job.comicId,
+        cached: job.cached === true,
+        source,
+        fileId
+      });
+    } catch (error) {
+      // 文件已经上传成功，回流失败不能把 completed 任务重新放回非幂等的上传路径。
+      console.warn(`[jmcomic] PDF 已上传，但完成回调失败（${job.id}）:`, errorMessage(error));
+    }
+  }
 }
 
 function deferUploadVerification(job: JmJob, error: unknown) {
@@ -425,7 +482,7 @@ async function uploadStage(job: JmJob) {
   const action = kind === 'group' ? 'upload_group_file' : 'upload_private_file';
   try {
     const result = await runtime?.onebot.call(action, params, UPLOAD_TIMEOUT_MS);
-    completeUpload(job, 'response', responseFileId(result));
+    await completeUpload(job, 'response', responseFileId(result));
   } catch (error) {
     // upload_*_file 是非幂等动作。AbortError、断线乃至 HTTP 错误都不能证明服务端
     // 没有继续执行；统一进入“结果未知”，后续只核验，不重复发送。
@@ -488,7 +545,7 @@ async function uploadUncertainStage(job: JmJob) {
       ? matchingGroupFile(result, job, pdfPath)
       : matchingPrivateFile(result, job, pdfPath);
     if (found) {
-      completeUpload(job, kind === 'group' ? 'group-file-check' : 'private-history-check', responseFileId(found));
+      await completeUpload(job, kind === 'group' ? 'group-file-check' : 'private-history-check', responseFileId(found));
       console.info(`[jmcomic] 已通过${kind === 'group' ? '群文件列表' : '好友消息历史'}确认上传完成（${job.id}）`);
       return;
     }
@@ -553,8 +610,8 @@ async function runWorker() {
 }
 
 /** 绑定运行时依赖，并恢复上次退出时未完成的任务。可重复调用。 */
-export function initJmcomicQueue({ onebot, sender, store }: JmRuntime) {
-  runtime = { onebot, sender, store };
+export function initJmcomicQueue({ onebot, sender, store, spawnProcess, onCompleted }: JmRuntime) {
+  runtime = { onebot, sender, store, ...(spawnProcess ? { spawnProcess } : {}), ...(onCompleted ? { onCompleted } : {}) };
   loadJobs();
   startCleanupTimer();
   void runWorker();

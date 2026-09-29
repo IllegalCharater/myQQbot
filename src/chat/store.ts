@@ -65,17 +65,18 @@ function archiveFile(chatKey: string) {
  * 进入动态唤醒窗口时**必须排除**的 kind：压缩摘要（digest）与面板插的人工备注（note）。
  *
  * 这个集合回答的是"它该不该占一次唤醒"，`isWakeEligibleIncoming` 直接用它。
- * 别把转写结果（transcript）加进来 —— 它恰恰**必须**进窗口让模型看到。
+ * 别把转写结果（transcript）或漫画完成结果（jmcomic-result）加进来 —— 它们恰恰
+ * **必须**进窗口让模型看到。
  */
 const NON_WAKE_KINDS = new Set(['digest', 'note']);
 
 /**
- * 按"人"统计/取样时要跳过的 kind：上面两种，**再加**转写结果。
+ * 按"人"统计/取样时要跳过的 kind：上面两种，**再加**两个异步任务结果。
  *
  * 转写结果不是某个群友说的话（senderId 是空串），不跳过就会在"活跃成员"里
  * 多出一个查无此人的幽灵成员，进而生成对它的印象。
  */
-const NON_PERSON_KINDS = new Set(['digest', 'note', 'transcript']);
+const NON_PERSON_KINDS = new Set(['digest', 'note', 'transcript', 'jmcomic-result']);
 
 /**
  * "不是某人说的话"的条目：压缩摘要（kind:'digest'）与面板插的人工备注（kind:'note'）。
@@ -558,6 +559,37 @@ export class ChatStore {
       media: [],
       kind: 'transcript',
       transcript: { chars: Math.max(0, Number(chars) || body.length), truncated: truncated === true }
+    };
+    st.messages.push(entry);
+    this.#trim(st);
+    saveChat(st);
+    return entry;
+  }
+
+  /**
+   * 追加漫画队列的完成回调。它与转写结果同属“机器生成、但必须唤醒 Agent”的条目：
+   * `read:false`、`self:false` 让它进入窗口；空 senderId 让成员/记忆逻辑不会把它当成群友。
+   *
+   * PDF 已在这条记录产生前由 OneBot 确认上传，所以正文只陈述完成事实。模型看到
+   * 【漫画下载结果】后可以自然地给请求者一句交代，但不能再提交同一任务。
+   */
+  appendJmcomicResult(chatKey: string, { comicId, cached = false, ts = Date.now() }: {
+    comicId: unknown; cached?: boolean; ts?: number;
+  }) {
+    const st = this.#state(chatKey);
+    const id = String(comicId ?? '').trim();
+    const entry: ChatMessage = {
+      id: st.nextLocalId++,
+      mid: null,
+      ts: Number(ts) || Date.now(),
+      senderId: '',
+      senderName: '漫画下载',
+      text: `漫画 ${id} 的 PDF 已上传到当前会话${cached ? '（使用本地缓存）' : ''}`,
+      self: false,
+      read: false,
+      reply: null,
+      media: [],
+      kind: 'jmcomic-result'
     };
     st.messages.push(entry);
     this.#trim(st);

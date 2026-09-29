@@ -129,7 +129,7 @@ OneBot 入站
 
 Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息存档、历史摘要和成员记忆。
 
-链路另有一条**异步回流**入口：后台转写完成后把一条 `kind:'transcript'` 的【转写结果】写进存档并推入窗口，走同一套「窗口 → 响应判定 → runAgent」。它与众不同的是那次运行**拿不到任何 tool result**（转写是在更早一次运行里入队的），所以正确性只能由 system prompt 规则与窗口判定承载，不能指望上下文里留着工具调用痕迹。
+链路另有两条**异步回流**入口：后台转写完成后写入 `kind:'transcript'` 的【转写结果】；漫画 PDF 被 OneBot 明确接收后写入 `kind:'jmcomic-result'` 的【漫画下载结果】。两者都会落存档、推入窗口，再走同一套「窗口 → 响应判定 → runAgent」。那次运行**拿不到原始 tool result**（任务在更早一次运行里入队），所以正确性只能由 system prompt 规则与窗口判定承载，不能指望上下文里留着工具调用痕迹。
 
 **合并转发展开后仍然是「一条」消息，不是几条记录**：`ingest.ts` 认到 `forward` 段就展开，产物是 `[合并转发 共N条]\n名字: 内容\n…`（`expandForwardNodes`），然后**整份替换**那条消息的 `text` —— 存档里发送者仍是转发的人，那些行只是 `text` 里的换行。三条推论：① 那些行**不带时间戳**（OneBot 的转发节点没有时间）、发送者也属于别的会话，所以任何按行展示的地方都必须让"这是一段被转发进来的东西"看得出来，否则观感就是"混进了几条不属于本群、还没有时间的记录"（实测报过一次）；② 面板侧 `ui/js/views/chats.js` 的 `forwardBlockHtml` 只把它渲染成缩进/弱化的区块、**不改 `text`**（模型要读的仍是展开后的原文），且判据 `/^\[合并转发 共\d+条\]/` 必须与 `read_forward` 工具那句 `entry.text.startsWith('[合并转发 共')` 同形 —— 两边认的不是同一件事时，工具说"已展开"、面板却平铺；渲染出的仍是**一行 `<tr>`**，多渲染出行会打乱分页账本（`state.chatMsgRendered` 与滚动加载）。③ 已知空白：`expandForwardNodes` **没有任何套件覆盖**（`[合并转发 共N条]` 这个字面也没被钉过），且展开后的形态在 `prompt-catalog.ts` 里**没有说明** —— 目录只写了未展开的 `[合并转发聊天记录]` / `[转发消息 …]`，而入站是自动展开的，模型实际看到的是第三种拼法。
 
@@ -148,7 +148,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - 是否回复都要消费已经判断过的消息，防止旧消息反复成为“本次新消息”。
 - 原始历史以本轮 `triggerEntries` 最早消息为边界，只从边界之前读取；当前批只进【本次唤醒】。
 - 内部统一使用 `historyCount/historyLimit`，不要重新引入 `contextLimit`。
-- **转写结果（`kind:'transcript'`）是一等窗口条目，且两个谓词给出的答案相反**：`isSystemRecord` 必须**不**认它（认了它就永远进不了窗口），`isPersonMessage` 必须认它（它的 `senderId` 是空串，否则会凭空多出一个叫“转写”的成员）。它必须 `read:false`——写 `true` 会落进 `#lastSeenId` 水位线之下：进程内刚写入时看得见，**重启后永久不可见**。窗口里只要有它，`evaluateWindowTrigger` 无条件响应（`responseTier:0` / `reason:'转写结果'`）；**`forceWake` 绕不过档位判定**，这是唯一落点，且它必须不读 `roll`（`#resolvePendingResponse` 有 `scheduleWake`/`wake` 两个调用点）。规则作用于**整批**。
+- **异步任务结果（`transcript` / `jmcomic-result`）是一等窗口条目，且两个谓词给出的答案相反**：`isSystemRecord` 必须**不**认它们（否则永远进不了窗口），`isPersonMessage` 必须**排除**它们（否则空 `senderId` 会制造幽灵成员）。它们必须 `read:false`——写 `true` 会落进 `#lastSeenId` 水位线之下：进程内刚写入时看得见，**重启后永久不可见**。窗口里只要有其中一种，`evaluateWindowTrigger` 无条件响应（`responseTier:0`，原因分别为“转写结果”/“漫画下载结果”）；**`forceWake` 绕不过档位判定**，这是唯一落点，且规则不能读 `roll`。规则作用于**整批**。
 
 ## 提示词维护规则
 
@@ -296,6 +296,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - `t-ports.mjs`（跨模块端口与 `implements`；含 S10d 的第 1c 段——扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`）
 - `t-tasks.mjs`（长期任务描述符表；含三条实名断言，其中一条是扫 `qq/onebot.ts` 的"重连排定只许一处、句柄必须存进 `#reconnectTimer`"——往那里再加一处裸 `setTimeout` 会打红它）
 - `t-timers.mjs`（长期任务的计时器句柄：起没起、停没停、有没有被"清掉又没重建"；第 5 段是配置刷新触发重连——用 `app.onebot.socket` 的**身份**断言"值没变不断连、值变了才重建"，外加 `applyEndpoint` 的单元断言与 `applyConfigPatch` 函数体的文本扫描）
+- `t-jmcomic-callback.mjs`（Python 只发分块结果帧、永不发 `close` 时仍能上传；OneBot 确认后完成 sink 只回流一次；`jmcomic-result` 在最低档位也会唤醒）
 - `t-hot-search.mjs`（ApiZero 匿名/Bearer 请求、429/5xx/超时退避、字段缺失与空榜、去重分页、白名单目标、状态持久化、当天幂等、手动/定时互斥与配置脱敏）
 - `t-lifecycle.mjs`（注册层执行侧：关停路径的信号接线与幂等；S11c 起还有装配清单 ⇄ `LONG_TERM_TASKS` 对账、清单 import 纯度、`app.start()/stop()` 的接线与逆序；S11d 的第 4 段是死代码与空转事件收口（33 条里的 5 条）、S11e 的第 5 段是 electron 的 `before-quit` 真的等 `stop()`（6 条，套件 33 → 39）；**搜图 worker 接入后是 42 条**——新增的 3 条恰好是那一行 entry 唯一能被机检的两个面：`DEFAULT_CONFIG.imageSource.enabled` 必须是 `false`、闸门必须认 `=== true`（`false`/`undefined` 都判不开）、`lifecycleDeps()` 里递的必须**是真模块函数**（`moduleEntryNames()` 按 `owner.endsWith('<owner>.ts')` 取名，够不着 `pic-image-search-client.ts`，所以这一条是独立的））。**它的文本扫描一律先 `stripComments()`**——`runtime/lifecycle.ts` 的头部注释里就写着 `LIFECYCLE[动态键]` 与 `.find(`（那是在列出被禁形态），不剥注释会让文件把自己的文档打红。**"无按键分发"那三条断言是"装配清单 vs 被禁注册表"唯一的机检边界**：往 `runtime/lifecycle.ts` 里加一个 `startById(id)` 式的按键分发函数，**所有行为断言仍全绿**（对账、顺序、逆序、接线、纯度都不受影响），只有它红——这正是它存在的唯一理由。**S11d 那 5 条全是文本断言**，因为删的东西零调用者/零消费者——"删与不删运行期完全一样"，行为断言一条都写不出来，探针只能证明"加回来会被文本挡住"。其中两条值得记住：① 判 `core/config.ts` 没有计时器**不认名字**，只认这个文件里有没有 `setTimeout`/`setInterval`，所以换个名字复活同样会被抓住；② **`providers.ts` 里 `const visionScan = { running: false }` 这个局部对象是活的**（`/api/vision/results` 读它、`/api/vision/scan` 用它挡 409、UI 读 `visionData.scanning`）——它长得像 `vision-scan` 事件的残留，**删不掉，也没有任何套件能区分"删事件"与"删这个对象"**，只有一条正向文本断言钉着它，另配一条真机冒烟（点设置页的"视觉能力扫描"按钮）。`core/events.ts` 的注释里也写着 `AgentEventMap`（那是在记反面教材，S11d 已把它从代码里删掉），所以这句扫描同样必须先剥注释。**S11e 的第 5 段（6 条）与第 4 段不同：它盯的不是死代码，而是两条"缺了就挂"的活路径**——同上，`electron/main.js` import 不了，所以只能切出 `before-quit` 的**函数体**逐条断言（不是全文 `includes`）。两个探针实测：删掉 `if (stopping) return;` → 红 1 条（真机表现是"点了退出、窗口关了、进程还在"）；删掉 `.finally(() => app.quit())` → 红 1 条（真机表现是**应用永远不退**）。**这两件事都没有任何行为套件看得见**，而它们又都不影响启动与聊天——所以别以为"能跑就没坏"。
 

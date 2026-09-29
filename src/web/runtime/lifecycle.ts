@@ -33,12 +33,14 @@ import type { AgentControlPort } from '../../agent/runtime/control-port.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { SendQueue } from '../../qq/sender.js';
 import type { ChatStore } from '../../chat/store.js';
+import type { JmcomicCompletionSink } from '../../media/jmcomic.js';
 
 /** jmcomic 队列需要的运行时（与 `media/jmcomic.ts` 的 `JmRuntime` 结构一致）。 */
 export interface LifecycleJmRuntime {
   onebot: OneBotClient;
   sender: SendQueue;
   store: ChatStore;
+  onCompleted: JmcomicCompletionSink;
 }
 
 /**
@@ -61,7 +63,7 @@ export interface LifecycleDeps {
   sender: SendQueue;
   store: ChatStore;
   priceFeed: { init(url: string): void; stop(): void };
-  jmcomic: { init(runtime: LifecycleJmRuntime): void; stop(): void };
+  jmcomic: { init(runtime: LifecycleJmRuntime): void; stop(): void; onCompleted: JmcomicCompletionSink };
   transcription: { start(): void | Promise<void>; stop(): void | Promise<void> };
   hotSearch: { start(): void | Promise<void>; stop(): void | Promise<void> };
   /**
@@ -156,7 +158,12 @@ export const LIFECYCLE: readonly LifecycleEntry[] = [
     // 让"这条 entry 代表一次真实的装配动作"这件事退化成运气。
     ids: ['jmcomic.cleanup', 'jmcomic.worker'],
     enabled: ALWAYS,
-    start: (deps) => deps.jmcomic.init({ onebot: deps.onebot, sender: deps.sender, store: deps.store }),
+    start: (deps) => deps.jmcomic.init({
+      onebot: deps.onebot,
+      sender: deps.sender,
+      store: deps.store,
+      onCompleted: deps.jmcomic.onCompleted
+    }),
     stop: (deps) => deps.jmcomic.stop()
   },
   {

@@ -13,6 +13,7 @@ import { SessionRegistry } from '../chat/sessions.js';
 import { Orchestrator } from '../agent/runtime/orchestrator.js';
 import { initPriceFeed, stopPriceFeed } from '../llm/price-feed.js';
 import { initJmcomicQueue, stopJmcomicQueue } from '../media/jmcomic.js';
+import type { JmcomicCompletion } from '../media/jmcomic.js';
 import { VideoTranscriptionQueue } from '../media/video-transcription.js';
 import { createEventBus } from '../core/util.js';
 import { projectSse, writeSse } from './http/event-projector.js';
@@ -97,6 +98,14 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   }) {
     // 顺序照 ingest：先落存档 → 再入窗（onIncoming 会推窗口并按防抖唤醒）→ 最后通知面板。
     const entry = store.appendTranscript(chatKey, { text, truncated, chars });
+    orchestrator.onIncoming(chatKey, entry);
+    emit(EVENTS.chatUpdate, chatKey);
+  }
+
+  // 漫画队列的完成回流与转写同形：文件仍由队列确定性上传；OneBot 确认接收后，
+  // 再把一条未读机器结果送进窗口，触发 Agent 给请求者自然收尾。
+  function deliverJmcomicCompletion({ chatKey, comicId, cached }: JmcomicCompletion) {
+    const entry = store.appendJmcomicResult(chatKey, { comicId, cached });
     orchestrator.onIncoming(chatKey, entry);
     emit(EVENTS.chatUpdate, chatKey);
   }
@@ -186,7 +195,7 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       sender,
       store,
       priceFeed: { init: initPriceFeed, stop: stopPriceFeed },
-      jmcomic: { init: initJmcomicQueue, stop: stopJmcomicQueue },
+      jmcomic: { init: initJmcomicQueue, stop: stopJmcomicQueue, onCompleted: deliverJmcomicCompletion },
       transcription: { start: () => transcription.start(), stop: () => transcription.stop() },
       hotSearch: { start: () => hotSearchScheduler.start(), stop: () => hotSearchScheduler.stop() },
       // 搜图 worker 自己吞掉预热失败（没装库不该掀翻 app.start()），所以这里直接递真函数即可。

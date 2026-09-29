@@ -69,6 +69,11 @@ export function evaluateWindowTrigger({ entries, identity = {}, policy, roll }: 
   if (entries.some((entry) => entry?.kind === 'transcript')) {
     return { responseTier: 0, reason: '转写结果', shouldRespond: true };
   }
+  // 漫画下载与转写同属异步回流：原工具调用早已结束，这里若按普通闲聊档位判断，
+  // 低档位会把完成事实静默消费，用户只看到“已入队”却收不到完成后的自然回应。
+  if (entries.some((entry) => entry?.kind === 'jmcomic-result')) {
+    return { responseTier: 0, reason: '漫画下载结果', shouldRespond: true };
+  }
   if (tier >= 2 && hitKeyword(texts.join('\n'), policy.keywords)) return { responseTier: 2, reason: '关键词命中', shouldRespond: true };
   const rollValue = Number(roll);
   const randomHit = rollValue < Math.max(0, Math.min(100, Number(policy.randomPercent) || 0));

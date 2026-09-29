@@ -140,6 +140,11 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
     const cut = meta.truncated === true ? `（原文共 ${Number(meta.chars) || 0} 字，超出上限，此处为开头部分）` : '';
     return `[${formatShortTime(m.ts)}] 【转写结果】${cut}${String(m.text || '')}`;
   }
+  // 漫画队列的异步完成回调。PDF 已由队列直接上传，这里只把完成事实交给模型，
+  // 让它像群友一样自然收尾；不套“某人：”，也不给可引用的消息 id。
+  if (m.kind === 'jmcomic-result') {
+    return `[${formatShortTime(m.ts)}] 【漫画下载结果】${String(m.text || '')}`;
+  }
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');
   const who = m.self ? '我' : (notes[senderId] || m.senderName || senderId || '未知');
@@ -376,7 +381,7 @@ function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
   // 转写结果是机器输出，不是"谁在提问题"：整条短路。
   // 不短路的话下面几条正则必然误标 —— 转写正文里出现"吗/呢"或以"？"结尾是常事（→"提问"），
   // 提到 bot 的名字也是常事（→"提到我"），而这两条都会让模型以为有人在向它提问。
-  if (entry?.kind === 'transcript') return [];
+  if (entry?.kind === 'transcript' || entry?.kind === 'jmcomic-result') return [];
   const labels: string[] = [];
   const text = String(entry?.text ?? '');
   const lower = text.toLowerCase();

@@ -129,7 +129,7 @@ OneBot 入站事件
 
 模型没有跨运行的原生对话历史。每次 `runAgent` 都重新创建 system 和 user 两条初始消息。同一次运行中的工具轮次会继续追加 assistant、tool 和视觉 user 消息；运行结束后不把这串模型消息作为下一次运行的 LLM history。
 
-链路还有一条**异步回流**入口：后台转写完成后，把一条 `kind:'transcript'` 的【转写结果】写进存档并推入窗口，它随后走上面同一套「窗口 → 响应判定 → runAgent」流程。区别在于那一次运行**没有任何 tool result 与之对应**——转写是在更早一次运行里入队的，中间隔了一次会话收尾。所以这条路径的正确性只能靠 system prompt 规则（见 5.1）与窗口判定（见 4.2）承载，不能指望上下文里还留着工具调用痕迹。
+链路另有两条**异步回流**入口：后台转写完成后写入 `kind:'transcript'` 的【转写结果】；漫画 PDF 被 OneBot 明确接收后写入 `kind:'jmcomic-result'` 的【漫画下载结果】。两者都会落存档、推入窗口，再走同一套「窗口 → 响应判定 → runAgent」。区别在于那次运行**没有任何 tool result 与之对应**——任务是在更早一次运行里入队的，中间隔了一次会话收尾。所以正确性只能靠 system prompt 规则（见 5.1）与窗口判定（见 4.2）承载，不能指望上下文里还留着工具调用痕迹。
 
 ## 4. 新消息窗口与历史深度
 
@@ -150,14 +150,14 @@ OneBot 入站事件
 - `foldedCount()`：已滑出但尚未结算的 id 数，用于提示模型较早消息已降级到历史。
 - `seen()`：推进水位线。回复与不回复都会消费，避免旧消息反复成为“新消息”。
 
-窗口收的是“对方发来的消息”，但有一类**机器生成的条目**也必须进窗口：转写结果（`kind:'transcript'`）。它不是谁说的话（`senderId` 为空串、`senderName` 为 `转写`，仅用于摘要与提示词显示），却必须让模型看到并开口。它的 `read` 必须是 `false`——否则播种时 `#lastSeenId` 取的是“最长的一段 `read === true` 前缀”，条目会落在那条水位线**之下**：进程内刚写入时看得见，重启后永久不可见。
+窗口收的是“对方发来的消息”，但两类**机器生成的条目**也必须进窗口：转写结果（`kind:'transcript'`）与漫画完成结果（`kind:'jmcomic-result'`）。它们不是谁说的话（`senderId` 为空串，`senderName` 只用于摘要与面板显示），却必须让模型看到并开口。它们的 `read` 必须是 `false`——否则播种时 `#lastSeenId` 取的是“最长的一段 `read === true` 前缀”，条目会落在那条水位线**之下**：进程内刚写入时看得见，重启后永久不可见。
 
 存档层因此用**两个谓词**回答两个不同的问题（此前由 `isSystemRecord` 一个函数兼任，转写结果的两个答案是相反的，所以必须拆开）：
 
-- `isSystemRecord`：判“要不要进动态唤醒窗口”。只有 `digest` / `note` 不进，转写结果**天然通过**。
-- `isPersonMessage`：判“算不算某人说的话”。`digest` / `note` / `transcript` 都不算，供 `activeMembers` 与记忆整理过滤幽灵成员（否则会凭空多出一个叫“转写”的成员）。
+- `isSystemRecord`：判“要不要进动态唤醒窗口”。只有 `digest` / `note` 不进，两种异步结果**天然通过**。
+- `isPersonMessage`：判“算不算某人说的话”。`digest` / `note` / `transcript` / `jmcomic-result` 都不算，供 `activeMembers` 与记忆整理过滤幽灵成员。
 
-归档范围（`selectArchiveRange`）仍按 `isSystemRecord` 判定，所以转写结果**可以被压缩归档**，长文本不会在存档里只增不减。
+归档范围（`selectArchiveRange`）仍按 `isSystemRecord` 判定，所以两种异步结果**可以被压缩归档**，不会在存档里只增不减。
 
 ### 4.2 独立历史策略
 
@@ -176,15 +176,15 @@ OneBot 入站事件
 3. 用 `batch()` 拍下实际进入【本次唤醒】的当前窗口，并以其中最早消息的本地 ID
    作为 `historyBeforeId`。
 
-窗口里只要有一条转写结果，`evaluateWindowTrigger()` 就无条件返回 `shouldRespond: true`
-（`reason` 为 `转写结果`，`responseTier: 0`）。理由是转写结果是**异步交付**的：它到达时距离入队已经隔了一次完整的会话收尾，那次运行的 tool result 早已不在上下文里；若在低档位被判成“未触发”，它会被静默消费，模型永远看不到，用户等了半分钟只等来一片沉默。`responseTier: 0` 沿用主动机会的同类先例——非档位来源共用 0，含义由 `reason` 承载，UI 打印的“档 N · reason”里 N 为 0 也不与 1–4 的档位词表混淆。
+窗口里只要有一条转写结果或漫画完成结果，`evaluateWindowTrigger()` 就无条件返回 `shouldRespond: true`
+（`reason` 分别为 `转写结果` / `漫画下载结果`，`responseTier: 0`）。理由是它们都是**异步交付**的：到达时距离入队已经隔了一次完整的会话收尾，那次运行的 tool result 早已不在上下文里；若在低档位被判成“未触发”，它会被静默消费，模型永远看不到。`responseTier: 0` 沿用主动机会的同类先例——非档位来源共用 0，含义由 `reason` 承载。
 
 这条规则有两条刻意保住的性质：
 
 - 它排在“全部响应”与“被艾特”**之后**（那两种原因更具体，配了全部响应的用户仍看到“全部响应”），排在关键词/随机**之前**（后两者受档位闸门约束，而转写结果必须在**任何**档位下都触发）；
 - 它**不读骰子**。`#resolvePendingResponse` 同时被 `scheduleWake`（建等待会话之前）与 `wake`（真正运行之前）调用，与随机无关才能保证两处给出同一个答案。
 
-后果要知道：规则作用于**整批**。一条转写结果与一批无关闲聊同处窗口时，整批都会进入【本次唤醒】并被响应，模型看到的不只是转写结果。
+后果要知道：规则作用于**整批**。一条异步结果与一批无关闲聊同处窗口时，整批都会进入【本次唤醒】并被响应，模型看到的不只是任务结果。
 
 提示词构建器从 `historyBeforeId` 之前向前读取 `historyCount` 条，形成【过去状态】；
 `batch()` 中的消息只形成【本次唤醒】。两段以明确边界相接，不按数组 offset 猜测，也不
@@ -330,7 +330,7 @@ store.promptContextMaxChars = 32000
 
 模型普通文本本身不会自动发送到 QQ；对外动作必须通过发送类工具完成。因此最终状态按真实发送记录判断：发过消息为 `done`，未发送为正常的 `noreply`。
 
-注意有一类工具**不在本轮产生外部动作**：它把任务交给后台队列就立刻返回，完毕后由队列自己把结果投递回原会话。`download_jmcomic` 是这个形态，所以它的产出不落在本轮会话记录的发送列表里，也不能用“这轮没发消息”推断它没干活。
+注意有一类工具**不在本轮产生外部动作**：它把任务交给后台队列就立刻返回，完毕后由队列自己把结果投递回原会话。`download_jmcomic` 是这个形态：Python 用 `__QQ_AGENT_RESULT__` 结果帧通知 Node，Node 在 stdout 收到完整帧时立即结算（不再等待子进程 `close`；`close` 只作异常兜底），随后上传 PDF。OneBot 明确返回成功或文件列表核验命中后，再经注入的完成 sink 写入【漫画下载结果】并唤醒 Agent。这样即使第三方库留下未退出线程，也不会出现“PDF 已生成、任务仍永久卡在 downloading”的状态。它的产出不落在最初那轮会话记录的发送列表里，不能用“这轮没发消息”推断它没干活。
 
 与它相邻的是**"工具自己不开口"契约**：`transcribe_video` 与 `reverse_image_source` 都**不代模型发任何消息**——工具只负责入队/查询与返回结果，说不说、怎么说由模型在这一次运行里自己决定。这条契约不是风格偏好，它有两条机制上的理由：
 
@@ -381,7 +381,7 @@ npm run dev             # tsc --watch
 
 当前重点回归包括动态窗口语义、摘要去重、当前窗口与独立历史分离、统一预算保护本轮消息、读图结果回填、`memory_query` 定向查询、主动冒泡的唤醒语义（`t-window.mjs` 第 15 段），以及 Web/UI 模块接线。
 
-长期任务与事件相关改动另有一组专项套件：`t-events.mjs`（事件名/载荷/注入类型/`session-update` 通道）、`t-sse-project.mjs`（SSE 帧逐字节）、`t-panel-wiring.mjs`（UI 订阅名跨边界 + 设置页接线：Python 工具那段的 id 解析、保存分支必须写 `patch.python.path` 且**兜底仍是空串**、两个按钮必须先 `saveConfig` 再打探测端点）、`t-ports.mjs`（跨模块端口与 `implements`；另扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`——`.mjs` 不受 `tsc` 管，这条只能文本扫）、`t-tasks.mjs`（`LONG_TERM_TASKS` 描述符与 `conformance` 一致性）、`t-timers.mjs`（计时器句柄：起没起、停没停、有没有被"清掉又没重建"、待触发的那一次取消不取消得掉）、`t-transcription.mjs`（视频命令、SSRF、单并发状态机、凭证脱敏）、`t-jmcomic.mjs`（漫画队列按"请求者 QQ + 漫画 ID"去重：完成后记录**留在** `jobs` 里而不是即时摘除，否则"同一用户短时间内不能重复提交"对**下载成功过**的漫画失效；窗口的计时起点是上传完成时刻而非创建时刻；2026-09-29 起还守 Python 解释器的解析优先级（`python.path` > `QQ_AGENT_PYTHON` > Windows 固定环境 / conda）、每一层报出的 `source`、探测与自检模块（假 `spawn` 注入：非 JSON 输出、非零退出、超时 kill、输出截断、`--self-check` 确实进了 argv），以及旧配置迁移——`jmcomic.pythonPath` 搬进 `python.path` 后旧键必须消失，且保存一次**不会被写回**，因为 `updateConfig` 的 `deepMerge` 只加键不删键，漏掉那句 `delete` 的话内存里看着对、盘上却永远留着；安全网也换了形态：早先靠 `JMCOMIC_PYTHON` 指一个不存在的程序，现在把 `python.path` 写进夹具 `config.json`（`config` 优先级最高，不再依赖"某台机器上恰好有这个变量"），并另配一条正向断言证明安全网真的生效）、`t-jmcomic-upload.mjs`（上传超时/断连与重启遗留的 `uploading` 统一进入 `upload_uncertain`：群文件按文件名和大小查群文件列表，私聊按文件名和大小查好友消息历史，核验期间不再次调用非幂等的上传动作）、`t-lifecycle.mjs`（注册层执行侧：退出路径的信号接线与幂等、装配清单 ⇄ 描述符表对账、`app.start()/stop()` 的接线与逆序、无按键分发；S11d 起还守"被删的死代码与空转事件不许长回来"——`core/config.ts` 无任何计时器、三个文件再无 `emit`、`EventMap` 与 `vision-scan` 在 `src/` 绝迹，同时**正向**钉住 `routes/providers.ts` 里那个活着的 `visionScan` 局部对象；S11e 起还守 electron 的退出等待——`before-quit` 的**函数体**里必须有 `preventDefault(`、排在它前面的 `stopping` 守卫、promise 链上的 `.catch(`，以及 `.finally` 里那次 `app.quit()`，否则桌面端要么不退要么死循环）。
+长期任务与事件相关改动另有一组专项套件：`t-events.mjs`（事件名/载荷/注入类型/`session-update` 通道）、`t-sse-project.mjs`（SSE 帧逐字节）、`t-panel-wiring.mjs`（UI 订阅名跨边界 + 设置页接线：Python 工具那段的 id 解析、保存分支必须写 `patch.python.path` 且**兜底仍是空串**、两个按钮必须先 `saveConfig` 再打探测端点）、`t-ports.mjs`（跨模块端口与 `implements`；另扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`——`.mjs` 不受 `tsc` 管，这条只能文本扫）、`t-tasks.mjs`（`LONG_TERM_TASKS` 描述符与 `conformance` 一致性）、`t-timers.mjs`（计时器句柄：起没起、停没停、有没有被"清掉又没重建"、待触发的那一次取消不取消得掉）、`t-transcription.mjs`（视频命令、SSRF、单并发状态机、凭证脱敏）、`t-jmcomic.mjs`（漫画队列按"请求者 QQ + 漫画 ID"去重：完成后记录**留在** `jobs` 里而不是即时摘除，否则"同一用户短时间内不能重复提交"对**下载成功过**的漫画失效；窗口的计时起点是上传完成时刻而非创建时刻；2026-09-29 起还守 Python 解释器的解析优先级（`python.path` > `QQ_AGENT_PYTHON` > Windows 固定环境 / conda）、每一层报出的 `source`、探测与自检模块（假 `spawn` 注入：非 JSON 输出、非零退出、超时 kill、输出截断、`--self-check` 确实进了 argv），以及旧配置迁移——`jmcomic.pythonPath` 搬进 `python.path` 后旧键必须消失，且保存一次**不会被写回**，因为 `updateConfig` 的 `deepMerge` 只加键不删键，漏掉那句 `delete` 的话内存里看着对、盘上却永远留着；安全网也换了形态：早先靠 `JMCOMIC_PYTHON` 指一个不存在的程序，现在把 `python.path` 写进夹具 `config.json`（`config` 优先级最高，不再依赖"某台机器上恰好有这个变量"），并另配一条正向断言证明安全网真的生效）、`t-jmcomic-callback.mjs`（结果帧即刻结算，不依赖 Python `close`；上传完成 sink 回流 `jmcomic-result`，最低档位仍唤醒）、`t-jmcomic-upload.mjs`（上传超时/断连与重启遗留的 `uploading` 统一进入 `upload_uncertain`：群文件按文件名和大小查群文件列表，私聊按文件名和大小查好友消息历史，核验期间不再次调用非幂等的上传动作）、`t-lifecycle.mjs`（注册层执行侧：退出路径的信号接线与幂等、装配清单 ⇄ 描述符表对账、`app.start()/stop()` 的接线与逆序、无按键分发；S11d 起还守"被删的死代码与空转事件不许长回来"——`core/config.ts` 无任何计时器、三个文件再无 `emit`、`EventMap` 与 `vision-scan` 在 `src/` 绝迹，同时**正向**钉住 `routes/providers.ts` 里那个活着的 `visionScan` 局部对象；S11e 起还守 electron 的退出等待——`before-quit` 的**函数体**里必须有 `preventDefault(`、排在它前面的 `stopping` 守卫、promise 链上的 `.catch(`，以及 `.finally` 里那次 `app.quit()`，否则桌面端要么不退要么死循环）。
 
 每日热搜另有 `t-hot-search.mjs`，覆盖 ApiZero 匿名/Bearer 请求、429/5xx/超时重试、字段缺失与空榜、标题去重、按条目分页、白名单目标、重启后当天不重复以及手动/定时互斥。
 
