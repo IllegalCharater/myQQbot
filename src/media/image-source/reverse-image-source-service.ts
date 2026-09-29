@@ -84,15 +84,24 @@ const ENGINE_ROWS: Record<EngineWhich, EngineRow> = {
 };
 
 /**
- * **顺序是语义**：intent 决定先问哪一类引擎，命中就不再问下一个。
+ * **顺序是语义**：intent 决定先问哪一类引擎，命中就不再问下一个（下面那个 `if (result) break`）。
  *
  * 写成显式两张表（而不是"按 kind 排个序算出来"）是有意的：加引擎的人**必须自己决定它排在
- * 哪**，那是一个决定，不该由一条现成的规则替他做。`unknown` 与 `anime` 同序，与改动前一致。
+ * 哪**，那是一个决定，不该由一条现成的规则替他做。
+ *
+ * **`unknown` 不是 `anime` 的同义词。** 这两行最初写成同序，理由是"与改动前一致"——那是沿袭
+ * 旧实现，不是一个决定。它的代价是：模型判不出类型时填的正是 `unknown`，于是**最常出现的那个
+ * 值在顺序上等于"这是一张动画截图"**（真机实测：一张梗图走的就是动画那条路）。判据是引擎的
+ * **覆盖面**：trace.moe 只索引动画帧，是窄域专用引擎；SauceNAO 面广（画师/同人/漫画/动画源图
+ * 都在）。窄域引擎只有在**类型已确认**时才该先问 —— 否则它对非动画图要么白烧一次调用，要么
+ * 给出一个假命中、并因此**拦住**后面那个面广的引擎（`break` 之后不再问）。
  */
 const ORDER: Record<SearchIntent, readonly EngineWhich[]> = {
   anime: ['trace', 'sauce'],
-  unknown: ['trace', 'sauce'],
-  illustration: ['sauce', 'trace']
+  illustration: ['sauce', 'trace'],
+  // 与 `illustration` 同序是**当前**的结论，不是"这两个 intent 是一回事"：`unknown` 的输入里
+  // 非动画占绝大多数，所以面广的引擎先问。将来若按 intent 分化门槛/条数，这一行要自己走。
+  unknown: ['sauce', 'trace']
 };
 
 function specOf(which: EngineWhich, cfg: ImageSourceConfig): EngineSpec {

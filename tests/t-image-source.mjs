@@ -312,6 +312,18 @@ ok('intent=illustration 先问 saucenao', illHit.calls[0]?.engine === 'saucenao'
 ok('SauceNAO 的 apiKey 从配置经 engineOptions 递到 provider（不进 URL、不进 argv，只进 stdin）',
   illHit.calls[0].options?.apiKey === 'secret-test-key');
 
+// `unknown` 此前**一条断言都没有**，而这正是模型最常填的那个值（判不出类型时填的就是它）——
+// 守护空白就这么长出了一个真机缺陷：它当初与 `anime` 排成同序（理由只是"与改动前一致"），
+// 于是"我不确定"在引擎顺序上等于"这是动画截图"。夹具让 trace.moe 也自称命中（0.99，高于它
+// 自己的门槛 0.87），这样两边的答案可区分：顺序错则 trace 的 0.99 赢并拦住 saucenao。
+const unknownHit = await dispatch({}, {
+  'trace.moe': () => ({ results: [{ similarity: 0.99 }], statusCode: 200 }),
+  saucenao: () => ({ results: [{ similarity: 0.95 }], statusCode: 200 })
+}, 'unknown');
+ok('intent=unknown 先问覆盖面更广的 saucenao（它不是 anime 的同义词：专用引擎只在类型已确认时才先问）',
+  unknownHit.calls.map((c) => c.engine).join(',') === 'saucenao' && unknownHit.out.result?.similarity === 0.95,
+  `calls=${unknownHit.calls.map((c) => c.engine).join(',')} sim=${unknownHit.out.result?.similarity}`);
+
 const fallthrough = await dispatch({}, {
   'trace.moe': () => ({ results: [{ similarity: 0.5 }], statusCode: 200 }),
   saucenao: () => ({ results: [{ similarity: 0.92 }], statusCode: 200 })
