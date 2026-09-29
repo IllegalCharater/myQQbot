@@ -206,7 +206,7 @@ UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词
 
 ### 5.1 System prompt
 
-`buildSystemPrompt()` 放稳定、跨会话的规则：人设与表达约束、是否应当发言的原则、工具调用与引用安全规则、表情使用策略。工具参数定义留在 tool schema，不再复制到 system/user prompt。
+`buildSystemPrompt()` 放稳定、跨会话的规则：人设与表达约束、是否应当发言的原则、工具调用与引用安全规则、表情使用策略。工具参数定义留在 tool schema，不再复制到 system/user prompt。**唯一的例外是「参数是 JSON，字符串值里需要引号时用中文引号」这条**（`toolProtocol` 第 3 条）：它不是某个参数的语义约束，而是**所有工具调用共有的传输格式**——`send_message.messages`、`sticker_note.note`、`memory_append` 的自由文本都会踩同一个坑，写进 schema 就得在每个字段里各抄一遍。模型偶尔仍会漏，所以通用解析失败的文案（`agent/tools/shared.ts`）也带上了可执行的下一步。
 
 其中一条规则只能在 system prompt 里交代：**看到【转写结果】必须开口**。转写结果是异步到达的，到达的那次运行拿不到任何 tool result，也没有“上一轮我提交过转写”的痕迹；只有 system prompt 能跨运行把这件事说清楚（要求模型评价或转述，并禁止在没有【转写结果】时凭空评价视频内容）。
 

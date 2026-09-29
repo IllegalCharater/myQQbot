@@ -773,7 +773,10 @@ export async function executeTool(defs: ToolDefinition[], ctx: ToolContext, name
     const parsed: unknown = typeof raw === 'string' ? JSON.parse(raw) : raw;
     args = isRecord(parsed) ? parsed : {};
   } catch {
-    return { content: `错误：工具 ${name} 的参数不是合法 JSON：${String(raw).slice(0, 200)}`, isError: true };
+    // 最常见的成因是字符串值里有**没转义的英文双引号**（模型写中文时习惯直接敲 "），而
+    // 转义与否是模型自己的事，我们不做猜测式修复：JSON 修错了会把改动过的文本真的发到群里，
+    // 比发不出去更糟。所以只把原文回给模型，外加它能自己执行的下一步。
+    return { content: `错误：工具 ${name} 的参数不是合法 JSON：${String(raw).slice(0, 200)}（常见原因是字符串值里有没转义的英文双引号 —— 需要引号时改用中文引号「」或“”，改好后重新调用一次）`, isError: true };
   }
   try {
     return await def.execute(ctx, args ?? {});
