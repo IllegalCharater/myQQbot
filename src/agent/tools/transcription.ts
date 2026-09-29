@@ -36,10 +36,20 @@ export function transcriptionTools(): ToolDefinition[] {
         const id = String(messageId);
         const entry = (ctx.triggerEntries || []).find((m) => String(m.mid) === id)
           || ctx.store.findByMid(ctx.chatKey, messageId);
+        // 两种失败分开报：id 打错/消息已不在存档里，与"消息里确实没有视频"是两回事，
+        // 混成一句会让模型（和排查的人）都以为是后者。顺带列出**实际看到的附件种类**——
+        // 卡片链接没被解析出来时，这条信息就是唯一能看出"卡片在、链接不在"的地方。
+        if (!entry) return { content: `错误：没找到消息 ${id}（id 可能不对，或它已经不在存档里了）`, isError: true };
         // B 站视频卡片在接入层入库**之前**就被补成了 kind:'video' 别名（web/onebot/ingest.ts），
         // 所以读存档时只认 video 一种 kind 就够，不需要在这里重做卡片解析。
-        const video = entry?.media?.find((m) => m.kind === 'video' && m.url);
-        if (!video?.url) return { content: '错误：指定消息里没有可转写的视频链接（B 站视频卡片也可以）', isError: true };
+        const video = entry.media?.find((m) => m.kind === 'video' && m.url);
+        if (!video?.url) {
+          const kinds = [...new Set((entry.media || []).map((m) => String(m.kind)).filter(Boolean))];
+          return {
+            content: `错误：这条消息里没有视频链接（只看到：${kinds.length ? kinds.join('、') : '没有附件'}）。也可以直接把视频 URL 或 BV 号发我。`,
+            isError: true
+          };
+        }
         url = String(video.url);
       }
       const queue = ctx.transcription;

@@ -103,6 +103,17 @@ const noVideo = await executeTool(defs, ctxOf({
 }), 'transcribe_video', { messageId: '7' });
 ok('消息里只有图片时明确告知没有视频，且不建任务',
   noVideo.isError === true && jobs.length === beforeRejects, noVideo.content);
+// 这条错句必须列出**实际看到的附件种类**：卡片链接没被解析出来时（B 站小程序卡曾如此），
+// 「只看到：card、image」是唯一能区分「消息里真没视频」与「卡片在、链接没解析出来」的证据。
+ok('没有视频时把实际看到的附件种类一并说出来（卡片解析失灵时的唯一线索）',
+  noVideo.content.includes('只看到：image') && noVideo.content.includes('视频 URL'), noVideo.content);
+
+// 「id 打错/消息已不在存档」与「消息里确实没有视频」是两种失败，混成一句会让排查的人
+// 以为是后者（真实的「卡片抓不到链接」报告就会被这句话盖住）。
+const missing = await executeTool(defs, ctxOf({ transcription: queue }), 'transcribe_video', { messageId: '-999' });
+ok('消息不存在时说的是"没找到消息"，不是"没有视频链接"',
+  missing.isError === true && missing.content.includes('没找到消息 -999')
+  && !missing.content.includes('没有视频链接') && jobs.length === beforeRejects, missing.content);
 
 const noArgs = await executeTool(defs, ctxOf({ transcription: queue }), 'transcribe_video', {});
 ok('url 与 messageId 都缺时明确告知，且不建任务',

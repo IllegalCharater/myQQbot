@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { checker } from './lib/harness.mjs';
+import { checker, dataDir } from './lib/harness.mjs';
 import { ROOT, load, readUI, stripComments } from './lib/src.mjs';
+
+// dataDir 必须先于 load('core/config.js')：末尾的工具级用例要开功能开关，
+// config 在加载时就把 DATA_DIR 定死，晚一步就会往真 data/ 里写配置。
+dataDir('qqagent-image-source-');
 
 const { ok, done } = checker();
 const { TraceMoeProvider } = await load('media/image-source/trace-moe-provider.js');
@@ -100,5 +104,74 @@ const sectionsSrc = readUI('js/views/settings/sections.js');
 const saveSrc = readUI('js/views/settings/save.js');
 ok('设置页渲染了每群每小时与全局每日两个输入框', sectionsSrc.includes('id="cfg-image-source-chat-hourly"') && sectionsSrc.includes('id="cfg-image-source-daily"'));
 ok('保存时钳制并持久化两个调用上限', saveSrc.includes("clampInt(val('#cfg-image-source-chat-hourly'") && saveSrc.includes("clampInt(val('#cfg-image-source-daily'"));
+
+// ── 工具层：失败原因不许被吞掉 ───────────────────────────────────
+// 这是全项目问题最多的一条链路（先撞语义闸门，再撞兜底文案），而它此前**一条工具级断言都没有**。
+// 下面用必然解析失败的地址驱动：查询会立刻以 "URL 无效" / "禁止访问内网/本机地址" 结束，
+// 不联网、不依赖真实图床，但足以证明"查询确实跑过"以及"原因确实被带了出来"。
+const { buildToolDefs, executeTool } = await load('agent/tools/index.js');
+const { updateConfig } = await load('core/config.js');
+const { imageSourceFailureText } = await load('agent/tools/image-source.js');
+const defs = buildToolDefs();
+updateConfig({ imageSource: { enabled: true } });
+
+const warns = [];
+const realWarn = console.warn;
+console.warn = (...args) => { warns.push(args.map(String).join(' ')); };
+try {
+  // 每个用例一个**全新的 chatKey**：额度闸门是模块级单例，复用键会被前面的用例记账拦下（假红）。
+  const ctxOf = (chatKey, url) => ({
+    chatKey,
+    sender: { sendTextBatch: async () => { throw new Error('发送频率超限（每分钟最多 80 条），请等一会再发'); } },
+    session: { id: 's1', sent: [] },
+    emit: () => {},
+    store: { findByMid: () => null },
+    triggerEntries: [{ mid: 'm1', media: [{ kind: 'image', url }] }]
+  });
+
+  // ① 占位提示发不出去（限频、内容为空、协议端全败都会抛）不许把查询一起拖下水。
+  const failedSend = await executeTool(defs, ctxOf('group:88001', 'not-a-url'), 'reverse_image_source', { messageId: 'm1' });
+  ok('占位提示发送失败时仍然执行查询，并把真实原因带回模型',
+    failedSend.isError === true && failedSend.content.includes('URL 无效'), failedSend.content);
+  ok('占位提示失败不再被报成"这次图源识别没成功"（旧兜底文案）',
+    !failedSend.content.includes('没成功'), failedSend.content);
+
+  // ② 原因必须落进日志：会话记录里只能看到工具结果这句话，console 是唯一的排查面。
+  ok('占位提示失败与查询失败都写了 console.warn',
+    warns.some((w) => w.includes('占位提示发送失败')) && warns.some((w) => w.includes('查询失败：URL 无效')),
+    warns.join(' | '));
+
+  // ③ 提示发得出去时，照旧记进 session.sent（面板与"发过消息"判定依赖它）。
+  const sentCalls = [];
+  const okCtx = {
+    ...ctxOf('group:88002', 'not-a-url'),
+    session: { id: 's2', sent: [] },
+    sender: { sendTextBatch: async (...args) => { sentCalls.push(args); return { sent: [{ text: '在找图源，稍等', at: '12:00' }], failed: [] }; } }
+  };
+  await executeTool(defs, okCtx, 'reverse_image_source', { messageId: 'm1' });
+  ok('占位提示照常发出并记入本轮会话',
+    sentCalls.length === 1 && okCtx.session.sent.length === 1 && okCtx.session.sent[0].text === '在找图源，稍等',
+    `calls=${sentCalls.length} sent=${okCtx.session.sent.length}`);
+
+  // ④ 安全层挡下的地址也要如实说明，不能退化成一句泛泛的失败。
+  const blocked = await executeTool(defs, ctxOf('group:88003', 'http://127.0.0.1/x.png'), 'reverse_image_source', { messageId: 'm1' });
+  ok('被 SSRF 挡下时如实带出原因', blocked.content.includes('禁止访问内网'), blocked.content);
+} finally {
+  console.warn = realWarn;
+}
+
+// ⑤ 映射表是纯函数，可以离线逐条钉住；未知原因**必须**带回原始码。
+ok('已知失败原因各有专属文案',
+  ['TOTAL_TIMEOUT', 'IMAGE_FORMAT', 'IMAGE_EMPTY', 'IMAGE_TOO_LARGE', 'QUEUE_FULL', 'DISABLED']
+    .every((code) => imageSourceFailureText(code) !== imageSourceFailureText('SOMETHING_ELSE'))
+  && imageSourceFailureText('TOTAL_TIMEOUT').includes('超时') && imageSourceFailureText('IMAGE_FORMAT').includes('格式'));
+ok('未知失败原因带回原始码或说明未知，不压成泛泛的一句',
+  imageSourceFailureText('HTTP 403').includes('HTTP 403') && imageSourceFailureText('').includes('未知原因'));
+
+// ⑥ 服务层的 failures 是"接口报错"的唯一痕迹：全空结果配上非空 failures 必须走报错分支。
+// 这条只能做文本断言——要让服务层真的返回 failures 得先下载成功一张图并让真实
+// provider 报错，套件里没有可注入 loader 的口子（守护空白，别以为它被行为断言管着）。
+ok('服务层报过错的全空结果不会被当成"没找到图源"',
+  toolSrc.includes('output.failures.length') && toolSrc.includes('图源接口这次没返回结果'));
 
 done();

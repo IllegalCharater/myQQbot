@@ -49,6 +49,83 @@ export function isBilibiliUrl(raw: unknown): boolean {
   }
 }
 
+// ── 卡片报文里的 B 站链接 ───────────────────────────────────────────────
+// 为什么需要这两个函数：B 站 App 分享到 QQ 的是**小程序卡片**，链接在
+// `meta.detail_1.qqdocurl`，而通用卡片解析只认 `meta.*.jumpUrl`（那是老式 news 卡片的字段）。
+// 只认 jumpUrl 的后果是"卡片看着有链接、存档里却没有"——`/转写` 与 `transcribe_video`
+// 都靠 media 里的 `kind:'video'` 定位目标，于是两者都报"没有视频链接"。
+// 另有一部分协议端把分享卡下发成 `xml` 段，通用解析层完全不认这个段（不产生任何 media）。
+
+const CARD_PAYLOAD_MAX = 32 * 1024;
+const CARD_URL_MAX = 300;
+/** 链接可能出现的字段名。qqdocurl 排第一：小程序卡片只有它。 */
+const CARD_URL_FIELDS = ['qqdocurl', 'jumpUrl', 'url'];
+
+/** 只收 http(s) 的 B 站地址；其余（mqqapi:// 之类）一律丢弃。 */
+function bilibiliUrlField(value: unknown): string {
+  if (typeof value !== 'string' && typeof value !== 'number') return '';
+  const s = String(value).trim().slice(0, CARD_URL_MAX);
+  return isBilibiliUrl(s) ? s : '';
+}
+
+/**
+ * json 卡片报文里的 B 站链接（找不到返回 ''）。
+ *
+ * 入参是 json 段的 `data`（形如 `{ data: <JSON字符串|对象> }`，与 parseCardSegment 同一形状）。
+ * 只按白名单读字段、只下探 meta 一层：卡片报文是群成员可伪造的不可信输入，
+ * 这里既不展开对象也不请求任何地址（请求交给后续的 safe-fetch 与 B 站解析层）。
+ */
+export function bilibiliUrlFromCardData(value: unknown): string {
+  const data = isRecord(value) ? value : {};
+  const raw = data.data;
+  let payload: Record<string, unknown> | null = null;
+  if (isRecord(raw)) {
+    payload = raw;   // 有的协议端直接给已解析好的对象
+  } else if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!s || s.length > CARD_PAYLOAD_MAX) return '';
+    try {
+      const parsed: unknown = JSON.parse(s);
+      if (isRecord(parsed)) payload = parsed;
+    } catch { return ''; }
+  }
+  if (!payload) return '';
+
+  const bodies: Array<Record<string, unknown>> = [payload];
+  const meta = payload.meta;
+  if (isRecord(meta)) {
+    for (const key of Object.keys(meta)) {
+      const child = meta[key];
+      if (isRecord(child)) bodies.push(child);
+    }
+  }
+  for (const body of bodies) {
+    for (const field of CARD_URL_FIELDS) {
+      const hit = bilibiliUrlField(body[field]);
+      if (hit) return hit;
+    }
+  }
+  return '';
+}
+
+/**
+ * xml 分享卡里的第一个 B 站链接（找不到返回 ''）。
+ *
+ * 不解析 XML 结构，只把 `http(s)://…` 逐个挑出来做域名判定：xml 卡片的正文是
+ * 协议端与 QQ 之间的私有约定，按标签名取值只会更脆。`&amp;` 先还原，否则带参数的
+ * 链接会被当成另一个地址。
+ */
+export function bilibiliUrlFromXml(value: unknown): string {
+  const xml = typeof value === 'string' ? value : '';
+  if (!xml || xml.length > CARD_PAYLOAD_MAX) return '';
+  const decoded = xml.replace(/&amp;/g, '&');
+  for (const match of decoded.matchAll(/https?:\/\/[^\s"'<>\\]+/g)) {
+    const hit = bilibiliUrlField(match[0]);
+    if (hit) return hit;
+  }
+  return '';
+}
+
 function identityFromUrl(url: URL): BilibiliIdentity | null {
   const bvid = url.pathname.match(/(?:^|\/)video\/(BV[0-9A-Za-z]{10,20})(?:\/|$)/i)?.[1]
     || url.searchParams.get('bvid') || '';

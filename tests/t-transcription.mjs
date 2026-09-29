@@ -12,7 +12,7 @@ const {
   VideoTranscriptionQueue, buildFlashRecognitionRequest, normalizeTranscriptionUrl,
   parseTranscriptionCommand, resolveTranscriptionConfig
 } = await load('media/video-transcription.js');
-const { isBilibiliUrl } = await load('media/bilibili.js');
+const { isBilibiliUrl, bilibiliUrlFromCardData, bilibiliUrlFromXml } = await load('media/bilibili.js');
 const { DEFAULT_CONFIG, updateConfig } = await load('core/config.js');
 
 const rejected = [
@@ -37,6 +37,33 @@ ok('B 站主站、移动站与短链可识别，近似域名不会误判',
   && isBilibiliUrl('https://m.bilibili.com/video/BV1xx411c7mD')
   && isBilibiliUrl('https://b23.tv/fixture')
   && !isBilibiliUrl('https://bilibili.com.evil.example/video/BV1xx411c7mD'));
+
+// ── 卡片链接抽取（纯函数）───────────────────────────────────────
+// B 站 App 分享到 QQ 的是小程序卡片：链接在 meta.detail_1.qqdocurl，通用卡片解析认的
+// jumpUrl 根本不存在。只认 jumpUrl 的后果是卡片看着有链接、存档里却没有。
+const cardData = (payload) => ({ data: JSON.stringify(payload) });
+ok('小程序卡从 qqdocurl 取到链接（这个形态没有 jumpUrl）',
+  bilibiliUrlFromCardData(cardData({ app: 'com.tencent.miniapp_01', meta: { detail_1: { qqdocurl: 'https://www.bilibili.com/video/BV1xx411c7mD' } } }))
+    === 'https://www.bilibili.com/video/BV1xx411c7mD');
+ok('老式 news 卡的 jumpUrl 仍然认（回归）',
+  bilibiliUrlFromCardData(cardData({ meta: { news: { jumpUrl: 'https://b23.tv/legacy' } } })) === 'https://b23.tv/legacy');
+ok('已解析成对象的卡片报文同样认（有的协议端不下发字符串）',
+  bilibiliUrlFromCardData({ data: { meta: { detail_1: { qqdocurl: 'https://b23.tv/obj' } } } }) === 'https://b23.tv/obj');
+// 长度上限判的是**去掉首尾空白后**的报文（纯空白不算内容，也不必为它分配解析树）；
+// 所以这里用一个真的超长报文，而不是往小报文后面补空格。
+ok('非 B 站链接、坏 JSON、超大报文一律返回空串',
+  bilibiliUrlFromCardData(cardData({ meta: { detail_1: { qqdocurl: 'https://example.com/video/1' } } })) === ''
+  && bilibiliUrlFromCardData({ data: '{不是 JSON' }) === ''
+  && bilibiliUrlFromCardData(cardData({ meta: { detail_1: { title: 'x'.repeat(40000), qqdocurl: 'https://b23.tv/x' } } })) === ''
+  && bilibiliUrlFromCardData(undefined) === '');
+// 卡片报文是群成员可伪造的不可信输入：只读白名单字段，绝不把对象展开进任何地方。
+ok('伪造的卡片报文既不污染原型也不抛错',
+  bilibiliUrlFromCardData({ data: JSON.stringify({ __proto__: { polluted: 1 }, meta: { __proto__: { polluted: 1 } } }) }) === ''
+  && ({}.polluted === undefined));
+ok('xml 分享卡里抠出 B 站链接（&amp; 先还原）',
+  bilibiliUrlFromXml('<msg serviceID="1"><item><url>https://b23.tv/a?x=1&amp;y=2</url></item></msg>') === 'https://b23.tv/a?x=1&y=2');
+ok('xml 里没有 B 站链接时返回空串',
+  bilibiliUrlFromXml('<msg><url>https://example.com/a</url></msg>') === '' && bilibiliUrlFromXml(null) === '');
 
 const { createIngest } = await load('web/onebot/ingest.js');
 const { ChatStore } = await load('chat/store.js');
@@ -131,6 +158,62 @@ await cardIngest.handle({
 ok('回复 B 站视频卡片发送 /转写，会从被引用卡片提取链接并立即入队',
   cardCommands.length === 1 && cardCommands[0].url === bilibiliCardUrl
   && cardReplies.length === 1 && String(cardReplies[0][1]).includes('已开始处理'));
+
+// 真实入站契约：把**原始段**换成本轮新增的两种形态，其余断言与上面的老卡片完全一致。
+// 这三种形态的差异只在"链接藏在哪个字段/哪种段里"（老卡片 jumpUrl / 小程序 qqdocurl / xml 正文），
+// 对下游（媒体别名 → /转写 与 transcribe_video）应当是同一件事。
+async function cardIngestFor(groupId, rawSegments) {
+  const commands = [];
+  const replies = [];
+  const ingest = createIngest({
+    onebot: { selfId: '999999', getMsg: async () => ({ sender: { nickname: '卡片发送者' }, message: rawSegments }) },
+    store: new ChatStore(),
+    sender: { sendTextBatch: async (...args) => { replies.push(args); return {}; } },
+    orchestrator: { onIncoming: () => { throw new Error('显式转写命令不应进入 Agent'); } },
+    transcription: {
+      enqueue: (input) => {
+        commands.push(input);
+        return { id: 'card-task-fixture', chatKey: input.chatKey, status: 'queued', createdAt: 1, updatedAt: 1 };
+      }
+    },
+    emit: () => {},
+    getConfig: () => commandConfig,
+    log: () => {}
+  });
+  await ingest.handle({
+    post_type: 'message', message_type: 'group', group_id: groupId, user_id: 456,
+    message_id: 791, sender: { user_id: 456, nickname: '测试者' },
+    message: [{ type: 'reply', data: { id: '789' } }, { type: 'text', data: { text: '/转写' } }]
+  });
+  return { commands, replies };
+}
+
+const miniappCard = await cardIngestFor(124, [{
+  type: 'json',
+  data: { data: JSON.stringify({
+    app: 'com.tencent.miniapp_01', view: 'viewMultiMsg',
+    meta: { detail_1: { title: '【B站】视频', qqdocurl: 'https://www.bilibili.com/video/BV1xx411c7mD' } }
+  }) }
+}]);
+ok('小程序卡片（链接只在 qqdocurl）回复 /转写 也能取到链接入队',
+  miniappCard.commands.length === 1
+  && miniappCard.commands[0].url === 'https://www.bilibili.com/video/BV1xx411c7mD'
+  && miniappCard.replies.length === 1 && String(miniappCard.replies[0][1]).includes('已开始处理'));
+
+const xmlCard = await cardIngestFor(125, [{
+  type: 'xml',
+  data: { data: '<msg serviceID="1"><item><title>B站视频</title><url>https://b23.tv/xml-card</url></item></msg>' }
+}]);
+ok('xml 分享卡回复 /转写 同样能取到链接入队',
+  xmlCard.commands.length === 1 && xmlCard.commands[0].url === 'https://b23.tv/xml-card'
+  && xmlCard.replies.length === 1 && String(xmlCard.replies[0][1]).includes('已开始处理'));
+
+const noLinkCard = await cardIngestFor(126, [{
+  type: 'xml', data: { data: '<msg><item><url>https://example.com/not-bilibili</url></item></msg>' }
+}]);
+ok('没有 B 站链接的卡片不会造出假视频，也不会误入队',
+  noLinkCard.commands.length === 0 && noLinkCard.replies.length === 1
+  && String(noLinkCard.replies[0][1]).includes('用法：/转写'));
 
 // 同一聊天的异步解析必须按 OneBot 到达顺序提交：第一条引用查询被阻塞时，
 // 后到的简单消息不能抢先拿到更小的本地 id。

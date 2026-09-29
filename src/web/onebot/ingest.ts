@@ -23,7 +23,7 @@ import type { OneBotEvent } from '../../qq/types.js';
 import type { SendQueue } from '../../qq/sender.js';
 import { parseTranscriptionCommand } from '../../media/video-transcription.js';
 import type { VideoTranscriptionQueue } from '../../media/video-transcription.js';
-import { isBilibiliUrl } from '../../media/bilibili.js';
+import { isBilibiliUrl, bilibiliUrlFromCardData, bilibiliUrlFromXml } from '../../media/bilibili.js';
 import { errorMessage, isRecord } from '../http/http.js';
 
 // ── 白名单判断（移植自原版 allowed()） ───────────────────────────────────
@@ -46,6 +46,35 @@ function addBilibiliVideoAliases(media: MediaEntry[]): void {
     if (item.kind !== 'card' || typeof item.url !== 'string' || !isBilibiliUrl(item.url) || existing.has(item.url)) continue;
     media.push({ kind: 'video', url: item.url, source: 'bilibili-card' });
     existing.add(item.url);
+  }
+}
+
+/**
+ * 直接从原始消息段里补卡片链接。
+ *
+ * 与 `addBilibiliVideoAliases` 的分工：那个从**已解析的** card 媒体里补别名，只能覆盖
+ * 通用卡片解析认得的字段；这个不经过那一层，覆盖它认不出的形态——
+ * **B 站 App 分享出来的小程序卡片（链接在 `meta.detail_1.qqdocurl`，没有 `jumpUrl`）**
+ * 和部分协议端下发成 `xml` 段的分享卡。两者都调，按 url 去重，顺序无关。
+ *
+ * 为什么非补不可：`/转写` 与 `transcribe_video` 都靠 media 里的 `kind:'video'` 定位目标，
+ * 只认 jumpUrl 时卡片看着有链接、存档里却没有，两边都会报"没有视频链接"。
+ */
+function addBilibiliCardLinks(media: MediaEntry[], segments: unknown): void {
+  const existing = new Set(media
+    .filter((item) => item.kind === 'video' && typeof item.url === 'string')
+    .map((item) => String(item.url)));
+  for (const value of Array.isArray(segments) ? segments : []) {
+    if (!isRecord(value)) continue;
+    const type = value.type;
+    if (type !== 'json' && type !== 'xml') continue;
+    const data = isRecord(value.data) ? value.data : {};
+    const url = type === 'json'
+      ? bilibiliUrlFromCardData(data)
+      : bilibiliUrlFromXml(data.data ?? data.string);
+    if (!url || existing.has(url)) continue;
+    media.push({ kind: 'video', url, source: 'bilibili-card' });
+    existing.add(url);
   }
 }
 
@@ -126,6 +155,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
           .filter((item): item is Record<string, unknown> & { kind: string } => typeof item.kind === 'string')
           .map((item) => ({ ...item, kind: item.kind }));
         addBilibiliVideoAliases(media);
+        addBilibiliCardLinks(media, msg.message);
       } else if (isRecord(msg) && typeof msg.message === 'string') {
         text = msg.message;
       }
@@ -159,6 +189,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       media.push({ kind: 'video', ...(candidate ? { url: candidate } : {}), file: String(segment.data.file || '') });
     }
     addBilibiliVideoAliases(media);
+    addBilibiliCardLinks(media, segments);
 
     let text;
     let commandText;
