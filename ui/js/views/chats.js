@@ -381,6 +381,39 @@ function replyPrefixHtml(m) {
   return `<span class="reply-quote"${mid ? ` title="被引用消息 ${esc(mid)}"` : ''}>[引用 ${esc(label)}]</span>`;
 }
 
+// 展开后的合并转发在存档里长这样（产物见 src/qq/onebot.ts 的 expandForwardNodes）：
+//   [合并转发 共10条]
+//   航: [图片]
+//   航: 这个笔记本怎么样
+// 判据与 read_forward 工具那句 `entry.text.startsWith('[合并转发 共')` 同形 ——
+// 两边认的必须是同一件事，否则工具说"已展开"、面板却按普通消息平铺。
+const FWD_HEAD_RE = /^\[合并转发 共\d+条\]/;
+
+/**
+ * 合并转发的展开块（面板侧）。
+ *
+ * 为什么不能像普通正文那样直接平铺：**这是转发者的一条消息**，展开出来的那些行只是它
+ * text 里的换行 —— 而那些行自带发送者名字、却**没有时间戳**（OneBot 的转发节点不带时间），
+ * 内容也来自别的会话。平铺在存档表里，看起来就是"本群混进了几条不属于这里、还没有时间的记录"
+ * （用户实测报过一次）。缩进 + 弱化 + 保留原样的头行，才能一眼看出"这一坨是转发内容"。
+ *
+ * 只改渲染、不动存档里的 text：模型看到的必须还是展开后的原文（它要读得懂转发内容）。
+ * 头行原样印出，不在这里改写成"转发的聊天记录" —— 面板与提示词两侧说法一致，
+ * 排查时对着看不会打架。
+ */
+function forwardBlockHtml(raw) {
+  const text = String(raw || '');
+  if (!FWD_HEAD_RE.test(text)) return '';
+  const nl = text.indexOf('\n');
+  const head = nl < 0 ? text : text.slice(0, nl);
+  const rest = nl < 0 ? '' : text.slice(nl + 1);
+  return '<div class="fwd-block" title="转发内容：来自别的会话，不是本群的聊天记录">'
+    + `<div class="fwd-head">${esc(head)}</div>`
+    // 行内容照样转义：转发里谁都能写 <script>，这里是最容易漏的一处
+    + (rest ? `<div class="fwd-body">${esc(rest)}</div>` : '')
+    + '</div>';
+}
+
 /** 单行消息 HTML（全量渲染与滚动追加共用同一个模板，保证两处长得一样）。 */
 export function chatMsgRowHtml(m, opts) {
   // ⚠️ 调用方有 `.map(chatMsgRowHtml)` 这种写法，那样第二个参数会是数组下标（数字）而不是
@@ -407,10 +440,12 @@ export function chatMsgRowHtml(m, opts) {
     + '<button class="btn btn-small btn-danger" data-op="del" title="真删除这条存档">删</button>';
   // 顶部历史印象块只给预览（previewChars）：一条摘要正文可达 4000 字，整段铺在最上面
   // 会把表格挤到屏幕外。完整正文在下方表格里本来就有（摘要自己也是一行）。
+  // 那个块里只出现摘要，所以不参与转发块渲染（转发块不做截断，见 forwardBlockHtml）。
   const raw = String(m.text || '');
-  const body = previewChars > 0 && raw.length > previewChars
-    ? `${esc(raw.slice(0, previewChars))}…`
-    : esc(raw);
+  const body = (previewChars > 0 ? '' : forwardBlockHtml(raw))
+    || (previewChars > 0 && raw.length > previewChars
+      ? `${esc(raw.slice(0, previewChars))}…`
+      : esc(raw));
   return `
     <tr class="${m.read ? '' : 'unread'}${isDigest ? ' digest-row' : ''}${isNote ? ' note-row' : ''}${isTranscript ? ' transcript-row' : ''}" data-midrow="${m.id}">
       <td class="t">${fmtTime(m.ts)}</td>

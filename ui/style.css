@@ -462,6 +462,19 @@ body {
 /* 引用预览：它是"被回复的那句话"，与本人的正文同处一格但必须一眼可分。
    预览已从存档的 text 里搬出来（结构化 reply），所以这一格由 JS 拼回。 */
 .archive-table .reply-quote { color: var(--muted); }
+/* 合并转发的展开块：存档里这是**一条**消息（发送者是转发的人），展开出来的若干行只是
+   它 text 里的换行。那些行自带名字却没有时间戳（OneBot 的转发节点不带时间），内容也来自
+   别的会话 —— 平铺的话看起来就是"本群混进了几条没时间的、不属于这里的记录"。
+   缩进 + 左侧竖线 + 弱化，让它一眼是"一段被转发进来的东西"，而不是本群的几条记录。
+   头行（[合并转发 共N条]）原样保留，与提示词里模型看到的字面一致。 */
+.archive-table .fwd-block {
+  margin: 2px 0 0; padding: 4px 8px;
+  border-left: 2px solid var(--border);
+  background: rgba(255,255,255,.02);
+  color: var(--muted);
+}
+.archive-table .fwd-head { font-family: var(--mono); font-size: 11.5px; }
+.archive-table .fwd-body { margin-top: 2px; }
 /* 压缩摘要条目：系统生成的纪要，不是某个人说的话 —— 弱化一下让它一眼可辨 */
 .archive-table .digest-row td { background: rgba(91,140,255,.06); }
 .archive-table .digest-row .w { color: var(--muted); font-style: italic; }

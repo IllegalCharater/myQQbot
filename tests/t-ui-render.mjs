@@ -110,6 +110,34 @@ const quoteEvil = sandbox.chatMsgRowHtml({ ...quotingRow, senderName: '李四', 
 ok('引用预览里的 HTML 同样被转义', !quoteEvil.includes('<img src=x') && !quoteEvil.includes('<script>') && !quoteEvil.includes('<b>1</b>'),
   cellOfInit(quoteEvil));
 
+console.log('\n  ── 合并转发的展开块（面板样式，不动存档 text）──');
+// 存档里的真实形态（产物见 src/qq/onebot.ts 的 expandForwardNodes）：**一条**消息，
+// 发送者是转发的人，text 是头行 + 若干行「名字: 内容」。那些行没有时间戳（OneBot 的转发
+// 节点不带时间）、发送者也不属于本群 —— 平铺在表里就像"混进了几条别的群的记录"（实测报过）。
+const fwdText = '[合并转发 共3条]\n航: [图片]\n蜉蝣: 手机配置低\n航: 我看看\n…（还有 2 条未展开）';
+const fwdRow = { id: 30, ts: Date.now(), senderId: '1', senderName: '战你娘亲', text: fwdText, self: false, read: true, kind: null, media: [] };
+const fwdHtml = sandbox.chatMsgRowHtml(fwdRow, {});
+ok('展开的合并转发走独立块，不再与本群正文一样平铺', fwdHtml.includes('class="fwd-block"'), cellOfInit(fwdHtml));
+ok('头行原样保留（与工具/提示词认的是同一个字面，不在这里改写）', fwdHtml.includes('[合并转发 共3条]'));
+ok('转发正文逐行都在，一行不丢（含"还有 N 条未展开"那句）',
+  cellOfInit(fwdHtml).includes('航: [图片]') && cellOfInit(fwdHtml).includes('蜉蝣: 手机配置低')
+  && cellOfInit(fwdHtml).includes('…（还有 2 条未展开）'));
+// 转发里谁都能写 <script>：这是面板最容易漏的一处（整块是新拼的 HTML）
+const fwdEvil = sandbox.chatMsgRowHtml({ ...fwdRow, text: '[合并转发 共1条]\n航: <img src=x onerror=alert(1)>' }, {});
+ok('转发内容里的 HTML 照样转义', !fwdEvil.includes('<img src=x') && fwdEvil.includes('&lt;img'), cellOfInit(fwdEvil));
+// 判据是"以头行**开头**"（与 read_forward 的 startsWith 同形）：正文里提到这句话不算转发
+ok('普通消息不会被误判成转发块',
+  !plain.includes('fwd-block')
+  && !sandbox.chatMsgRowHtml({ ...fwdRow, text: '看看这个\n[合并转发 共3条]' }, {}).includes('fwd-block'));
+ok('只有头行、正文为空时不产生空的正文块',
+  (() => {
+    const h = sandbox.chatMsgRowHtml({ ...fwdRow, text: '[合并转发 共3条]' }, {});
+    return h.includes('class="fwd-head"') && !h.includes('class="fwd-body"');
+  })());
+// 关键：转发再多行也还是**一行存档**。要是这里渲染成多行 <tr>，分页账本
+// （state.chatMsgRendered / 滚动加载）会立刻对不上。
+ok('转发块仍是存档表里的一行', (fwdHtml.match(/<tr /g) || []).length === 1);
+
 console.log('\n  ── 选项参数：预览裁剪 / 注入徽标 ──');
 const longMsg = { id: 20, ts: Date.now(), senderId: '1', senderName: '小明', text: '这是一条很长很长的消息'.repeat(30), self: false, read: true, kind: null, media: [] };
 const preview = sandbox.chatMsgRowHtml(longMsg, { previewChars: 8, badge: '<span class="digest-badge is-in">已注入</span>' });
