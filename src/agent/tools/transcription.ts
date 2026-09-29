@@ -80,7 +80,7 @@ export function transcriptionTools(): ToolDefinition[] {
         //
         // 代价要知道：模型选择沉默时，群里在结果到达前没有任何提示。这是刻意的取舍 —— 定死一句
         // 回执会和模型自己的发言重复，而结果到达的那一次运行本来就必须开口（见 toolProtocol 第 7 条）。
-        return { content: `已加入转写队列（任务 ${job.id.slice(0, 8)}）。识别结果还没到，结果会在完成后作为一条【转写结果】进入你的上下文，届时你必须开口；现在不要评价视频内容——你还没看到它。` };
+        return { content: `已加入转写队列（任务 ${job.id.slice(0, 8)}）。识别结果还没到，结果会在完成后作为一条【转写结果】进入你的上下文，届时你必须开口；现在不要评价视频内容——你还没看到它，此时仅可发送类似‘我先看看’这样的答复` };
       } catch (error) {
         // TranscriptionError 携带的 message 本来就是中文用户文案（与 `/转写` 命令路径同源）。
         if (error instanceof TranscriptionError) return { content: `错误：${error.message}`, isError: true };
