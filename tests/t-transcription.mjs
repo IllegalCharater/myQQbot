@@ -56,6 +56,23 @@ ok('非 B 站链接、坏 JSON、超大报文一律返回空串',
   && bilibiliUrlFromCardData({ data: '{不是 JSON' }) === ''
   && bilibiliUrlFromCardData(cardData({ meta: { detail_1: { title: 'x'.repeat(40000), qqdocurl: 'https://b23.tv/x' } } })) === ''
   && bilibiliUrlFromCardData(undefined) === '');
+// 兜底扫描：字段名穷举不完。线上真实卡片 `com.tencent.miniapp_01` /
+// `view_8C8E89B49BE609866298ADDFF2DBABA4` 解析出的 media 里 url 就是空的
+// （kind:'card' 有 title/desc 却没有链接），而下游只认 kind:'video'，于是报"没有视频链接"。
+ok('字段名不在白名单里时靠兜底扫描照样取到链接',
+  bilibiliUrlFromCardData(cardData({
+    meta: { detail_1: { title: '哔哩哔哩', desc: '领赛博鸡蛋没想到家被偷', targetUrl: 'https://www.bilibili.com/video/BV1xx411c7mD' } }
+  })) === 'https://www.bilibili.com/video/BV1xx411c7mD');
+ok('白名单字段胜过扫描结果（卡片含多个链接时以目标字段为准）',
+  bilibiliUrlFromCardData(cardData({
+    meta: { detail_1: { qqdocurl: 'https://b23.tv/wanted', extra: 'https://b23.tv/noise' } }
+  })) === 'https://b23.tv/wanted');
+ok('兜底扫描只认 B 站域名，卡片封面等第三方图床不会被当成视频',
+  bilibiliUrlFromCardData(cardData({
+    meta: { detail_1: { preview: 'https://qq.ugcimg.cn/fixture-cover', icon: 'https://i0.hdslb.com/fixture.png' } }
+  })) === '');
+ok('白名单与扫描都取不到时不返回半截结果',
+  bilibiliUrlFromCardData(cardData({ meta: { detail_1: { url: 'mqqapi://miniapp/open' } } })) === '');
 // 卡片报文是群成员可伪造的不可信输入：只读白名单字段，绝不把对象展开进任何地方。
 ok('伪造的卡片报文既不污染原型也不抛错',
   bilibiliUrlFromCardData({ data: JSON.stringify({ __proto__: { polluted: 1 }, meta: { __proto__: { polluted: 1 } } }) }) === ''

@@ -58,8 +58,14 @@ export function isBilibiliUrl(raw: unknown): boolean {
 
 const CARD_PAYLOAD_MAX = 32 * 1024;
 const CARD_URL_MAX = 300;
-/** 链接可能出现的字段名。qqdocurl 排第一：小程序卡片只有它。 */
+/** 已知字段名，按命中优先级排列。qqdocurl 排第一：小程序卡片只有它。 */
 const CARD_URL_FIELDS = ['qqdocurl', 'jumpUrl', 'url'];
+// 兜底扫描的边界。字段名是协议端与 QQ 之间的私有约定，穷举不完 ——
+// 真实卡片 `com.tencent.miniapp_01` 的 `view_8C8E89B49BE609866298ADDFF2DBABA4`
+// 就是白名单之外的形态。扫不出链接时的代价是"卡片看着有链接、机器人说没有"，
+// 所以宁可多扫一层，扫描不改任何状态、不发任何请求。
+const CARD_SCAN_MAX_DEPTH = 4;
+const CARD_SCAN_MAX_NODES = 200;
 
 /** 只收 http(s) 的 B 站地址；其余（mqqapi:// 之类）一律丢弃。 */
 function bilibiliUrlField(value: unknown): string {
@@ -69,11 +75,38 @@ function bilibiliUrlField(value: unknown): string {
 }
 
 /**
+ * 兜底：字段名未知时把报文里的字符串值按深度优先扫一遍。
+ * 判定始终是 `isBilibiliUrl`，所以误命中最多是"拿到另一个 B 站链接"，不会拿到别的站点；
+ * 有节点数与深度上限，报文本身也已按 `CARD_PAYLOAD_MAX` 卡过长度。
+ */
+function scanForBilibiliUrl(value: unknown, depth = 0, budget = { nodes: CARD_SCAN_MAX_NODES }): string {
+  if (depth > CARD_SCAN_MAX_DEPTH || budget.nodes <= 0) return '';
+  budget.nodes -= 1;
+  const leaf = bilibiliUrlField(value);
+  if (leaf) return leaf;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = scanForBilibiliUrl(item, depth + 1, budget);
+      if (hit) return hit;
+    }
+    return '';
+  }
+  if (isRecord(value)) {
+    for (const key of Object.keys(value)) {
+      const hit = scanForBilibiliUrl(value[key], depth + 1, budget);
+      if (hit) return hit;
+    }
+  }
+  return '';
+}
+
+/**
  * json 卡片报文里的 B 站链接（找不到返回 ''）。
  *
  * 入参是 json 段的 `data`（形如 `{ data: <JSON字符串|对象> }`，与 parseCardSegment 同一形状）。
- * 只按白名单读字段、只下探 meta 一层：卡片报文是群成员可伪造的不可信输入，
- * 这里既不展开对象也不请求任何地址（请求交给后续的 safe-fetch 与 B 站解析层）。
+ * 先按白名单字段取（精度优先：卡片同时含多个链接时，目标视频字段胜出），取不到再退回定深扫描
+ * （召回优先）。只取值、不发任何请求——真正的请求交给后续的 safe-fetch 与 B 站解析层，
+ * 那一层会把提取出的地址再校验一遍。
  */
 export function bilibiliUrlFromCardData(value: unknown): string {
   const data = isRecord(value) ? value : {};
@@ -105,7 +138,7 @@ export function bilibiliUrlFromCardData(value: unknown): string {
       if (hit) return hit;
     }
   }
-  return '';
+  return scanForBilibiliUrl(payload);
 }
 
 /**
