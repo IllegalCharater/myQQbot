@@ -60,17 +60,24 @@ minSimilarity —— 那些是 Node 侧服务层的事，在这里重复一份�
 ═══════════════════════════════════════════════════════════════════════════════
 
 本文件最初是在**没有装 PicImageSearch 的机器上**写的，版本相关的事实全是候选链。2026-09-29
-在目标解释器上跑了一次
+在目标解释器上跑了两次
 
     <python.path 那个解释器> python-tools/pic_image_search_worker.py --self-check
 
 （实测环境：Python 3.10.12 / PicImageSearch 3.12.11）四条对账如下：
 
-  a. 结果访问器（`.raw` / `.results`）—— **仍未定**。`_items()` 两个都试、**只接受 list**，
-     所以两种版本形态都能活，悬着也不会炸。自检会打印返回类型与其字段，据此可以钉死。
-  b. 结果条目的字段名 —— **仍未定**（自检现在会把条目类声明的字段列出来，对着 `_normalize_*`
-     的候选链读：哪个字段是空的就改哪个）。取不到一律退化成 None 而不是抛异常，所以这一条
-     即使不准，表现也是"某个字段空了"（用户看得见、能报告），不是"搜图功能挂了"。
+  a. 结果访问器（`.raw` / `.results`）—— **边界已实测清楚，值还没读到**。第一次自检打出了每个
+     引擎的返回类型，两个事实：① `google_lens` 是**唯一有两个形态的** —— 返回
+     `Union[GoogleLensResponse, GoogleLensExactMatchesResponse]`，其余 7 个各是一个类；
+     ② 响应类**在类上一个字段都不声明**（第一次 dump 打出来是一片 `{}`），属性是在 `__init__`
+     里 `self.x = …` 赋的，所以"访问器到底叫什么"只能从那里读。`_items()` 两个都试、**只接受
+     list** 因此是对的写法（两种版本形态都能活、悬着不会炸）—— **不要改成只认一个**。
+  b. 结果条目的字段名 —— **同上：边界清楚了，值还差一次点击**。自检现在从四个来源取字段名
+     （MRO 上的注解 / pydantic 的 `__fields__`·`model_fields` / `__slots__` /
+     **`__init__` 里赋值的 `STORE_ATTR` 字节码**），并从"响应类的 `__init__` 构造了哪个类"
+     （`LOAD_GLOBAL`）与模型子模块两处找条目类；对着 `_normalize_*` 的候选链读：哪个字段是空的
+     就改哪个。取不到一律退化成 None 而不是抛异常，所以这一条即使不准，表现也是"某个字段空了"
+     （用户看得见、能报告），不是"搜图功能挂了"。
   c. 引擎类名 —— **已实测确认**。红过一次的是 `baidu`：库里导出的名字是 **`BaiDu`**（大写的
      D），不是 `Baidu`，于是那个引擎**永远解析不到**。`ENGINE_CLASS_CANDIDATES` 已改。
      实测到的名字（括号里是库里同时存在、但**不该**用的同名近亲）：
@@ -84,13 +91,22 @@ minSimilarity —— 那些是 Node 侧服务层的事，在这里重复一份�
      `_call_search` 里那个临时文件降级是**纯保险**（正常永远不该触发），也就不必设
      `IMAGE_SOURCE_INPUT_MODE=file`。
 
+  第二次实测（同日、改完 dump 之后）另外确认三件事：① 8 个引擎名**全部**可解析，`baidu →
+  BaiDu` 与 `google_lens → GoogleLens`（不是那个按关键词搜的 `Google`）都对，说明候选链的
+  顺序在起作用；② `TinEye` **不在** 3.12.11 的 22 个导出里（导出的是 `Tineye`），候选顺序已把
+  实测名摆到前面；③ 那 22 个名字里另有 `Ascii2D` / `Copyseeker` / `EHentai` / `Iqdb` / `Lenso`
+  五个引擎我们**没接** —— 将来要接就是加一行 `ENGINE_CLASS_CANDIDATES` + 在 Node 的 `ORDER`
+  里给它定位置，不在本轮范围。
+
   另有一条实测：`Network(internal=False, proxies=None, headers=None, cookies=None, timeout=30,
   verify_ssl=True, http2=False)`。构造函数确实收 `timeout`（本文件的 `timeout=30` 生效），
   但那个参数是**复数 `proxies`** —— 写成 `proxy` 会被 `_filtered_call` 静默丢掉（行为无差，
   只是看着像配了代理）。
 
 改过 `ENGINE_CLASS_CANDIDATES` / `_normalize_*` / `_input_param` 里的任何一张表之后，**再跑一次
-`--self-check` 并把结论写回上面这几条** —— 这张表是那几处唯一的判据来源。
+`--self-check` 并把结论写回上面这几条** —— 这张表是那几处唯一的判据来源。a / b 两条现在还差
+的就是这一次点击：dump 的取数路径已经按实测修好（第一版取不到，因为只试了"类上声明的注解"，
+而本库一个都不声明）。
 """
 
 from __future__ import annotations
@@ -98,6 +114,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dis
 import inspect
 import json
 import os
@@ -155,7 +172,9 @@ ENGINE_CLASS_CANDIDATES: dict[str, tuple[str, ...]] = {
     # GoogleLens 必须排在 Google 前面：`Google` 在库里是**按关键词搜**的另一个类，不收图。
     "google_lens": ("GoogleLens", "Google"),
     "yandex": ("Yandex",),
-    "tineye": ("TinEye", "Tineye"),
+    # 实测确认导出名是 `Tineye`（`TinEye` **不在** 3.12.11 的 22 个导出里；留着只为兼容旧版。
+    # 候选链里排在后面的死项无害，只是白跑一次 getattr）。
+    "tineye": ("Tineye", "TinEye"),
 }
 
 #: 结果归一化的「家族」。同一家族里的引擎字段含义相同，可以共用一张提取表。
@@ -1104,45 +1123,143 @@ def _install_signal_handlers(
 # 在目标解释器上跑一次这个模式，就能把「候选链里哪一个是对的」从猜测变成事实。
 
 
+def _own(base: Any, key: str, default: Any = None) -> Any:
+    """只读**这个类自己**的 `__dict__`（不取继承来的）。
+
+    `getattr(cls, '__annotations__')` 在本库上会骗人：实测 3.12.11 的响应类一个注解都没有，
+    而 Python 3.10+ 访问时会给它**现造**一个空的 `__annotations__`，看起来"读到了、是空的"。
+    """
+    return getattr(base, "__dict__", {}).get(key, default)
+
+
+def _annotation_types(annotation: Any) -> list[type]:
+    """把一个注解摊平成类列表：`Union[A, B]` → `[A, B]`，`list[X]` → `[X]`。
+
+    实测（2026-09-29）`google_lens` 的返回注解就是 `Union[GoogleLensResponse,
+    GoogleLensExactMatchesResponse]` —— 只看 `isinstance(annotation, type)` 会把它整条判成
+    "取不到"，于是那个引擎的结果字段永远是空白。`NoneType` 不算。
+    """
+    if annotation is None or annotation is inspect.Signature.empty:
+        return []
+    if isinstance(annotation, type):
+        return [] if annotation is type(None) else [annotation]
+    out: list[type] = []
+    for arg in getattr(annotation, "__args__", ()) or ():
+        out.extend(_annotation_types(arg))
+    return list(dict.fromkeys(out))
+
+
+def _iter_code(code: Any) -> list[Any]:
+    """`code` 及其**嵌套** code object（列表推导 / 生成器 / 内层函数各是一个 code）。
+
+    必须递归：`self.raw = [SauceNAOResult(i) for i in …]` 里的 `LOAD_GLOBAL SauceNAOResult`
+    发生在**推导式自己的** code object 里，只看外层 `__init__.__code__` 会漏掉它
+    （实测：假夹具上 `_item_classes` 因此返回空表，条目类型照样推不出来）。
+    """
+    out = [code]
+    for const in getattr(code, "co_consts", ()) or ():
+        if hasattr(const, "co_code"):
+            out.extend(_iter_code(const))
+    return out
+
+
+def _method_codes(base: Any) -> list[Any]:
+    """`base` **自己的**方法（含 `__init__`）的所有 code object（含嵌套）。"""
+    codes: list[Any] = []
+    for value in (getattr(base, "__dict__", {}) or {}).values():
+        code = getattr(value, "__code__", None)
+        if code is not None:
+            codes.extend(_iter_code(code))
+    return codes
+
+
+def _assigned_attrs(base: Any) -> list[str]:
+    """从 `base` **自己的**方法（含 `__init__`）里取出 `STORE_ATTR` 的属性名。
+
+    实测逼出来的第四种来源（2026-09-29）：本库的响应类与条目类既没有注解、也没有 pydantic
+    字段，属性全在 `__init__` 里 `self.x = …` 赋值 —— 只试前三种，dump 出来是一片 `{}`，
+    等于没说话。属性名在 CPython 里是 `STORE_ATTR` 指令的 `argval`，所以从字节码里读得到。
+    取不到就空：**这一段绝不能抛**，自检挂了等于没跑。
+    """
+    out: list[str] = []
+    for code in _method_codes(base):
+        try:
+            for instruction in dis.get_instructions(code):
+                if instruction.opname == "STORE_ATTR" and isinstance(instruction.argval, str):
+                    out.append(instruction.argval)
+        except (TypeError, ValueError):
+            continue
+    return list(dict.fromkeys(out))
+
+
 def _declared_fields(cls: Any) -> list[str]:
     """尽量取全一个类上「声明的字段名」。
 
-    三种来源都试，因为库换过数据类型（普通注解 / pydantic v1 的 `__fields__` /
-    pydantic v2 的 `model_fields` / `__slots__`）。取不到就是空列表 ——
-    **这一段绝不能抛**：自检的价值就在于"在有库的机器上说话"，它挂了等于没跑。
+    四种来源都试，因为库换过数据类型（普通注解 / pydantic v1 的 `__fields__` /
+    pydantic v2 的 `model_fields` / `__slots__` / `__init__` 里的 `self.x = …`）。
+    **走整条 MRO**：这些响应类自己什么都不声明，字段在基类上（实测 3.12.11 就是如此）。
+    取不到就是空列表 —— **这一段绝不能抛**：自检的价值就在于"在有库的机器上说话"。
     """
     names: list[str] = []
-    hints = getattr(cls, "__annotations__", None)
-    if isinstance(hints, dict):
-        names.extend(str(key) for key in hints)
-    for attr in ("__fields__", "model_fields"):  # pydantic v1 / v2
-        mapping = getattr(cls, attr, None)
-        if isinstance(mapping, dict):
-            names.extend(str(key) for key in mapping)
-    slots = getattr(cls, "__slots__", None)
-    if isinstance(slots, str):
-        names.append(slots)
-    elif isinstance(slots, (list, tuple)):
-        names.extend(str(name) for name in slots)
-    return list(dict.fromkeys(name for name in names if not name.startswith("__")))
+    for base in getattr(cls, "__mro__", ()) or ():
+        hints = _own(base, "__annotations__")
+        if isinstance(hints, dict):
+            names.extend(str(key) for key in hints)
+        for attr in ("__fields__", "model_fields"):  # pydantic v1 / v2
+            mapping = _own(base, attr)
+            if isinstance(mapping, dict):
+                names.extend(str(key) for key in mapping)
+        slots = _own(base, "__slots__")
+        if isinstance(slots, str):
+            names.append(slots)
+        elif isinstance(slots, (list, tuple)):
+            names.extend(str(name) for name in slots)
+        names.extend(_assigned_attrs(base))
+    return list(dict.fromkeys(name for name in names if name and not name.startswith("__")))
 
 
-def _list_item_class(cls: Any) -> Any:
-    """从响应类上取「结果条目的类」。取不到返回 None。
+def _global_names(cls: Any) -> list[str]:
+    """`cls` **自己的**方法里 `LOAD_GLOBAL` 的名字（用来找"这个方法构造了哪个类"）。"""
+    out: list[str] = []
+    for code in _method_codes(cls):
+        try:
+            for instruction in dis.get_instructions(code):
+                if instruction.opname == "LOAD_GLOBAL" and isinstance(instruction.argval, str):
+                    out.append(instruction.argval)
+        except (TypeError, ValueError):
+            continue
+    return list(dict.fromkeys(out))
 
-    两种写法都认：`@dataclass` 的注解（在 `__annotations__` 里，**类属性上取不到**）
-    与普通类属性。注解是字符串时（库带 `from __future__ import annotations`）取不到，
-    直接放弃——那是"少打一段"，不是错误。
+
+def _item_classes(response_cls: Any) -> list[Any]:
+    """从响应类上取「结果条目的类」。三处都找：注解里的 `list[X]`、类属性、`__init__` 里构造的类。
+
+    第三条的依据同样是实测：`self.raw = [SauceNAOResult(i) for i in …]` 这种写法里，
+    条目类名是 `LOAD_GLOBAL` 的名字，从字节码里能捞出来、再用模块 globals 解析成真类。
+    只要**和响应类同一个模块**、且真读得出字段的那些 —— 过滤器就是"它看起来像不像条目类"。
     """
-    hints = getattr(cls, "__annotations__", None)
-    for key in ("results", "raw", "items"):
-        candidate = hints.get(key) if isinstance(hints, dict) else None
-        if candidate is None:
-            candidate = getattr(cls, key, None)
-        for arg in getattr(candidate, "__args__", None) or ():
-            if isinstance(arg, type):
-                return arg
-    return None
+    found: list[Any] = []
+    for base in getattr(response_cls, "__mro__", ()) or ():
+        hints = _own(base, "__annotations__")
+        for annotation in (hints or {}).values():
+            found.extend(_annotation_types(annotation))
+    module = sys.modules.get(getattr(response_cls, "__module__", "") or "")
+    module_globals = getattr(module, "__dict__", {}) or {}
+    for value in (getattr(response_cls, "__dict__", {}) or {}).values():
+        if isinstance(value, type):
+            found.append(value)
+    for name in _global_names(response_cls):
+        candidate = module_globals.get(name)
+        if isinstance(candidate, type):
+            found.append(candidate)
+    own_module = getattr(response_cls, "__module__", None)
+    return [
+        cls
+        for cls in dict.fromkeys(found)
+        if cls is not response_cls
+        and getattr(cls, "__module__", None) == own_module
+        and (_declared_fields(cls) or _assigned_attrs(cls))
+    ]
 
 
 def _dump_result_fields(module: Any, resolved: dict[str, Any]) -> None:
@@ -1150,33 +1267,34 @@ def _dump_result_fields(module: Any, resolved: dict[str, Any]) -> None:
 
     模块头 b 条（`_normalize_*` 里那一串候选名哪个才对）**没法从 search() 的签名推出来**，
     只能看条目类声明了哪些字段。a 条（`.raw` 还是 `.results`）在这里也一并见分晓：
-    响应类的字段名就是答案。
+    响应类的字段名就是答案。`google_lens` 有两个返回形态（`Union[…, …ExactMatches…]`），
+    所以这里是**按返回类型逐个**打，不是一个引擎一行。
     """
     print("\n结果类型与字段（模块头 a / b 条的判据）：", file=sys.stderr)
     for engine, cls in resolved.items():
         try:
             annotation = inspect.signature(cls.search).return_annotation
         except (TypeError, ValueError):
-            annotation = None
-        # `inspect.Signature.empty` 自己也是**一个类**（`inspect._empty`），单判 isinstance
-        # 会让"没有返回注解"走进下面那条路、把 `_empty` 当成一个类型名打出来（实测踩到）。
-        if annotation is inspect.Signature.empty or not isinstance(annotation, type):
-            print(f"  {engine:<12} <返回类型取不到>", file=sys.stderr)
+            annotation = inspect.Signature.empty
+        types_ = _annotation_types(annotation)
+        if not types_:
+            print(f"  {engine:<12} <返回类型取不到：{annotation!r}>", file=sys.stderr)
             continue
-        print(
-            f"  {engine:<12} {annotation.__name__} "
-            f"{{{', '.join(_declared_fields(annotation))}}}",
-            file=sys.stderr,
-        )
-        item = _list_item_class(annotation)
-        if item is not None:
+        for response in types_:
             print(
-                f"  {'':<12} └ 条目 {item.__name__} "
-                f"{{{', '.join(_declared_fields(item))}}}",
+                f"  {engine:<12} {response.__name__} "
+                f"{{{', '.join(_declared_fields(response)) or '（类上读不出字段）'}}}",
                 file=sys.stderr,
             )
-        else:
-            print(f"  {'':<12} └ 条目类型推不出来，看下面模型模块的成员", file=sys.stderr)
+            items = _item_classes(response)
+            if not items:
+                print(f"  {'':<12} └ 条目类型推不出来，看下面模型模块的成员", file=sys.stderr)
+            for item in items:
+                print(
+                    f"  {'':<12} └ 条目 {item.__name__} "
+                    f"{{{', '.join(_declared_fields(item)) or '（类上读不出字段）'}}}",
+                    file=sys.stderr,
+                )
 
     model_pkg = getattr(module, "model", None)
     if model_pkg is None:
@@ -1192,11 +1310,11 @@ def _dump_result_fields(module: Any, resolved: dict[str, Any]) -> None:
             # 只要这个子模块里**自己定义**的类，不要它 import 进来的。
             if getattr(obj, "__module__", None) != getattr(sub, "__name__", None):
                 continue
-            if not any(token in cls_name for token in ("Result", "Item", "Response")):
+            if not any(token in cls_name for token in ("Result", "Item", "Response", "Entry")):
                 continue
-            declared = _declared_fields(obj)
-            if declared:
-                print(f"  {sub_name}.{cls_name:<26} {{{', '.join(declared)}}}", file=sys.stderr)
+            # 不过滤"字段为空"的类：正是空的那几个曾经把 dump 变成一片 `{}`（实测 3.12.11）。
+            declared = ", ".join(_declared_fields(obj)) or "（类上读不出字段）"
+            print(f"  {sub_name}.{cls_name:<26} {{{declared}}}", file=sys.stderr)
 
 
 def self_check() -> int:
