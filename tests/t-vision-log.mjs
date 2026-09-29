@@ -169,6 +169,49 @@ console.log('\n=== 4. 实时存档变化不影响本轮图片快照 ===');
   delayedModel.close();
 }
 
+// ═══ 5. 模型填的是"回复那条"的 id → 顺着引用取被引用的图 ═══
+// 09/29 那次实测：清三发图、源赖氏佐田引用那张图问"评价一下"，模型填的却是**回复那条**的 id
+// （它自己没有图），于是读到的是清三的另一张图。根因是引用预览不带 id（已修），
+// 这里守的是第二条腿：模型仍然填错时，工具顺着 reply.mid 把它救回来，并说清图从哪来。
+console.log('\n=== 5. 填了没有图的那条 → 顺着 reply.mid 取被引用的图片 ===');
+{
+  updateConfig({ api: { baseUrl: model.url, model: 'stub-vision', maxRounds: 4 } });
+  model.script = [
+    { tool_calls: [toolCall('get_message_images', { messageId: 82 }, 'c1')] },
+    { content: '看到了被引用的那张图。' }
+  ];
+  model.requests = [];
+  const env = boot('group:127');
+  env.store.appendIncoming(env.key, {
+    mid: 81, ts: Date.now(), senderId: '555', senderName: '张三', text: '[图片]',
+    media: [{ kind: 'image', url: `${base}/ok.png` }]
+  });
+  env.store.appendIncoming(env.key, {
+    mid: 82, ts: Date.now() + 10, senderId: '777', senderName: '李四', text: '这是哪张图',
+    reply: { mid: '81', sender: '张三', text: '[图片]' }
+  });
+  env.orc.scheduleWake(env.key, 0);
+  const s = await waitDone(env);
+  const readCall = s?.messages.find((m) => m.toolCall?.name === 'get_message_images');
+  ok('填了没有图的那条仍能取到被引用的图片（顺着 reply.mid 回退）',
+    !!readCall && !readCall.toolCall.isError && String(readCall.toolCall.result).includes('图片内容'),
+    JSON.stringify(readCall?.toolCall));
+  ok('结果里点明图来自被引用的 #81（模型不能以为图属于它问的那条）',
+    String(readCall?.toolCall?.result || '').includes('#81'), String(readCall?.toolCall?.result || '').slice(0, 160));
+  // 反向对照：引用链上都没有图时不能凭空取图，也不能说成"取到了"。
+  env.store.appendIncoming(env.key, {
+    mid: 83, ts: Date.now() + 20, senderId: '777', senderName: '李四', text: '再看这条',
+    reply: { mid: '999999', sender: '张三', text: '纯文字' }
+  });
+  const { buildToolDefs, executeTool } = await load('agent/tools/index.js');
+  const plain = await executeTool(buildToolDefs(), {
+    chatKey: env.key, store: env.store, triggerEntries: [], onebot
+  }, 'get_message_images', { messageId: 83 });
+  ok('引用链上没有图时如实说没有，不返回图片内容',
+    String(plain.content).includes('没有可查看的图片') && !String(plain.content).includes('图片内容'),
+    JSON.stringify(plain).slice(0, 200));
+}
+
 model.close();
 image.close();
 process.exit(done() ? 0 : 1);

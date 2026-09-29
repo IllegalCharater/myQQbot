@@ -459,6 +459,9 @@ body {
 .archive-table .w.self { color: var(--accent); }
 .archive-table .unread td { background: rgba(255,180,84,.05); }
 .archive-table .text { word-break: break-word; white-space: pre-wrap; }
+/* 引用预览：它是"被回复的那句话"，与本人的正文同处一格但必须一眼可分。
+   预览已从存档的 text 里搬出来（结构化 reply），所以这一格由 JS 拼回。 */
+.archive-table .reply-quote { color: var(--muted); }
 /* 压缩摘要条目：系统生成的纪要，不是某个人说的话 —— 弱化一下让它一眼可辨 */
 .archive-table .digest-row td { background: rgba(91,140,255,.06); }
 .archive-table .digest-row .w { color: var(--muted); font-style: italic; }

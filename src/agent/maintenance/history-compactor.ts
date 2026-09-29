@@ -3,6 +3,7 @@ import { EVENTS } from '../../core/events.js';
 import type { AppEmit } from '../../core/events.js';
 import { PROMPT_CATALOG } from '../../core/prompt-catalog.js';
 import { formatShortTime } from '../../core/util.js';
+import { formatReplyPrefix } from '../prompting/prompt-builder.js';
 import { errorMessage, extractJsonObject } from '../shared/json-parse.js';
 import type { ChatMessage } from '../../chat/types.js';
 import type { ChatStore } from '../../chat/store.js';
@@ -217,7 +218,10 @@ export class HistoryCompactor {
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i];
       const text = String(e.text || '').replace(/\s+/g, ' ').slice(0, 200);
-      const line = `${formatShortTime(e.ts)} ${nameOf(e)}：${text}`;
+      // 引用预览必须带上：它与正文分居两处，只在 formatEntry 里拼，这里不补就会
+      // 让摘要里"某人回了什么"变成"某人说了句没头没尾的话"（被回复的对象消失）。
+      // 200 字截断只管正文，预览不参与截断——它本身有 REPLY_PREVIEW_MAX 的上限。
+      const line = `${formatShortTime(e.ts)} ${nameOf(e)}：${formatReplyPrefix(e.reply)}${text}`;
       // 至少留一行，否则一条超长消息就会让整轮空转
       if (chars + line.length > maxChars && lines.length) break;
       chars += line.length;

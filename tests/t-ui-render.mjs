@@ -93,6 +93,23 @@ const evil = sandbox.chatMsgRowHtml({ id: 11, ts: Date.now(), senderId: '1', sen
 ok('发送者名里的 HTML 被转义', !evil.includes('<img src=x') && evil.includes('&lt;img'));
 ok('正文里的 script 被转义', !evil.includes('<script>') && evil.includes('&lt;script&gt;'));
 
+console.log('\n  ── 引用预览（结构化 reply，面板侧唯一拼法）──');
+// 取正文单元格的局部小工具（下面 选项参数 那一节还有个同名用途的 cellOf，两处各自成立）
+const cellOfInit = (h) => (/<td class="text">([\s\S]*?)<\/td>/.exec(h) || [, ''])[1];
+// 存档里 reply 是 { mid, sender, text }，预览**不再**拍进 text —— 面板不拼就整段丢。
+const quotingRow = { id: 12, ts: Date.now(), senderId: '1', senderName: '李四', text: '这是哪张图', self: false, read: true, kind: null, media: [], reply: { mid: '81', sender: '张三', text: '[图片]' } };
+const quotingHtml = sandbox.chatMsgRowHtml(quotingRow, {});
+ok('引用预览带被引用消息的 #id 与发送者', quotingHtml.includes('[引用 #81 张三：[图片]]'), cellOfInit(quotingHtml));
+ok('引用预览走独立样式（与本人正文一眼可分）', quotingHtml.includes('class="reply-quote"'));
+ok('只有 id 没有预览时印成 [引用 #id]',
+  sandbox.chatMsgRowHtml({ ...quotingRow, reply: { mid: '-5', sender: '', text: '' } }, {}).includes('[引用 #-5]'));
+ok('老存档（reply 为 null，预览本就在 text 里）不重复也不丢失',
+  cellOfInit(sandbox.chatMsgRowHtml({ ...quotingRow, reply: null, text: '[引用 张三：[图片]]这是哪张图' }, {}))
+    === '[引用 张三：[图片]]这是哪张图');
+const quoteEvil = sandbox.chatMsgRowHtml({ ...quotingRow, senderName: '李四', reply: { mid: '<b>1</b>', sender: '<img src=x onerror=alert(1)>', text: '"><script>alert(2)</script>' } }, {});
+ok('引用预览里的 HTML 同样被转义', !quoteEvil.includes('<img src=x') && !quoteEvil.includes('<script>') && !quoteEvil.includes('<b>1</b>'),
+  cellOfInit(quoteEvil));
+
 console.log('\n  ── 选项参数：预览裁剪 / 注入徽标 ──');
 const longMsg = { id: 20, ts: Date.now(), senderId: '1', senderName: '小明', text: '这是一条很长很长的消息'.repeat(30), self: false, read: true, kind: null, media: [] };
 const preview = sandbox.chatMsgRowHtml(longMsg, { previewChars: 8, badge: '<span class="digest-badge is-in">已注入</span>' });

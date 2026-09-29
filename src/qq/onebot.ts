@@ -436,10 +436,16 @@ export function forwardIdFromData(value: unknown) {
 
 /**
  * 把 OneBot 消息段数组转成 AI 可读的纯文本。
- * resolveReply: async (mid) => { sender, text } | null —— 解析引用原文。
  * resolveAtName: async (qq) => string | null —— 把 @ 的 QQ 号解析成群名片。
+ *
+ * **引用段不在这一层解析**：`includeReply:false` 时整个 reply 段被跳过（调用方会把它
+ * 结构化地存进 `ChatMessage.reply`，渲染时再拼成 `[引用 #id 谁：什么]`）；为 true 时只留
+ * 一个 `[引用消息]` 占位符，供合并转发这类**没有存档条目**的场合说明"这里有个引用"。
+ * 早先这里还有一个 `resolveReply` 回调，让这一层去取被引用消息的正文 —— 那条路会把
+ * 被引用消息的 **id 吃掉**（预览串里没有它），模型于是无法寻址被引用的那张图/那条消息。
+ * 现在正文与 id 一起在 `Ingest.resolveReply` 里取，形式化的关系存在存档里。
  */
-export async function segmentsToText(segments: OneBotSegment[] | string | null | undefined, { resolveReply = null, resolveAtName = null, includeReply = true }: { resolveReply?: ((id: string) => Promise<{ sender?: string; text?: string } | null>) | null; resolveAtName?: ((qq: string) => Promise<string | null>) | null; includeReply?: boolean } = {}) {
+export async function segmentsToText(segments: OneBotSegment[] | string | null | undefined, { resolveAtName = null, includeReply = true }: { resolveAtName?: ((qq: string) => Promise<string | null>) | null; includeReply?: boolean } = {}) {
   if (typeof segments === 'string') return sanitizeUserText(segments.trim());
   const out: string[] = [];
   for (const seg of segments ?? []) {
@@ -462,20 +468,7 @@ export async function segmentsToText(segments: OneBotSegment[] | string | null |
       case 'video': out.push('[视频]'); break;
       case 'file': out.push(`[文件${d.name ?? ''}]`); break;
       case 'reply': {
-        if (!includeReply) break;
-        let replyText = '';
-        if (resolveReply) {
-          try {
-            const info = await resolveReply(String(d.id));
-            if (info?.sender || info?.text) {
-              const parts = [];
-              if (info.sender) parts.push(info.sender);
-              if (info.text) parts.push(info.text);
-              replyText = `[引用 ${parts.join('：')}]`;
-            }
-          } catch { /* 解析失败降级 */ }
-        }
-        out.push(replyText || '[引用消息]');
+        if (includeReply) out.push('[引用消息]');
         break;
       }
       case 'json': out.push(parseCardSegment(d).text); break;

@@ -362,6 +362,25 @@ export function chatMessagesNewestFirst() {
   return chatMsgSortCache.newestFirst;
 }
 
+/**
+ * 引用预览（面板侧）。存档里 `reply` 是结构化的 `{ mid, sender, text }`，
+ * **预览不再拍进 text**（见 src/chat/types.ts 的 ChatReply）：面板不在这里拼的话，
+ * 新收到的引用消息在存档页上会整段丢掉引用段（text 里已经没有它了）。
+ *
+ * 与提示词侧 formatReplyPrefix 同一形态（`[引用 #id 谁：什么]`），但**不共享代码** ——
+ * ui/js 是浏览器原生 ES Module，不打包、够不着 src/。两边各自一行，改动时都要动。
+ * 老存档（本改动之前）的 reply 是 null、预览本就在 text 里，这里返回空串，渲染不变。
+ */
+function replyPrefixHtml(m) {
+  const r = m && m.reply;
+  if (!r || typeof r !== 'object') return '';
+  const mid = String(r.mid ?? '');
+  const body = [r.sender, r.text].filter(Boolean).join('：');
+  if (!mid && !body) return '';
+  const label = [mid ? `#${mid}` : '', body].filter(Boolean).join(' ');
+  return `<span class="reply-quote"${mid ? ` title="被引用消息 ${esc(mid)}"` : ''}>[引用 ${esc(label)}]</span>`;
+}
+
 /** 单行消息 HTML（全量渲染与滚动追加共用同一个模板，保证两处长得一样）。 */
 export function chatMsgRowHtml(m, opts) {
   // ⚠️ 调用方有 `.map(chatMsgRowHtml)` 这种写法，那样第二个参数会是数组下标（数字）而不是
@@ -396,7 +415,7 @@ export function chatMsgRowHtml(m, opts) {
     <tr class="${m.read ? '' : 'unread'}${isDigest ? ' digest-row' : ''}${isNote ? ' note-row' : ''}${isTranscript ? ' transcript-row' : ''}" data-midrow="${m.id}">
       <td class="t">${fmtTime(m.ts)}</td>
       <td class="w ${m.self ? 'self' : ''}">${who}</td>
-      <td class="text">${body}${badge}${m.read ? '' : ' <span class="unread-pill">未读</span>'}</td>
+      <td class="text">${replyPrefixHtml(m)}${body}${badge}${m.read ? '' : ' <span class="unread-pill">未读</span>'}</td>
       <td class="ops">${ops}</td>
     </tr>`;
 }
@@ -519,7 +538,11 @@ export function chatVisibleMessages() {
   if (!q) return all;
   if (chatMsgViewCache.src === all && chatMsgViewCache.q === q) return chatMsgViewCache.list;
   const list = all.filter((m) => {
-    const hay = `${m.text || ''}\n${m.senderName || ''}\n${fmtTime(m.ts)}`.toLowerCase();
+    // 引用预览也算正文的一部分：它已经不在 m.text 里了，不并进来就搜不到
+    // "被引用的那句话"（用户想找某条回复时，往往会去搜被引用的原文）。
+    const r = (m.reply && typeof m.reply === 'object') ? m.reply : null;
+    const quote = r ? `${r.sender || ''} ${r.text || ''}` : '';
+    const hay = `${m.text || ''}\n${quote}\n${m.senderName || ''}\n${fmtTime(m.ts)}`.toLowerCase();
     return hay.includes(q);
   });
   chatMsgViewCache = { src: all, q, list };

@@ -25,6 +25,22 @@ export interface TranscriptRecord extends Record<string, unknown> {
   truncated: boolean;
 }
 
+/**
+ * 这条消息引用/回复的对象。**`mid` 是它存在的理由，不是附加信息**。
+ *
+ * 三者分工：`mid` = 被引用消息的 QQ id（可寻址），`sender`/`text` = 预览（人看着像话）。
+ * 少了 `mid`，模型就只能看见一句 `[引用 清三：[图片]]` —— 而 `[图片]` 是所有图片共用的
+ * 占位符，"清三的哪一张图"在文本上完全无从分辨，`get_message_images` 又只认消息 id，
+ * 于是它只能从提示词里可见的 id 里挑一个（实测踩到：挑中了同一发送者的另一条图片消息）。
+ * 细节与修法见 `docs/ts-migration-plan.md` 的「引用」一节。
+ */
+export interface ChatReply extends Record<string, unknown> {
+  /** 被引用消息的 id。空串 = 引用段没带 id（理论上有，按"没有引用"处理）。 */
+  mid: string;
+  sender: string;
+  text: string;
+}
+
 export interface ChatMessage extends Record<string, unknown> {
   id: number;
   ts: number;
@@ -40,7 +56,13 @@ export interface ChatMessage extends Record<string, unknown> {
   media?: MediaEntry[];
   digest?: DigestRecord;
   transcript?: TranscriptRecord;
-  reply?: unknown;
+  /**
+   * 引用对象。**预览只存在这里，不再拍进 `text`**（见 `Ingest` 的注释）：
+   * 拍进去的话 id 就没了，而渲染层拿得到结构化数据才能把它印成 `[引用 #id 谁：什么]`。
+   * 老存档（本改动之前）的 `reply` 是 `null`，预览在 `text` 里 —— 两边渲染出来一样，
+   * 所以不需要迁移。
+   */
+  reply?: ChatReply | null;
 }
 
 export interface SessionUsage {

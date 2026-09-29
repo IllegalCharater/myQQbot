@@ -13,13 +13,14 @@
 //   read:      已读状态。通常由动态上下文窗口消费时单向下沉，面板用它画未读角标；
 //              触发判定不再看它（看窗口的游标）。两个显式例外：窗口首次播种用 read
 //              前缀还原游标；wakeEligible:false 的确定性命令在落库时直接写成已读。
-//   reply:     可选 { sender, text }：该消息引用/回复的对象摘要
+//   reply:     可选 { mid, sender, text }：该消息引用/回复的对象。**预览只写在这里，
+//              不拍进 text** —— 拍进去会把被引用消息的 id 丢掉（见 chat/types.ts 的 ChatReply）
 //   media:     可选 [{ kind, url, file, faceId, summary }] 原始媒体定位信息
 // }
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../core/config.js';
-import type { ChatMessage, DigestRecord, MediaEntry } from './types.js';
+import type { ChatMessage, ChatReply, DigestRecord, MediaEntry } from './types.js';
 
 interface ChatState {
   chatKey: string;
@@ -35,7 +36,7 @@ interface IncomingInput {
   senderId?: unknown;
   senderName?: unknown;
   text?: unknown;
-  reply?: unknown;
+  reply?: ChatReply | null;
   media?: MediaEntry[];
   /** false = 确定性命令已接管；保留在历史里，但不进入 Agent 的动态唤醒窗口。 */
   wakeEligible?: boolean;

@@ -12,7 +12,7 @@
 import { EVENTS } from '../../core/events.js';
 import type { AppEmit } from '../../core/events.js';
 import type { AppConfig } from '../../core/config.js';
-import type { MediaEntry } from '../../chat/types.js';
+import type { ChatReply, MediaEntry } from '../../chat/types.js';
 import type { ChatStore } from '../../chat/store.js';
 import type { AgentControlPort } from '../../agent/runtime/control-port.js';
 import {
@@ -130,11 +130,17 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
   const REPLY_PREVIEW_MAX = 300;
 
   /**
-   * 解析被引用消息的原文。
+   * 解析被引用消息：**正文、发送者与它自己的 id 一起取出来**。
+   *
+   * `mid` 必须回传：调用方要把它结构化地存进 `ChatMessage.reply`。少了它，模型就只看得见
+   * `[引用 清三：[图片]]` —— `[图片]` 是所有图片共用的占位符，而 `get_message_images` 只认
+   * 消息 id，于是模型只能在提示词里可见的 id 里瞎挑（实测踩到：挑中同一发送者的另一张图）。
+   *
    * ctx 传当前会话的 kind/id：QQ 里引用只可能发生在同一个会话内，所以被引用消息里的
    * @ 就是本群成员，能正常解析成群名片（与主消息路径的行为保持一致）。
    */
   async function resolveReply(messageId: unknown, { kind = '', id = '' }: { kind?: string; id?: string } = {}) {
+    const mid = String(messageId ?? '');
     try {
       const msg = await onebot.getMsg(messageId);
       const sender = isRecord(msg) && isRecord(msg.sender) ? msg.sender : {};
@@ -145,7 +151,6 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
         // 必须复用 segmentsToText，不能自己拼。被引用的消息可能是 json 卡片 /
         // 合并转发 / 图片，自己拼只会得到 "[json]" "[forward]" 这类原始英文段名，
         // 模型完全读不懂 —— 曾经这里就是这样把"引用了一张卡片"变成四个无用字符。
-        // includeReply:false：引用里再套引用只展开一层，防递归。
         // 注意这里不展开合并转发（只留占位符），展开是模型用 read_forward 主动做的事。
         text = await segmentsToText(msg.message, {
           includeReply: false,
@@ -159,9 +164,11 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       } else if (isRecord(msg) && typeof msg.message === 'string') {
         text = msg.message;
       }
-      return { sender: String(senderName), text: String(text).slice(0, REPLY_PREVIEW_MAX), media };
+      return { mid, sender: String(senderName), text: String(text).slice(0, REPLY_PREVIEW_MAX), media };
     } catch {
-      return null;
+      // 取不到正文不等于"没有引用"：id 本身仍然可寻址（模型可以拿它去看图/看详情），
+      // 所以回一个只有 id 的对象，而不是 null —— 丢掉 id 就退回了改动前的病。
+      return { mid, sender: '', text: '', media: [] as MediaEntry[] };
     }
   }
 
@@ -194,19 +201,28 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     let text;
     let commandText;
     const repliedMedia: MediaEntry[] = [];
+    // 引用在**这一层**解析，不交给 `segmentsToText`：那里拼出来的预览串没有 id，
+    // 而被引用对象的 id 必须留下（见 ChatReply 的注释）。两条路径都走 `includeReply:false`，
+    // 即引用段不进 text —— 预览由渲染层从 reply 里拼，位置在 `formatReplyPrefix`。
+    //
+    // `text` 与 `commandText` **起手是同一个串**，但下面合并转发展开会整份替换 `text`：
+    // 于是 `commandText` 是"用户真正敲的那句话"（命令判定与 `parseTranscriptionCommand` 只认它），
+    // `text` 是"进了存档、给模型看的那份"。别把它们并成一个变量 —— 那会让
+    // "转发了一条记录、转发内容里恰好以 /转写 开头"变成一条真命令。
+    let reply: ChatReply | null = null;
     if (segments) {
+      const replySeg = segments.find((seg) => seg?.type === 'reply');
+      const replyId = replySeg ? String((replySeg.data as Record<string, unknown> | undefined)?.id ?? '') : '';
+      if (replyId) {
+        const info = await resolveReply(replyId, { kind, id });
+        reply = { mid: info.mid, sender: info.sender, text: info.text };
+        if (info.media.length) repliedMedia.push(...info.media);
+      }
       commandText = await segmentsToText(segments, {
         includeReply: false,
         resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : Promise.resolve(null)
       });
-      text = await segmentsToText(segments, {
-        resolveReply: async (mid) => {
-          const info = await resolveReply(mid, { kind, id });
-          if (info?.media?.length) repliedMedia.push(...info.media);
-          return info;
-        },
-        resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : Promise.resolve(null)
-      });
+      text = commandText;
     } else {
       text = String(event.raw_message ?? event.message ?? '').trim();
       commandText = text;
@@ -256,6 +272,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       senderId,
       senderName,
       text: text || '[图片]',
+      reply,
       media,
       wakeEligible: !isTranscriptionCommand
     });

@@ -120,7 +120,7 @@ export const TOOL_PROMPT_TEXT = {
     messageId: 'QQ 消息 id（聊天记录里的 #数字，可能为负数）',
   },
   get_message_images: {
-    description: '查看某条消息里的图片/表情（视觉模型可以直接看懂）。消息文本出现 [图片] 时可用。id 用聊天记录里每条消息前的 #数字。',
+    description: '查看某条消息里的图片/表情（视觉模型可以直接看懂）。消息文本出现 [图片] 时可用。id 用聊天记录里每条消息前的 #数字；图片在被引用的那条消息里时，用引用预览里 [引用 #数字 …] 的那个数字（不是回复它的那条）。',
     messageId: 'QQ 消息 id（聊天记录里的 #数字，可能为负数）',
   },
   reverse_image_source: {

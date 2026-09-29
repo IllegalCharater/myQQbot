@@ -87,6 +87,30 @@ export function buildSystemPrompt({ persona, capabilities = {} }: {
 
 
 
+/**
+ * 引用预览的**唯一拼法**：`[引用 #-966228343 清三：[图片]]`。
+ *
+ * 为什么必须带上被引用消息的 id（本轮修的 bug）：不带 id 时模型只看得见
+ * `[引用 清三：[图片]]`，而 `[图片]` 是所有图片共用的占位符 —— 同一发送者的两张图在文本上
+ * 逐字相同，`get_message_images` 又只认消息 id，于是模型只能在提示词里可见的 id 里挑一个。
+ * 实测它挑中了同一发送者的**另一张图**，拿回来的画面与群里被引用的那张无关，而它自己
+ * 没有任何线索能发现挑错了（工具照样返回了一张图）。
+ *
+ * 这与"带 #数字 的才能引用/看图"（system prompt 与 tool schema 都这么写）是同一条规则：
+ * 被引用的对象恰好同时是"可能要引用回去"和"可能要打开看"的东西，所以它必须可寻址。
+ * 老存档的 reply 是 `null`、预览留在 text 里（当时的形态），这里自然什么都不拼。
+ *
+ * 三个字段都可能缺：解析失败时只有 id（那时 `[引用 #id]` 仍是有用的 —— 模型可以拿 id 去看图或
+ * 看详情），引用段没带 id 时 ids 为空（只剩 `[引用 谁：什么]`，退化成旧行为）。
+ */
+export function formatReplyPrefix(reply: unknown): string {
+  const r = asRecord(reply);
+  const mid = String(r.mid ?? '');
+  const body = [r.sender, r.text].filter(Boolean).join('：');
+  if (!mid && !body) return '';
+  return `[引用 ${[mid ? `#${mid}` : '', body].filter(Boolean).join(' ')}]`;
+}
+
 // withId：是否带 "#消息id" 前缀。id 只在需要引用/看图的场景展示（触发批、带图消息），
 // 纯文本历史行不带，避免整屏数字噪音。
 function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {}): string {
@@ -119,8 +143,9 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');
   const who = m.self ? '我' : (notes[senderId] || m.senderName || senderId || '未知');
-  const reply = asRecord(m.reply);
-  const replyPrefix = reply.text || reply.sender ? `[引用 ${[reply.sender, reply.text].filter(Boolean).join('：')}]` : '';
+  // 引用预览由 formatReplyPrefix 拼（唯一拼法，带被引用消息的 #id）。
+  // 老存档的 reply 是 null、预览本就在 text 里，这里拼出空串，渲染结果不变。
+  const replyPrefix = formatReplyPrefix(m.reply);
   const hasMid = m.mid !== null && m.mid !== undefined && String(m.mid) !== '';
   const idPrefix = withId && hasMid ? `#${m.mid} ` : '';
   return `[${formatShortTime(m.ts)}] ${idPrefix}${who}：${replyPrefix}${m.text}`;
@@ -364,7 +389,12 @@ function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
   if ((botName && lower.includes(botName)) || (nick && lower.includes(nick))) labels.push('提到我');
   if (noteName && lower.includes(noteLower)) labels.push('提到我（备注名）');
   if (/[?？]$/.test(text.trim()) || /[吗呢]/.test(text)) labels.push('提问');
-  if (text.startsWith('[引用 ')) labels.push('引用');
+  // 引用标签看**结构化 reply**，不看 text 前缀：本轮起预览已从 text 里搬出来
+  // （见 formatReplyPrefix），还按前缀判的话标签会静默消失。
+  const rp = asRecord(entry?.reply);
+  if (rp.mid || rp.sender || rp.text) labels.push('引用');
+  // 老存档兜底：本改动之前预览就拍在 text 里，重启后窗口播种可能把这类消息捞进触发批。
+  else if (text.startsWith('[引用 ')) labels.push('引用');
   if (text.includes('[拍一拍]')) labels.push('拍一拍');
   return labels;
 }

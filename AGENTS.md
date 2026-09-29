@@ -167,6 +167,8 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 【过去状态】目前按整段让位，不进行半条消息截断；被预算移除时必须同步修正 `session.pastStateCount`。
 
+引用预览是**动态拼装**（不算固定指令），所以不在 Catalog 里：唯一拼法是 `prompt-builder.ts` 的 `formatReplyPrefix`，数据来自存档的结构化 `reply`。只用前缀匹配（`text.startsWith('[引用 ')`）判断"这条是不是引用"的地方**必须**改成看 `reply`——预览已经不在 `text` 里了。形状、成因与三处调用点见「图片链路」那条与 `docs/ts-migration-plan.md` §5.4。
+
 ## 工具与记忆边界
 
 - 模型普通文本不会自动发到 QQ；发送必须通过发送类工具。
@@ -201,6 +203,8 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 ## 图片链路
 
 `get_message_images` 只负责找到并安全下载图片。图片以 data URL 形式作为额外的多模态 `role: user` 消息交给视觉模型，不塞入 `role: tool` 图片内容。
+
+**被引用对象的 id 必须可寻址，这是本条链路的硬约束**：存档里 `ChatMessage.reply` 是结构化的 `{ mid, sender, text }`，**预览只存在这里、不拍进 `text`**（完整设计与实测成因见 `docs/ts-migration-plan.md` §5.4）。三条推论，改动时别拆散：① 模型可见的引用预览一律由 `prompt-builder.ts` 的 `formatReplyPrefix` 拼成 `[引用 #-966228343 清三：[图片]]`（`formatEntry` / `buildTriggerBlock` / 历史压缩的输入行三处共用），面板侧 `ui/js/views/chats.js` 的 `replyPrefixHtml` 是**同形态的另一份实现**（`ui/js/` 够不着 `src/`），改一处要改两处；② 触发标签「引用」认结构化 `reply`、不认文本前缀（老存档按前缀兜底）—— 只看前缀的话标签会静默消失，这正是本轮差点踩到的形态；③ `get_message_images` 在目标消息没有图、但它引用了某条消息时**顺着 `reply.mid` 回退**去取被引用那条的图，并在结果文本里点明图来自哪条（不点明的话模型会把图归到错误的发送者名下）。这条回退不是猜测：`reply.mid` 是入站时就记死的关联；引用段没带 id 时 `reply` 为 `null`（按"没有引用"处理），解析不出被引用正文时**只丢正文、不丢 id**。守护分散在四个套件里，改这条链时四个都要跑：落库形状与预览上限在 `t-transcription.mjs`（它的 `replyIngestFor` 每个用例用一个**独立群号**——`new ChatStore()` 会从磁盘重载，同群号会让 `findByMid` 读到前面用例留下的那条），渲染与标签在 `t-reply.mjs`（含压缩输入行），工具回退在 `t-vision-log.mjs`，面板行在 `t-ui-render.mjs`。
 
 下一轮模型输出需要回填到 session 的 `toolImages.reply`，UI 在图片工具卡片中显示；对应 assistant 条目标记 `imageReply`，避免相同读图结果显示两次。
 

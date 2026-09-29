@@ -533,11 +533,30 @@ export function buildAllToolDefs(): ToolDefinition[] {
           // 本轮快照优先：模型作出工具决定前可能已经思考/下载了很久，实时存档可能
           // 因容量裁剪、面板删除或压缩而失去这条消息。触发批是模型实际看见的事实源；
           // 查询历史图片时再回落到实时存档。
-          const entry = (ctx.triggerEntries || []).find((message) => String(message.mid) === target)
-            ?? ctx.store.findByMid(ctx.chatKey, args.messageId);
+          const findEntry = (mid: unknown) => (ctx.triggerEntries || []).find((message) => String(message.mid) === String(mid))
+            ?? ctx.store.findByMid(ctx.chatKey, mid);
+          const imageUrlsOf = (m: ChatMessage) => (m.media || [])
+            .filter((item) => item.kind === 'image' && item.url).map((item) => String(item.url));
+          const entry = findEntry(target);
           if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
-          let urls = (entry.media || []).filter((m) => m.kind === 'image' && m.url).map((m) => String(m.url));
-          if (!urls.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);
+          // 没有图片但有引用 → 顺着 `reply.mid` 去取被引用那条的图。
+          // **这不是猜**：`reply.mid` 是入站时就记死的关联（见 chat/types.ts 的 ChatReply），
+          // 被引用的那条消息本身可能才是图片所在。典型场景就是本轮修的 bug：
+          // A 发了图、B 引用 A 的图问"这是什么"，模型填的是 **B 那条的 id**
+          // （自然语言里"B 那条消息里有那张图"说得通）。真正被引用的 id 现在会印在
+          // 提示词的引用预览里，模型本该直接用它；这条回退只负责在它没这么做时救回来。
+          let source = entry;
+          let viaReply = false;
+          let urls = imageUrlsOf(entry);
+          const quotedMid = String(isRecord(entry.reply) ? (entry.reply.mid ?? '') : '');
+          if (!urls.length && quotedMid) {
+            const quoted = findEntry(quotedMid);
+            const quotedUrls = quoted ? imageUrlsOf(quoted) : [];
+            if (quoted && quotedUrls.length) { source = quoted; urls = quotedUrls; viaReply = true; }
+          }
+          if (!urls.length) return ok(`消息 ${args.messageId} 没有可查看的图片${quotedMid ? `（它引用的 #${quotedMid} 也没有）` : ''}`);
+          // 下载与刷新都针对**真正的来源**（source），不是模型问的那条：刷新走
+          // `source.mid` 才能拿到新鲜 rkey，替换也只改 source 的媒体。
           const downloadAll = async (targets: string[]) => {
             const dataUrls: string[] = [];
             const failed: string[] = [];
@@ -552,14 +571,14 @@ export function buildAllToolDefs(): ToolDefinition[] {
           // 用新鲜段替换存档图片并重试；只刷新一次，避免协议端异常时形成循环。
           if (failed.length) {
             try {
-              const latest = await ctx.onebot.getMsg(entry.mid);
+              const latest = await ctx.onebot.getMsg(source.mid);
               const segments = isRecord(latest) && Array.isArray(latest.message) ? latest.message : [];
               const freshMedia = extractMediaFromSegments(segments)
                 .filter((m) => m.kind === 'image' && m.url)
                 .map((m) => ({ ...m, kind: 'image', url: String(m.url) }));
               const freshUrls = [...new Set(freshMedia.map((m) => String(m.url)))];
               if (freshUrls.length && freshUrls.some((url, index) => url !== urls[index])) {
-                ctx.store.updateByMid(ctx.chatKey, entry.mid, { replaceImageMedia: freshMedia });
+                ctx.store.updateByMid(ctx.chatKey, source.mid, { replaceImageMedia: freshMedia });
                 urls = freshUrls;
                 ({ dataUrls, failed } = await downloadAll(urls));
               }
@@ -569,7 +588,12 @@ export function buildAllToolDefs(): ToolDefinition[] {
           }
           if (!dataUrls.length) return err(`图片获取失败：${failed.join('；')}`);
           const note = failed.length ? `（另有 ${failed.length} 张获取失败）` : '';
-          return { content: imageParts(`消息 ${args.messageId} 的图片内容${note}：`, dataUrls) };
+          // 走回退时必须说清图是从哪条消息取的：不说的话模型会以为"它问的那条就是图"，
+          // 于是后续引用/描述会把图片归到错误的发送者名下。
+          const label = viaReply
+            ? `消息 ${args.messageId} 引用的消息 #${source.mid} 的图片内容`
+            : `消息 ${args.messageId} 的图片内容`;
+          return { content: imageParts(`${label}${note}：`, dataUrls) };
         } catch (error) {
           return err(errorMessage(error));
         }

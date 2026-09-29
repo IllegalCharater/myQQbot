@@ -176,6 +176,63 @@ ok('回复 B 站视频卡片发送 /转写，会从被引用卡片提取链接�
   cardCommands.length === 1 && cardCommands[0].url === bilibiliCardUrl
   && cardReplies.length === 1 && String(cardReplies[0][1]).includes('已开始处理'));
 
+// ── 引用（reply）的存档形状 ──────────────────────────────────────────────
+// 被引用消息的 **id** 必须结构化地留下来，不能只把预览串拍进 text ——
+// 典型故障：A 发图、B 引用那张图问"这是什么"，模型看见 `[引用 清三：[图片]]`，
+// 而 `[图片]` 是常量占位符、同一发送者的两张图在文本上逐字相同，它只能瞎挑一个 id，
+// 结果把**另一张图**当成了被引用的那张（实测踩到）。所以这一段的每一条都在钉"id 在不在"。
+// ⚠️ 每个用例一个**独立的群号**：`new ChatStore()` 会从磁盘 `group_<id>.json` 重新载入，
+// 同一个群号在同一个临时数据目录里是共享的 —— 存档里于是有多条 mid=800，而 `findByMid`
+// 返回**最早**那条，后面的用例会拿到前面用例留下的条目（实测：断言读到的是 `[图片]`）。
+async function replyIngestFor(groupId, { replyId = '789', getMsg, segments }) {
+  const store = new ChatStore();
+  const forwarded = [];
+  const ingest = createIngest({
+    onebot: { selfId: '999999', getMsg },
+    store,
+    sender: { sendTextBatch: async () => ({}) },
+    orchestrator: { onIncoming: (...args) => { forwarded.push(args); } },
+    transcription: { enqueue: () => { throw new Error('本用例不涉及转写'); } },
+    emit: () => {},
+    getConfig: () => commandConfig,
+    log: () => {}
+  });
+  await ingest.handle({
+    post_type: 'message', message_type: 'group', group_id: groupId, user_id: 456,
+    message_id: 800, sender: { user_id: 456, nickname: '测试者' },
+    message: segments ?? [{ type: 'reply', data: { id: replyId } }, { type: 'text', data: { text: '这是哪张图' } }]
+  });
+  return { store, forwarded, chatKey: `group:${groupId}` };
+}
+const quotedOf = (r) => r.store.findByMid(r.chatKey, 800);
+
+const quoted = quotedOf(await replyIngestFor(130, {
+  getMsg: async () => ({
+    sender: { nickname: '清三' },
+    message: [{ type: 'image', data: { url: 'https://example.com/quoted.png' } }]
+  })
+}));
+ok('被引用消息的 id 结构化落库（不是拼进 text 的预览串）',
+  quoted?.reply?.mid === '789' && quoted?.reply?.sender === '清三'
+  && quoted?.reply?.text === '[图片]',
+  JSON.stringify(quoted?.reply));
+ok('预览不再拍进 text：正文只剩自己的话，引用段由渲染层从 reply 拼',
+  quoted?.text === '这是哪张图' && !String(quoted?.text).includes('[引用'),
+  JSON.stringify(quoted?.text));
+ok('被引用消息解析失败时 id 仍然留下（拿不到正文不等于没有引用）',
+  quotedOf(await replyIngestFor(131, { getMsg: async () => { throw new Error('协议端取消息失败'); } }))?.reply?.mid === '789');
+ok('引用段没带 id 时不产生 reply（按"没有引用"处理）',
+  quotedOf(await replyIngestFor(132, {
+    getMsg: async () => ({ sender: { nickname: '清三' }, message: [] }),
+    segments: [{ type: 'reply', data: {} }, { type: 'text', data: { text: '在吗' } }]
+  }))?.reply === null);
+const longPreview = quotedOf(await replyIngestFor(133, {
+  getMsg: async () => ({ sender: { nickname: '清三' }, message: [{ type: 'text', data: { text: '很'.repeat(400) } }] })
+}));
+ok('引用预览按上限截断，不把整段正文搬进每一条引用它的消息',
+  String(longPreview?.reply?.text).length === 300,
+  String(longPreview?.reply?.text).length);
+
 // 真实入站契约：把**原始段**换成本轮新增的两种形态，其余断言与上面的老卡片完全一致。
 // 这三种形态的差异只在"链接藏在哪个字段/哪种段里"（老卡片 jumpUrl / 小程序 qqdocurl / xml 正文），
 // 对下游（媒体别名 → /转写 与 transcribe_video）应当是同一件事。
