@@ -23,8 +23,9 @@ const { HotSearchScheduler } = await load('media/hot-search/scheduler.js');
 const defs = buildToolDefs();
 
 // ── 共用夹具 ─────────────────────────────────────────────────────
-// 假 sender 记录每次 sendTextBatch 的实参：热搜工具必须一次都不发；转写工具恰好发一条
-// 固定回执（结果本身不贴群，改成进模型上下文 —— 见 t-transcription.mjs 的 assisted 段）。
+// 假 sender 记录每次 sendTextBatch 的实参：两个工具都必须一次都不发 —— 热搜结果发不发、
+// 转写入队后要不要先说一句，都归模型自己决定（转写结果本身不贴群，改成进模型上下文 —— 见
+// t-transcription.mjs 的 assisted 段）。
 // `session` 与 `emit` 在 ToolContext 上是必填：漏了会在运行期抛 TypeError，
 // 而套件里一个未捕获异常会**静默吃掉它后面的全部断言**（终端上只显示"这个套件失败了"）。
 const sent = [];
@@ -91,19 +92,22 @@ const queue = {
 };
 
 const beforeUrl = sent.length;
+const emitsBeforeUrl = emits.length;
 const byUrl = await executeTool(defs, ctxOf({ transcription: queue }), 'transcribe_video', { url: ' https://example.com/v.mp4 ' });
 ok('url 路径去掉首尾空白后交给队列并回任务号',
   jobs.at(-1).url === 'https://example.com/v.mp4' && byUrl.content.includes('abcdef12'), byUrl.content);
-ok('结果不贴群：工具只代发一条固定回执「我先看看」',
-  sent.length === beforeUrl + 1 && String(sent.at(-1)[1]) === '我先看看', JSON.stringify(sent.slice(beforeUrl)));
-ok('回执记进会话并广播 session-update（面板要立刻看到这次发言）',
-  lastSession().sent.length === 1 && lastSession().sent[0].text === '我先看看'
-  && emits.at(-1)?.[0] === 'session-update' && emits.at(-1)?.[1]?.sessionId === lastSession().id,
-  JSON.stringify(emits.at(-1)));
+// 工具自己不发消息 —— 入队后要不要先说一句（例如「我先看看」）由模型在这一次运行里自己决定。
+// 这条断言的反面正是"代发回执"：代发会让模型再自己说一句时群里出现两条重复的话。
+ok('入队成功也不代发任何消息（说不说话归模型自己决定）',
+  sent.length === beforeUrl, JSON.stringify(sent.slice(beforeUrl)));
+ok('没有代发就没有 session.sent 记录、也不广播 session-update（否则这轮会被算成"已发言"）',
+  lastSession().sent.length === 0 && emits.length === emitsBeforeUrl,
+  JSON.stringify({ sent: lastSession().sent, emits: emits.slice(emitsBeforeUrl) }));
 ok('模型自主路径以 assisted 入队（结果进上下文，由模型决定说什么）', jobs.at(-1).mode === 'assisted', String(jobs.at(-1).mode));
 ok('url 路径没有可回复的消息时不带 replyToMessageId', jobs.at(-1).replyToMessageId === null);
-ok('工具结果交代清楚"结果还没到、届时由你决定说什么"',
-  byUrl.content.includes('【转写结果】') && byUrl.content.includes('不要'), byUrl.content);
+ok('工具结果交代清楚"结果还没到、届时必须开口、现在别评价"',
+  byUrl.content.includes('【转写结果】') && byUrl.content.includes('你必须开口')
+  && byUrl.content.includes('不要评价'), byUrl.content);
 
 // 本轮消息（窗口内）
 const inBatch = [{ mid: '-2040798711', media: [{ kind: 'video', url: 'https://b23.tv/abc' }] }];
@@ -111,8 +115,8 @@ const beforeId = sent.length;
 await executeTool(defs, ctxOf({ transcription: queue, triggerEntries: inBatch }), 'transcribe_video', { messageId: '-2040798711' });
 ok('messageId 命中本轮消息时取到视频地址，并把它作为回复目标',
   jobs.at(-1).url === 'https://b23.tv/abc' && jobs.at(-1).replyToMessageId === '-2040798711');
-ok('回执也引用同一条消息（群里看得出在回谁）',
-  sent.length === beforeId + 1 && sent.at(-1)[2]?.replyToMessageId === '-2040798711', JSON.stringify(sent.at(-1)));
+ok('这条路径同样不发消息（引用谁、说什么，都归模型自己决定）',
+  sent.length === beforeId, `多发了 ${sent.length - beforeId} 条`);
 
 // 批外旧消息 —— 与 reverse_image_source 同源的缺陷面：工具愿意去查存档，
 // 夹具必须证明"查存档这条路真的通"，不能只覆盖窗口内那一种。
@@ -150,7 +154,7 @@ ok('url 与 messageId 都缺时明确告知，且不建任务',
 
 const noQueue = await executeTool(defs, ctxOf({}), 'transcribe_video', { url: 'https://example.com/v.mp4' });
 ok('缺 transcription 依赖时返回友好错误而不是抛', noQueue.isError === true && noQueue.content.includes('未启用'));
-ok('以上四种"任务根本没建起来"的情形一律不发回执（说了要先看看就一定真的在转）',
+ok('以上四种"任务根本没建起来"的情形一律不发任何消息（工具从来不代模型开口）',
   sent.length === sentBeforeRejects, `多发了 ${sent.length - sentBeforeRejects} 条`);
 
 // 队列给的中文原因要原样转述（它与 `/转写` 命令路径同源，不能在这里被换成一句泛泛的失败）。
@@ -162,9 +166,8 @@ const rejected = await executeTool(defs, ctxOf({
 }), 'transcribe_video', { url: 'https://example.com/v.mp4' });
 ok('转写被队列拒绝时转述队列给的原因',
   rejected.isError === true && rejected.content === '错误：转写服务未启用', rejected.content);
-// 回执排在 enqueue **之后**（enqueue 同步做完 URL 安全校验/凭证/FFmpeg/去重，抛错发生在建任务之前）
-// —— 把回执挪到前面，这条就会红。
-ok('入队抛错时不发回执（证明回执排在 enqueue 之后）',
+// 入队抛错时更不能有任何外部动作 —— 现在工具压根不发消息，这条是"不许长出代发"的回归网。
+ok('入队抛错时一条消息都没发',
   sent.length === sentBeforeRejected, `多发了 ${sent.length - sentBeforeRejected} 条`);
 
 // ── 成本闸门：超限不建任务 ───────────────────────────────────────
@@ -183,7 +186,7 @@ ok('未超限的第一次正常建任务', gateFirst.isError !== true, gateFirst
 ok('超过每群每小时上限时拒绝，且被拒的那一次不建任务',
   gateSecond.isError === true && gateSecond.content.includes('太频繁') && gateJobs.length === 1,
   `jobs=${gateJobs.length} content=${gateSecond.content}`);
-ok('被限频拒绝时同样不发回执（回执不是"我收到了"的空头支票）',
+ok('被限频拒绝时同样一条消息都没发（工具不发"我收到了"的空头支票）',
   sent.length === sentAfterGateFirst, `多发了 ${sent.length - sentAfterGateFirst} 条`);
 
 // ── 配置默认值与钳制 ────────────────────────────────────────────
@@ -238,13 +241,12 @@ ok('转写工具里没有关键词闸门（"该不该转"交回模型判断）',
   !trToolSrc.includes('什么视频') && !trToolSrc.includes('requestText'));
 ok('转写工具在建任务前先消耗调用额度', trToolSrc.includes('budget.take(ctx.chatKey)'));
 ok('模型自主路径以 assisted 入队', trToolSrc.includes("mode: 'assisted'"));
-ok('回执排在 enqueue 之后（说了「我先看看」就一定是真的入了队）',
-  trToolSrc.indexOf('queue.enqueue') < trToolSrc.indexOf('我先看看'));
-// 从回执那句切到"已加入转写队列"的返回：中间必须有一个 catch。
-// 去掉内层 try/catch 后，这段里就只剩注释与 return —— 而实际后果是"客套话没发出去"
-// 会被外层捕获报成"转写失败"（转写其实已经入队了）。
-ok('回执与真正的转写分开捕获（客套话没发出去不能被报成转写失败）',
-  /\}\s*catch/.test(trToolSrc.slice(trToolSrc.indexOf('我先看看'), trToolSrc.indexOf('已加入转写队列'))));
+// 工具必须**完全不发消息**：这是"入队后说不说话由模型自己决定"的全部内容。
+// 拿掉 `sendTextBatch` 还不够——`ctx.session.sent` 与 `emit` 同样是把这次调用算成"已发言"，
+// 留着它们会让这轮以 done 收尾，模型就再也没机会自己开口了。
+ok('转写工具自己不发消息：不碰 sender、不写 session.sent、不发事件',
+  !trToolSrc.includes('sendTextBatch') && !trToolSrc.includes('session.sent')
+  && !trToolSrc.includes('ctx.emit') && !trToolSrc.includes('EVENTS'));
 
 const runnerSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/agent/runtime/agent-runner.ts'), 'utf8'));
 ok('未启用的能力不进模型工具集（按配置过滤，与既有视觉/搜索过滤同款）',
