@@ -311,6 +311,10 @@ const illHit = await dispatch({}, { saucenao: () => ({ results: [{ similarity: 0
 ok('intent=illustration 先问 saucenao', illHit.calls[0]?.engine === 'saucenao', illHit.calls.map((c) => c.engine).join(','));
 ok('SauceNAO 的 apiKey 从配置经 engineOptions 递到 provider（不进 URL、不进 argv，只进 stdin）',
   illHit.calls[0].options?.apiKey === 'secret-test-key');
+// 掩码（`hide`）是 SauceNAO 的**构造**参数，取值由服务层 `INTENT_PARAMS` 的三行表给出。
+// 它此前完全不存在：没有一般向/R18 分支，SauceNAO 用的是库的默认值 0（全部）。
+ok('intent=illustration 带上 hide=1（藏掉预期明确的 R18 同人图）',
+  illHit.calls[0].options?.hide === 1, `hide=${JSON.stringify(illHit.calls[0].options?.hide)}`);
 
 // `unknown` 此前**一条断言都没有**，而这正是模型最常填的那个值（判不出类型时填的就是它）——
 // 守护空白就这么长出了一个真机缺陷：它当初与 `anime` 排成同序（理由只是"与改动前一致"），
@@ -323,6 +327,10 @@ const unknownHit = await dispatch({}, {
 ok('intent=unknown 先问覆盖面更广的 saucenao（它不是 anime 的同义词：专用引擎只在类型已确认时才先问）',
   unknownHit.calls.map((c) => c.engine).join(',') === 'saucenao' && unknownHit.out.result?.similarity === 0.95,
   `calls=${unknownHit.calls.map((c) => c.engine).join(',')} sim=${unknownHit.out.result?.similarity}`);
+// `unknown` 在**掩码上也不能**跟 `anime` 走：它是模型判不出类型时填的那个值，此时按保守侧
+// 处理（与 illustration 同档）才对。这一条与上面那条顺序断言是两个独立的判据。
+ok('intent=unknown 的 hide 也是 1（说不清时按保守侧，不是按 anime 的 0）',
+  unknownHit.calls[0].options?.hide === 1, `hide=${JSON.stringify(unknownHit.calls[0].options?.hide)}`);
 
 const fallthrough = await dispatch({}, {
   'trace.moe': () => ({ results: [{ similarity: 0.5 }], statusCode: 200 }),
@@ -331,6 +339,10 @@ const fallthrough = await dispatch({}, {
 ok('前一个引擎的结果低于它自己的门槛时继续问下一个，取达到门槛的那条',
   fallthrough.calls.map((c) => c.engine).join(',') === 'trace.moe,saucenao' && fallthrough.out.result?.similarity === 0.92,
   `calls=${fallthrough.calls.map((c) => c.engine).join(',')} sim=${fallthrough.out.result?.similarity}`);
+// 这条**只能**挂在这里：`animeHit` 那条 trace.moe 先命中就 `break` 了，sauce 一次都没被调用，
+// 拿 `animeHit.calls[0].options` 断言 hide 会断言到 trace.moe 的 `undefined` 上。
+ok('intent=anime 的 hide=0：找番时 R18 番剧是合法答案，藏掉就是误杀',
+  fallthrough.calls[1]?.options?.hide === 0, `hide=${JSON.stringify(fallthrough.calls[1]?.options?.hide)}`);
 
 const below = await dispatch({}, { 'trace.moe': () => ({ results: [{ similarity: 0.86 }], statusCode: 200 }) }, 'anime');
 ok('低于门槛的结果不被当成命中（0.86 < trace.moe 的 0.87）', below.out.result === null);
@@ -446,10 +458,13 @@ ok('两个按引擎的 provider 文件已删除',
 
 // 引擎表是**逐行声明**的：加一个引擎 = 加一行 + 在 ORDER 里给它定位置（顺序是语义，不该由
 // 一条"按 kind 排序"的现成规则替加引擎的人做决定）。这两条是形态断言，行为断言在上面 ⑦。
+// `INTENT_PARAMS` 只比前缀：它的类型里嵌着两层泛型，逐字钉住会在任何一次无害的类型改写上
+// 打红，而这条要守的是"它是一张按 SearchIntent 穷尽的显式表"，不是那串泛型的写法。
 const svcSrc = stripComments(fs.readFileSync(path.join(imageDir, 'reverse-image-source-service.ts'), 'utf8'));
-ok('引擎表与顺序表都是显式声明的（`Record<EngineWhich, EngineRow>` / `Record<SearchIntent, …>`）',
+ok('引擎表、顺序表与按 intent 的引擎参数表都是显式声明的（`Record<EngineWhich, EngineRow>` / `Record<SearchIntent, …>`）',
   svcSrc.includes('ENGINE_ROWS: Record<EngineWhich, EngineRow>')
-  && svcSrc.includes('ORDER: Record<SearchIntent, readonly EngineWhich[]>'));
+  && svcSrc.includes('ORDER: Record<SearchIntent, readonly EngineWhich[]>')
+  && svcSrc.includes('INTENT_PARAMS: Record<SearchIntent,'));
 
 // ⚠️ AnimeTrace **不在**表里，这是决定而不是遗漏：worker 的 `ENGINE_CLASS_CANDIDATES` 里
 // `anime_trace` 的候选是 `("TraceMoe","AnimeTrace")` —— 它是 trace.moe 的**中文叫法**，
@@ -544,6 +559,19 @@ const pyBody = (name) => {
   const src = workerSrc.split(/\r?\n/).filter((l) => !l.trim().startsWith('#')).join('\n');
   return (src.match(new RegExp(`^def ${name}\\([\\s\\S]*?\\n(?=\\S)`, 'm')) || [''])[0];
 };
+/**
+ * 取一个**方法**的函数体。`pyBody` 只认顶层 `def`（正则锚 `^def`），够不着类里的方法。
+ *
+ * 为什么非要方法级锚点：模块 docstring 里**就写着那条调用**（⚑ f 条在讲掩码怎么递下去），
+ * 而 docstring 不是注释、`pyBody` 那套"按行丢掉 `#`"的办法丢不掉它 —— 若用全文 `includes`，
+ * 把 `_engine` 里那行真调用删掉，断言**照样绿**。上一轮 `title_chinese` 就是这么骗过一次的。
+ * 边界：类成员恒为 4 空格缩进；被取的方法若是该类最后一个，"下一个 def"不存在 → 返回空串
+ * （断言失败，是响的，不是静默的）。
+ */
+const pyMethod = (name) => {
+  const src = workerSrc.split(/\r?\n/).filter((l) => !l.trim().startsWith('#')).join('\n');
+  return (src.match(new RegExp(`^    (?:async )?def ${name}\\([\\s\\S]*?\\n(?=    (?:async )?def )`, 'm')) || [''])[0];
+};
 const traceBody = pyBody('_normalize_trace_moe');
 ok('trace.moe 的时间取的是实测名 `From`（小写 `from` 在真库上恒为 None → 每条都印 00:00）',
   /seconds\s*=\s*_as_float\(_pick\(raw_item,\s*"From"/.test(traceBody),
@@ -558,6 +586,22 @@ ok('trace.moe 标题按 中文 → 原生 → 罗马音 取实测的平铺字段
   && !/origin if not isinstance/.test(titleBody),
   '实测 `TraceMoeItem` 直接给了 title_chinese/title_native/title_romaji/title_english；'
   + '旧版那条"origin 是字符串就当标题"的兜底会让来源 URL 顶掉真标题（它排在 `title` 前面）')
+
+// —— SauceNAO 掩码：实测出"参数住在构造上"之后，这两条钉住它**只能**从那一条路进去 ——
+// 判据不是"代码里出现了 hide"，而是"这条路是白名单、且 `_engine` 真的走了它"。见模块头 ⚑ f 条。
+const sauceArgsBody = pyBody('_saucenao_constructor_args');
+const engineBody = pyMethod('_engine');
+ok('SauceNAO 的构造参数走白名单函数，且 hide 有取值校验（透传会让拼错的键静默塞进 HTTP 客户端）',
+  /"hide"\s+in\s+options/.test(sauceArgsBody) && /0\s*<=\s*hide\s*<=\s*3/.test(sauceArgsBody),
+  '`SauceNAO.__init__` 结尾是 `**request_kwargs` → `_has_var_keyword()` 返回 True → '
+  + '`_filtered_call` 是**全传**的：键名拼错不会被丢掉，会被原样交给 HTTP 客户端（不报错、'
+  + '参数却没生效）。hide 不校验的话，`hide=7` 的症状只是"结果少了几条"，与"这张图本来就没结果"一样');
+ok('`_engine` 真的把白名单的结果并进构造 kwargs，且没有整份 options 的透传',
+  engineBody.includes('kwargs.update(_saucenao_constructor_args(options))')
+  && !/kwargs\.update\((?:\*\*)?options\)/.test(engineBody),
+  engineBody.length > 0
+    ? '锚点是 `_engine` 的方法体，不是全文 —— 模块 docstring 里就写着这串调用，全文扫描会被它骗过'
+    : '取不到 `_engine` 的方法体（pyMethod 的缩进假设失效？）');
 
 // 必须是 process.exit(done() …)：done() 只**返回**布尔值、自己从不退出（见 lib/harness.mjs:27），
 // 而 run.mjs 单看子进程的退出码判定成败。这里原先是一句裸 `done();`，于是本套件**永远退 0** ——

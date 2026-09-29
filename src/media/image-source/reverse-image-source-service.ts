@@ -104,9 +104,32 @@ const ORDER: Record<SearchIntent, readonly EngineWhich[]> = {
   unknown: ['sauce', 'trace']
 };
 
-function specOf(which: EngineWhich, cfg: ImageSourceConfig): EngineSpec {
+/**
+ * 按搜索类型固定的**引擎参数**（与 `ORDER` 并列的第二张 intent 表）。
+ *
+ * 为什么不把它做成设置页上的一个档位：模型每次调用都已经给出了"这是什么图"，而一张图该
+ * 不该看到 R18 结果正取决于它 —— 找番时 R18 番剧是**正确答案**（藏掉就是误杀），找插画或
+ * 说不清是什么时 R18 同人图多半是**错答案**。一个全局档位做不到这件事：它只能同时错杀一边。
+ *
+ * `hide` 的四档语义（0 全部 / 1 隐藏预期 R18 / 2 隐藏预期存疑 / 3 只留预期安全）与整条
+ * `SauceNAO.__init__` 签名实测自 PicImageSearch 3.12.11，结论写在 worker 头部 ⚑ f 条。
+ * **它是构造参数，不是 `search()` 的 kwargs** —— 递下去的路由见 worker 的
+ * `_saucenao_constructor_args`（那里必须白名单，理由在函数文档里）。
+ *
+ * `Partial<Record<EngineWhich, …>>` 让"给哪个引擎加参数"也受编译期检查；`Record<SearchIntent, …>`
+ * 是穷尽的 —— 将来多一个 intent，编译器会在这里报错，而不是让它悄悄变成"没有掩码"。
+ */
+const INTENT_PARAMS: Record<SearchIntent, Partial<Record<EngineWhich, Record<string, unknown>>>> = {
+  anime: { sauce: { hide: 0 } },          // 找番：不藏（R18 番剧是合法答案）
+  illustration: { sauce: { hide: 1 } },   // 找插画：藏掉预期明确的 R18 同人图
+  unknown: { sauce: { hide: 1 } }         // 说不清：按更保守的一侧处理
+};
+
+function specOf(which: EngineWhich, cfg: ImageSourceConfig, intent: SearchIntent): EngineSpec {
   const row = ENGINE_ROWS[which];
   const limits = row.limits(cfg);
+  const base = row.options?.(cfg);
+  const extra = INTENT_PARAMS[intent][which];
   return {
     engine: row.engine,
     logName: row.logName,
@@ -114,7 +137,10 @@ function specOf(which: EngineWhich, cfg: ImageSourceConfig): EngineSpec {
     timeoutMs: limits.timeoutMs,
     maxResults: limits.maxResults,
     minSimilarity: limits.minSimilarity,
-    options: row.options?.(cfg)
+    // 两边都没有时必须是 `undefined`，**不能是 `{}`**：`{}` 会让没有任何私有参数的引擎
+    // （trace.moe）凭空多出一个 engineOptions，缓存键也从 `-` 变成一个散列值。
+    // 现成守护：`tests/t-image-source.mjs` 的"trace.moe 没有私有参数"那条。
+    options: base || extra ? { ...base, ...extra } : undefined
   };
 }
 
@@ -125,7 +151,10 @@ function specOf(which: EngineWhich, cfg: ImageSourceConfig): EngineSpec {
  * - 引擎：同一张图在 `anime` 与 `illustration` 两种 intent 下会先问不同的引擎。键里不带引擎
  *   的话，先问的那个引擎的结论会替另一个引擎作答 —— 用户看到的是"换了个问法，答案没变"。
  * - maxResults：它在设置页可调。换个条数就是在问不同的问题，不该命中上一次的响应。
- * - 参数指纹：`apiKey` 这类引擎私有参数变了（换号、清空又填回）时不该复用上一次的响应。
+ * - 参数指纹：引擎私有参数变了时不该复用上一次的响应。两个例子都在这里：`apiKey` 换号，
+ *   以及 `hide` 随 intent 变（`anime` 的 `hide=0` 与 `illustration` 的 `hide=1` 是**两个不同
+ *   的问题**，共用一个槽位会让先问的那种 intent 替另一种作答）。反过来，参数逐字节相同的两种
+ *   intent（今天 `illustration` 与 `unknown`）**共享**槽位 —— 请求一样，共享是对的。
  *
  * 指纹只取散列前 16 位，且只在内存里做键；key 本身不进日志、不落盘。
  */
@@ -191,7 +220,7 @@ export class ReverseImageSourceService {
     const failures: string[] = []; let result: ImageSourceResult | null = null;
     let remoteCalls = 0; let cacheHits = 0;
     for (const which of ORDER[intent]) {
-      const spec = specOf(which, cfg);
+      const spec = specOf(which, cfg, intent);
       if (!spec.ready) continue;
       try {
         const key = cacheKey(spec.engine, hash, spec.maxResults, spec.options);

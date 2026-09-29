@@ -56,7 +56,8 @@ minSimilarity —— 那些是 Node 侧服务层的事，在这里重复一份�
 5. **超时以 Node 侧为准**，这里的 timeoutMs 只是兜底（Node 的计时器不会因本进程繁忙而迟到）。
 
 ═══════════════════════════════════════════════════════════════════════════════
-⚑ 与真实库的对账状态（2026-09-29 实测，四条已全部收口）
+⚑ 与真实库的对账状态（2026-09-29 实测，a–d 四条已全部收口；e 是那次顺带挖出的两个活 bug，
+f 是后续实测的 SauceNAO 掩码参数）
 ═══════════════════════════════════════════════════════════════════════════════
 
 本文件最初是在**没有装 PicImageSearch 的机器上**写的，版本相关的事实全是候选链。2026-09-29
@@ -113,6 +114,36 @@ minSimilarity —— 那些是 Node 侧服务层的事，在这里重复一份�
      顺带把 `time` 的兜底口径改成**取不到就不写这个键**（原为写 `0.0`）：写 0 会让 formatter
      的"字段在不在"判据失效，等于把 ① 的症状再引入一次。真值 `From: 0`（正好片头）照写，
      `0.0` 不是空值、`_drop_empty` 不会丢它。
+  f. **SauceNAO 的过滤档位（R18 掩码）住在构造函数上，不在 `search()` 的 kwargs 里**
+     —— 已实测确认。整条签名是
+
+         SauceNAO(base_url='https://saucenao.com', api_key=None, numres=5, hide=0, minsim=30,
+                  output_type=2, testmode=0, dbmask=None, dbmaski=None, db=999,
+                  dbs=None, **request_kwargs)
+
+     而 `search()` 只收 `url` / `file` / `**kwargs`。`hide` 的语义是四档：**0 全部 / 1 隐藏
+     预期 R18 / 2 隐藏预期存疑 / 3 只留预期安全**；`db` 是库编号（999 = 全部），`dbs` 是编号
+     列表且**优先于 `db`**，`dbmask` / `dbmaski` 是按位开关。
+
+     两件事因此被钉死：
+     ① **掩码必须从构造走。** 递下去的路由是 `_engine` 里的 `kwargs.update(
+        _saucenao_constructor_args(options))`，取值由 **Node 侧 `INTENT_PARAMS`** 那张三行表
+        给出（`anime` → 0，`illustration` / `unknown` → 1，理由写在那边）。键名直接用引擎的
+        `hide`：实测没有第二种叫法，所以**不需要** apiKey 那种 `_first_accepted` 改名协商。
+     ② **这个分支必须是白名单，不能透传 options。** `__init__` 结尾是 `**request_kwargs`，
+        `_has_var_keyword()` 对它返回 True，于是 `_filtered_call` 是**全传**的 —— 键名拼错
+        不会被丢掉，会被原样塞给 HTTP 客户端：不报错、参数却没生效。白名单与 `hide` 的取值
+        校验都在 `_saucenao_constructor_args` 里。
+
+     **`dbmask` / `dbmaski` / `db` / `dbs` 有意不接**：它们的编号表**不在库里**（实测
+     `constants` 只导出 `COPYSEEKER_CONSTANTS`，编号表在 saucenao.com 的
+     `tools/examples/api/index_details.txt`）。凭印象填掩码的表现同样是"悄悄隐藏了另外几套
+     库"，而结果里只有 `index_name` 一个线索 —— 要接就把编号表也一并落成显式常量。
+
+     这次实测的入口是"在目标解释器上手跑一行"，因为当时 `--self-check` 还没打构造签名。
+     现在它会打（`_dump_engine_params` 打每个引擎的 `__init__` 签名与类文档，
+     `_dump_constants` 打取值表），所以**"某个参数住在构造还是 search 的 kwargs"这类问题
+     此后一次点击即可**：设置页「Python 工具」→「跑一遍依赖自检」。
 
   第二次实测（同日）另外确认三件事：① 8 个引擎名**全部**可解析，`baidu →
   BaiDu` 与 `google_lens → GoogleLens`（不是那个按关键词搜的 `Google`）都对，说明候选链的
@@ -126,8 +157,9 @@ minSimilarity —— 那些是 Node 侧服务层的事，在这里重复一份�
   但那个参数是**复数 `proxies`** —— 写成 `proxy` 会被 `_filtered_call` 静默丢掉（行为无差，
   只是看着像配了代理）。
 
-改过 `ENGINE_CLASS_CANDIDATES` / `_normalize_*` / `_input_param` 里的任何一张表之后，**再跑一次
-`--self-check` 并把结论写回上面这几条** —— 这张表是那几处唯一的判据来源。**这四条 2026-09-29
+改过 `ENGINE_CLASS_CANDIDATES` / `_normalize_*` / `_input_param` / `_saucenao_constructor_args`
+里的任何一张表之后，**再跑一次 `--self-check` 并把结论写回上面这几条** —— 这张表是那几处唯一的
+判据来源。**这四条 2026-09-29
 已全部收口，所以此后重跑这件事的用途是「回归 / 升级探测」**（换了 PicImageSearch 版本、或改了
 表里任何一行），不是"补未知"。dump 的取数路径是按实测修的（第一版取不到，因为只试了"类上声明
 的注解"，而本库一个都不声明），所以它现在打出来的字段名可以**直接**与本文件比对，不必再猜。
@@ -433,6 +465,37 @@ def _as_float(value: Any) -> float | None:
 def _as_int(value: Any) -> int | None:
     number = _as_float(value)
     return None if number is None else int(number)
+
+
+def _saucenao_constructor_args(options: dict[str, Any]) -> dict[str, Any]:
+    """从 engineOptions 里挑出 SauceNAO 的**构造**参数。
+
+    `hide` 住在构造上、而不是 `search()` 的 kwargs 里 —— 实测（PicImageSearch 3.12.11）：
+    `SauceNAO(base_url, api_key, numres, hide, minsim, output_type, testmode, dbmask, dbmaski,
+    db, dbs, **request_kwargs)`，而 `search()` 只收 `url` / `file` / `**kwargs`，所以照
+    "把参数塞进 search 的 kwargs"那条路走**到不了它**（见模块头 ⚑ f 条）。
+
+    **这个函数本身就是白名单，不是可选项**：`__init__` 带 `**request_kwargs`，
+    `_has_var_keyword()` 对它返回 True，于是 `_filtered_call` 是**全传**的 —— 一旦把这里
+    换成"整份 options 透传"，键名拼错就再没有任何声音，未识别的键会被原样塞给 HTTP 客户端。
+    同一个理由，`hide` 必须在这里显式校验：`hide=7` 这种值不报错的话，症状只是
+    "结果少了几条"，与"这张图本来就没结果"长得一模一样。
+
+    实测同住构造的还有 `dbmask` / `dbmaski` / `db` / `dbs`：**暂时不接**。它们的编号表不在
+    库里（`constants` 只导出 `COPYSEEKER_CONSTANTS`，实测过），凭印象填掩码的表现同样是
+    "悄悄隐藏了另外几套库"。要接就在这里加一段校验，并在 Node 的 `INTENT_PARAMS` 里给它取值。
+    """
+    args: dict[str, Any] = {}
+    if "hide" in options and options["hide"] is not None:
+        hide = _as_int(options["hide"])
+        if hide is None or not 0 <= hide <= 3:
+            raise ProviderFailure(
+                E_PROVIDER_UNAVAILABLE,
+                f"engineOptions.hide 必须是 0-3 的整数（收到 {options['hide']!r}）——"
+                "0 全部 / 1 隐藏预期 R18 / 2 隐藏预期存疑 / 3 只留预期安全",
+            )
+        args["hide"] = hide
+    return args
 
 
 def _attr_node(value: Any) -> Any:
@@ -826,6 +889,8 @@ class Worker:
                     f"{ENV_SAUCENAO_KEY} 都没有）",
                 )
             kwargs[_first_accepted(cls, ("api_key", "key", "apikey"), default="api_key")] = api_key
+            # 过滤档位（R18 掩码）也住在构造上，白名单与理由见 `_saucenao_constructor_args`。
+            kwargs.update(_saucenao_constructor_args(options))
 
         try:
             engine = _filtered_call(cls, **kwargs)
@@ -1405,6 +1470,69 @@ def _dump_result_fields(module: Any, resolved: dict[str, Any]) -> None:
             print(f"  {sub_name}.{cls_name:<26} {{{declared}}}", file=sys.stderr)
 
 
+def _dump_engine_params(resolved: dict[str, Any]) -> None:
+    """打印每个引擎的**构造签名**与类文档。
+
+    为什么 `search()` 的签名不够：它只回答"收图片的参数叫什么"，而**引擎自己的搜索参数
+    （SauceNAO 的 `db` / `hide` 掩码这类）收在构造还是交给 `search(**kwargs)`** 是另一件事。
+    两者的区别是致命的 —— `_filtered_call` 对**没有 `**kwargs`** 的签名会**静默丢掉**不认识的
+    参数，所以传错一层不会报任何错，只会让"改了配置但请求没变"。
+
+    类文档一并打出来是因为**取值表常写在 `__init__` 的 docstring 里**，而不是代码里的常量。
+    """
+    print("\n各引擎的构造签名（判据：搜索参数收在构造还是 search 的 kwargs）：", file=sys.stderr)
+    for engine, cls in resolved.items():
+        try:
+            signature = inspect.signature(cls)
+        except (TypeError, ValueError) as exc:
+            signature = f"<取不到：{exc}>"
+        print(f"  {engine:<12} {cls.__name__}{signature}", file=sys.stderr)
+        init = cls.__init__
+        doc = None if init is object.__init__ else getattr(init, "__doc__", None)
+        lines = [line.rstrip() for line in (doc or cls.__doc__ or "").splitlines()]
+        lines = [line for line in lines if line.strip()]
+        if not lines:
+            print("      （无文档）", file=sys.stderr)
+            continue
+        if len(lines) > 40:
+            lines = lines[:40] + [f"…（还有 {len(lines) - 40} 行）"]
+        for line in lines:
+            print(f"      {line}", file=sys.stderr)
+
+
+def _dump_constants(module: Any) -> None:
+    """打印 `PicImageSearch.constants` 的成员。
+
+    引擎参数的**取值表**（SauceNAO 的 database 编号各是什么）常被库收在这里。打它是为了
+    **照抄**：掩码表凭印象填错，表现不是报错而是"隐藏了另外几套库"，而结果里只有
+    `index_name` 一个线索。
+    """
+    constants = getattr(module, "constants", None)
+    if constants is None:
+        print("\n（库里没有 constants 模块）", file=sys.stderr)
+        return
+    print("\nPicImageSearch.constants（引擎参数取值表）：", file=sys.stderr)
+    holders: list[tuple[str, Any]] = [("", constants)]
+    for sub_name in sorted(dir(constants)):
+        if sub_name.startswith("_"):
+            continue
+        sub = getattr(constants, sub_name, None)
+        if inspect.ismodule(sub):
+            holders.append((f"{sub_name}.", sub))
+    printed = False
+    for prefix, holder in holders:
+        for name in sorted(dir(holder)):
+            if name.startswith("_"):
+                continue
+            value = getattr(holder, name)
+            if inspect.ismodule(value) or callable(value):
+                continue
+            print(f"  {prefix}{name} = {value!r}", file=sys.stderr)
+            printed = True
+    if not printed:
+        print("  （没有可打印的取值；试看下面模块导出的名字）", file=sys.stderr)
+
+
 def self_check() -> int:
     try:
         module = _import_library()
@@ -1431,6 +1559,10 @@ def self_check() -> int:
             except (TypeError, ValueError) as exc:
                 signature = f"<取不到：{exc}>"
             print(f"  {engine:<12} {cls.__name__}.search{signature}", file=sys.stderr)
+
+        _dump_engine_params(resolved)
+
+    _dump_constants(module)
 
     # 整段套 try：自检是一张"诊断报告"，它自己崩掉等于一个字都没说。
     try:
