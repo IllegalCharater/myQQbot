@@ -98,7 +98,12 @@ ok('被拒绝的调用不占额度', refusal(() => b5.take('h')) === '');
 // ── 语义闸门已删除 ───────────────────────────────────────────────
 const toolSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/agent/tools/image-source.ts'), 'utf8'));
 ok('工具里不再有关键词闸门（"该不该搜"交回模型判断）', !toolSrc.includes('什么番') && !toolSrc.includes('requestText'));
-ok('工具在发占位回复前先消耗调用额度', toolSrc.includes('budget.take(ctx.chatKey)'));
+ok('工具在查询前先消耗调用额度', toolSrc.includes('budget.take(ctx.chatKey)'));
+// 与 transcribe_video 同一契约：工具不代模型开口。代发会写进 session.sent，把这一轮撑成
+// done —— 模型本该给群友一句"没找到/接口出错"，却会停在错误结果上结束，群里只剩那句占位。
+ok('工具自己不发消息：不碰 sender、不写 session.sent、不发事件',
+  !toolSrc.includes('sendTextBatch') && !toolSrc.includes('session.sent')
+  && !toolSrc.includes('ctx.emit') && !toolSrc.includes('EVENTS'));
 
 const sectionsSrc = readUI('js/views/settings/sections.js');
 const saveSrc = readUI('js/views/settings/save.js');
@@ -120,38 +125,41 @@ const realWarn = console.warn;
 console.warn = (...args) => { warns.push(args.map(String).join(' ')); };
 try {
   // 每个用例一个**全新的 chatKey**：额度闸门是模块级单例，复用键会被前面的用例记账拦下（假红）。
+  const emits = [];
   const ctxOf = (chatKey, url) => ({
     chatKey,
     sender: { sendTextBatch: async () => { throw new Error('发送频率超限（每分钟最多 80 条），请等一会再发'); } },
     session: { id: 's1', sent: [] },
-    emit: () => {},
+    emit: (type) => { emits.push(type); },
     store: { findByMid: () => null },
     triggerEntries: [{ mid: 'm1', media: [{ kind: 'image', url }] }]
   });
 
-  // ① 占位提示发不出去（限频、内容为空、协议端全败都会抛）不许把查询一起拖下水。
+  // ① 把 sender 换成**必抛**的：工具压根不碰它，查询必须照常跑完并把真实原因带回模型。
+  // （旧版在这里代发「在找图源，稍等」，这条用例当时验的是"占位发不出去也不能拖累查询"。）
   const failedSend = await executeTool(defs, ctxOf('group:88001', 'not-a-url'), 'reverse_image_source', { messageId: 'm1' });
-  ok('占位提示发送失败时仍然执行查询，并把真实原因带回模型',
+  ok('工具不代发消息：sender 必抛也照样跑完查询，并把真实原因带回模型',
     failedSend.isError === true && failedSend.content.includes('URL 无效'), failedSend.content);
-  ok('占位提示失败不再被报成"这次图源识别没成功"（旧兜底文案）',
+  ok('失败原因不再被报成"这次图源识别没成功"（旧兜底文案）',
     !failedSend.content.includes('没成功'), failedSend.content);
 
   // ② 原因必须落进日志：会话记录里只能看到工具结果这句话，console 是唯一的排查面。
-  ok('占位提示失败与查询失败都写了 console.warn',
-    warns.some((w) => w.includes('占位提示发送失败')) && warns.some((w) => w.includes('查询失败：URL 无效')),
-    warns.join(' | '));
+  ok('查询失败写了 console.warn',
+    warns.some((w) => w.includes('查询失败：URL 无效')), warns.join(' | '));
+  ok('不再有"占位提示发送失败"那条日志（占位提示已删除）',
+    !warns.some((w) => w.includes('占位提示')), warns.join(' | '));
 
-  // ③ 提示发得出去时，照旧记进 session.sent（面板与"发过消息"判定依赖它）。
+  // ③ 工具零外部动作 —— 这一轮"发过话"的账只能由模型自己的 send_message 记。
   const sentCalls = [];
   const okCtx = {
     ...ctxOf('group:88002', 'not-a-url'),
     session: { id: 's2', sent: [] },
-    sender: { sendTextBatch: async (...args) => { sentCalls.push(args); return { sent: [{ text: '在找图源，稍等', at: '12:00' }], failed: [] }; } }
+    sender: { sendTextBatch: async (...args) => { sentCalls.push(args); return { sent: [{ text: 'x', at: '12:00' }], failed: [] }; } }
   };
   await executeTool(defs, okCtx, 'reverse_image_source', { messageId: 'm1' });
-  ok('占位提示照常发出并记入本轮会话',
-    sentCalls.length === 1 && okCtx.session.sent.length === 1 && okCtx.session.sent[0].text === '在找图源，稍等',
-    `calls=${sentCalls.length} sent=${okCtx.session.sent.length}`);
+  ok('工具零发送：不调 sender、不写 session.sent、不发 session-update（否则失败的一轮会被撑成 done）',
+    sentCalls.length === 0 && okCtx.session.sent.length === 0 && emits.length === 0,
+    `calls=${sentCalls.length} sent=${okCtx.session.sent.length} emits=${emits.join(',')}`);
 
   // ④ 安全层挡下的地址也要如实说明，不能退化成一句泛泛的失败。
   const blocked = await executeTool(defs, ctxOf('group:88003', 'http://127.0.0.1/x.png'), 'reverse_image_source', { messageId: 'm1' });
@@ -174,4 +182,8 @@ ok('未知失败原因带回原始码或说明未知，不压成泛泛的一句'
 ok('服务层报过错的全空结果不会被当成"没找到图源"',
   toolSrc.includes('output.failures.length') && toolSrc.includes('图源接口这次没返回结果'));
 
-done();
+// 必须是 process.exit(done() …)：done() 只**返回**布尔值、自己从不退出（见 lib/harness.mjs:27），
+// 而 run.mjs 单看子进程的退出码判定成败。这里原先是一句裸 `done();`，于是本套件**永远退 0** ——
+// 断言红成一片，run.mjs 照样报 ✅。（实测：30 通过 / 5 失败的一次运行，run.mjs 显示全绿。）
+process.exit(done() ? 0 : 1);
+

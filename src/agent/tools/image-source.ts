@@ -1,6 +1,5 @@
 import { getConfig } from '../../core/config.js';
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
-import { EVENTS } from '../../core/events.js';
 import { ReverseImageSourceService, formatImageSourceResult } from '../../media/image-source/index.js';
 import { SlidingWindowBudget } from '../../media/call-budget.js';
 import type { SearchIntent } from '../../media/image-source/index.js';
@@ -67,7 +66,7 @@ export function imageSourceTools(): ToolDefinition[] {
       const entry = (ctx.triggerEntries || []).find((m) => String(m.mid) === id) || ctx.store.findByMid(ctx.chatKey, args.messageId);
       const image = entry?.media?.find((m) => m.kind === 'image' && m.url);
       if (!image?.url) return { content: '错误：指定消息里没有可识别的图片', isError: true };
-      // 限频排在占位回复之前：否则会先发一句"稍等"再立刻拒绝。
+      // 限频排在查询之前：被拒绝的调用不该真去联网，也不该占额度。
       try {
         budget.take(ctx.chatKey);
       } catch (error) {
@@ -76,19 +75,15 @@ export function imageSourceTools(): ToolDefinition[] {
         }
         throw error;
       }
-      // 占位提示与真正的查询**分开捕获**。
+      // 工具**自己不发任何消息**（与 transcribe_video 同一契约）：说不说、怎么说由模型自己决定。
       //
-      // `SendQueue.sendTextBatch` 在限频、内容为空、协议端全败时都会抛错
-      // （src/qq/sender.ts 的 `#checkRate` 与"全部失败"分支），原先两者共用同一个 try，
-      // 于是"客套话没发出去"被报成"图源识别失败"——而且**真正的查询根本没跑**。
-      // 提示只是礼貌，它失败最多留一条日志。
-      try {
-        const sent = await ctx.sender.sendTextBatch(ctx.chatKey, '在找图源，稍等', { replyToMessageId: args.messageId });
-        ctx.session.sent.push(...sent.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
-        ctx.emit(EVENTS.sessionUpdate, { sessionId: ctx.session.id });
-      } catch (error) {
-        console.warn(`[image-source] 占位提示发送失败（继续找图）：${reasonOf(error)}`);
-      }
+      // 这里原先代发一句「在找图源，稍等」，两个后果都真实发生过：
+      //   ① 图源接口一旦失败，模型会拿同一张图重试，而每调一次就代发一次 —— 群里连收两条
+      //      一模一样的「稍等」（实测：HTTP 400 后重试了一轮，占位提示出现两次）。
+      //   ② 代发会写进 `ctx.session.sent`，把这一轮撑成 `done`。于是模型本应给群友一个交代
+      //      （没找到 / 接口出错），却因为"看着已经说过了"停在错误结果上结束，群里只剩那句占位。
+      //      —— 这是"任务没有正常结束"的机制：不是没结束，是被代发伪装成了已收尾。
+      // 现在工具只负责查询与返回，收尾归模型（见 prompt-catalog 里的 description）。
       try {
         const output = await service.search(String(image.url), intentOf(args.intent));
         // 服务层把第三方报错收进 failures 而**不抛**（见 reverse-image-source-service.ts），

@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { ROOT, SRC_DIR } from './lib/src.mjs';
+import { ROOT, SRC_DIR, stripComments } from './lib/src.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 
@@ -71,7 +71,26 @@ const unclassified = onDisk.filter((f) => !ASSERT.includes(f) && !DIAG.includes(
 const missing = [...ASSERT, ...DIAG].filter((f) => !onDisk.includes(f));
 if (unclassified.length) console.error(`❌ 这些套件没归类（ASSERT / DIAG 二选一）：${unclassified.join(', ')}`);
 if (missing.length) console.error(`❌ 清单里有、磁盘上找不到：${missing.join(', ')}`);
-if (unclassified.length || missing.length) process.exit(1);
+
+// 断言套件必须能**失败**：上面那句 `const bad = r.status !== 0;` 只看子进程退出码，
+// 而 `checker().done()` 只返回布尔值、自己从不退出（tests/lib/harness.mjs:27）。
+// 所以一句裸 `done();` 会让整个套件永远退 0 —— 断言红成一片，这里照样打 ✅。
+// 实测：`t-image-source.mjs` 曾以裸 `done();` 结尾，一次 30 通过 / 5 失败的运行被报成全绿，
+// 那段"红"因此从没进过任何人的眼睛。这条扫描就是为了不让它再长出来。
+//
+// 判据是"代码里存在一个**参数不是字面量 0** 的 process.exit( 调用"——覆盖全仓库现有的四种写法
+// （`process.exit(done() ? 0 : 1)` / `process.exit(fail ? 1 : 0)` / `if (!done()) process.exit(1)` /
+// `if (counts.fail) process.exit(1)`），同时挡住只有 `process.exit(0)` 的套件。
+// 先剥注释：注释里提一嘴 `process.exit(1)` 不算数（本项目的通用坑，见 AGENTS.md）。
+// 已知边界：这是文本扫描，证明不了那条 exit 在运行期真会被走到（例如写在一个永不进入的分支里）；
+// 它只堵"压根没有非零退出路径"这个具体形态。DIAG 脚本按定义永远退 0，不在此列。
+const noFailPath = ASSERT.filter((f) => {
+  const src = stripComments(fs.readFileSync(path.join(HERE, f), 'utf8'));
+  return !/process\.exit\((?!\s*0\s*\))/.test(src);
+});
+if (noFailPath.length) console.error(`❌ 这些断言套件没有非零退出路径（done() 不会自己退出，必须 process.exit(...)）：${noFailPath.join(', ')}`);
+
+if (unclassified.length || missing.length || noFailPath.length) process.exit(1);
 
 const suites = [...ASSERT, ...(all ? DIAG : [])]
   .filter((s) => !filters.length || filters.some((f) => s.includes(f)));
