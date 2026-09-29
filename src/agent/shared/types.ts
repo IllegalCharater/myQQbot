@@ -9,6 +9,8 @@ import type { OneBotClient } from '../../qq/onebot.js';
 import type { SessionRegistry } from '../../chat/sessions.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
 import type { AppEmit } from '../../core/events.js';
+import type { VideoTranscriptionQueue } from '../../media/video-transcription.js';
+import type { HotSearchScheduler } from '../../media/hot-search/scheduler.js';
 
 export type ToolArguments = Record<string, unknown>;
 export interface ToolContentPart extends Record<string, unknown> { type: string }
@@ -36,6 +38,12 @@ export interface ToolContext extends Record<string, unknown> {
   session: SessionRecord & { sent: unknown[]; feedbacks: unknown[] };
   emit: AppEmit;
   triggerEntries?: ChatMessage[];
+  /**
+   * 能力型工具依赖，**可选**：只有 app.ts 装配的那条链路会传，测试里的部分字面量不必跟着补。
+   * 工具侧一律按"可能没有"处理，缺了返回友好错误而不是抛。
+   */
+  transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
 }
 
 export interface ToolResult extends Record<string, unknown> {
@@ -85,6 +93,9 @@ export interface OrchestratorDependencies {
   // 测试侧由 tests/t-ports.mjs 第 1c 段的文本扫描守（见那里的注释）。
   emit: AppEmit;
   windows?: ContextWindowRegistry | null;
+  // 能力型工具依赖，可选：透传给 WakeScheduler（它才是 `AgentRunnerHost`），见 ToolContext 的说明。
+  transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
 }
 
 export interface PromptContext extends TriggerContext, Record<string, unknown> {

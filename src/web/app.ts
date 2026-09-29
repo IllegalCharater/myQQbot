@@ -83,8 +83,13 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`)
   });
   const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log });
-  const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit });
   const hotSearchScheduler = new HotSearchScheduler({ getConfig, updateConfig, sender, log });
+  // 这两个能力对象先建、再交给 Orchestrator：模型的两个工具（transcribe_video / get_hot_search）
+  // 需要它们，而依赖是从 Orchestrator → WakeScheduler（`AgentRunnerHost`）→ ToolContext 透传的。
+  const orchestrator = new Orchestrator({
+    store, memory, stickers, sender, sessions, onebot, emit,
+    transcription, hotSearch: hotSearchScheduler
+  });
   const hotSearch = createHotSearchAdminActions(hotSearchScheduler);
 
   // 长期任务一律在 start() 里启动、在 stop() 里停止（见 src/web/tasks.ts）。

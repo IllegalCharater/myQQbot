@@ -7,6 +7,7 @@ import { buildSystemPrompt, buildUserPrompt } from '../prompting/prompt-builder.
 import { chatCompletionWithRetry, addUsage } from '../../llm/llm.js';
 import { toOpenAiTools, executeTool } from '../tools/index.js';
 import { modelImageVerdict } from '../../llm/vision-scan.js';
+import { resolveTranscriptionConfig } from '../../media/video-transcription.js';
 import { parseInlineToolCalls } from '../shared/inline-tool-parser.js';
 import { isRecord, safeParse } from '../shared/json-parse.js';
 import type { ChatMessage, SessionRecord } from '../../chat/types.js';
@@ -18,6 +19,8 @@ import type { SessionRegistry } from '../../chat/sessions.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
 import type { HistoryPolicyResult, ResponseDecision, ToolContext, ToolDefinition } from '../shared/types.js';
+import type { VideoTranscriptionQueue } from '../../media/video-transcription.js';
+import type { HotSearchScheduler } from '../../media/hot-search/scheduler.js';
 import type { InlineToolCall } from '../shared/inline-tool-parser.js';
 import type { ChatRequestMessage } from '../../llm/types.js';
 import type { StickerEntry } from '../../stickers/types.js';
@@ -48,6 +51,9 @@ export interface AgentRunnerHost {
   aborted: boolean;
   emit: AppEmit;
   getChatName(groupId: string | number): Promise<string>;
+  /** 能力型工具依赖，可选：见 shared/types.ts 的 ToolContext 说明。 */
+  transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
 }
 
 /** 兼容 OpenAI 字符串 content 与部分兼容端点返回的文本 parts 数组。 */
@@ -142,11 +148,16 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     session.llmRequests = [];
     host.sessions.update(session.id);
 
-    // 工具集按配置过滤：无视觉模型 → 移除看图工具；搜索关闭 → 移除联网工具
+    // 工具集按配置过滤：无视觉模型 → 移除看图工具；搜索关闭 → 移除联网工具；能力未启用 → 移除对应工具
     // 视觉判定 = 全局开关 && 选中模型未被探测为"明确不支持图片"（未探测/unknown 时保持开关行为）
+    // 转写与热搜走 resolveTranscriptionConfig / hotSearchEnabled，与 ingest、tasks.ts 的启用判定同源，
+    // 不各写一份（否则环境变量注入的启用会被这里悄悄判成关闭）。
+    const transcriptionEnabled = resolveTranscriptionConfig(cfg).enabled;
     const toolDefs = host.toolDefs.filter((d) => {
       if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
+      if (!transcriptionEnabled && d.name === 'transcribe_video') return false;
+      if (cfg.hotSearchEnabled !== true && d.name === 'get_hot_search') return false;
       return true;
     });
     const openAiTools = toOpenAiTools(toolDefs);
@@ -166,6 +177,8 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       stickers: host.stickers,
       sender: host.sender,
       session,
+      transcription: host.transcription,
+      hotSearch: host.hotSearch,
       emit: (type, payload) => host.emit(type, payload)
     };
 

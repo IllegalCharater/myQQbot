@@ -46,6 +46,8 @@ interface EffectiveConfig {
   maxAudioBytes: number;
   maxSourceBytes: number;
   resultMaxChars: number;
+  maxCallsPerChatPerHour: number;
+  maxCallsPerDay: number;
 }
 
 interface InternalJob {
@@ -74,7 +76,8 @@ export interface TranscriptionJobView {
   errorCode?: string;
 }
 
-class TranscriptionError extends Error {
+/** 对外导出，供工具侧用 `instanceof` 区分"用户看得懂的原因"与真实内部错误。 */
+export class TranscriptionError extends Error {
   constructor(public stage: FailureStage, public code: string, public userMessage: string) {
     super(userMessage);
     this.name = 'TranscriptionError';
@@ -118,7 +121,10 @@ export function resolveTranscriptionConfig(config: AppConfig): EffectiveConfig {
     maxDurationSeconds: boundedInt(raw.maxDurationSeconds, 2 * 60 * 60, 1, 2 * 60 * 60),
     maxAudioBytes: boundedInt(raw.maxAudioBytes, 100 * 1024 * 1024, 64 * 1024, 100 * 1024 * 1024),
     maxSourceBytes: boundedInt(raw.maxSourceBytes, 256 * 1024 * 1024, 1 * 1024 * 1024, 1024 * 1024 * 1024),
-    resultMaxChars: boundedInt(raw.resultMaxChars, 3500, 200, 4000)
+    resultMaxChars: boundedInt(raw.resultMaxChars, 3500, 200, 4000),
+    // 模型自主调用的成本闸门；钳制归属地就是这里（transcription 没有独立的 normalizeConfigShape 分支）。
+    maxCallsPerChatPerHour: boundedInt(raw.maxCallsPerChatPerHour, 3, 1, 60),
+    maxCallsPerDay: boundedInt(raw.maxCallsPerDay, 10, 1, 1000)
   };
 }
 

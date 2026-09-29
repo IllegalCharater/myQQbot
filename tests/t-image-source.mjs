@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { checker } from './lib/harness.mjs';
-import { ROOT, load } from './lib/src.mjs';
+import { ROOT, load, readUI, stripComments } from './lib/src.mjs';
 
 const { ok, done } = checker();
 const { TraceMoeProvider } = await load('media/image-source/trace-moe-provider.js');
@@ -43,5 +43,62 @@ const consoleSrc = fs.readFileSync(path.join(ROOT, 'src/web/http/console.ts'), '
 const ui = fs.readFileSync(path.join(ROOT, 'ui/js/views/settings/sections.js'), 'utf8');
 ok('设置页使用密码框且服务端删除 SauceNAO 原始 Key', ui.includes('id="cfg-sauce-key"') && ui.includes('type="password"') && consoleSrc.includes('delete out.imageSource.sauceNao.apiKey'));
 ok('未配置 SauceNAO 时 trace.moe 配置保持独立', ui.includes('cfg-trace-enabled') && ui.includes('cfg-sauce-enabled'));
+
+// ── 调用额度闸门（成本闸门，替代原先的关键词闸门）────────────────
+// 用注入的假时钟，夹具不依赖全局状态与随机挑选，结果确定。
+// 闸门本体与视频转写共用（media/call-budget.ts），这里验的是搜图传进去的那组限额。
+const { SlidingWindowBudget } = await load('media/call-budget.js');
+const { DEFAULT_CONFIG } = await load('core/config.js');
+
+const T0 = 1_750_000_000_000;
+const HOUR = 60 * 60 * 1000;
+const budgetAt = (cfg) => {
+  let now = T0;
+  const b = new SlidingWindowBudget({
+    getLimits: () => ({ perChatPerHour: cfg.maxCallsPerChatPerHour, perDay: cfg.maxCallsPerDay }),
+    now: () => now
+  });
+  return { take: (k) => b.take(k), at: (t) => { now = t; } };
+};
+const refusal = (fn) => { try { fn(); return ''; } catch (e) { return e.message; } };
+
+ok('新增两个配额字段有默认值', DEFAULT_CONFIG.imageSource.maxCallsPerChatPerHour === 5 && DEFAULT_CONFIG.imageSource.maxCallsPerDay === 30);
+
+const b1 = budgetAt({ maxCallsPerChatPerHour: 2, maxCallsPerDay: 100 });
+b1.take('group:1'); b1.take('group:1');
+const overChat = refusal(() => b1.take('group:1'));
+ok('单群超过每小时上限时拒绝', overChat === 'RATE_LIMITED', `msg=${overChat}`);
+
+const b2 = budgetAt({ maxCallsPerChatPerHour: 2, maxCallsPerDay: 100 });
+b2.take('group:1'); b2.take('group:1');
+ok('不同群的额度互不影响', refusal(() => b2.take('group:2')) === '');
+
+const b3 = budgetAt({ maxCallsPerChatPerHour: 1, maxCallsPerDay: 100 });
+b3.take('group:1');
+const refusedInWindow = refusal(() => b3.take('group:1')) === 'RATE_LIMITED';
+b3.at(T0 + HOUR + 1);
+ok('每小时窗口滑过后额度恢复', refusedInWindow && refusal(() => b3.take('group:1')) === '');
+
+// 每群上限放到很宽，只让全局每日上限起作用：换四个不同的群，第四个应被日上限拦下。
+const b4 = budgetAt({ maxCallsPerChatPerHour: 60, maxCallsPerDay: 3 });
+b4.take('g1'); b4.take('g2'); b4.take('g3');
+const overDay = refusal(() => b4.take('g4'));
+ok('全局每日上限跨群生效', overDay === 'RATE_LIMITED', `msg=${overDay}`);
+
+// 若被拒绝的那一次也记账，daily 会从 1/2 涨到 2/2，另一个群就会被误拒。
+const b5 = budgetAt({ maxCallsPerChatPerHour: 1, maxCallsPerDay: 2 });
+b5.take('g');
+refusal(() => b5.take('g'));
+ok('被拒绝的调用不占额度', refusal(() => b5.take('h')) === '');
+
+// ── 语义闸门已删除 ───────────────────────────────────────────────
+const toolSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/agent/tools/image-source.ts'), 'utf8'));
+ok('工具里不再有关键词闸门（"该不该搜"交回模型判断）', !toolSrc.includes('什么番') && !toolSrc.includes('requestText'));
+ok('工具在发占位回复前先消耗调用额度', toolSrc.includes('budget.take(ctx.chatKey)'));
+
+const sectionsSrc = readUI('js/views/settings/sections.js');
+const saveSrc = readUI('js/views/settings/save.js');
+ok('设置页渲染了每群每小时与全局每日两个输入框', sectionsSrc.includes('id="cfg-image-source-chat-hourly"') && sectionsSrc.includes('id="cfg-image-source-daily"'));
+ok('保存时钳制并持久化两个调用上限', saveSrc.includes("clampInt(val('#cfg-image-source-chat-hourly'") && saveSrc.includes("clampInt(val('#cfg-image-source-daily'"));
 
 done();

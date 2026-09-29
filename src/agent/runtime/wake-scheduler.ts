@@ -17,6 +17,8 @@ import type { SendQueue } from '../../qq/sender.js';
 import type { SessionRegistry } from '../../chat/sessions.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
+import type { VideoTranscriptionQueue } from '../../media/video-transcription.js';
+import type { HotSearchScheduler } from '../../media/hot-search/scheduler.js';
 import type { ChatRuntimeState, HistoryPolicyResult, ResponseDecision, ToolDefinition } from '../shared/types.js';
 
 export interface WakeSchedulerDependencies {
@@ -33,6 +35,9 @@ export interface WakeSchedulerDependencies {
   maybeConsolidateMemory(chatKey: string): void;
   isPaused(): boolean;
   isAborted(): boolean;
+  /** 能力型工具依赖，可选：缺失时对应工具自行返回友好错误。 */
+  transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
 }
 
 export class WakeScheduler {
@@ -45,6 +50,8 @@ export class WakeScheduler {
   readonly windows: ContextWindowRegistry;
   readonly toolDefs: ToolDefinition[];
   readonly emit: AppEmit;
+  readonly transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  readonly hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
   readonly runtimeState: RuntimeStateRegistry;
   readonly chatStates: Map<string, ChatRuntimeState>;
   readonly wakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -64,6 +71,8 @@ export class WakeScheduler {
     this.windows = deps.windows;
     this.toolDefs = deps.toolDefs;
     this.emit = deps.emit;
+    this.transcription = deps.transcription;
+    this.hotSearch = deps.hotSearch;
     this.runtimeState = new RuntimeStateRegistry(this.sender);
     this.chatStates = this.runtimeState.states;
   }

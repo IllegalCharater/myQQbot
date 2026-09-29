@@ -42,6 +42,7 @@ const ASSERT = [
   't-transcription.mjs',   // 视频 URL 转写（SSRF、单并发状态机、凭证脱敏）
   't-hot-search.mjs',      // 每日热搜（接口契约、重试、去重分页、幂等与互斥）
   't-image-source.mjs',    // 图片来源识别（Provider、队列、缓存、脱敏与 UI 接线）
+  't-media-tools.mjs',     // 模型自主调用的两个能力工具（取榜单 / 转写、配额闸门与按配置过滤）
   't-jmcomic.mjs',         // 漫画队列去重（按请求者+漫画ID）与完成后记录留存
   't-jmcomic-upload.mjs',  // 漫画上传超时/重启恢复只核验，不盲目重传
   't-lifecycle.mjs',       // 注册层执行侧（关停路径、装配清单、清单与描述表对账）

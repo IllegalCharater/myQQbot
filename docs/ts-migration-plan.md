@@ -244,6 +244,10 @@ store.promptContextMaxChars = 32000
 
 模型普通文本本身不会自动发送到 QQ；对外动作必须通过发送类工具完成。因此最终状态按真实发送记录判断：发过消息为 `done`，未发送为正常的 `noreply`。
 
+注意有一类工具**不在本轮产生外部动作**：它把任务交给后台队列就立刻返回，完毕后由队列自己把结果投递回原会话。`download_jmcomic` 与 `transcribe_video` 都是这个形态，所以它们的产出不落在本轮会话记录的发送列表里，也不能用"这轮没发消息"推断它们没干活。
+
+能力型工具的依赖（`transcription` / `hotSearch`）是 `ToolContext` 上的**可选**字段，从 `OrchestratorDependencies` 经 `WakeScheduler`（真正的 `AgentRunnerHost`）透传进来；缺了不做 `instanceof` 校验，由工具自己返回友好错误。未启用的能力由 `agent-runner.ts` 按配置从工具集里过滤掉，与视觉/搜索的过滤同一处。
+
 ## 9. 会话记录与可观测性
 
 每次运行记录：

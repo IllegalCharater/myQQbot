@@ -2,12 +2,21 @@ import { getConfig } from '../../core/config.js';
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
 import { EVENTS } from '../../core/events.js';
 import { ReverseImageSourceService, formatImageSourceResult } from '../../media/image-source/index.js';
+import { SlidingWindowBudget } from '../../media/call-budget.js';
 import type { SearchIntent } from '../../media/image-source/index.js';
 import type { ToolDefinition } from '../shared/types.js';
 
 const service = new ReverseImageSourceService({
   getConfig: () => getConfig().imageSource,
   log: (message) => console.log(message)
+});
+
+// 成本闸门：只限次数，不判断"该不该搜"（那是模型结合上下文的事，见工具 description）。
+const budget = new SlidingWindowBudget({
+  getLimits: () => {
+    const cfg = getConfig().imageSource;
+    return { perChatPerHour: cfg.maxCallsPerChatPerHour, perDay: cfg.maxCallsPerDay };
+  }
 });
 
 function intentOf(value: unknown): SearchIntent {
@@ -29,14 +38,19 @@ export function imageSourceTools(): ToolDefinition[] {
     async execute(ctx, args) {
       const cfg = getConfig().imageSource;
       if (!cfg.enabled) return { content: '错误：图片来源识别未启用', isError: true };
-      const requestText = (ctx.triggerEntries || []).filter((m) => !m.self).map((m) => String(m.text || '')).join('\n');
-      if (!/(什么番|哪(?:部|个)?(?:动画|番)|第几集|出自哪里|出处|求图源|找图源|搜图源|查(?:一下)?(?:作者|出处|画师)|谁画的|插画|画师|pixiv)/i.test(requestText)) {
-        return { content: '错误：只有群友明确要求查动画、集数、作者或图源时才能调用此工具', isError: true };
-      }
       const id = String(args.messageId ?? '');
       const entry = (ctx.triggerEntries || []).find((m) => String(m.mid) === id) || ctx.store.findByMid(ctx.chatKey, args.messageId);
       const image = entry?.media?.find((m) => m.kind === 'image' && m.url);
       if (!image?.url) return { content: '错误：指定消息里没有可识别的图片', isError: true };
+      // 限频排在占位回复之前：否则会先发一句"稍等"再立刻拒绝。
+      try {
+        budget.take(ctx.chatKey);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'RATE_LIMITED') {
+          return { content: `错误：本群找图太频繁（每小时最多 ${cfg.maxCallsPerChatPerHour} 次），稍后再试。`, isError: true };
+        }
+        throw error;
+      }
       try {
         const sent = await ctx.sender.sendTextBatch(ctx.chatKey, '在找图源，稍等', { replyToMessageId: args.messageId });
         ctx.session.sent.push(...sent.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));

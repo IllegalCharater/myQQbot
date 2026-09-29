@@ -155,7 +155,9 @@ export async function saveConfig({ quiet = false } = {}) {
       sauceNao: { ...(old.sauceNao || {}), enabled: chk('#cfg-sauce-enabled', true), timeoutMs: Number(val('#cfg-sauce-timeout', 20000)), minSimilarity: Number(val('#cfg-sauce-similarity', 0.8)), maxResults: Number(val('#cfg-sauce-results', 3)), ...(key && key !== '******' ? { apiKey: key } : {}) },
       maxImageBytes: Number(val('#cfg-image-source-max-mib', 8)) * 1048576,
       maxQueueLength: Number(val('#cfg-image-source-queue', 5)), totalTimeoutMs: Number(val('#cfg-image-source-total-timeout', 35000)),
-      cacheEnabled: chk('#cfg-image-source-cache', true), cacheTtlMs: old.cacheTtlMs || 86400000
+      cacheEnabled: chk('#cfg-image-source-cache', true), cacheTtlMs: old.cacheTtlMs || 86400000,
+      maxCallsPerChatPerHour: clampInt(val('#cfg-image-source-chat-hourly', 5), 1, 60, 5),
+      maxCallsPerDay: clampInt(val('#cfg-image-source-daily', 30), 1, 1000, 30)
     };
   }
 
@@ -216,6 +218,8 @@ export async function saveConfig({ quiet = false } = {}) {
       maxAudioBytes: clampInt(val('#cfg-transcription-max-audio-mib', Math.round(Number(t.maxAudioBytes || 104857600) / 1048576)), 1, 100, 100) * 1048576,
       maxSourceBytes: clampInt(val('#cfg-transcription-max-source-mib', Math.round(Number(t.maxSourceBytes || 268435456) / 1048576)), 1, 1024, 256) * 1048576,
       resultMaxChars: clampInt(val('#cfg-transcription-result-chars', t.resultMaxChars), 200, 4000, 3500),
+      maxCallsPerChatPerHour: clampInt(val('#cfg-transcription-chat-hourly', t.maxCallsPerChatPerHour), 1, 60, 3),
+      maxCallsPerDay: clampInt(val('#cfg-transcription-daily', t.maxCallsPerDay), 1, 1000, 10),
       ...(secretId && secretId !== '******' ? { secretId } : {}),
       ...(secretKey && secretKey !== '******' ? { secretKey } : {})
     };

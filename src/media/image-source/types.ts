@@ -32,4 +32,6 @@ export interface ImageSourceConfig {
   totalTimeoutMs: number;
   cacheEnabled: boolean;
   cacheTtlMs: number;
+  maxCallsPerChatPerHour: number;
+  maxCallsPerDay: number;
 }

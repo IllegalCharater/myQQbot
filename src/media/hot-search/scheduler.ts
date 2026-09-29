@@ -153,6 +153,17 @@ export class HotSearchScheduler {
     return this.#exclusive(() => this.#prepare('preview'));
   }
 
+  /**
+   * 只取榜单，**不写任何状态**（供模型自主查询）。
+   *
+   * 不复用 `preview()`：它会把面板的"上次任务"刷成 `status=success / trigger=preview`，
+   * 模型每查一次就盖掉一次真实播报记录。`lastSuccessDate` / `deliveryDate` 两处不受影响，
+   * 所以播报幂等本身是安全的——被污染的只是给人看的那行状态。
+   */
+  readTopics(limit?: number): Promise<HotSearchPreview> {
+    return this.#exclusive(() => this.#fetch(limit));
+  }
+
   broadcast(trigger: Exclude<HotSearchTrigger, 'preview'> = 'manual'): Promise<HotSearchBroadcastResult> {
     return this.#exclusive(async () => {
       const config = this.#deps.getConfig();
@@ -228,25 +239,11 @@ export class HotSearchScheduler {
       error: undefined, authMode
     });
     try {
-      const limit = Math.min(20, Math.max(3, Math.round(Number(config.hotSearchItemLimit) || 10)));
-      const payload = await (this.#deps.fetchFeed ?? fetchHotSearch)({
-        apiKey,
-        platformFilter: Array.isArray(config.hotSearchPlatformFilter) ? config.hotSearchPlatformFilter : [],
-        limit
-      }, { log: this.#deps.log });
-      const feed = normalizeHotSearchResponse(payload);
-      const topics = dedupeHotSearchItems(feed.items).slice(0, limit);
-      if (!topics.length) throw new Error('接口没有返回可用的热搜条目，本次不发送空榜单');
-      const pages = formatHotSearchPages(topics, {
-        now: this.#now(), timezone: TIMEZONE, generatedAt: feed.generatedAt,
-        includeLinks: config.hotSearchIncludeLinks === true,
-        maxChars: messageMaxChars(config)
-      });
-      const preview = { generatedAt: feed.generatedAt, itemCount: topics.length, pages, authMode };
+      const preview = await this.#fetch();
       if (trigger === 'preview') {
         this.#writeState({
           ...this.#stateStore.read(), status: 'success', trigger, updatedAt: this.#now().toISOString(),
-          itemCount: topics.length, targetCount: 0, error: undefined, authMode
+          itemCount: preview.itemCount, targetCount: 0, error: undefined, authMode
         });
       }
       return preview;
@@ -257,6 +254,32 @@ export class HotSearchScheduler {
       });
       throw error;
     }
+  }
+
+  /**
+   * 取榜并排版这一段是纯的：**只有这一个地方**读接口，状态写入全在调用方。
+   * `limitOverride` 让模型按需少要几条；越界与非法值都收敛回官方区间。
+   */
+  async #fetch(limitOverride?: number): Promise<HotSearchPreview> {
+    const config = this.#deps.getConfig();
+    const apiKey = resolveHotSearchApiKey(config);
+    const requested = limitOverride === undefined ? Number(config.hotSearchItemLimit) || 10 : Number(limitOverride);
+    const limit = Math.min(20, Math.max(3, Number.isFinite(requested) ? Math.round(requested) : 10));
+    const payload = await (this.#deps.fetchFeed ?? fetchHotSearch)({
+      apiKey,
+      platformFilter: Array.isArray(config.hotSearchPlatformFilter) ? config.hotSearchPlatformFilter : [],
+      limit
+    }, { log: this.#deps.log });
+    const feed = normalizeHotSearchResponse(payload);
+    const topics = dedupeHotSearchItems(feed.items).slice(0, limit);
+    // 这条同时给播报与"模型自主取榜"两条路用，所以措辞不能带播报口径（如"本次不发送"）。
+    if (!topics.length) throw new Error('接口没有返回可用的热搜条目（榜单为空）');
+    const pages = formatHotSearchPages(topics, {
+      now: this.#now(), timezone: TIMEZONE, generatedAt: feed.generatedAt,
+      includeLinks: config.hotSearchIncludeLinks === true,
+      maxChars: messageMaxChars(config)
+    });
+    return { generatedAt: feed.generatedAt, itemCount: topics.length, pages, authMode: apiKey ? 'api-key' : 'anonymous' };
   }
 
   #exclusive<T>(operation: () => Promise<T>): Promise<T> {

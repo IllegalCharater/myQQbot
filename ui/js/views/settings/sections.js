@@ -204,7 +204,7 @@ export function renderImageSourceSection(c) {
   return `
     <h3>图片来源识别</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-image-source-enabled" ${s.enabled ? 'checked' : ''} /><label for="cfg-image-source-enabled">启用图片来源识别</label></div>
-    <div class="hint">只在群友明确要求找图源时使用。trace.moe 用于动画截图；SauceNAO 用于二次元插画、同人图与来源站点。</div>
+    <div class="hint">由模型结合上下文判断何时查询；调用次数受下方频率上限约束（护住第三方接口配额）。trace.moe 用于动画截图；SauceNAO 用于二次元插画、同人图与来源站点。</div>
     <div class="settings-divider"></div><h3>trace.moe</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-trace-enabled" ${trace.enabled !== false ? 'checked' : ''} /><label for="cfg-trace-enabled">启用 trace.moe</label></div>
     <div class="field-row"><div class="field"><label>请求超时（毫秒）</label><input type="number" id="cfg-trace-timeout" value="${esc(trace.timeoutMs ?? 15000)}" /></div><div class="field"><label>最小置信度（0–1）</label><input type="number" step="0.01" id="cfg-trace-similarity" value="${esc(trace.minSimilarity ?? 0.87)}" /></div><div class="field"><label>最大结果数</label><input type="number" id="cfg-trace-results" value="${esc(trace.maxResults ?? 3)}" /></div></div>
@@ -214,6 +214,8 @@ export function renderImageSourceSection(c) {
     <div class="field-row"><div class="field"><label>请求超时（毫秒）</label><input type="number" id="cfg-sauce-timeout" value="${esc(sauce.timeoutMs ?? 20000)}" /></div><div class="field"><label>最低相似度（0–1）</label><input type="number" step="0.01" id="cfg-sauce-similarity" value="${esc(sauce.minSimilarity ?? 0.8)}" /></div><div class="field"><label>最大结果数</label><input type="number" id="cfg-sauce-results" value="${esc(sauce.maxResults ?? 3)}" /></div></div>
     <div class="settings-divider"></div><h3>通用</h3>
     <div class="field-row"><div class="field"><label>图片最大大小（MiB）</label><input type="number" id="cfg-image-source-max-mib" value="${esc(Math.round(Number(s.maxImageBytes || 8388608) / 1048576))}" /></div><div class="field"><label>队列最大长度</label><input type="number" id="cfg-image-source-queue" value="${esc(s.maxQueueLength ?? 5)}" /></div><div class="field"><label>总任务超时（毫秒）</label><input type="number" id="cfg-image-source-total-timeout" value="${esc(s.totalTimeoutMs ?? 35000)}" /></div></div>
+    <div class="field-row"><div class="field"><label>每群每小时上限</label><input type="number" id="cfg-image-source-chat-hourly" value="${esc(s.maxCallsPerChatPerHour ?? 5)}" /></div><div class="field"><label>全局每日上限</label><input type="number" id="cfg-image-source-daily" value="${esc(s.maxCallsPerDay ?? 30)}" /></div></div>
+    <div class="hint">调用次数超限时工具会直接失败并告知原因；上限只统计"发起了几次查询"，命中缓存的重复图片同样计数。</div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-image-source-cache" ${s.cacheEnabled !== false ? 'checked' : ''} /><label for="cfg-image-source-cache">启用内存缓存（最多 100 条，默认 24 小时；不保存图片）</label></div>
     <div style="display:flex;gap:8px;margin-top:10px"><button class="btn btn-small" id="test-image-source-btn" type="button">测试连接</button><span id="image-source-test-result" class="muted"></span></div>`;
 }
@@ -381,7 +383,7 @@ export function renderTranscriptionSection(c) {
   return `
     <h3>音视频转写</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-transcription-enabled" ${enabled ? 'checked' : ''} ${t.enabledFromEnvironment ? 'disabled' : ''} />
-      <label for="cfg-transcription-enabled">启用 QQ 命令 <code>/转写 &lt;视频URL&gt;</code></label></div>
+      <label for="cfg-transcription-enabled">启用转写：QQ 命令 <code>/转写 &lt;视频URL&gt;</code>，以及模型自主调用 <code>transcribe_video</code></label></div>
     <div class="hint" style="margin-bottom:10px">${t.enabledFromEnvironment
       ? `启用状态由环境变量 QQ_AGENT_TRANSCRIPTION_ENABLED 固定为“${enabled ? '启用' : '停用'}”；如需页面控制，请先移除该环境变量并重启。`
       : '保存后新入队的任务读取最新配置。FFmpeg 路径发生变化后建议重启服务，以重新执行启动可用性检查。'}</div>
@@ -421,7 +423,12 @@ export function renderTranscriptionSection(c) {
     </div>
     <div class="field"><label>QQ 内直接回复的最大字符数（200～4000）</label>
       <input type="number" id="cfg-transcription-result-chars" min="200" max="4000" value="${esc(t.resultMaxChars ?? 3500)}" />
-      <div class="hint">超过后会截断消息，并尝试把完整 UTF-8 文本作为文件发送。</div></div>`;
+      <div class="hint">超过后会截断消息，并尝试把完整 UTF-8 文本作为文件发送。</div></div>
+    <div class="field-row">
+      <div class="field"><label>模型自主调用：每群每小时上限</label><input type="number" id="cfg-transcription-chat-hourly" min="1" max="60" value="${esc(t.maxCallsPerChatPerHour ?? 3)}" /></div>
+      <div class="field"><label>模型自主调用：全局每日上限</label><input type="number" id="cfg-transcription-daily" min="1" max="1000" value="${esc(t.maxCallsPerDay ?? 10)}" /></div>
+    </div>
+    <div class="hint">转写按次计费，所以模型自主调用时受这两项限制（<code>/转写</code> 命令不受限）。超限时工具直接失败并说明原因。</div>`;
 }
 
 // 表情包积极程度档位：[值, 显示名]

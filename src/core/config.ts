@@ -111,7 +111,9 @@ export const DEFAULT_CONFIG = {
     maxQueueLength: 5,
     totalTimeoutMs: 35000,
     cacheEnabled: true,
-    cacheTtlMs: 24 * 60 * 60 * 1000
+    cacheTtlMs: 24 * 60 * 60 * 1000,
+    maxCallsPerChatPerHour: 5,              // 单群每小时调用上限（护住第三方配额）
+    maxCallsPerDay: 30                      // 所有群合计每天上限
   },
   // SnowLuma / OneBot v11
   snowluma: {
@@ -223,7 +225,11 @@ export const DEFAULT_CONFIG = {
     maxDurationSeconds: 2 * 60 * 60, // 录音文件识别极速版官方硬上限
     maxAudioBytes: 100 * 1024 * 1024,
     maxSourceBytes: 256 * 1024 * 1024,
-    resultMaxChars: 3500
+    resultMaxChars: 3500,
+    // 模型自主调用时的成本闸门（`/转写` 命令不受它约束）。转写按次计费且单次成本远高于一次搜图，
+    // 所以默认值比 imageSource 的 5/30 更紧。语义与 imageSource 同名两项一致，见 media/call-budget.ts。
+    maxCallsPerChatPerHour: 3,
+    maxCallsPerDay: 10
   },
   // 漫画下载 Python 解释器。留空时保持原探测链：JMCOMIC_PYTHON → Windows 固定环境 → conda my_bot。
   jmcomic: {
@@ -390,6 +396,8 @@ function normalizeConfigShape<T>(input: T): T {
     c.totalTimeoutMs = Math.round(clamp(c.totalTimeoutMs, 1000, 120000, 35000));
     c.cacheEnabled = c.cacheEnabled !== false;
     c.cacheTtlMs = Math.round(clamp(c.cacheTtlMs, 60000, 7 * 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000));
+    c.maxCallsPerChatPerHour = Math.round(clamp(c.maxCallsPerChatPerHour, 1, 60, 5));
+    c.maxCallsPerDay = Math.round(clamp(c.maxCallsPerDay, 1, 1000, 30));
     for (const [name, defaults] of [['traceMoe', [15000, 0.87, 3]], ['sauceNao', [20000, 0.80, 3]]] as const) {
       const raw = c[name]; if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
       const p = raw as Record<string, unknown>;

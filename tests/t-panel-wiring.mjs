@@ -80,7 +80,8 @@ for (const id of [
   'cfg-transcription-secretid', 'cfg-transcription-secretkey', 'cfg-transcription-ffmpeg',
   'cfg-transcription-ffmpeg-timeout', 'cfg-transcription-flash-timeout',
   'cfg-transcription-max-duration', 'cfg-transcription-max-audio-mib',
-  'cfg-transcription-max-source-mib', 'cfg-transcription-result-chars'
+  'cfg-transcription-max-source-mib', 'cfg-transcription-result-chars',
+  'cfg-transcription-chat-hourly', 'cfg-transcription-daily'
 ]) {
   ok(`#${id} 已加入设置模板`, new RegExp(`id="${id}"`).test(js));
 }
