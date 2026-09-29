@@ -179,6 +179,12 @@ system/user 固定段、工具及参数 description、历史压缩和记忆整�
 `src/agent/prompting/prompt-builder.ts` 只负责动态变量、聊天记录格式化、条件选择与预算裁剪。
 UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词目录。
 
+工具**结果**串通常是动态返回值（含错误文案），留在各自工具文件里；唯一例外是
+`transcribe_video` 的回执话术（`TOOL_PROMPT_TEXT.transcribe_video.receipt`）：它没有任何动态成分，
+且它要解决的问题是"**诱导模型说哪句话**"而不是"返回什么数据"，所以按固定指令处理。这一条特别值得
+放在目录里，因为它是纯话术、需要反复调——它和 `description`、`toolProtocol` 第 7 条是同一件事的
+三个面，分居两地就永远调不齐。
+
 ### 5.1 System prompt
 
 `buildSystemPrompt()` 放稳定、跨会话的规则：人设与表达约束、是否应当发言的原则、工具调用与引用安全规则、表情使用策略。工具参数定义留在 tool schema，不再复制到 system/user prompt。

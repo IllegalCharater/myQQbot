@@ -94,8 +94,7 @@ const queue = {
 const beforeUrl = sent.length;
 const emitsBeforeUrl = emits.length;
 const byUrl = await executeTool(defs, ctxOf({ transcription: queue }), 'transcribe_video', { url: ' https://example.com/v.mp4 ' });
-ok('url 路径去掉首尾空白后交给队列并回任务号',
-  jobs.at(-1).url === 'https://example.com/v.mp4' && byUrl.content.includes('abcdef12'), byUrl.content);
+ok('url 路径去掉首尾空白后交给队列', jobs.at(-1).url === 'https://example.com/v.mp4', jobs.at(-1).url);
 // 工具自己不发消息 —— 入队后要不要先说一句（例如「我先看看」）由模型在这一次运行里自己决定。
 // 这条断言的反面正是"代发回执"：代发会让模型再自己说一句时群里出现两条重复的话。
 ok('入队成功也不代发任何消息（说不说话归模型自己决定）',
@@ -105,9 +104,17 @@ ok('没有代发就没有 session.sent 记录、也不广播 session-update（�
   JSON.stringify({ sent: lastSession().sent, emits: emits.slice(emitsBeforeUrl) }));
 ok('模型自主路径以 assisted 入队（结果进上下文，由模型决定说什么）', jobs.at(-1).mode === 'assisted', String(jobs.at(-1).mode));
 ok('url 路径没有可回复的消息时不带 replyToMessageId', jobs.at(-1).replyToMessageId === null);
-ok('工具结果交代清楚"结果还没到、届时必须开口、现在别评价"',
-  byUrl.content.includes('【转写结果】') && byUrl.content.includes('你必须开口')
-  && byUrl.content.includes('不要评价'), byUrl.content);
+// 回执话术（receipt）是这一版最容易退化的地方：模型拿到带任务号的工具结果就会说"任务已派上"。
+// 去掉原料比事后禁令可靠，所以这里钉住"结果串里没有任务号"，另加正面/反面两条话术断言。
+ok('工具结果不出现任务号（那是"任务已派上（任务 xxxx）"的全部原料）',
+  !byUrl.content.includes('abcdef12') && !/任务\s*[a-f0-9]{6,}/i.test(byUrl.content), byUrl.content);
+ok('工具结果正面给出该说的那句回执与例句（正面指令比只写"不要…"有效得多）',
+  byUrl.content.includes('我先看看') && byUrl.content.includes('像人接话'), byUrl.content);
+ok('工具结果点名禁掉系统状态措辞（"已派上/已安排/正在处理"），不是只禁"别评价视频"',
+  byUrl.content.includes('已派上') && byUrl.content.includes('已安排') && byUrl.content.includes('队列'), byUrl.content);
+ok('工具结果仍然交代了"现在别评价、结果稍后进上下文、届时必须开口"',
+  byUrl.content.includes('不要评价') && byUrl.content.includes('【转写结果】')
+  && byUrl.content.includes('你必须开口'), byUrl.content);
 
 // 本轮消息（窗口内）
 const inBatch = [{ mid: '-2040798711', media: [{ kind: 'video', url: 'https://b23.tv/abc' }] }];
@@ -247,6 +254,10 @@ ok('模型自主路径以 assisted 入队', trToolSrc.includes("mode: 'assisted'
 ok('转写工具自己不发消息：不碰 sender、不写 session.sent、不发事件',
   !trToolSrc.includes('sendTextBatch') && !trToolSrc.includes('session.sent')
   && !trToolSrc.includes('ctx.emit') && !trToolSrc.includes('EVENTS'));
+// 不接 job.id 是**刻意的**（见文件里的注释）：任务号对模型没用，却是"任务已派上（任务 xxxx）"
+// 唯一的原料。这条断言钉住"别再把它接回来"——接回来不会报任何错，只会让回执话术慢慢退化。
+ok('转写工具不接 job.id、回执整句取自 Catalog 的 receipt（不在这里拼状态串）',
+  trToolSrc.includes('TOOL_PROMPT_TEXT.transcribe_video.receipt') && !trToolSrc.includes('job.id'));
 
 const runnerSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/agent/runtime/agent-runner.ts'), 'utf8'));
 ok('未启用的能力不进模型工具集（按配置过滤，与既有视觉/搜索过滤同款）',

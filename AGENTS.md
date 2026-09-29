@@ -152,6 +152,8 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 所有模型可见的固定指令（内置 persona、system/user 固定段、工具 description、历史压缩与记忆整理指令）只允许写在 `src/core/prompt-catalog.ts`，业务模块引用其中的 `PROMPT_CATALOG`；`src/agent/prompting/prompt-builder.ts` 只负责动态变量、聊天记录格式化、条件选择与预算裁剪。UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词目录。
 
+工具**结果**串一般留在各自工具文件里（它带动态数据或错误文案）；唯一的例外是 `transcribe_video` 的回执话术 `TOOL_PROMPT_TEXT.transcribe_video.receipt`——它没有动态成分，且要解决的是"诱导模型说哪句话"而不是"返回什么数据"，所以按固定指令处理。**它必须整句取自目录，不许在工具文件里拼状态串**：带上任务号（`job.id`）会让模型回一句"任务已派上（任务 xxxx）"，而 `description` 与 `toolProtocol` 第 7 条是同一件事的另外两个面，分居两地就调不齐。
+
 - 稳定且全局的行为规则进入 system prompt。
 - 会话状态、摘要、历史、新消息、相关记忆和表情目录进入 user prompt。
 - 工具参数和参数约束只写 tool schema，不在提示词中复制一份。

@@ -67,7 +67,10 @@ export function transcriptionTools(): ToolDefinition[] {
       try {
         // enqueue 自己会做 URL 安全校验（协议/凭据/内网）、云凭证检查与任务去重前置判断，
         // 这里不重复实现任何一道闸门。
-        const job = queue.enqueue({
+        //
+        // **刻意不接 job.id、也不把它写进工具结果**：任务号对模型毫无用处（它没法用这个 id
+        // 做任何事），却是"任务已派上（任务 xxxx）"这句话的全部原料。去掉原料比事后禁令可靠。
+        queue.enqueue({
           chatKey: ctx.chatKey,
           url,
           replyToMessageId: typeof messageId === 'string' || typeof messageId === 'number' ? messageId : null,
@@ -80,7 +83,10 @@ export function transcriptionTools(): ToolDefinition[] {
         //
         // 代价要知道：模型选择沉默时，群里在结果到达前没有任何提示。这是刻意的取舍 —— 定死一句
         // 回执会和模型自己的发言重复，而结果到达的那一次运行本来就必须开口（见 toolProtocol 第 7 条）。
-        return { content: `已加入转写队列（任务 ${job.id.slice(0, 8)}）。识别结果还没到，结果会在完成后作为一条【转写结果】进入你的上下文，届时你必须开口；现在不要评价视频内容——你还没看到它，此时仅可发送类似‘我先看看’这样的答复` };
+        //
+        // 结果串（receipt）整句都在 prompt-catalog：它没有动态成分，且是在**诱导模型说哪句话**，
+        // 属于"模型可见的固定指令"，不是这条路返回的数据。
+        return { content: TOOL_PROMPT_TEXT.transcribe_video.receipt };
       } catch (error) {
         // TranscriptionError 携带的 message 本来就是中文用户文案（与 `/转写` 命令路径同源）。
         if (error instanceof TranscriptionError) return { content: `错误：${error.message}`, isError: true };
