@@ -115,6 +115,38 @@ ok('插画结果走另一套标签，缺失的 title 兜成"未知来源"',
   === '可能来源：未知来源\n画师：画师A\n来源：Pixiv\n相似度：80%\n链接：https://x/1');
 ok('没有结果时那句固定说明（工具与模型看到的就是它）',
   formatImageSourceResult(null).startsWith('没找到可靠图源'));
+// 置信度现在是**可选**字段（网页类引擎不返回它，见 `types.ts` 的 `similarity`）。渲染方的判据
+// 必须是"字段在不在"，不能无条件插值 —— `pct(undefined)` 算出来是 `NaN%`，群里看到的是一行
+// 像模像样的"相似度 NaN%"，比不印更糟。而 `0` 是合法值，所以也不能写成 `similarity || ''`。
+const noScoreAnime = formatImageSourceResult(animeCase({ similarity: undefined, title: '某番' }));
+ok('动画结果没有置信度时整行让位（不印出 NaN%）',
+  noScoreAnime === '可能是《某番》' && !noScoreAnime.includes('NaN'), JSON.stringify(noScoreAnime));
+const noScoreIll = formatImageSourceResult(illCase({ similarity: undefined, title: '某图' }));
+ok('插画结果没有置信度时整行让位（百度识图那条兜底路走的就是它）',
+  noScoreIll === '可能来源：某图' && !noScoreIll.includes('NaN'), JSON.stringify(noScoreIll));
+ok('置信度为 0 时照旧印出来（0 是合法值，不是"没给"）',
+  formatImageSourceResult(illCase({ similarity: 0 })).includes('相似度：0%'),
+  JSON.stringify(formatImageSourceResult(illCase({ similarity: 0 }))));
+
+// ── `SearchIntent` 的取值域在**三处**出现，只有第一处受编译器管 ────────
+//   ① `types.ts` 的联合类型（服务层那两张 `Record<SearchIntent, …>` 表受它约束）
+//   ② 工具 schema 的 `enum` —— 少一个值，模型**永远填不出**那一档：工具照跑、请求照发，
+//      只是那个类型从不生效。静默，且"看起来一切正常"。
+//   ③ `prompt-catalog.ts` 的 intent 描述 —— 模型看的就是它，改了 ② 不改 ③ 等于新档位没有说明，
+//      模型只会按旧的四选一里最接近的那个填。
+// 夹具用**从 types.ts 现读**的取值域去比 enum，而不是写死四个名字：写死的话，"类型里加了新档位
+// 但 enum 忘了跟"这件事恰好不会被发现（两边都从同一个手写清单里来）。
+const typesSrc = fs.readFileSync(path.join(ROOT, 'src/media/image-source/types.ts'), 'utf8');
+const intentUnion = [...((typesSrc.match(/export type SearchIntent\s*=([^;]*);/) || [])[1] || '').matchAll(/'(\w+)'/g)].map((m) => m[1]);
+const toolSrcFull = fs.readFileSync(path.join(ROOT, 'src/agent/tools/image-source.ts'), 'utf8');
+const intentEnum = [...((toolSrcFull.match(/enum:\s*\[([^\]]*)\]/) || [])[1] || '').matchAll(/'(\w+)'/g)].map((m) => m[1]);
+ok('工具 schema 的 intent enum 与 `SearchIntent` 的取值域逐字相同（少一个值 → 模型永远填不出那一档，且没有任何报错）',
+  intentUnion.length >= 4 && JSON.stringify(intentEnum) === JSON.stringify(intentUnion),
+  `types=[${intentUnion.join(',')}] enum=[${intentEnum.join(',')}]`);
+const catalogSrc = fs.readFileSync(path.join(ROOT, 'src/core/prompt-catalog.ts'), 'utf8');
+ok('prompt-catalog 里给了 manga 档的说明，且漫画已从 illustration 那一档挪走',
+  catalogSrc.includes('manga=日式漫画书页') && !/illustration=[^']*漫画/.test(catalogSrc),
+  '`illustration=[^\']*漫画` 匹配到东西说明漫画还留在插画那一档；模型按它填就永远走不到 manga');
 
 // ── 调用额度闸门（成本闸门，替代原先的关键词闸门）────────────────
 // 用注入的假时钟，夹具不依赖全局状态与随机挑选，结果确定。
@@ -135,6 +167,28 @@ const budgetAt = (cfg) => {
 const refusal = (fn) => { try { fn(); return ''; } catch (e) { return e.message; } };
 
 ok('新增两个配额字段有默认值', DEFAULT_CONFIG.imageSource.maxCallsPerChatPerHour === 5 && DEFAULT_CONFIG.imageSource.maxCallsPerDay === 30);
+
+// 一般向兜底引擎（百度识图）的默认值。**`minSimilarity` 必须不存在**：它不返回置信度，
+// "这个引擎没有门槛这个概念"由**字段的缺席**表达（见 `types.ts` 的 `EngineLimits`）。
+// 补一个 0 出来的效果不是"更宽松"，而是把一个我们从没读过的数字摆成一个配置项。
+ok('兜底引擎默认启用且**没有** minSimilarity 这一栏（取值 15000 / 3）',
+  DEFAULT_CONFIG.imageSource.baidu?.enabled === true
+  && DEFAULT_CONFIG.imageSource.baidu.timeoutMs === 15000
+  && DEFAULT_CONFIG.imageSource.baidu.maxResults === 3
+  && !('minSimilarity' in DEFAULT_CONFIG.imageSource.baidu),
+  JSON.stringify(DEFAULT_CONFIG.imageSource.baidu));
+
+// 归一化必须**显式删掉**混进来的 `minSimilarity`：`updateConfig` 走 `deepMerge`，它只加键不删键，
+// 一旦写进用户的 config.json 就再也出不去 —— 一个从不被读、却看起来像配置的旋钮（jmcomic.pythonPath
+// 那次的同一个形态）。这条能在本进程里验，正是因为 `updateConfig` 会对合并结果再跑一遍
+// `normalizeConfigShape`（`src/core/config.ts:506`）。
+const configMod = await load('core/config.js');
+configMod.updateConfig({ imageSource: { baidu: { timeoutMs: 12000, maxResults: 4, minSimilarity: 0.5 } } });
+const afterBaidu = configMod.getConfig().imageSource.baidu;
+ok('混进兜底引擎配置的 minSimilarity 会被归一化删掉，其它字段照常写进去',
+  afterBaidu.minSimilarity === undefined && afterBaidu.timeoutMs === 12000 && afterBaidu.maxResults === 4,
+  JSON.stringify(afterBaidu));
+configMod.updateConfig({ imageSource: { baidu: { timeoutMs: 15000, maxResults: 3 } } });   // 还原，别把改动漏给后续用例
 
 const b1 = budgetAt({ maxCallsPerChatPerHour: 2, maxCallsPerDay: 100 });
 b1.take('group:1'); b1.take('group:1');
@@ -272,6 +326,11 @@ const cfgOf = (over = {}) => ({
   enabled: true,
   traceMoe: { enabled: true, timeoutMs: 1000, minSimilarity: 0.87, maxResults: 3 },
   sauceNao: { enabled: true, apiKey: 'secret-test-key', timeoutMs: 1000, minSimilarity: 0.80, maxResults: 3 },
+  // 一般向兜底。**这个段是必需的**：新路由下 `illustration` / `unknown` / `anime` 的链尾都是它，
+  // 15 个调用点里任何一个走到第二发都会读 `cfg.baidu.enabled` —— 段不在就是 `TypeError`，
+  // 而套件会**静默中止**（后面的断言不是变红，是压根没跑）。**它没有 `minSimilarity`**，
+  // 这是有意的（该引擎不返回置信度），别顺手补一个 0。
+  baidu: { enabled: true, timeoutMs: 15000, maxResults: 3 },
   maxImageBytes: 8 * 1024 * 1024,
   maxQueueLength: 5,
   totalTimeoutMs: 35000,
@@ -312,37 +371,78 @@ ok('intent=illustration 先问 saucenao', illHit.calls[0]?.engine === 'saucenao'
 ok('SauceNAO 的 apiKey 从配置经 engineOptions 递到 provider（不进 URL、不进 argv，只进 stdin）',
   illHit.calls[0].options?.apiKey === 'secret-test-key');
 // 掩码（`hide`）是 SauceNAO 的**构造**参数，取值由服务层 `INTENT_PARAMS` 的三行表给出。
-// 它此前完全不存在：没有一般向/R18 分支，SauceNAO 用的是库的默认值 0（全部）。
-ok('intent=illustration 带上 hide=1（藏掉预期明确的 R18 同人图）',
-  illHit.calls[0].options?.hide === 1, `hide=${JSON.stringify(illHit.calls[0].options?.hide)}`);
+// **今天两行都是 0**，这是实测撞出来的（`hide=1` 曾把 Madokami 那张同人志图藏掉，于是这一路不再
+// 短路、必须去问 trace.moe，而后者答不了漫画），理由写在 `INTENT_PARAMS` 上面那段注释里。
+ok('intent=illustration 带上 hide=0（不藏：hide 是服务端按它自己的判定过滤的，误判一次整条结果就没了）',
+  illHit.calls[0].options?.hide === 0, `hide=${JSON.stringify(illHit.calls[0].options?.hide)}`);
+
+const mangaHit = await dispatch({}, { saucenao: () => ({ results: [{ similarity: 0.9 }], statusCode: 200 }) }, 'manga');
+ok('intent=manga 的专属引擎也是 saucenao，且 hide=0（同人志本来就是找漫画时的合法答案）',
+  mangaHit.calls[0]?.engine === 'saucenao' && mangaHit.calls[0].options?.hide === 0,
+  `calls=${mangaHit.calls.map((c) => c.engine).join(',')} hide=${JSON.stringify(mangaHit.calls[0]?.options?.hide)}`);
 
 // `unknown` 此前**一条断言都没有**，而这正是模型最常填的那个值（判不出类型时填的就是它）——
 // 守护空白就这么长出了一个真机缺陷：它当初与 `anime` 排成同序（理由只是"与改动前一致"），
-// 于是"我不确定"在引擎顺序上等于"这是动画截图"。夹具让 trace.moe 也自称命中（0.99，高于它
-// 自己的门槛 0.87），这样两边的答案可区分：顺序错则 trace 的 0.99 赢并拦住 saucenao。
+// 于是"我不确定"在引擎顺序上等于"这是动画截图"。现在的决定更干脆：**`unknown` 没有专属引擎**，
+// 直接走一般向那一发，窄域引擎（trace.moe）连问都不问。
+// 夹具要让两个专属引擎都自称命中（0.99 / 0.95）：顺序错则它们会先答并因为 `break` 拦住兜底。
 const unknownHit = await dispatch({}, {
   'trace.moe': () => ({ results: [{ similarity: 0.99 }], statusCode: 200 }),
-  saucenao: () => ({ results: [{ similarity: 0.95 }], statusCode: 200 })
+  saucenao: () => ({ results: [{ similarity: 0.95 }], statusCode: 200 }),
+  baidu: () => ({ results: [{ title: '百度说的梗图' }], statusCode: 200 })
 }, 'unknown');
-ok('intent=unknown 先问覆盖面更广的 saucenao（它不是 anime 的同义词：专用引擎只在类型已确认时才先问）',
-  unknownHit.calls.map((c) => c.engine).join(',') === 'saucenao' && unknownHit.out.result?.similarity === 0.95,
-  `calls=${unknownHit.calls.map((c) => c.engine).join(',')} sim=${unknownHit.out.result?.similarity}`);
-// `unknown` 在**掩码上也不能**跟 `anime` 走：它是模型判不出类型时填的那个值，此时按保守侧
-// 处理（与 illustration 同档）才对。这一条与上面那条顺序断言是两个独立的判据。
-ok('intent=unknown 的 hide 也是 1（说不清时按保守侧，不是按 anime 的 0）',
-  unknownHit.calls[0].options?.hide === 1, `hide=${JSON.stringify(unknownHit.calls[0].options?.hide)}`);
+ok('intent=unknown 只问一般向兜底（它不是 anime 的同义词：判不出类型时窄域引擎要么白烧一次调用，要么给假命中并拦住广域引擎）',
+  unknownHit.calls.map((c) => c.engine).join(',') === 'baidu' && unknownHit.out.result?.title === '百度说的梗图',
+  `calls=${unknownHit.calls.map((c) => c.engine).join(',')} title=${unknownHit.out.result?.title}`);
+// 与上面那条是两个独立的判据：**没有私有参数的引擎不该被凭空塞一个 engineOptions**（缓存键里
+// 有它的指纹，`{}` 会把键从 `-` 变成一个散列值；上一轮 trace.moe 那条断言守的是同一件事）。
+ok('intent=unknown 的那一发不带任何引擎参数',
+  unknownHit.calls[0].options === undefined, JSON.stringify(unknownHit.calls[0].options));
 
+// 「专属引擎答不上 → 兜底顶上」。**抛错与超时走的是同一条路**（超时在 provider 里就是抛
+// `<which>:TIMEOUT`），所以这几条同时覆盖了用户那句"若失败或超时则再使用一般向引擎"。
 const fallthrough = await dispatch({}, {
   'trace.moe': () => ({ results: [{ similarity: 0.5 }], statusCode: 200 }),
-  saucenao: () => ({ results: [{ similarity: 0.92 }], statusCode: 200 })
+  baidu: () => ({ results: [{ title: '百度兜底' }], statusCode: 200 })
 }, 'anime');
-ok('前一个引擎的结果低于它自己的门槛时继续问下一个，取达到门槛的那条',
-  fallthrough.calls.map((c) => c.engine).join(',') === 'trace.moe,saucenao' && fallthrough.out.result?.similarity === 0.92,
-  `calls=${fallthrough.calls.map((c) => c.engine).join(',')} sim=${fallthrough.out.result?.similarity}`);
-// 这条**只能**挂在这里：`animeHit` 那条 trace.moe 先命中就 `break` 了，sauce 一次都没被调用，
-// 拿 `animeHit.calls[0].options` 断言 hide 会断言到 trace.moe 的 `undefined` 上。
-ok('intent=anime 的 hide=0：找番时 R18 番剧是合法答案，藏掉就是误杀',
-  fallthrough.calls[1]?.options?.hide === 0, `hide=${JSON.stringify(fallthrough.calls[1]?.options?.hide)}`);
+ok('专属引擎的结果低于它自己的门槛时继续问兜底，取兜底那条',
+  fallthrough.calls.map((c) => c.engine).join(',') === 'trace.moe,baidu' && fallthrough.out.result?.title === '百度兜底',
+  `calls=${fallthrough.calls.map((c) => c.engine).join(',')} title=${fallthrough.out.result?.title}`);
+ok('兜底那一发拿到它自己配置里的满额超时（配置 15000，且它后面没有引擎要留时间）',
+  fallthrough.calls[1]?.timeoutMs === 15000, String(fallthrough.calls[1]?.timeoutMs));
+// 「一般向引擎不报置信度」这件事的**正面**断言：它没有门槛（配置里根本没有 minSimilarity 这一栏），
+// 所以它给出的第一条就直接采用 —— 上面 fallthrough 拿到的正是这样一条（只有 title、没有 similarity）。
+ok('无置信度的结果对没有门槛的引擎算命中（`similarity` 保持 undefined，不是被编出来的 0）',
+  fallthrough.out.result?.similarity === undefined, String(fallthrough.out.result?.similarity));
+
+// 对照组：**有**门槛的引擎对无置信度的结果照样丢弃。两条合起来才说明"门槛是引擎级的"，
+// 而不是"顺手把门槛删了"或"顺手给所有引擎都放行"。判据是"字段在不在"——`0` 是合法值。
+const gateOnUnscored = await dispatch(
+  { baidu: { enabled: false, timeoutMs: 15000, maxResults: 3 } },
+  { saucenao: () => ({ results: [{ title: '没有置信度的 saucenao 结果' }], statusCode: 200 }) }, 'illustration');
+ok('有门槛的引擎对无置信度的结果照样丢弃（宁可空手，也不认一条无法核实的命中），且不记 failure',
+  gateOnUnscored.out.result === null && gateOnUnscored.out.failures.length === 0,
+  `result=${JSON.stringify(gateOnUnscored.out.result)} failures=${gateOnUnscored.out.failures.join('|')}`);
+
+// 预算：**专属引擎那一发被夹住，给兜底留出位置**。这是"兜底真的有机会"唯一可机检的一面 ——
+// 上一版每一发都拿满自己配置的 timeoutMs，于是整轮可能刚好等于 totalTimeoutMs（真机那次
+// `TOTAL_TIMEOUT` 的算术就是 20000+15000=35000），**兜底在最需要它的那一刻根本没机会开火**。
+// 夹法：min(该引擎配置的 timeoutMs, 剩余 - 8000×后面还有几发 - 500)。这里 35000-8000-500=26500。
+// 断言写成区间而不是那个具体数：`deadline` 是按墙上时钟算的，下载耗掉的几毫秒会直接扣掉。
+const reserved = await dispatch(
+  { traceMoe: { enabled: true, timeoutMs: 30000, minSimilarity: 0.87, maxResults: 3 } },
+  { 'trace.moe': () => ({ results: [], statusCode: 200 }) }, 'anime');
+const reservedMs = reserved.calls[0]?.timeoutMs;
+ok('专属引擎那一发被夹到给兜底留出下限（配置 30000 → 实际落到 26500 附近）',
+  reservedMs < 30000 && reservedMs > 20000, String(reservedMs));
+
+// 反过来：预算真的不够时**不发这一枪**，并且如实记 `NO_BUDGET`（"我们没给它时间"），
+// 而不是记 `TIMEOUT`（"它太慢"）—— 这两个原因指向完全不同的排查方向，混成一句话就是
+// 把我们自己的决定说成对方的过错。这里 2.5s 的总预算连下限（3s）都给不出，所以两发都不该发。
+const noBudget = await dispatch({ totalTimeoutMs: 2500 }, {}, 'anime');
+ok('预算不够时跳过并记 NO_BUDGET（不把"没给时间"说成"它太慢"），且一次调用都不发',
+  noBudget.calls.length === 0 && noBudget.out.failures.join('|') === 'trace:NO_BUDGET|baidu:NO_BUDGET',
+  `calls=${noBudget.calls.length} failures=${noBudget.out.failures.join('|')}`);
 
 const below = await dispatch({}, { 'trace.moe': () => ({ results: [{ similarity: 0.86 }], statusCode: 200 }) }, 'anime');
 ok('低于门槛的结果不被当成命中（0.86 < trace.moe 的 0.87）', below.out.result === null);
@@ -350,14 +450,15 @@ ok('低于门槛的结果不被当成命中（0.86 < trace.moe 的 0.87）', bel
 const traceOff = await dispatch(
   { traceMoe: { enabled: false, timeoutMs: 1000, minSimilarity: 0.87, maxResults: 3 } },
   { saucenao: () => ({ results: [{ similarity: 0.95 }], statusCode: 200 }) }, 'anime');
-ok('关掉的引擎被跳过（intent=anime 本该先问 trace.moe，这里直接问 saucenao）',
-  traceOff.calls.map((c) => c.engine).join(',') === 'saucenao' && traceOff.out.result?.similarity === 0.95);
+ok('关掉的引擎被跳过（intent=anime 本该先问 trace.moe），链上只剩兜底那一发',
+  traceOff.calls.map((c) => c.engine).join(',') === 'baidu' && traceOff.out.result === null,
+  `calls=${traceOff.calls.map((c) => c.engine).join(',')}`);
 
 const noKey = await dispatch(
   { sauceNao: { enabled: true, apiKey: '', timeoutMs: 1000, minSimilarity: 0.80, maxResults: 3 } },
   { 'trace.moe': () => ({ results: [], statusCode: 200 }) }, 'illustration');
-ok('enabled 但空 apiKey 的 SauceNAO 视同没开：一次调用都不发、也不记 failure（不把"没配"伪装成"接口出错"）',
-  noKey.calls.map((c) => c.engine).join(',') === 'trace.moe' && noKey.out.failures.length === 0,
+ok('enabled 但空 apiKey 的 SauceNAO 视同没开：一次调用都不发、也不记 failure（不把"没配"伪装成"接口出错"），链缩成兜底那一发',
+  noKey.calls.map((c) => c.engine).join(',') === 'baidu' && noKey.out.failures.length === 0,
   `calls=${noKey.calls.map((c) => c.engine).join(',')} failures=${noKey.out.failures.join('|')}`);
 
 const failTrace = await dispatch({}, {
@@ -367,8 +468,8 @@ const failTrace = await dispatch({}, {
 ok('引擎抛错时 failures 用 trace:/sauce: 标签 —— 它经工具原样进模型可见文本，不能为了好看改成引擎名',
   failTrace.out.failures.length === 1 && failTrace.out.failures[0] === 'trace:TIMEOUT' && failTrace.out.result === null,
   failTrace.out.failures.join('|'));
-ok('一个引擎报错不拦下另一个（顺序走完，错误只记账）',
-  failTrace.calls.map((c) => c.engine).join(',') === 'trace.moe,saucenao');
+ok('一个引擎报错不拦下另一个（顺序走完，错误只记账；这里的第二发就是兜底）',
+  failTrace.calls.map((c) => c.engine).join(',') === 'trace.moe,baidu');
 
 const failSauce = await dispatch(
   { traceMoe: { enabled: false, timeoutMs: 1000, minSimilarity: 0.87, maxResults: 3 } },
@@ -406,20 +507,30 @@ ok('同引擎 + 同图 + 同条数：第二次不再发远端调用，并标记 
   hit.calls.length === 1 && hitFirst.cached === false && hitSecond.cached === true && hitSecond.result?.similarity === 0.95,
   `calls=${hit.calls.length} cached=${hitFirst.cached}/${hitSecond.cached}`);
 
-const sepReply = { 'trace.moe': () => ({ results: [{ similarity: 0.95 }], statusCode: 200 }) };
+const sepReply = {
+  'trace.moe': () => ({ results: [{ similarity: 0.95 }], statusCode: 200 }),
+  // illustration 的链是 ['sauce','baidu']，第二轮里 sauce 抛错之后**兜底真的会被问到** ——
+  // 不 mock 它的话假 provider 走默认分支返回空结果，下面那条"半缓存半真查"就没有真结果可断。
+  baidu: () => ({ results: [{ title: '百度结果' }], statusCode: 200 })
+};
 const sep = cachedService({}, sepReply);
 await sep.run('anime');
 sepReply.saucenao = () => { throw new Error('RATE_LIMIT'); };
 const sepSecond = await sep.run('illustration');
 ok('换 intent 不会被另一个引擎的缓存顶替：sauce 侧没有缓存槽，必须真去问（并如实报错）',
-  sep.calls.map((c) => c.engine).join(',') === 'trace.moe,saucenao'
+  sep.calls.map((c) => c.engine).join(',') === 'trace.moe,saucenao,baidu'
   && sepSecond.failures.includes('sauce:RATE_LIMIT') && sepSecond.cached === false,
   `calls=${sep.calls.map((c) => c.engine).join(',')} failures=${sepSecond.failures.join('|')} cached=${sepSecond.cached}`);
 ok('部分命中不算 cached（这个标记只回答"这次有没有花钱"，半缓存半真查的答案是有花钱）',
-  sepSecond.result?.similarity === 0.95, String(sepSecond.result?.similarity));
+  sepSecond.result?.title === '百度结果', JSON.stringify(sepSecond.result));
 
 const failRuns = cachedService(
-  { sauceNao: { enabled: false, apiKey: '', timeoutMs: 1000, minSimilarity: 0.8, maxResults: 3 } },
+  {
+    sauceNao: { enabled: false, apiKey: '', timeoutMs: 1000, minSimilarity: 0.8, maxResults: 3 },
+    // 兜底也关掉：这个用例验的是"**一个失败引擎被问两次**"，多一发兜底会让 calls 从 2 变 4，
+    // 而它想钉的（失败不进缓存）与兜底没关系。链上只剩 trace.moe 那一发。
+    baidu: { enabled: false, timeoutMs: 15000, maxResults: 3 }
+  },
   { 'trace.moe': () => { throw new Error('TIMEOUT'); } });
 await failRuns.run('anime'); await failRuns.run('anime');
 ok('失败不进缓存：同一张图连问两次都真的去问了（旧版会把一次超时冻结 cacheTtlMs）',

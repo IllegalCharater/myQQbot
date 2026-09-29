@@ -201,10 +201,11 @@ export function renderImageSourceSection(c) {
   const s = c.imageSource || {};
   const trace = s.traceMoe || {};
   const sauce = s.sauceNao || {};
+  const baidu = s.baidu || {};
   return `
     <h3>图片来源识别</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-image-source-enabled" ${s.enabled ? 'checked' : ''} /><label for="cfg-image-source-enabled">启用图片来源识别</label></div>
-    <div class="hint">由模型结合上下文判断何时查询；调用次数受下方频率上限约束（护住第三方接口配额）。trace.moe 用于动画截图；SauceNAO 用于二次元插画、同人图与来源站点。</div>
+    <div class="hint">由模型结合上下文判断何时查询；调用次数受下方频率上限约束（护住第三方接口配额）。按图片类型先问专属引擎：动画截图用 trace.moe，插画/漫画用 SauceNAO；专属引擎没结果或超时后自动再用百度识图兜底一次。</div>
     <div class="settings-divider"></div><h3>trace.moe</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-trace-enabled" ${trace.enabled !== false ? 'checked' : ''} /><label for="cfg-trace-enabled">启用 trace.moe</label></div>
     <div class="field-row"><div class="field"><label>请求超时（毫秒）</label><input type="number" id="cfg-trace-timeout" value="${esc(trace.timeoutMs ?? 15000)}" /></div><div class="field"><label>最小置信度（0–1）</label><input type="number" step="0.01" id="cfg-trace-similarity" value="${esc(trace.minSimilarity ?? 0.87)}" /></div><div class="field"><label>最大结果数</label><input type="number" id="cfg-trace-results" value="${esc(trace.maxResults ?? 3)}" /></div></div>
@@ -212,6 +213,10 @@ export function renderImageSourceSection(c) {
     <div class="checkbox-row"><input type="checkbox" id="cfg-sauce-enabled" ${sauce.enabled !== false ? 'checked' : ''} /><label for="cfg-sauce-enabled">启用 SauceNAO</label></div>
     <div class="field"><label>API Key</label><input type="password" id="cfg-sauce-key" value="${sauce.hasApiKey ? '******' : ''}" placeholder="${sauce.hasApiKey ? '已配置；留空不修改' : '未配置'}" autocomplete="new-password" /></div>
     <div class="field-row"><div class="field"><label>请求超时（毫秒）</label><input type="number" id="cfg-sauce-timeout" value="${esc(sauce.timeoutMs ?? 20000)}" /></div><div class="field"><label>最低相似度（0–1）</label><input type="number" step="0.01" id="cfg-sauce-similarity" value="${esc(sauce.minSimilarity ?? 0.8)}" /></div><div class="field"><label>最大结果数</label><input type="number" id="cfg-sauce-results" value="${esc(sauce.maxResults ?? 3)}" /></div></div>
+    <div class="settings-divider"></div><h3>百度识图（一般向兜底）</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-baidu-enabled" ${baidu.enabled !== false ? 'checked' : ''} /><label for="cfg-baidu-enabled">启用百度识图</label></div>
+    <div class="field-row"><div class="field"><label>请求超时（毫秒）</label><input type="number" id="cfg-baidu-timeout" value="${esc(baidu.timeoutMs ?? 15000)}" /></div><div class="field"><label>最大结果数</label><input type="number" id="cfg-baidu-results" value="${esc(baidu.maxResults ?? 3)}" /></div></div>
+    <div class="hint">不需要 API Key。它只在专属引擎没给出结果（或超时、或结果没过门槛）之后才被问到，所以它给出的第一条就直接采用——该引擎不返回置信度，因此没有"最低相似度"这一项。</div>
     <div class="settings-divider"></div><h3>通用</h3>
     <div class="field-row"><div class="field"><label>图片最大大小（MiB）</label><input type="number" id="cfg-image-source-max-mib" value="${esc(Math.round(Number(s.maxImageBytes || 8388608) / 1048576))}" /></div><div class="field"><label>队列最大长度</label><input type="number" id="cfg-image-source-queue" value="${esc(s.maxQueueLength ?? 5)}" /></div><div class="field"><label>总任务超时（毫秒）</label><input type="number" id="cfg-image-source-total-timeout" value="${esc(s.totalTimeoutMs ?? 35000)}" /></div></div>
     <div class="field-row"><div class="field"><label>每群每小时上限</label><input type="number" id="cfg-image-source-chat-hourly" value="${esc(s.maxCallsPerChatPerHour ?? 5)}" /></div><div class="field"><label>全局每日上限</label><input type="number" id="cfg-image-source-daily" value="${esc(s.maxCallsPerDay ?? 30)}" /></div></div>

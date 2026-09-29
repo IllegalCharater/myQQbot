@@ -4,6 +4,17 @@ const pct = (v: number) => `${Math.round(v * 100)}%`;
 const mmss = (seconds: number) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 
 /**
+ * 置信度那一行：**引擎报了才印**。
+ *
+ * 判据是"字段在不在"，不是"值是否非零" —— 与上面 `time` 那个 `00:00` 是同一条规矩。网页类引擎
+ * （百度识图那条兜底路）**根本不返回置信度**，若照旧无条件插值，`pct(undefined)` 会算出
+ * `NaN%`：群里看到的是一行像模像样的"相似度 NaN%"，比不印更糟。而 `0` 是合法值（真有一条 0%
+ * 的结果），所以判据不能写成 `result.similarity || ''`。
+ */
+const scoreLine = (label: string, result: ImageSourceResult) =>
+  result.similarity != null && Number.isFinite(result.similarity) ? `${label}：${pct(result.similarity)}` : '';
+
+/**
  * 展示层兜底：`title` 现在是可选字段（数据层不再编造名字，见 `types.ts`），
  * 而这里把它直接插进模板串 —— 不兜就会给群里印出字面量 `undefined`。
  *
@@ -32,7 +43,7 @@ function formatAnime(result: ImageSourceResult): string {
   return [
     `可能是《${result.title || '未知作品'}》`,
     when,
-    `匹配度：${pct(result.similarity)}`,
+    scoreLine('匹配度', result),
     result.url ? `链接：${result.url}` : ''
   ].filter(Boolean).join('\n');
 }
@@ -42,7 +53,7 @@ function formatIllustration(result: ImageSourceResult): string {
     `可能来源：${result.title || '未知来源'}`,
     result.author ? `画师：${result.author}` : '',
     result.source ? `来源：${result.source}` : '',
-    `相似度：${pct(result.similarity)}`,
+    scoreLine('相似度', result),
     result.url ? `链接：${result.url}` : ''
   ].filter(Boolean).join('\n');
 }

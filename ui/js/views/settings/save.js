@@ -153,6 +153,10 @@ export async function saveConfig({ quiet = false } = {}) {
       enabled: chk('#cfg-image-source-enabled', false),
       traceMoe: { enabled: chk('#cfg-trace-enabled', true), timeoutMs: Number(val('#cfg-trace-timeout', 15000)), minSimilarity: Number(val('#cfg-trace-similarity', 0.87)), maxResults: Number(val('#cfg-trace-results', 3)) },
       sauceNao: { ...(old.sauceNao || {}), enabled: chk('#cfg-sauce-enabled', true), timeoutMs: Number(val('#cfg-sauce-timeout', 20000)), minSimilarity: Number(val('#cfg-sauce-similarity', 0.8)), maxResults: Number(val('#cfg-sauce-results', 3)), ...(key && key !== '******' ? { apiKey: key } : {}) },
+      // 百度识图**没有 minSimilarity**（它不返回置信度）——别顺手照上面两行补一个，那会变成
+      // 一个从不被读、却看起来像配置的旋钮（见 src/core/config.ts 的说明与
+      // docs/image-source-routing-design.md §5）。
+      baidu: { ...(old.baidu || {}), enabled: chk('#cfg-baidu-enabled', true), timeoutMs: Number(val('#cfg-baidu-timeout', 15000)), maxResults: Number(val('#cfg-baidu-results', 3)) },
       maxImageBytes: Number(val('#cfg-image-source-max-mib', 8)) * 1048576,
       maxQueueLength: Number(val('#cfg-image-source-queue', 5)), totalTimeoutMs: Number(val('#cfg-image-source-total-timeout', 35000)),
       cacheEnabled: chk('#cfg-image-source-cache', true), cacheTtlMs: old.cacheTtlMs || 86400000,

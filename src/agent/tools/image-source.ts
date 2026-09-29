@@ -19,7 +19,7 @@ const budget = new SlidingWindowBudget({
 });
 
 function intentOf(value: unknown): SearchIntent {
-  return value === 'anime' || value === 'illustration' ? value : 'unknown';
+  return value === 'anime' || value === 'manga' || value === 'illustration' ? value : 'unknown';
 }
 
 function reasonOf(error: unknown): string {
@@ -33,6 +33,9 @@ const FAILURE_TEXT: Record<string, string> = {
   IMAGE_TOO_LARGE: '图片太大，无法识别。',
   IMAGE_EMPTY: '图片没下载到内容（链接多半已失效），让群友重新发一次。',
   IMAGE_FORMAT: '这张图的格式认不出来（只支持 PNG/JPEG/GIF/WebP）。',
+  // 下载与"图源接口"是两件事，文案必须把它分开：这一条指向图片链接/网络，`TOTAL_TIMEOUT`
+  // 才指向接口。从前两者都落进 `TOTAL_TIMEOUT`，于是"下载慢"被说成"接口慢"，排查方向直接错了。
+  IMAGE_TIMEOUT: '图片下载超时（不是图源接口的问题），稍后再试。',
   TOTAL_TIMEOUT: '图源接口响应太慢，这次查询超时了，稍后再试。'
 };
 
@@ -55,7 +58,7 @@ export function imageSourceTools(): ToolDefinition[] {
       type: 'object',
       properties: {
         messageId: { type: ['integer', 'string'], description: TOOL_PROMPT_TEXT.reverse_image_source.messageId },
-        intent: { type: 'string', enum: ['anime', 'illustration', 'unknown'], description: TOOL_PROMPT_TEXT.reverse_image_source.intent }
+        intent: { type: 'string', enum: ['anime', 'manga', 'illustration', 'unknown'], description: TOOL_PROMPT_TEXT.reverse_image_source.intent }
       },
       required: ['messageId']
     },

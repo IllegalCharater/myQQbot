@@ -143,7 +143,7 @@ export function bindSettingsEvents(c) {
   const testImageSource = $('#test-image-source-btn');
   if (testImageSource) testImageSource.addEventListener('click', async () => {
     const out = $('#image-source-test-result'); out.textContent = '测试中…';
-    try { const r = await api('/api/image-source/test', { method: 'POST', body: '{}' }); out.textContent = `trace.moe：${r.traceMoe ? '可用' : '失败'}；SauceNAO：${r.sauceNao}`; }
+    try { const r = await api('/api/image-source/test', { method: 'POST', body: '{}' }); out.textContent = `trace.moe：${r.traceMoe ? '可用' : '失败'}；SauceNAO：${r.sauceNao}；百度识图：${r.baidu}`; }
     catch { out.textContent = '测试失败（未暴露任何密钥）'; }
   });
   // 保存当前区块设置（通用保存按钮）。只有当前区块的字段才会被读取，不会 null 报错。

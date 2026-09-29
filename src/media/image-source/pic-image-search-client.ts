@@ -243,10 +243,15 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, code: PicImageSe
  * Python 侧刻意用了同一套字段名（它已经有 `_drop_empty` 把空值变成「键不存在」），
  * 所以这里只需要补两个**只有 Node 才知道**的字段：`provider`（展示名）与 `kind`。
  *
- * `similarity` 必须兜 0：它在 `ImageSourceResult` 里是必填的，而网页类引擎
- * （baidu/bing/google_lens/yandex/tineye）**刻意不给相似度**（见 worker 的
- * `_normalize_web`）。兜 0 的结果是它们会被服务层的 `similarity >= minSimilarity`
- * 全部滤掉 —— 这正是 worker 想要的：宁可返回空，也不要编一个置信度出来。
+ * `similarity` **取到才写**，不兜 `0`。这里曾经写着"必须兜 0"，理由是它在
+ * `ImageSourceResult` 里是必填的、而网页类引擎（baidu/bing/google_lens/yandex/tineye）
+ * 刻意不给相似度，兜 0 的结果是它们会被服务层的 `similarity >= minSimilarity` 全部滤掉，
+ * 且那句注释说"这正是 worker 想要的"。
+ *
+ * **那个结论本轮被推翻了**：这些引擎现在是**一般向兜底**那一路（`ORDER` 的末位），
+ * 它们必须能出结果。而兜出来的 `0` 是替引擎编的数，不是它的回答 —— 所以字段本身改成可选
+ * （见 `types.ts` 的 `similarity`），接受策略换成"引擎级门槛"（见 `reverse-image-source-service.ts`
+ * 的 `#perform`），展示层按"字段在不在"决定印不印那一行（见 `result-formatter.ts`）。
  */
 function toImageSourceResult(raw: unknown, engine: PicImageSearchEngine): ImageSourceResult {
   const row = asRecord(raw);
@@ -260,13 +265,12 @@ function toImageSourceResult(raw: unknown, engine: PicImageSearchEngine): ImageS
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
   };
 
-  // 必填字段只有这三个。`title` **不在其中**：worker 没给名字时就不写这个键，
-  // 不在数据层编一个「未命名结果」—— 编出来的名字会被当成真结果，事后分不清
-  // "接口没给"与"接口就叫这个名"。兜底归 result-formatter（展示层）。
+  // 必填字段只有这两个。`title` 与 `similarity` **都不在其中**：worker 没给就不写这个键，
+  // 不在数据层编一个「未命名结果」或「0% 相似」—— 编出来的值会被当成真结果，事后分不清
+  // "接口没给"与"接口就是这么说的"。兜底归 result-formatter（展示层）。
   const result: ImageSourceResult = {
     provider: display.provider,
-    kind: display.kind,
-    similarity: num('similarity') ?? 0
+    kind: display.kind
   };
 
   // 可选字段一律「取到才写」：`?:` 在 Node 侧表示「没有」，而 result-formatter 的
@@ -280,6 +284,7 @@ function toImageSourceResult(raw: unknown, engine: PicImageSearchEngine): ImageS
   const indexName = text('indexName'); if (indexName) result.indexName = indexName;
   const characters = text('characters'); if (characters) result.characters = characters;
   const time = num('time'); if (time !== undefined) result.time = time;
+  const similarity = num('similarity'); if (similarity !== undefined) result.similarity = similarity;
 
   return result;
 }

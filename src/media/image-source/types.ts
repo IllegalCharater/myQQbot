@@ -49,7 +49,19 @@ export interface ImageSourceResult {
    */
   provider: ImageSourceProvider;
   kind: ImageSourceKind;
-  similarity: number;
+  /**
+   * **可选**：引擎没报置信度时就不写这个键。
+   *
+   * 网页类引擎（`baidu` / `bing` / `google_lens` / `yandex` / `tineye`）**不返回相似度**
+   * （worker 的 `_normalize_web` 因此把它留空），而它们恰恰是"一般向兜底"那一路。这里曾经
+   * 是必填 + 兜 `0` —— 兜出来的 `0` 不是"零相似"，是**替引擎编了一个它没说过的数**：服务层会
+   * 因为这个 0 低于门槛而把结果全丢掉（旧注释还写着"这正是 worker 想要的"，本轮起反了），
+   * 展示层会把它印成"相似度 0%"。与 `title` 同一套规矩：字段不足就保留 undefined，不许编造。
+   *
+   * 代价与 `title` 一样，落在渲染方：`result-formatter.ts` 按"字段在不在"决定印不印那一行。
+   * 判据是"在不在"而不是"值是否非零"—— `0` 是合法值（真有一条 0% 的结果）。
+   */
+  similarity?: number;
   /**
    * **可选**：worker 没给出名字时就不写这个键，不在数据层编一个「未命名结果」出来。
    * 依据是"字段不足就保留 undefined，不许编造"——编出来的名字会被当成真结果记进存档与日志，
@@ -82,12 +94,26 @@ export interface ProviderResponse {
   quota?: { shortRemaining?: number; longRemaining?: number };
 }
 
-export type SearchIntent = 'anime' | 'illustration' | 'unknown';
+/**
+ * 模型给出的"这是什么图"。它决定**先问哪个引擎**（`reverse-image-source-service.ts` 的
+ * `ORDER`）与**那一发带什么引擎参数**（同文件的 `INTENT_PARAMS`），设计见
+ * `docs/image-source-routing-design.md`。
+ *
+ * 取值域与工具 schema 的 `enum`、`prompt-catalog.ts` 的 intent 描述三处必须同时改：
+ * 编译器管不到后两处（它们是字符串字面量），所以由 `tests/t-image-source.mjs` 的形态断言钉住。
+ */
+export type SearchIntent = 'anime' | 'manga' | 'illustration' | 'unknown';
 
 export interface ImageSourceConfig {
   enabled: boolean;
   traceMoe: { enabled: boolean; timeoutMs: number; minSimilarity: number; maxResults: number };
   sauceNao: { enabled: boolean; apiKey: string; timeoutMs: number; minSimilarity: number; maxResults: number };
+  /**
+   * 一般向兜底引擎（百度识图）。**没有 `minSimilarity`** —— 它不返回置信度，"这个引擎没有
+   * 门槛这个概念"由**字段的缺席**表达，而不是塞一个从不被读的 0（见 `types.ts` 的
+   * `similarity` 与 `EngineLimits` 的注释）。
+   */
+  baidu: { enabled: boolean; timeoutMs: number; maxResults: number };
   maxImageBytes: number;
   maxQueueLength: number;
   totalTimeoutMs: number;

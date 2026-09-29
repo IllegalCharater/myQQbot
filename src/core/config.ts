@@ -107,6 +107,11 @@ export const DEFAULT_CONFIG = {
     enabled: false,
     traceMoe: { enabled: true, timeoutMs: 15000, minSimilarity: 0.87, maxResults: 3 },
     sauceNao: { enabled: true, apiKey: '', timeoutMs: 20000, minSimilarity: 0.80, maxResults: 3 },
+    // 一般向兜底引擎（百度识图）：专属引擎答不上/超时后才会被问到，见
+    // docs/image-source-routing-design.md。
+    // **它没有 minSimilarity 这一栏**，这是有意的：该引擎不返回置信度，"没有门槛这个概念"由
+    // 字段的缺席表达。别为了跟上面两行对齐补一个 0 —— 那个 0 会被读成"门槛为零"。
+    baidu: { enabled: true, timeoutMs: 15000, maxResults: 3 },
     maxImageBytes: 8 * 1024 * 1024,
     maxQueueLength: 5,
     totalTimeoutMs: 35000,
@@ -403,13 +408,21 @@ function normalizeConfigShape<T>(input: T): T {
     c.cacheTtlMs = Math.round(clamp(c.cacheTtlMs, 60000, 7 * 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000));
     c.maxCallsPerChatPerHour = Math.round(clamp(c.maxCallsPerChatPerHour, 1, 60, 5));
     c.maxCallsPerDay = Math.round(clamp(c.maxCallsPerDay, 1, 1000, 30));
-    for (const [name, defaults] of [['traceMoe', [15000, 0.87, 3]], ['sauceNao', [20000, 0.80, 3]]] as const) {
+    // 第三列是 `maxResults`，第二列是 `minSimilarity` —— **`null` 表示这个引擎没有这个概念**
+    // （网页类引擎不返回置信度，见 DEFAULT_CONFIG.imageSource.baidu 那段）。这时是 `delete`
+    // 而不是写一个 0：`updateConfig` 走 `deepMerge`，**只加键不删键**，所以任何被写进去的
+    // minSimilarity 都会永远留在用户的 config.json 里，成为一个从不被读、却看起来像配置的旋钮
+    // （仓库里 jmcomic.pythonPath 那次的教训，见 AGENTS.md）。
+    for (const [name, limitMs, minSim, maxResults] of [
+      ['traceMoe', 15000, 0.87, 3], ['sauceNao', 20000, 0.80, 3], ['baidu', 15000, null, 3]
+    ] as const) {
       const raw = c[name]; if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
       const p = raw as Record<string, unknown>;
       p.enabled = p.enabled !== false;
-      p.timeoutMs = Math.round(clamp(p.timeoutMs, 1000, 60000, defaults[0]));
-      p.minSimilarity = clamp(p.minSimilarity, 0, 1, defaults[1]);
-      p.maxResults = Math.round(clamp(p.maxResults, 1, 10, defaults[2]));
+      p.timeoutMs = Math.round(clamp(p.timeoutMs, 1000, 60000, limitMs));
+      if (minSim === null) delete p.minSimilarity;
+      else p.minSimilarity = clamp(p.minSimilarity, 0, 1, minSim);
+      p.maxResults = Math.round(clamp(p.maxResults, 1, 10, maxResults));
       if (name === 'sauceNao') p.apiKey = String(p.apiKey ?? '').trim();
     }
   }
