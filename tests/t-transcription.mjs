@@ -377,6 +377,148 @@ await queue.stop();
 ok('stop 会中止当前 worker、禁止迟到结果发送并等待其落到 failed',
   queue.get(third.id)?.status === 'failed' && delivered.length === 2);
 
+// ── 另一条投递路：模型自主（assisted）────────────────────────────────
+//
+// 上面那个队列注入了 `operations.deliver`，所以**队列默认的 `#deliver` 一直没被测过**。
+// 这里另起一个不注入它的实例，专门覆盖 assisted：
+//   · 结果交给回流端口 → 落成一条存档条目，由模型决定说什么
+//   · 队列自己**不发任何群文本**（截断段会与模型的话重复）
+//   · 超长时仍上传全文文件（群里那份完整的得另给）
+//   · **绝不把异常抛回 `#drain`**：那里会同时把任务记成 failed 并往群里发一句莫须有的
+//     「转写失败」——而结果其实已经拿到了
+const assistedTexts = [];     // 队列自己发出去的群文本（assisted 下必须始终为空）
+const assistedUploads = [];   // upload_* 调用的文件名
+const sinkCalls = [];
+const assistedLogs = [];
+let uploadShouldFail = false;
+let sinkShouldThrow = false;
+const ASSIST_LIMIT = Math.max(200, resolveTranscriptionConfig(cfg).resultMaxChars - '转写结果：\n'.length - 20);
+const SHORT_TEXT = '短视频里讲了茶叶';
+const LONG_TEXT = '长'.repeat(4000);   // 远超 ASSIST_LIMIT
+
+const assistedQueue = new VideoTranscriptionQueue({
+  sender: {
+    sendTextBatch: async (_chatKey, text) => { assistedTexts.push(String(text)); return { sent: [], failed: [] }; }
+  },
+  onebot: {
+    call: async (_action, params) => {
+      assistedUploads.push(String(params?.name || ''));
+      if (uploadShouldFail) throw new Error('fixture-upload-failed');
+      return {};
+    }
+  },
+  getConfig: () => cfg,
+  log: (line) => assistedLogs.push(String(line)),
+  deliverTranscript: async (input) => {
+    sinkCalls.push(input);
+    if (sinkShouldThrow) throw new Error('fixture-sink-failed');
+  },
+  operations: {
+    checkFfmpeg: async () => {},
+    runTask: async (job, _signal, setStatus) => {
+      setStatus('extracting');
+      if (String(job.sourceUrl).includes('boom')) throw new Error('fixture-run-failed');
+      return String(job.sourceUrl).includes('long') ? LONG_TEXT : SHORT_TEXT;
+    }
+  }
+});
+await assistedQueue.start();
+const settle = async (jobId) => {
+  for (let i = 0; i < 200; i++) {
+    const status = assistedQueue.get(jobId)?.status;
+    if (status === 'done' || status === 'failed') return status;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return assistedQueue.get(jobId)?.status;
+};
+
+const a1 = assistedQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/short.mp4', replyToMessageId: 42, mode: 'assisted' });
+const a1Status = await settle(a1.id);
+ok('assisted 短文本：结果交给回流端口，队列零群文本、零上传',
+  a1Status === 'done' && sinkCalls.length === 1 && assistedTexts.length === 0 && assistedUploads.length === 0,
+  `status=${a1Status} sink=${sinkCalls.length} text=${assistedTexts.length} upload=${assistedUploads.length}`);
+ok('回流端口拿到原文、未截断事实、原会话与引用 id',
+  sinkCalls[0]?.text === SHORT_TEXT && sinkCalls[0]?.truncated === false
+  && sinkCalls[0]?.chars === Array.from(SHORT_TEXT).length
+  && sinkCalls[0]?.chatKey === 'group:7' && sinkCalls[0]?.replyToMessageId === 42,
+  JSON.stringify(sinkCalls[0]));
+
+const a2 = assistedQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/long.mp4', mode: 'assisted' });
+const a2Status = await settle(a2.id);
+ok('assisted 超长：全文仍走文件上传，但**零群文本**（删掉这一步会与模型自己的话重复）',
+  a2Status === 'done' && assistedUploads.length === 1 && assistedTexts.length === 0,
+  `status=${a2Status} upload=${assistedUploads.length} text=${JSON.stringify(assistedTexts)}`);
+ok('回流端口拿到的是开头一段（与群里那份截断段同一长度），并带原文全长',
+  Array.from(sinkCalls[1]?.text || '').length === ASSIST_LIMIT
+  && sinkCalls[1]?.truncated === true && sinkCalls[1]?.chars === 4000
+  && sinkCalls[1]?.text === LONG_TEXT.slice(0, ASSIST_LIMIT),
+  `${Array.from(sinkCalls[1]?.text || '').length} / limit=${ASSIST_LIMIT} truncated=${sinkCalls[1]?.truncated} chars=${sinkCalls[1]?.chars}`);
+
+// 回归：默认的 standalone 路径逐字节不变（截断段 + 文件 + 上传失败时的补救文案）
+uploadShouldFail = true;
+const a3 = assistedQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/long.mp4' });
+const a3Status = await settle(a3.id);
+ok('/转写 那条路（默认 standalone）超长时仍是"截断段 + 上传 + 失败补救"，文案与顺序不变',
+  a3Status === 'done' && assistedTexts.length === 2
+  && String(assistedTexts[0]).startsWith('转写结果：\n')
+  && String(assistedTexts[0]).includes('文本过长，已截断；完整内容将作为 UTF-8 文本文件发送。')
+  && String(assistedTexts[1]).includes('完整文本文件发送失败')
+  && assistedUploads.length === 2 && sinkCalls.length === 2,
+  JSON.stringify(assistedTexts.map((t) => t.slice(0, 30))));
+
+const a4 = assistedQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/long.mp4', mode: 'assisted' });
+const a4Status = await settle(a4.id);
+ok('assisted 上传失败：端口照旧被调用、任务仍 done、依旧零群文本',
+  a4Status === 'done' && sinkCalls.length === 3 && assistedTexts.length === 2,
+  `status=${a4Status} sink=${sinkCalls.length} text=${assistedTexts.length}`);
+ok('上传失败只留固定错误码，日志不含 URL、识别文本或文件名',
+  assistedLogs.every((line) => !line.includes('example.com') && !line.includes('长')
+    && !line.includes('fixture-upload-failed') && !line.includes('transcription-')),
+  assistedLogs.filter((l) => l.includes('example.com') || l.includes('长')).join(' | '));
+
+// 端口抛错必须被吞掉：`#drain` 把异常一律当成"转写失败"，会在结果已拿到的情况下
+// 同时记 failed 并往群里发一句莫须有的「转写失败」。
+sinkShouldThrow = true;
+const a5 = assistedQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/short.mp4', mode: 'assisted' });
+const a5Status = await settle(a5.id);
+uploadShouldFail = false;
+sinkShouldThrow = false;
+ok('端口抛错不外抛：任务照旧 done、不发任何失败文案、只记 DELIVER_FAILED',
+  a5Status === 'done' && sinkCalls.length === 4 && assistedTexts.length === 2
+  && assistedLogs.some((line) => line.includes('code=DELIVER_FAILED')),
+  `status=${a5Status} sink=${sinkCalls.length} text=${assistedTexts.length}`);
+
+// runTask 失败是另一回事：那时确实没有结果，必须照旧往群里说一句
+const a6 = assistedQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/boom.mp4', mode: 'assisted' });
+const a6Status = await settle(a6.id);
+ok('转写本身失败：群里收到失败文案，回流端口**不被调用**',
+  a6Status === 'failed' && assistedTexts.length === 3
+  && String(assistedTexts[2]).startsWith('转写失败') && sinkCalls.length === 4,
+  `status=${a6Status} text=${assistedTexts.length} sink=${sinkCalls.length}`);
+await assistedQueue.stop();
+
+// 没有回流端口时（例如某种装配缺失）不能无声无息：留一条日志说明结果没落地。
+const noSinkLogs = [];
+const noSinkTexts = [];
+const noSinkQueue = new VideoTranscriptionQueue({
+  sender: { sendTextBatch: async (_k, text) => { noSinkTexts.push(String(text)); return { sent: [], failed: [] }; } },
+  onebot: { call: async () => ({}) },
+  getConfig: () => cfg,
+  log: (line) => noSinkLogs.push(String(line)),
+  operations: {
+    checkFfmpeg: async () => {},
+    runTask: async (_job, _signal, setStatus) => { setStatus('extracting'); return SHORT_TEXT; }
+  }
+});
+await noSinkQueue.start();
+const a7 = noSinkQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/short.mp4', mode: 'assisted' });
+for (let i = 0; i < 200 && noSinkQueue.get(a7.id)?.status !== 'done'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+ok('缺回流端口：什么都不发，但留一条 NO_DELIVER_SINK 日志（不静默丢结果）',
+  noSinkQueue.get(a7.id)?.status === 'done' && noSinkTexts.length === 0
+  && noSinkLogs.some((line) => line.includes('code=NO_DELIVER_SINK')),
+  `status=${noSinkQueue.get(a7.id)?.status} text=${noSinkTexts.length}`);
+await noSinkQueue.stop();
+
 // 控制台 GET /api/config 必须沿用既有 secret 递归脱敏，不能把新凭证带给浏览器。
 updateConfig({
   server: { port: 39210 },

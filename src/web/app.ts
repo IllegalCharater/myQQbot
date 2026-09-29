@@ -82,7 +82,25 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     onebot, store,
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`)
   });
-  const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log });
+  // 转写结果的回流：把识别文本落成一条存档条目并唤醒一次运行，**由模型决定说什么**
+  // （`/转写` 命令走的是另一条路，队列自己把结果贴进群，见 internal job 的 mode）。
+  //
+  // 为什么这段留在组装根：它同时碰 store、orchestrator 端口与 emit —— **它就是共享组件图**，
+  // 按"只碰共享图的不搬"的判据不搬。web/ 根目录白名单也不允许新开文件；onebot/ 是入站侧、
+  // runtime/ 是长期任务与退出路径，都不合适。
+  //
+  // 用函数声明（会提升）：下面传给队列时 `orchestrator` 这个 const 还没初始化，
+  // 但函数体要等到 `start()` 之后、队列真正投递时才会执行，那时它早就建好了。
+  function deliverTranscript({ chatKey, text, truncated, chars }: {
+    chatKey: string; text: string; truncated: boolean; chars: number;
+  }) {
+    // 顺序照 ingest：先落存档 → 再入窗（onIncoming 会推窗口并按防抖唤醒）→ 最后通知面板。
+    const entry = store.appendTranscript(chatKey, { text, truncated, chars });
+    orchestrator.onIncoming(chatKey, entry);
+    emit(EVENTS.chatUpdate, chatKey);
+  }
+
+  const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log, deliverTranscript });
   const hotSearchScheduler = new HotSearchScheduler({ getConfig, updateConfig, sender, log });
   // 这两个能力对象先建、再交给 Orchestrator：模型的两个工具（transcribe_video / get_hot_search）
   // 需要它们，而依赖是从 Orchestrator → WakeScheduler（`AgentRunnerHost`）→ ToolContext 透传的。

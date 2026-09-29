@@ -301,10 +301,11 @@ export function renderChatMessages() {
 
     if (btn.dataset.op === 'del') {
       const snip = String(m.text || '').replace(/\s+/g, ' ').slice(0, 60);
-      // 摘要 / 人工备注都不是某个人说的话。套 senderName || '我' 会把它们说成"我"
+      // 摘要 / 人工备注 / 转写结果都不是某个人说的话。套 senderName || '我' 会把它们说成"我"
       // 发的 —— 与行渲染里的 who 用同一套判定。
       const who = m.kind === 'digest' ? '摘要'
-        : (m.kind === 'note' ? '备注' : (m.self ? '我' : (m.senderName || '某人')));
+        : (m.kind === 'note' ? '备注'
+          : (m.kind === 'transcript' ? '转写' : (m.self ? '我' : (m.senderName || '某人'))));
       let warn = `确定要永久删除这条存档吗？\n\n${fmtTime(m.ts)}  ${who}：${snip}\n\n`;
       warn += '· 会在 data/messages/ 下留一份 .panel.bak 备份（只保留最近一次）\n';
       // 人工备注是从没收发过的记录，对它说"原文可能仍在冷归档"是误导
@@ -366,18 +367,23 @@ export function chatMsgRowHtml(m, opts) {
   // ⚠️ 调用方有 `.map(chatMsgRowHtml)` 这种写法，那样第二个参数会是数组下标（数字）而不是
   //    选项对象。这里挡一下：不挡的话下标会被当成 previewChars，除第一行以外全被截断。
   const { previewChars = 0, badge = '' } = (opts && typeof opts === 'object') ? opts : {};
-  // 压缩摘要（kind:'digest'）与人工备注（kind:'note'）都不是某个人说的话，
-  // 各自用一种弱化样式区分：多行文本靠 .text 已有的 white-space: pre-wrap 换行。
+  // 压缩摘要（kind:'digest'）、人工备注（kind:'note'）与转写结果（kind:'transcript'）
+  // 都不是某个人说的话，各自用一种弱化样式区分：多行文本靠 .text 已有的 white-space: pre-wrap 换行。
   const isDigest = m.kind === 'digest';
   const isNote = m.kind === 'note';
-  const who = isDigest ? '摘要' : (isNote ? '备注' : (m.self ? '我' : esc(m.senderName)));
+  const isTranscript = m.kind === 'transcript';
+  const who = isDigest ? '摘要'
+    : (isNote ? '备注' : (isTranscript ? '转写' : (m.self ? '我' : esc(m.senderName))));
   // 摘要由模型生成，手改会让它与 digest.summary/count 对不上（后端也会 400）。
   // 这里直接不给「改」，而不是给一个点了报错的按钮。
   // 但「删」必须给：删掉一条摘要本身完全合法 —— 后端只拦 PATCH，不拦 DELETE，
   // 它的 400 文案本身写的就是"不能手改；可以删除"。早先这里两项一起吞掉了，
   // 结果用户想清掉一段误生成的摘要时无路可走（工具提示还写着"可以删除"）。
-  const ops = (isDigest
-    ? '<span class="muted" title="摘要由模型生成，不能手改">—</span>'
+  //
+  // 转写结果同样不给「改」：面板的「改」走的是插人工备注那条路，会把一段机器识别出的
+  // 正文悄悄变成一条手写批注。
+  const ops = (isDigest || isTranscript
+    ? `<span class="muted" title="${isTranscript ? '转写结果由任务生成，不能手改' : '摘要由模型生成，不能手改'}">—</span>`
     : '<button class="btn btn-small" data-op="edit" title="改这条的正文">改</button>')
     + '<button class="btn btn-small btn-danger" data-op="del" title="真删除这条存档">删</button>';
   // 顶部历史印象块只给预览（previewChars）：一条摘要正文可达 4000 字，整段铺在最上面
@@ -387,7 +393,7 @@ export function chatMsgRowHtml(m, opts) {
     ? `${esc(raw.slice(0, previewChars))}…`
     : esc(raw);
   return `
-    <tr class="${m.read ? '' : 'unread'}${isDigest ? ' digest-row' : ''}${isNote ? ' note-row' : ''}" data-midrow="${m.id}">
+    <tr class="${m.read ? '' : 'unread'}${isDigest ? ' digest-row' : ''}${isNote ? ' note-row' : ''}${isTranscript ? ' transcript-row' : ''}" data-midrow="${m.id}">
       <td class="t">${fmtTime(m.ts)}</td>
       <td class="w ${m.self ? 'self' : ''}">${who}</td>
       <td class="text">${body}${badge}${m.read ? '' : ' <span class="unread-pill">未读</span>'}</td>

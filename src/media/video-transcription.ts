@@ -33,6 +33,27 @@ interface OneBotFileClient {
   call(action: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
 }
 
+/** 结果的投递方式，见 `InternalJob.mode`。 */
+export type DeliveryMode = 'standalone' | 'assisted';
+
+/**
+ * 结果回流端口（`assisted` 模式）。
+ *
+ * 为什么是**注入的函数**而不是让队列直接写存档：`media` 与 `chat`/`agent` 同属 T1、
+ * 严格互斥，队列不能 import `ChatStore` 或 `Orchestrator`。装配根（`web/app.ts`）
+ * 把"落存档 → 入窗 → 触发一次运行"接过去。与 `jmcomic` 的 `store: { appendSelf }`
+ * 是同一个形态：最小结构化端口，没有 `instanceof`、没有品牌。
+ *
+ * `text` 是**已被截断**（到 `resultMaxChars`）的正文；`chars` 是**原文全长**。
+ */
+export type TranscriptSink = (input: {
+  chatKey: string;
+  text: string;
+  truncated: boolean;
+  chars: number;
+  replyToMessageId?: string | number | null;
+}) => void | Promise<void>;
+
 interface EffectiveConfig {
   enabled: boolean;
   appId: string;
@@ -55,6 +76,17 @@ interface InternalJob {
   chatKey: string;
   sourceUrl: string;
   replyToMessageId: string | number | null;
+  /**
+   * 结果投递方式。
+   *
+   * - `standalone`（默认，`/转写` 命令路径）：队列自己把识别文本贴进原会话。
+   *   确定性、零 LLM 成本，也是既有断言守着的路径。
+   * - `assisted`（模型自主调用 `transcribe_video` 的路径）：结果交给注入的回流端口，
+   *   由它落成一条存档条目并唤醒 Agent，**由模型自己决定说什么**。队列不再贴文本。
+   *
+   * 归一化只发生在 `enqueue` 一处，`#deliver` 保证拿到的是确定值。
+   */
+  mode: DeliveryMode;
   status: TranscriptionStatus;
   failedStage?: FailureStage;
   createdAt: number;
@@ -523,6 +555,7 @@ export class VideoTranscriptionQueue {
   #getConfig: () => AppConfig;
   #log: (...args: unknown[]) => void;
   #operations: QueueOperations;
+  #deliverTranscript: TranscriptSink | null;
   #jobs = new Map<string, InternalJob>();
   #pending: InternalJob[] = [];
   #wake: ReturnType<typeof setTimeout> | null = null;
@@ -532,18 +565,21 @@ export class VideoTranscriptionQueue {
   #stopping = false;
   #ffmpegError = '';
 
-  constructor({ sender, onebot, getConfig, log = console.log, operations = {} }: {
+  constructor({ sender, onebot, getConfig, log = console.log, operations = {}, deliverTranscript = null }: {
     sender: TranscriptionSender;
     onebot: OneBotFileClient;
     getConfig: () => AppConfig;
     log?: (...args: unknown[]) => void;
     operations?: QueueOperations;
+    /** 见 TranscriptSink。缺省时 assisted 任务只记一条日志、不投递。 */
+    deliverTranscript?: TranscriptSink | null;
   }) {
     this.#sender = sender;
     this.#onebot = onebot;
     this.#getConfig = getConfig;
     this.#log = log;
     this.#operations = operations;
+    this.#deliverTranscript = deliverTranscript;
   }
 
   async start(): Promise<void> {
@@ -572,10 +608,19 @@ export class VideoTranscriptionQueue {
     this.#started = false;
   }
 
-  enqueue({ chatKey, url, replyToMessageId = null }: {
+  enqueue({ chatKey, url, replyToMessageId = null, mode = 'standalone' }: {
     chatKey: string;
     url: unknown;
     replyToMessageId?: string | number | null;
+    /**
+     * 投递方式，默认 `standalone`（见 `InternalJob.mode`）。
+     *
+     * **可选是刻意的**：`tests/` 是 `.mjs`，`tsc` 看不见它们，必填字段只会逼着每个夹具
+     * 改一遍 —— 而"为了让夹具变绿"顺手填错值，恰恰是两条路径最容易被搅在一起的方式。
+     * 留默认值，既有的 `enqueue({ chatKey, url })` 就继续跑在 standalone 上，
+     * 那正是它最需要的回归网。
+     */
+    mode?: DeliveryMode;
   }): TranscriptionJobView {
     if (!this.#started) throw new TranscriptionError('validation', 'NOT_STARTED', '转写服务尚未启动');
     if (this.#stopping) throw new TranscriptionError('validation', 'STOPPING', '转写服务正在关闭');
@@ -587,6 +632,8 @@ export class VideoTranscriptionQueue {
     const now = Date.now();
     const job: InternalJob = {
       id: randomUUID(), chatKey, sourceUrl, replyToMessageId,
+      // 归一化只在这一处：`#deliver` 永远拿到确定值，不需要自己兜 undefined。
+      mode: mode === 'assisted' ? 'assisted' : 'standalone',
       status: 'queued', createdAt: now, updatedAt: now
     };
     this.#jobs.set(job.id, job);
@@ -691,6 +738,13 @@ export class VideoTranscriptionQueue {
     const text = result || '（未识别到有效语音）';
     const prefix = '转写结果：\n';
     const limit = Math.max(200, config.resultMaxChars - prefix.length - 20);
+
+    // 两条路的**唯一**分岔点。job.mode 在 enqueue 里已归一化，这里不需要兜底。
+    if (job.mode === 'assisted') {
+      await this.#deliverAssisted(job, text, limit);
+      return;
+    }
+
     if (text.length <= limit) {
       await this.#sender.sendTextBatch(job.chatKey, prefix + text, { replyToMessageId: job.replyToMessageId });
       return;
@@ -701,20 +755,77 @@ export class VideoTranscriptionQueue {
       `${prefix}${Array.from(text).slice(0, limit).join('')}\n\n文本过长，已截断；完整内容将作为 UTF-8 文本文件发送。`,
       { replyToMessageId: job.replyToMessageId }
     );
-    const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qq-agent-transcript-'));
-    const filePath = path.join(tempDir, `transcription-${job.id}.txt`);
+    if (!await this.#uploadText(job, text)) {
+      await this.#sender.sendTextBatch(job.chatKey, '完整文本文件发送失败；上方为截断结果。').catch(() => {});
+    }
+  }
+
+  /**
+   * 模型自主路径的投递：把结果交给回流端口，由它落成一条存档条目并唤醒 Agent，
+   * **由模型自己决定说什么**。队列不往群里贴任何文本 —— 模型稍后会自己开口，
+   * 再贴一段转写就是重复发言。
+   *
+   * 超长时仍然上传全文文件：条目正文只留开头（`resultMaxChars`），群里那份完整的
+   * 得另给。上传失败只记日志，不当成任务失败。
+   *
+   * ⚠️ **全程不抛**。调用方 `#drain` 把异常一律当成"转写失败"，那会同时把任务记成
+   * failed 并往群里发一条莫须有的「转写失败」——而结果其实已经拿到了，只是没送出去。
+   *
+   * `limit` 的取值沿用了 standalone 的口径（`resultMaxChars`）。这本来是 **QQ 单条消息**
+   * 的上限，这里同时当作**条目正文**的上限：好处是"群里人看到的"与"模型看到的"是同一段
+   * 文本、与文件上传阈值也自然一致。代价要知道：【本次唤醒】是保护区、**永不裁剪**，
+   * 所以一条 3500 字的条目约占 `store.promptContextMaxChars`（默认 32000）的 11%，
+   * 极端情况下会挤掉表情/摘要/记忆/已读历史。有界、可接受，故不另开配置项。
+   */
+  async #deliverAssisted(job: Readonly<InternalJob>, text: string, limit: number): Promise<void> {
+    // Array.from 与 slice 同一口径：按码点算，代理对不会被劈成两半。
+    const chars = Array.from(text).length;
+    const truncated = chars > limit;
+    if (truncated) await this.#uploadText(job, text);
+
+    const sink = this.#deliverTranscript;
+    if (!sink) {
+      // 没有回流端口就什么都发不出去 —— 不能无声无息，留一条日志说明结果没落地。
+      this.#log(`[transcribe] task=${job.id} code=NO_DELIVER_SINK`);
+      return;
+    }
     try {
+      await sink({
+        chatKey: job.chatKey,
+        text: Array.from(text).slice(0, limit).join(''),
+        truncated,
+        chars,
+        replyToMessageId: job.replyToMessageId
+      });
+    } catch {
+      // 只记固定错误码，不记异常正文：日志里不得出现 URL 或识别文本。
+      this.#log(`[transcribe] task=${job.id} code=DELIVER_FAILED`);
+    }
+  }
+
+  /**
+   * 把完整文本作为文件上传到原会话。返回是否成功；失败只记日志、不抛。
+   *
+   * 临时代理目录的创建也放进 try：`mkdtemp` 自己失败时不该把任务判成失败
+   * （standalone 路径下宁可只发一句"文件发送失败"）。
+   */
+  async #uploadText(job: Readonly<InternalJob>, text: string): Promise<boolean> {
+    let tempDir = '';
+    try {
+      tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qq-agent-transcript-'));
+      const filePath = path.join(tempDir, `transcription-${job.id}.txt`);
       await fsp.writeFile(filePath, text, 'utf8');
       const [kind, id] = job.chatKey.split(':');
       const params = kind === 'group'
         ? { group_id: Number(id), file: filePath, name: path.basename(filePath) }
         : { user_id: Number(id), file: filePath, name: path.basename(filePath) };
       await this.#onebot.call(kind === 'group' ? 'upload_group_file' : 'upload_private_file', params, 120_000);
+      return true;
     } catch (error) {
       this.#log(`[transcribe] task=${job.id} code=${safeErrorCode(error)}`);
-      await this.#sender.sendTextBatch(job.chatKey, '完整文本文件发送失败；上方为截断结果。').catch(() => {});
+      return false;
     } finally {
-      await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     }
   }
 }

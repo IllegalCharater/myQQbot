@@ -6,7 +6,7 @@ import { load } from './lib/src.mjs';
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-reply-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
-const { buildPastState, buildUserPrompt, buildSystemPrompt } = await load('agent/prompting/prompt-builder.js');
+const { buildPastState, buildUserPrompt, buildSystemPrompt, buildTriggerBlock } = await load('agent/prompting/prompt-builder.js');
 const { evaluateWindowTrigger } = await load('agent/context/response-policy.js');
 const { resolveHistoryPolicy } = await load('agent/context/history-policy.js');
 const { updateConfig, responseConfigForChat } = await load('core/config.js');
@@ -111,6 +111,36 @@ const budgeted = buildUserPrompt({
 });
 ok('预算内仍完整保留【本次唤醒】', budgeted.includes('必须完整保留的当前消息-XYZ'));
 ok('可选背景被收缩后不超过统一预算', budgeted.length <= 2200, `实际 ${budgeted.length}`);
+
+// ── 6. 转写结果的渲染（【本次唤醒】与【过去状态】两条路径）──────────────
+//
+// 转写正文里出现"吗/呢"、以"？"结尾、或提到 bot 的名字都是常事；触发标签那几条
+// 正则一旦不作数就会把机器输出标成「提问」「提到我」——模型会以为有人在向它提问。
+console.log('\n=== 6. 【转写结果】的渲染与触发标签 ===');
+updateConfig({ store: { promptContextMaxChars: 32000, historyCount: 30 } });
+const trPlain = store.appendTranscript(KEY, { text: '视频里在讲一个关于茶叶的故事', chars: 15 });
+const trCut = store.appendTranscript(KEY, { text: `【开场】${'茶叶'.repeat(40)}`, chars: 5000, truncated: true });
+const trTrap = store.appendTranscript(KEY, { text: '@小鲸鱼 这视频里提到小鲸鱼了吗？', chars: 18 });
+
+const tbPlain = buildTriggerBlock([trPlain], { selfNickname: '小鲸鱼' });
+ok('【本次唤醒】里渲染成【转写结果】（时间戳 + 标记 + 正文，不套"某人："）',
+  /^\[.+\] 【转写结果】视频里在讲一个关于茶叶的故事$/.test(tbPlain), tbPlain);
+ok('未截断时不出现截断标记', !tbPlain.includes('原文共'), tbPlain);
+ok('转写结果不产生 #消息id 前缀（mid 是 null，引用不了）', !/#/.test(tbPlain), tbPlain);
+const tbCut = buildTriggerBlock([trCut], { selfNickname: '小鲸鱼' });
+ok('截断时标出原文全长（模型不能把半截当成全文照转）', tbCut.includes('（原文共 5000 字，超出上限，此处为开头部分）'), tbCut);
+const tbTrap = buildTriggerBlock([trTrap], { selfNickname: '小鲸鱼' });
+ok('不打任何触发标签（正文里的 @、『吗』、『？』都不作数）', !tbTrap.includes('（'), tbTrap);
+ok('正文照旧完整保留', tbTrap.includes('@小鲸鱼 这视频里提到小鲸鱼了吗？'), tbTrap);
+
+const psTr = buildPastState(store, KEY, { limit: 30 });
+const trLines = psTr.text.split('\n').filter((l) => l.includes('【转写结果】'));
+ok('【过去状态】用的是同一套渲染', trLines.length >= 3, `实际 ${trLines.length} 行`);
+ok('过去状态里也带截断标记', psTr.text.includes('（原文共 5000 字'));
+ok('转写结果不套"某人："（不冒充群友）',
+  trLines.length > 0 && trLines.every((l) => !l.slice(0, l.indexOf('【转写结果】')).includes('：')), trLines[0]);
+ok('转写结果在【过去状态】里也没有 #id',
+  trLines.length > 0 && trLines.every((l) => !/#-?\d/.test(l)), trLines[0]);
 
 fs.rmSync(DIR, { recursive: true, force: true });
 console.log(`\n════ 通过 ${pass} / 失败 ${fail} ════`);

@@ -1,5 +1,6 @@
 import { getConfig } from '../../core/config.js';
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
+import { EVENTS } from '../../core/events.js';
 import { SlidingWindowBudget } from '../../media/call-budget.js';
 import { TranscriptionError, resolveTranscriptionConfig } from '../../media/video-transcription.js';
 import type { ToolDefinition } from '../shared/types.js';
@@ -70,11 +71,28 @@ export function transcriptionTools(): ToolDefinition[] {
         const job = queue.enqueue({
           chatKey: ctx.chatKey,
           url,
-          replyToMessageId: typeof messageId === 'string' || typeof messageId === 'number' ? messageId : null
+          replyToMessageId: typeof messageId === 'string' || typeof messageId === 'number' ? messageId : null,
+          // assisted：结果不直接贴进群，而是作为一条【转写结果】进入上下文，由模型决定说什么。
+          mode: 'assisted'
         });
-        // 刻意不在这里发消息：完成后队列会把结果直接投递回本会话（video-transcription.ts 的 #deliver），
-        // 工具再发一条"稍等"只会和模型自己的回复重复。
-        return { content: `已加入转写队列（任务 ${job.id.slice(0, 8)}），完成后识别文本会自动发到本会话。` };
+        // 回执刻意排在 enqueue **之后**：enqueue 同步做完所有校验、抛错发生在建任务之前，
+        // 所以"说了我先看看、其实没在转"这种情况不可能出现 —— 失败时用户只看得到错误文案。
+        //
+        // 与真正的转写**分开捕获**（照 reverse_image_source 的占位回复）：`sendTextBatch`
+        // 在限频/内容为空/协议端全败时都会抛（src/qq/sender.ts），共用一个 try 会把
+        // "客套话没发出去"报成"转写失败"。回执只是礼貌，失败最多留一条日志。
+        try {
+          const sent = await ctx.sender.sendTextBatch(ctx.chatKey, '我先看看', {
+            replyToMessageId: typeof messageId === 'string' || typeof messageId === 'number' ? messageId : undefined
+          });
+          ctx.session.sent.push(...sent.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
+          ctx.emit(EVENTS.sessionUpdate, { sessionId: ctx.session.id });
+        } catch (error) {
+          console.warn(`[transcription] 回执发送失败（转写已入队）：${error instanceof Error ? error.message : error}`);
+        }
+        // 结果不会再"自动发到本会话"——它会在完成后进入 **你的上下文**（一条【转写结果】），
+        // 由你决定说什么。所以这里既不要等，也不要自己再发一条"稍等"重复上面的回执。
+        return { content: `已加入转写队列（任务 ${job.id.slice(0, 8)}）。识别结果还没到，结果会在完成后作为一条【转写结果】进入你的上下文，届时由你决定说什么；现在不要评价视频内容，也不要再发"稍等"。` };
       } catch (error) {
         // TranscriptionError 携带的 message 本来就是中文用户文案（与 `/转写` 命令路径同源）。
         if (error instanceof TranscriptionError) return { content: `错误：${error.message}`, isError: true };

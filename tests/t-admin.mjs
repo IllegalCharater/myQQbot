@@ -14,7 +14,7 @@ import { load } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-admin-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
 
-const { ChatStore, isSystemRecord } = await load('chat/store.js');
+const { ChatStore, isSystemRecord, isPersonMessage } = await load('chat/store.js');
 const { MemoryStore } = await load('chat/memory.js');
 const { StickerManager } = await load('stickers/sticker-manager.js');
 const { removeSticker, formatStickerAdminList } = await load('stickers/stickers.js');
@@ -85,6 +85,25 @@ eq('备注不在 activeMembers 里（否则会多出一个幽灵成员）', stor
 eq('备注不被 selectArchiveRange 当成压缩候选', store.selectArchiveRange(K, { keepRecent: 0, maxMessages: 100 }).entries.filter((m) => m.kind === 'note').length, 0);
 ok('isSystemRecord 认 note 与 digest', isSystemRecord({ kind: 'note' }) && isSystemRecord({ kind: 'digest' }) && !isSystemRecord({}));
 ok('备注仍在 recent 里（模型读得到）', store.recent(K, { limit: 100 }).some((m) => m.kind === 'note'));
+
+// ── 转写结果：既要能归档，也不能变成"一个叫转写的群友" ──
+// 两个谓词对 transcript 的答案**故意相反**（进窗口 / 不算人），这里是它们的守护：
+// 合成一个函数必然二选一地错一边，而这个错误在界面上表现为"活跃成员里多了个查无此人的转写"。
+const trEntry = store.appendTranscript(K, { text: '视频里在讲一个关于茶叶的故事', chars: 15 });
+ok("appendTranscript kind === 'transcript'", trEntry.kind === 'transcript');
+ok('appendTranscript read === false（写 read:true 会把它压在水位线之下，重启后永久不可见）', trEntry.read === false);
+ok('appendTranscript mid === null（没有 #id，模型引用不了它）', trEntry.mid === null);
+ok('appendTranscript senderId 空 / senderName 为「转写」（会话摘要不会渲染成":正文"）',
+  trEntry.senderId === '' && trEntry.senderName === '转写');
+ok('isSystemRecord 不认转写结果（它恰恰必须进唤醒窗口）', !isSystemRecord({ kind: 'transcript' }));
+ok('isPersonMessage 把 digest/note/transcript 都排除，普通消息与旧数据不排除',
+  !isPersonMessage({ kind: 'digest' }) && !isPersonMessage({ kind: 'note' }) && !isPersonMessage({ kind: 'transcript' })
+  && isPersonMessage({ kind: 'text' }) && isPersonMessage({}) && !isPersonMessage(null));
+ok('转写结果不占活跃成员（否则会多出一个查无此人的幽灵成员）',
+  !store.activeMembers(K, 20).some((m) => m.userId === '' || m.name === '转写'), JSON.stringify(store.activeMembers(K, 20)));
+ok('转写结果仍会被 selectArchiveRange 取走（长文本不能在存档里只增不减）',
+  store.selectArchiveRange(K, { keepRecent: 0, maxMessages: 100 }).entries.some((m) => m.kind === 'transcript'));
+ok('转写结果仍在 recent 里（模型读得到）', store.recent(K, { limit: 100 }).some((m) => m.kind === 'transcript'));
 
 // ── 渲染：不能读成"群里一个没名字的人" ──
 const ps = buildPastState(store, K, { limit: 50 });

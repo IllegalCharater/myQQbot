@@ -49,8 +49,13 @@ console.log('=== 1. 入窗与幂等 ===');
   ok('自己发的消息不入窗', w.push(msg(2, '我', { self: true })) === false && w.stats().win === 1);
   ok('摘要不入窗', w.push(msg(3, '纪要', { kind: 'digest' })) === false && w.stats().win === 1);
   ok('人工备注不入窗', w.push(msg(4, '备注', { kind: 'note' })) === false && w.stats().win === 1);
+  // 转写结果与上面两种**故意相反**：它是 `isSystemRecord` 之外的一种 kind，
+  // 恰恰必须进窗（否则模型永远看不到异步到达的识别文本）。这条与下面第 16 段
+  // 的分档位断言合起来，就是"谓词拆分"这个承重改动的守护。
+  ok('转写结果入窗（它不是系统记录，恰恰必须让模型看到）',
+    w.push(msg(5, '【转写结果】视频里在讲这个那个', { kind: 'transcript', senderId: '', senderName: '转写' })) === true && w.stats().win === 2);
   ok('乱序的旧 id 被忽略', w.push(msg(1, 'x')) === false);
-  ok('新 id 正常入窗', w.push(msg(9, '在的')) === true && w.stats().win === 2);
+  ok('新 id 正常入窗', w.push(msg(9, '在的')) === true && w.stats().win === 3);
   const snapshot = w.pending(); snapshot[0].text = '外部篡改';
   ok('外部拿到的是快照，不能修改窗口成员', w.pending()[0].text === '你好');
   ok('窗口不暴露删除成员的方法', typeof w.remove === 'undefined');
@@ -300,6 +305,109 @@ console.log('\n=== 15. 主动机会：空闲群也能被唤醒 ===');
   });
   ok('主动唤醒真的建出了会话（丢掉 proactive: true 会恒在这里早退）',
     created != null, created ? `session=${created.id} trigger=${JSON.stringify(created.trigger)}` : '压根没建会话');
+  orc.abortAll();
+}
+
+// ── 16. 转写结果强制唤醒：任何档位都必须被响应 ───────────────────────
+//
+// 为什么必须有这条规则：转写结果是**异步交付**的，它到达时群里没有任何人在说话。
+// 低档位（默认的"只认 @"）下这批消息会被判成"未触发"、被静默消费 —— 模型永远看不到
+// 识别文本，用户等了半分钟只等来一片沉默。
+//
+// 判定器是唯一的落点：`forceWake` 只是 `scheduleWake(chatKey, 0)`，wake() 照样会跑这个
+// 判定并把不该响应的批次静默消费掉。所以断言直接打在 `evaluateWindowTrigger` 上。
+console.log('\n=== 16. 转写结果：任何档位都必须被响应 ===');
+{
+  const { evaluateWindowTrigger } = await load('agent/context/response-policy.js');
+  const tr = (text = '【转写结果】视频里在讲一个关于茶叶的故事') =>
+    ({ id: 1, ts: 1, senderId: '', senderName: '转写', text, self: false, read: false, kind: 'transcript' });
+  const chatter = (text) => ({ id: 2, ts: 2, senderId: '555', senderName: '张三', text, self: false, read: false });
+  const identity = { selfNickname: '小鲸鱼', botName: '小鲸鱼', selfId: '999' };
+  // 档位 1 = 只认 @：正是"会被静默消费"的最低档
+  const tier1 = { responseTier: 1, randomPercent: 0, keywords: [] };
+  const allRandom = { responseTier: 3, randomPercent: 100, keywords: [] };
+  const decide = (entries, { policy = tier1, roll = 50, id = identity } = {}) =>
+    evaluateWindowTrigger({ entries, identity: id, policy, roll });
+
+  const only = decide([tr()]);
+  ok('只有转写结果 ⇒ 必须响应（档位 1 也不会静默消费）', only.shouldRespond === true, JSON.stringify(only));
+  ok('原因写作「转写结果」，档位编码沿用非档位来源的 0',
+    only.responseTier === 0 && only.reason === '转写结果', JSON.stringify(only));
+
+  // 规则作用于**整批**：转写结果与无关闲聊同批到达时，一整批都要交给模型
+  const mixed = decide([chatter('今天好热'), tr()]);
+  ok('转写 + 无关闲聊 ⇒ 仍响应（规则作用于整批，不是只把转写那条挑出来）',
+    mixed.shouldRespond === true && mixed.reason === '转写结果', JSON.stringify(mixed));
+
+  // 认的是 kind，不是"任何非人类条目"：只为 digest/note 时一条都不能响应
+  const digestOnly = decide([{ id: 3, ts: 3, senderId: 'digest', senderName: '摘要', text: '纪要', self: false, read: false, kind: 'digest' }]);
+  ok('只有 digest ⇒ 不响应（规则不是"看到非人类条目就开口"）', digestOnly.shouldRespond === false, JSON.stringify(digestOnly));
+  const noteOnly = decide([{ id: 4, ts: 4, senderId: '', senderName: '', text: '人工备注', self: false, read: false, kind: 'note' }]);
+  ok('只有 note ⇒ 不响应', noteOnly.shouldRespond === false, JSON.stringify(noteOnly));
+
+  // roll 无关：`#resolvePendingResponse` 同时被 scheduleWake（建等待会话前）与 wake
+  // 调用。规则一旦读 roll，两处就可能给出不同答案 —— 一个建了会话、一个静默消费。
+  ok('randomPercent 取 0（roll=0）与 100（roll=99）得到同一结论',
+    decide([tr()], { policy: { responseTier: 3, randomPercent: 0, keywords: [] }, roll: 0 }).shouldRespond === true
+    && decide([tr()], { policy: allRandom, roll: 99 }).shouldRespond === true);
+  ok('转写结果压过"随机命中"（同样命中随机时原因仍是转写结果）',
+    decide([tr()], { policy: allRandom, roll: 0 }).reason === '转写结果',
+    decide([tr()], { policy: allRandom, roll: 0 }).reason);
+
+  // 分支顺序不是随手写的：更具体的原因要胜出
+  ok('有人真的艾特时，原因仍是「被艾特」（转写分支排在它后面）',
+    decide([tr(), chatter('@小鲸鱼 看看这个')]).reason === '被艾特',
+    decide([tr(), chatter('@小鲸鱼 看看这个')]).reason);
+  ok('配了"全部响应"时仍报「全部响应」',
+    decide([tr()], { policy: { responseTier: 4, randomPercent: 0, keywords: [] } }).reason === '全部响应');
+  ok('空批不响应（规则不制造凭空的唤醒）', decide([]).shouldRespond === false);
+}
+
+// ── 17. 转写结果端到端：入存档 → 入窗 → 低档位下唤醒一次运行 ─────────
+console.log('\n=== 17. 转写结果端到端（低档位仍被唤醒）===');
+{
+  updateConfig({
+    allow: { groups: [] }, allowAllWhenEmpty: true, proactive: { enabled: false },
+    store: { contextSliderPos: 5, historyCount: 20, maxContextMessages: 0 }
+  });
+
+  // (a) 重启后播种：`read: false` 是"重启后仍看得见"的因果，不是随手写的字段。
+  //     照抄 insertNote 写成 read:true 的话，播种时 `#lastSeenId` 会吃满这条，
+  //     条目躺在水位线**之下** —— 进程内看得见、重启后永久不可见。
+  const K2 = key();
+  const h1 = harness();
+  h1.store.appendTranscript(K2, { text: '视频里在讲一个关于茶叶的故事', chars: 16 });
+  const h2 = harness();
+  ok('重启后从存档播种：转写结果仍是待处理（read:false 的因果）',
+    h2.orc.windows.pending(K2).map((m) => m.kind).join(',') === 'transcript',
+    JSON.stringify(h2.orc.windows.pending(K2).map((m) => [m.kind, m.read])));
+  h1.orc.abortAll(); h2.orc.abortAll();
+
+  // (b) 真跑一次：档位 1（只认 @）+ 窗口里只有一条转写结果
+  const { store, orc, sessions } = harness();
+  const K = key();
+  const entry = store.appendTranscript(K, { text: '视频里在讲一个关于茶叶的故事', chars: 16 });
+  orc.onIncoming(K, entry);
+  ok('转写结果经 onIncoming 进了窗口',
+    orc.windows.pendingCount(K) === 1 && orc.windows.pending(K)[0].kind === 'transcript',
+    JSON.stringify(orc.windows.pending(K).map((m) => m.kind)));
+  ok('存档里是未读（它就是这次唤醒的触发批）', store.unreadCount(K) === 1);
+  orc.scheduleWake(K, 0);
+  const hit = await new Promise((resolve) => {
+    const iv = setInterval(() => {
+      for (const s of sessions.current.values()) if (s.chatKey === K && s.status === 'running' && s.trigger) { clearInterval(iv); resolve(s); }
+    }, 10);
+    setTimeout(() => { clearInterval(iv); resolve(null); }, 5000);
+  });
+  ok('档位 1 下，一条转写结果照样唤醒一次运行', hit != null, hit ? `session=${hit.id}` : '压根没建会话');
+  ok('触发批就是那条转写结果',
+    hit != null && hit.trigger.length === 1 && hit.trigger[0].kind === 'transcript',
+    hit ? JSON.stringify(hit.trigger.map((m) => m.kind)) : '没抓到');
+  // 会话摘要（等待中会话与日志都用它）渲染成 `${senderName || senderId}：…`：
+  // senderName 空着会变成 ":<正文>"，senderId 空着则任何按 id 的匹配都认不上它 ——
+  // 两者都是刻意的选择，这里是它们唯一可机检的地方。
+  ok('会话摘要写作「转写：…」而不是「:…」',
+    hit != null && /^转写：/.test(String(hit.triggerSummary || '')), hit ? String(hit.triggerSummary) : '');
   orc.abortAll();
 }
 

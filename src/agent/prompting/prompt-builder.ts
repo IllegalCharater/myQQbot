@@ -106,6 +106,16 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
   if (m.kind === 'note') {
     return `[${formatShortTime(m.ts)}] 【人工备注】${String(m.text || '')}`;
   }
+  // 转写结果条目（kind:'transcript'）：异步任务的产物，同样"不是某人说的话"。
+  // 截断标记**必须**有 —— 没有它模型会把半截转写当成全文照转。`transcript.chars` 是
+  // **原文全长**（条目正文本身给不出这个信息），措辞只说这条目自己的事实，
+  // 不承诺"完整文本已作为文件发送"：那要追踪投递结果，会让投递顺序变成提示词的一部分
+  // （见 chat/types.ts 的 TranscriptRecord）。
+  if (m.kind === 'transcript') {
+    const meta = asRecord(m.transcript);
+    const cut = meta.truncated === true ? `（原文共 ${Number(meta.chars) || 0} 字，超出上限，此处为开头部分）` : '';
+    return `[${formatShortTime(m.ts)}] 【转写结果】${cut}${String(m.text || '')}`;
+  }
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');
   const who = m.self ? '我' : (notes[senderId] || m.senderName || senderId || '未知');
@@ -338,6 +348,10 @@ export function collectInjectedDigests(store: ChatStore, chatKey: string, { conf
 }
 
 function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
+  // 转写结果是机器输出，不是"谁在提问题"：整条短路。
+  // 不短路的话下面几条正则必然误标 —— 转写正文里出现"吗/呢"或以"？"结尾是常事（→"提问"），
+  // 提到 bot 的名字也是常事（→"提到我"），而这两条都会让模型以为有人在向它提问。
+  if (entry?.kind === 'transcript') return [];
   const labels: string[] = [];
   const text = String(entry?.text ?? '');
   const lower = text.toLowerCase();

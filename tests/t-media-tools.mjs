@@ -23,17 +23,33 @@ const { HotSearchScheduler } = await load('media/hot-search/scheduler.js');
 const defs = buildToolDefs();
 
 // ── 共用夹具 ─────────────────────────────────────────────────────
-// 假 sender 只用来证明"工具自己没有发任何东西"，真正的发送在别处（模型调 send_message，
-// 或转写队列完成后自己投递）。
+// 假 sender 记录每次 sendTextBatch 的实参：热搜工具必须一次都不发；转写工具恰好发一条
+// 固定回执（结果本身不贴群，改成进模型上下文 —— 见 t-transcription.mjs 的 assisted 段）。
+// `session` 与 `emit` 在 ToolContext 上是必填：漏了会在运行期抛 TypeError，
+// 而套件里一个未捕获异常会**静默吃掉它后面的全部断言**（终端上只显示"这个套件失败了"）。
 const sent = [];
-const ctxOf = ({ hotSearch, transcription, store, triggerEntries = [], chatKey = 'group:10001' } = {}) => ({
-  chatKey,
-  sender: { sendTextBatch: async (...args) => { sent.push(args); return { sent: [], failed: [] }; } },
-  triggerEntries,
-  store: store || { findByMid: () => null },
-  hotSearch,
-  transcription
-});
+const sessions = [];
+const emits = [];
+const ctxOf = ({ hotSearch, transcription, store, triggerEntries = [], chatKey = 'group:10001' } = {}) => {
+  const session = { id: `s-${sessions.length + 1}`, sent: [] };
+  sessions.push(session);
+  return {
+    chatKey,
+    sender: {
+      sendTextBatch: async (...args) => {
+        sent.push(args);
+        return { sent: [{ text: String(args[1]), at: 1 }], failed: [] };
+      }
+    },
+    triggerEntries,
+    store: store || { findByMid: () => null },
+    session,
+    emit: (type, payload) => { emits.push([type, payload]); },
+    hotSearch,
+    transcription
+  };
+};
+const lastSession = () => sessions[sessions.length - 1];
 
 // ── get_hot_search ──────────────────────────────────────────────
 const limitsSeen = [];
@@ -68,23 +84,35 @@ ok('缺 hotSearch 依赖时返回友好错误而不是抛', noDep.isError === tr
 // ── transcribe_video ────────────────────────────────────────────
 const jobs = [];
 const queue = {
-  enqueue: ({ chatKey, url, replyToMessageId }) => {
-    jobs.push({ chatKey, url, replyToMessageId });
+  enqueue: ({ chatKey, url, replyToMessageId, mode }) => {
+    jobs.push({ chatKey, url, replyToMessageId, mode });
     return { id: 'abcdef1234567890' };
   }
 };
 
+const beforeUrl = sent.length;
 const byUrl = await executeTool(defs, ctxOf({ transcription: queue }), 'transcribe_video', { url: ' https://example.com/v.mp4 ' });
 ok('url 路径去掉首尾空白后交给队列并回任务号',
   jobs.at(-1).url === 'https://example.com/v.mp4' && byUrl.content.includes('abcdef12'), byUrl.content);
-ok('转写工具自己不发送任何消息（完成后由队列投递回会话）', sent.length === 0);
+ok('结果不贴群：工具只代发一条固定回执「我先看看」',
+  sent.length === beforeUrl + 1 && String(sent.at(-1)[1]) === '我先看看', JSON.stringify(sent.slice(beforeUrl)));
+ok('回执记进会话并广播 session-update（面板要立刻看到这次发言）',
+  lastSession().sent.length === 1 && lastSession().sent[0].text === '我先看看'
+  && emits.at(-1)?.[0] === 'session-update' && emits.at(-1)?.[1]?.sessionId === lastSession().id,
+  JSON.stringify(emits.at(-1)));
+ok('模型自主路径以 assisted 入队（结果进上下文，由模型决定说什么）', jobs.at(-1).mode === 'assisted', String(jobs.at(-1).mode));
 ok('url 路径没有可回复的消息时不带 replyToMessageId', jobs.at(-1).replyToMessageId === null);
+ok('工具结果交代清楚"结果还没到、届时由你决定说什么"',
+  byUrl.content.includes('【转写结果】') && byUrl.content.includes('不要'), byUrl.content);
 
 // 本轮消息（窗口内）
 const inBatch = [{ mid: '-2040798711', media: [{ kind: 'video', url: 'https://b23.tv/abc' }] }];
+const beforeId = sent.length;
 await executeTool(defs, ctxOf({ transcription: queue, triggerEntries: inBatch }), 'transcribe_video', { messageId: '-2040798711' });
 ok('messageId 命中本轮消息时取到视频地址，并把它作为回复目标',
   jobs.at(-1).url === 'https://b23.tv/abc' && jobs.at(-1).replyToMessageId === '-2040798711');
+ok('回执也引用同一条消息（群里看得出在回谁）',
+  sent.length === beforeId + 1 && sent.at(-1)[2]?.replyToMessageId === '-2040798711', JSON.stringify(sent.at(-1)));
 
 // 批外旧消息 —— 与 reverse_image_source 同源的缺陷面：工具愿意去查存档，
 // 夹具必须证明"查存档这条路真的通"，不能只覆盖窗口内那一种。
@@ -97,6 +125,7 @@ await executeTool(defs, ctxOf({ transcription: queue, store }), 'transcribe_vide
 ok('窗口外的旧消息经存档回退也能取到视频', jobs.at(-1).url === 'https://example.com/old.mp4', jobs.at(-1).url);
 
 const beforeRejects = jobs.length;
+const sentBeforeRejects = sent.length;
 const noVideo = await executeTool(defs, ctxOf({
   transcription: queue,
   triggerEntries: [{ mid: '7', media: [{ kind: 'image', url: 'https://example.com/a.png' }] }]
@@ -121,15 +150,22 @@ ok('url 与 messageId 都缺时明确告知，且不建任务',
 
 const noQueue = await executeTool(defs, ctxOf({}), 'transcribe_video', { url: 'https://example.com/v.mp4' });
 ok('缺 transcription 依赖时返回友好错误而不是抛', noQueue.isError === true && noQueue.content.includes('未启用'));
+ok('以上四种"任务根本没建起来"的情形一律不发回执（说了要先看看就一定真的在转）',
+  sent.length === sentBeforeRejects, `多发了 ${sent.length - sentBeforeRejects} 条`);
 
 // 队列给的中文原因要原样转述（它与 `/转写` 命令路径同源，不能在这里被换成一句泛泛的失败）。
 // 用一个没记过账的 chatKey：额度是**在 enqueue 之前**消耗的，本群前面三条用例已经用完默认的 3 次。
+const sentBeforeRejected = sent.length;
 const rejected = await executeTool(defs, ctxOf({
   chatKey: 'group:77002',
   transcription: { enqueue: () => { throw new TranscriptionError('validation', 'DISABLED', '转写服务未启用'); } }
 }), 'transcribe_video', { url: 'https://example.com/v.mp4' });
 ok('转写被队列拒绝时转述队列给的原因',
   rejected.isError === true && rejected.content === '错误：转写服务未启用', rejected.content);
+// 回执排在 enqueue **之后**（enqueue 同步做完 URL 安全校验/凭证/FFmpeg/去重，抛错发生在建任务之前）
+// —— 把回执挪到前面，这条就会红。
+ok('入队抛错时不发回执（证明回执排在 enqueue 之后）',
+  sent.length === sentBeforeRejected, `多发了 ${sent.length - sentBeforeRejected} 条`);
 
 // ── 成本闸门：超限不建任务 ───────────────────────────────────────
 // 用一个**全新的 chatKey**：模块级闸门是单例，前面几条用例已经在本群记过账，
@@ -141,11 +177,14 @@ const gateQueue = { enqueue: ({ url }) => { gateJobs.push(url); return { id: 'ga
 const gateCtx = () => ctxOf({ transcription: gateQueue, chatKey: 'group:77001' });
 
 const gateFirst = await executeTool(defs, gateCtx(), 'transcribe_video', { url: 'https://example.com/1.mp4' });
+const sentAfterGateFirst = sent.length;
 const gateSecond = await executeTool(defs, gateCtx(), 'transcribe_video', { url: 'https://example.com/2.mp4' });
 ok('未超限的第一次正常建任务', gateFirst.isError !== true, gateFirst.content);
 ok('超过每群每小时上限时拒绝，且被拒的那一次不建任务',
   gateSecond.isError === true && gateSecond.content.includes('太频繁') && gateJobs.length === 1,
   `jobs=${gateJobs.length} content=${gateSecond.content}`);
+ok('被限频拒绝时同样不发回执（回执不是"我收到了"的空头支票）',
+  sent.length === sentAfterGateFirst, `多发了 ${sent.length - sentAfterGateFirst} 条`);
 
 // ── 配置默认值与钳制 ────────────────────────────────────────────
 ok('转写新增两个配额字段有默认值',
@@ -198,6 +237,14 @@ const trToolSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/agent/tools
 ok('转写工具里没有关键词闸门（"该不该转"交回模型判断）',
   !trToolSrc.includes('什么视频') && !trToolSrc.includes('requestText'));
 ok('转写工具在建任务前先消耗调用额度', trToolSrc.includes('budget.take(ctx.chatKey)'));
+ok('模型自主路径以 assisted 入队', trToolSrc.includes("mode: 'assisted'"));
+ok('回执排在 enqueue 之后（说了「我先看看」就一定是真的入了队）',
+  trToolSrc.indexOf('queue.enqueue') < trToolSrc.indexOf('我先看看'));
+// 从回执那句切到"已加入转写队列"的返回：中间必须有一个 catch。
+// 去掉内层 try/catch 后，这段里就只剩注释与 return —— 而实际后果是"客套话没发出去"
+// 会被外层捕获报成"转写失败"（转写其实已经入队了）。
+ok('回执与真正的转写分开捕获（客套话没发出去不能被报成转写失败）',
+  /\}\s*catch/.test(trToolSrc.slice(trToolSrc.indexOf('我先看看'), trToolSrc.indexOf('已加入转写队列'))));
 
 const runnerSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/agent/runtime/agent-runner.ts'), 'utf8'));
 ok('未启用的能力不进模型工具集（按配置过滤，与既有视觉/搜索过滤同款）',

@@ -3,7 +3,7 @@ import { PROMPT_CATALOG } from '../../core/prompt-catalog.js';
 import { todayKey } from '../../core/util.js';
 import { chatCompletion } from '../../llm/llm.js';
 import { currentProviders } from '../../llm/providers.js';
-import { isSystemRecord } from '../../chat/store.js';
+import { isPersonMessage } from '../../chat/store.js';
 import { errorMessage, extractJsonObject } from '../shared/json-parse.js';
 import type { ChatStore } from '../../chat/store.js';
 import type { MemoryStore } from '../../chat/memory.js';
@@ -233,11 +233,13 @@ export class MemoryConsolidator {
     const uidToName = new Map<string, string>();
     for (const m of this.deps.store.recent(chatKey, { limit: 2000 })) {
       if (m.self || !m.senderId) continue;
-      // 压缩摘要 / 人工备注都不是群友发言，不跳过就会造出幻影成员
+      // 压缩摘要 / 人工备注 / 转写结果都不是群友发言，不跳过就会造出幻影成员
       // （名字"聊天记录摘要"），进而生成"对聊天记录摘要的印象"这种幻觉。
       // 这里用条目类型判定，而不是往 PLACEHOLDER_NAMES 里塞名字：那个表是按
       // **名字**匹配的，而问题出在 kind。
-      if (isSystemRecord(m)) continue;
+      // （上面 `!m.senderId` 已经挡掉了转写结果，这里用 isPersonMessage 是为了
+      //   让"什么算人"只有一处定义，不靠某个字段恰好为空。）
+      if (!isPersonMessage(m)) continue;
       const uid = String(m.senderId);
       memberMsgCount.set(uid, (memberMsgCount.get(uid) || 0) + 1);
       const nm = String(m.senderName || '').trim();

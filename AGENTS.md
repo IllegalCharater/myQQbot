@@ -1,7 +1,7 @@
 # QQ Agent 项目长期开发记忆
 
 > 这是供后续开发者与编码 Agent 使用的长期上下文。开始修改前先读本文，再按需阅读 `README.md` 和 `docs/ts-migration-plan.md`。
-> 最后核对：2026-09-28。
+> 最后核对：2026-09-29。
 
 ## 项目定位
 
@@ -129,6 +129,8 @@ OneBot 入站
 
 Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息存档、历史摘要和成员记忆。
 
+链路另有一条**异步回流**入口：后台转写完成后把一条 `kind:'transcript'` 的【转写结果】写进存档并推入窗口，走同一套「窗口 → 响应判定 → runAgent」。它与众不同的是那次运行**拿不到任何 tool result**（转写是在更早一次运行里入队的），所以正确性只能由 system prompt 规则与窗口判定承载，不能指望上下文里留着工具调用痕迹。
+
 ## 上下文的四种数据必须分开
 
 1. 当前新消息窗口：`ContextWindow` 私有滑动窗口，只保留最新 `maxContextMessages` 条并决定【本次唤醒】。
@@ -144,6 +146,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - 是否回复都要消费已经判断过的消息，防止旧消息反复成为“本次新消息”。
 - 原始历史以本轮 `triggerEntries` 最早消息为边界，只从边界之前读取；当前批只进【本次唤醒】。
 - 内部统一使用 `historyCount/historyLimit`，不要重新引入 `contextLimit`。
+- **转写结果（`kind:'transcript'`）是一等窗口条目，且两个谓词给出的答案相反**：`isSystemRecord` 必须**不**认它（认了它就永远进不了窗口），`isPersonMessage` 必须认它（它的 `senderId` 是空串，否则会凭空多出一个叫“转写”的成员）。它必须 `read:false`——写 `true` 会落进 `#lastSeenId` 水位线之下：进程内刚写入时看得见，**重启后永久不可见**。窗口里只要有它，`evaluateWindowTrigger` 无条件响应（`responseTier:0` / `reason:'转写结果'`）；**`forceWake` 绕不过档位判定**，这是唯一落点，且它必须不读 `roll`（`#resolvePendingResponse` 有 `scheduleWake`/`wake` 两个调用点）。规则作用于**整批**。
 
 ## 提示词维护规则
 

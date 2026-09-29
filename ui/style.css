@@ -467,6 +467,10 @@ body {
    —— 摘要是模型生成的、备注是人写的，两者的可操作范围不一样（摘要不能手改） */
 .archive-table .note-row td { background: rgba(120,200,140,.07); }
 .archive-table .note-row .w { color: var(--green); font-style: italic; }
+/* 转写结果（kind:'transcript'）：异步任务的产物，同样不是群友说的话。
+   再换一种色调，让"这段是机器转出来的"一眼可辨 —— 它和摘要一样不能手改。 */
+.archive-table .transcript-row td { background: rgba(200,160,90,.07); }
+.archive-table .transcript-row .w { color: var(--orange); font-style: italic; }
 .archive-table .ops { white-space: nowrap; width: 1%; }
 .archive-table .ops .btn { padding: 2px 7px; font-size: 11.5px; }
 

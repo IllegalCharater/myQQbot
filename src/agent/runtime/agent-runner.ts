@@ -12,6 +12,7 @@ import { parseInlineToolCalls } from '../shared/inline-tool-parser.js';
 import { isRecord, safeParse } from '../shared/json-parse.js';
 import type { ChatMessage, SessionRecord } from '../../chat/types.js';
 import type { ChatStore } from '../../chat/store.js';
+import { isPersonMessage } from '../../chat/store.js';
 import type { MemoryStore } from '../../chat/memory.js';
 import type { StickerManager } from '../../stickers/sticker-manager.js';
 import type { SendQueue } from '../../qq/sender.js';
@@ -167,7 +168,9 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       // ContextWindow.batch() 给的是深拷贝；把它随本轮工具上下文固定下来，
       // 读图时即使实时存档已裁剪/删除该消息，也仍能读取本轮真正看见的媒体定位信息。
       triggerEntries,
-      requesterId: String([...triggerEntries].reverse().find((m) => !m.self)?.senderId || ''),
+      // 只认"人"的发言：一批里只有转写结果时，取最后一条非 self 的 senderId 会得到空串，
+      // 下游拿它当键的地方（如 jmcomic 的 commandKey）会静默退化成 'unknown'。
+      requesterId: String([...triggerEntries].reverse().find((m) => !m.self && isPersonMessage(m))?.senderId || ''),
       selfId: host.onebot.selfId,
       selfNickname,
       botName: cfg.persona.botName,

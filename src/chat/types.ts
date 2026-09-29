@@ -10,6 +10,21 @@ export interface DigestRecord extends Record<string, unknown> {
   summary?: string;
 }
 
+/**
+ * 转写结果条目（kind:'transcript'）的结构化事实。
+ *
+ * 和 DigestRecord 同一个取向：数据只记**发生了什么**（`chars` 是**原文全长**、
+ * `truncated` 是"条目正文只是开头"），"原文共 N 字，此处为开头部分"这句话怎么写
+ * 由渲染方（prompt-builder 的 formatEntry）决定。不回填"完整文件发出去没有"之类的
+ * 投递结果——那会让投递顺序变成提示词的一部分。
+ */
+export interface TranscriptRecord extends Record<string, unknown> {
+  /** 识别出的原文总字符数；条目正文被截断时它大于正文长度。 */
+  chars: number;
+  /** 条目正文是否只是原文开头（原文超过单条上限）。 */
+  truncated: boolean;
+}
+
 export interface ChatMessage extends Record<string, unknown> {
   id: number;
   ts: number;
@@ -24,6 +39,7 @@ export interface ChatMessage extends Record<string, unknown> {
   kind?: string;
   media?: MediaEntry[];
   digest?: DigestRecord;
+  transcript?: TranscriptRecord;
   reply?: unknown;
 }
 

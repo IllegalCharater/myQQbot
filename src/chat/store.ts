@@ -61,13 +61,36 @@ function archiveFile(chatKey: string) {
 }
 
 /**
+ * 进入动态唤醒窗口时**必须排除**的 kind：压缩摘要（digest）与面板插的人工备注（note）。
+ *
+ * 这个集合回答的是"它该不该占一次唤醒"，`isWakeEligibleIncoming` 直接用它。
+ * 别把转写结果（transcript）加进来 —— 它恰恰**必须**进窗口让模型看到。
+ */
+const NON_WAKE_KINDS = new Set(['digest', 'note']);
+
+/**
+ * 按"人"统计/取样时要跳过的 kind：上面两种，**再加**转写结果。
+ *
+ * 转写结果不是某个群友说的话（senderId 是空串），不跳过就会在"活跃成员"里
+ * 多出一个查无此人的幽灵成员，进而生成对它的印象。
+ */
+const NON_PERSON_KINDS = new Set(['digest', 'note', 'transcript']);
+
+/**
  * "不是某人说的话"的条目：压缩摘要（kind:'digest'）与面板插的人工备注（kind:'note'）。
  *
- * 凡是要按"人"来统计/取样的地方都得先用它过滤 —— 否则摘要的 senderId('digest')
- * 或备注的空 senderId 会变成群里一个查无此人的幽灵成员。
+ * ⚠️ 这是两个问题里**较窄**的那个（= 不进唤醒窗口）。"它算不算一个人的发言"
+ * 是另一个问题，用 `isPersonMessage` —— 两者对转写结果的答案**故意相反**：
+ * 转写结果要进窗口（所以不在这里），但不是人（所以在那边）。合并成一个函数
+ * 会让转写结果二选一地错一边。
  */
 export function isSystemRecord(m: ChatMessage | null | undefined) {
-  return m?.kind === 'digest' || m?.kind === 'note';
+  return NON_WAKE_KINDS.has(String(m?.kind ?? ''));
+}
+
+/** 这条条目是不是"某个群友说的话"。按人统计/取样的地方用它（如 activeMembers）。 */
+export function isPersonMessage(m: ChatMessage | null | undefined): boolean {
+  return !!m && !NON_PERSON_KINDS.has(String(m.kind ?? ''));
 }
 
 /** 是否属于动态唤醒窗口；确定性命令仍是用户消息，只是不再交给 LLM。 */
@@ -501,16 +524,56 @@ export class ChatStore {
     return entry;
   }
 
+  /**
+   * 追加一条**转写结果**（kind:'transcript'）：异步任务的产物，不是群友说的话。
+   *
+   * `read:false` 是关键，**不要**照抄 insertNote 的 `read:true`：窗口播种时
+   * `#lastSeenId` 取的是"最长的一段 read===true 前缀"，写成已读的条目会落在水位线
+   * **之下** —— 进程内看得见、重启后永久不可见。转写结果要进窗口被响应判定看见，
+   * 就必须是未读的。
+   *
+   * `senderName:'转写'` 是给"等待中"会话的摘要用的（wake-scheduler 写
+   * `${senderName || senderId}：…`），两者都空会渲染成 `：<正文>`。
+   * `senderId` 保持空串：它是机器生成的，任何按 QQ 号的匹配都不该认上它。
+   *
+   * 追加在末尾（不像 insertNote 那样按 ts 找位置）：结果是**当下**才产生的，
+   * 不是给历史补的一条批注。
+   */
+  appendTranscript(chatKey: string, { text, ts = Date.now(), truncated = false, chars = 0 }: {
+    text?: unknown; ts?: number; truncated?: boolean; chars?: number;
+  } = {}) {
+    const st = this.#state(chatKey);
+    const body = String(text ?? '');
+    const entry: ChatMessage = {
+      id: st.nextLocalId++,
+      mid: null,
+      ts: Number(ts) || Date.now(),
+      senderId: '',
+      senderName: '转写',
+      text: body,
+      self: false,
+      read: false,
+      reply: null,
+      media: [],
+      kind: 'transcript',
+      transcript: { chars: Math.max(0, Number(chars) || body.length), truncated: truncated === true }
+    };
+    st.messages.push(entry);
+    this.#trim(st);
+    saveChat(st);
+    return entry;
+  }
+
   /** 最近 senderId 出现过的活跃成员（带最后发言时间）。 */
   activeMembers(chatKey: string, limit = 10) {
     const st = this.#state(chatKey);
     const map = new Map<string, { userId: string; name: string; lastTs: number; count: number }>();
     for (const m of st.messages) {
       if (m.self) continue;
-      // 压缩摘要 / 人工备注都是系统生成的，不是人：不跳过就会在"活跃成员"里
-      // 凭空多出幻影成员（摘要的 senderId 是 'digest'，备注是空串），
+      // 压缩摘要 / 人工备注 / 转写结果都不是人：不跳过就会在"活跃成员"里
+      // 凭空多出幻影成员（摘要的 senderId 是 'digest'，另外两种是空串），
       // 进而污染群友印象。
-      if (isSystemRecord(m)) continue;
+      if (!isPersonMessage(m)) continue;
       const prev = map.get(m.senderId);
       if (!prev || prev.lastTs < m.ts) {
         map.set(m.senderId, { userId: m.senderId, name: m.senderName, lastTs: m.ts, count: (prev?.count || 0) + 1 });
@@ -542,6 +605,9 @@ export class ChatStore {
    *     永远直接来自原文。代价是纪要会缓慢累积（每条 ≤4000 字），
    *     相比原文的增长量级可以忽略。
    *     （人工备注同样跳过：它是给人看的批注，摘要它的成本换不来信息。）
+   *     **转写结果不跳过**（它不是 digest/note）：它是实打实的内容，会被压缩成纪要
+   *     才不至于在存档里只增不减。这条是刻意的，别顺手把它并进 isSystemRecord ——
+   *     那会同时把它挡在唤醒窗口之外（见 NON_WAKE_KINDS 的注释）。
    *
    * ⚠️ 返回的是原数组的切片（元素是**引用**）：调用方只能读，不能改内容。
    *    "按字符预算再裁一刀"由调用方在拼完提示词后做 —— 只有拼提示词的那一步
@@ -667,7 +733,12 @@ function normalizeMessage(value: unknown): ChatMessage | null {
     senderName: String(value.senderName ?? ''),
     self: value.self === true,
     read: value.read === true,
-    media: Array.isArray(value.media) ? value.media.filter(isRecord).map((m) => ({ ...m, kind: String(m.kind ?? '') })) : []
+    media: Array.isArray(value.media) ? value.media.filter(isRecord).map((m) => ({ ...m, kind: String(m.kind ?? '') })) : [],
+    // 与 media 同样窄化：手改过的聊天 JSON 不能把任意结构塞进提示词，
+    // 渲染方（formatEntry）只读这两个字段。
+    ...(isRecord(value.transcript)
+      ? { transcript: { chars: Number(value.transcript.chars) || 0, truncated: value.transcript.truncated === true } }
+      : {})
   } as ChatMessage;
 }
 
