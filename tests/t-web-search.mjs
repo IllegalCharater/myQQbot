@@ -15,7 +15,7 @@ import { load } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-websearch-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
 
-const { webSearch, sanitizeQuery, yandexSearch, bookmarkList, resolveBookmarkSite, parseSiteSearch } = await load('media/web-search.js');
+const { webSearch, sanitizeQuery, yandexSearch, bookmarkList, resolveBookmarkSite, parseSiteSearch, siteSearchCandidates, probeSiteSearch } = await load('media/web-search.js');
 const { updateConfig, getConfig } = await load('core/config.js');
 const { buildSystemPrompt } = await load('agent/prompting/prompt-builder.js');
 
@@ -321,7 +321,99 @@ await new Promise((r) => emptySrv.close(r));
 await new Promise((r) => badSrv.close(r));
 await new Promise((r) => ssrv.close(r));
 
-console.log('\n═══ 8. bookmarkMode=web：名单保留，但不传 site 时完全不理会它 ═══');
+console.log('\n═══ 8. 自动检测站内搜索地址（probeSiteSearch）═══');
+// 用一个本地假站点模拟三种真实形态，**必须真发请求**才能验到探测逻辑（对照查询、
+// 减基线、时间预算都是行为，不是文本）。
+let probeMode = 'html', probeHits = 0;
+const probeNav = '<a href="/about">关于</a><a href="/login">登录</a><a href="/docs">文档</a>'
+  + '<a href="/blog">博客</a><a href="/pricing">价格</a><a href="/contact">联系</a>'
+  + '<a href="/faq">常见问题</a><a href="/terms">条款</a>';
+const psrv = http.createServer((req, res) => {
+  probeHits++;
+  const u = new URL(req.url, 'http://x');
+  res.writeHead(200, { 'content-type': 'text/html' });
+  if (u.pathname === '/') return res.end(`<html><body>${probeNav}</body></html>`);
+  if (probeMode === 'js') {
+    // JS 渲染：搜不搜都是同一个空壳（导航与首页完全一致）
+    return res.end(`<html><body>${probeNav}<div id="root"></div></body></html>`);
+  }
+  // 参数名要覆盖 hint 用的那个（`wd`），否则夹具对 hint 返回空页、把 hint 判成不可用 ——
+  // 那是夹具的漏洞，不是被测逻辑的问题（本节初版就这么假红了一条）
+  const q = u.searchParams.get('q') || u.searchParams.get('wd') || '';
+  if (!q) return res.end(`<html><body>${probeNav}</body></html>`);
+  if (probeMode === 'classed') {
+    // 结果容器带类名，但通用解析收不到（类名元素里没有 <a> 之外的可解析结构时也一样）
+    return res.end(`<html><body>${probeNav}`
+      + `<li class="mw-search-result"><a href="/wiki/${encodeURIComponent(q)}-1">条目 ${q} 一</a><div>关于 ${q} 的足够长的摘要文本。</div></li>`
+      + `<li class="mw-search-result"><a href="/wiki/${encodeURIComponent(q)}-2">条目 ${q} 二</a><div>另一条足够长的摘要文本内容。</div></li>`
+      + '</body></html>');
+  }
+  // 普通 HTML 结果页：真结果 + 首页那批导航（导航必须在减基线时被去掉）
+  return res.end(`<html><body>${probeNav}`
+    + `<li><a href="/wiki/${encodeURIComponent(q)}-1">条目 ${q} 一</a><div>关于 ${q} 的足够长的摘要文本。</div></li>`
+    + `<li><a href="/wiki/${encodeURIComponent(q)}-2">条目 ${q} 二</a><div>另一条足够长的摘要文本内容。</div></li>`
+    + `<li><a href="/wiki/${encodeURIComponent(q)}-3">条目 ${q} 三</a><div>第三条足够长的摘要文本内容。</div></li>`
+    + '</body></html>');
+});
+await new Promise((r) => psrv.listen(0, '127.0.0.1', r));
+const pBase = `http://127.0.0.1:${psrv.address().port}`;
+
+// ① 模板生成：常见的参数名与路径都要有
+const cands = siteSearchCandidates(`${pBase}/`);
+ok('候选模板覆盖常见参数名（q/query/search/keyword/wd）',
+  ['q', 'query', 'search', 'keyword', 'wd'].every((p) => cands.some((c) => c.includes(`?${p}={q}`))),
+  JSON.stringify(cands.slice(0, 3)));
+ok('候选模板都指向同一个源', cands.every((c) => c.startsWith(pBase)), JSON.stringify(cands));
+ok('认不出的地址返回空数组（不抛错）', siteSearchCandidates('a b').length === 0);
+// 宿主名必须像域名：`不是地址` 这种会被 WHATWG URL 的 punycode 接受（变成 xn--…），
+// 若不拦就会去打一个无意义域名、白等一轮超时
+ok('单标签宿主名被拒（不给 punycode 留机会）',
+  siteSearchCandidates('不是地址').length === 0
+  && siteSearchCandidates('localhost').length === 0, JSON.stringify(siteSearchCandidates('localhost').slice(0, 1)));
+
+// ② HTML 结果页：应被检出，且计数是**减掉导航后**的
+probeMode = 'html';
+let pr = await probeSiteSearch(pBase, { budgetMs: 15000 });
+ok('普通 HTML 结果页被检出', pr.ok === true, JSON.stringify(pr.note));
+ok('检出的模板含 {q}', String(pr.searchUrl || '').includes('{q}'), pr.searchUrl);
+ok('计数是减掉导航后的真结果（3 条，不是导航+3）',
+  String(pr.note).includes('剩 3 条'), String(pr.note));
+// 这条是本节的核心：若不减基线，导航那 8 条会让任何页面都"看起来有结果"
+ok('探测过程确实取了基线（诊断里有通用候选记录）',
+  Array.isArray(pr.diagnostics) && pr.diagnostics.some((d) => d.kept !== undefined), JSON.stringify(pr.diagnostics?.slice(0, 2)));
+
+// ③ JS 渲染页：必须判为不可用（真结果与基线完全相同）
+probeMode = 'js';
+pr = await probeSiteSearch(pBase, { budgetMs: 8000 });
+ok('JS 渲染的站点被拒（导航减掉后一条不剩）', pr.ok === false, JSON.stringify(pr.note));
+ok('拒绝时的文案说明原因并给出可执行做法',
+  String(pr.note).includes('JavaScript') && String(pr.note).includes('{q}'), String(pr.note).slice(0, 120));
+
+// ④ 通用解析收不到、但带容器类名时能收到
+probeMode = 'classed';
+pr = await probeSiteSearch(pBase, { budgetMs: 15000 });
+ok('带容器类名的结果页被检出', pr.ok === true, JSON.stringify(pr.note));
+ok('检出时一并给出 resultClass', pr.resultClass === 'mw-search-result', JSON.stringify(pr.resultClass));
+
+// ⑤ hint 优先：用户自己贴的地址必须排在自动候选之前被采纳
+probeMode = 'html';
+pr = await probeSiteSearch(pBase, { hint: `${pBase}/custom?wd={q}`, budgetMs: 15000 });
+ok('hint 被优先采纳', pr.ok === true && String(pr.searchUrl).includes('/custom?wd={q}'),
+  `searchUrl=${JSON.stringify(pr.searchUrl)} note=${JSON.stringify(pr.note)} diag=${JSON.stringify((pr.diagnostics || []).slice(0, 3))}`);
+// hint 缺 {q} 时必须被忽略（否则会去搜一个拼不出查询词的地址）
+pr = await probeSiteSearch(pBase, { hint: `${pBase}/custom`, budgetMs: 15000 });
+ok('hint 缺 {q} 时被忽略，退回自动候选',
+  pr.ok === true && !String(pr.searchUrl).includes('/custom'), JSON.stringify(pr.searchUrl));
+
+// ⑥ 时间预算：慢站不能把按钮挂死
+probeMode = 'html';
+const slowStart = Date.now();
+const slow = await probeSiteSearch('http://10.255.255.1', { timeoutMs: 3000, budgetMs: 5000 });
+const slowMs = Date.now() - slowStart;
+ok('不可达地址在预算内返回（不挂死）', slow.ok === false && slowMs < 20000, `${slowMs}ms`);
+await new Promise((r) => psrv.close(r));
+
+console.log('\n═══ 9. bookmarkMode=web：名单保留，但不传 site 时完全不理会它 ═══');
 updateConfig({ webSearch: { ...baseSearch, bookmarks: [bm('book', 'book.mark')], bookmarkMode: 'web' } });
 scopedHits = 0; generalHits = 0;
 out = await webSearch('测试查询');

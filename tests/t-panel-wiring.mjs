@@ -152,9 +152,19 @@ const searchSave = seg("if (sec === 'search')", "if (sec === 'image-source')");
 // 收藏夹现在是「枚举值 + 网页地址 + 用途」三列，用 `data-bm-*` 标记每一格。
 // 这三个属性名是 save.js 逐行取值的**唯一接口**：改名只改一端会静默读出 undefined，
 // 于是每一项都因"三项不全"被丢弃 —— 表现为"收藏夹存不进去"，而没有任何报错。
-for (const attr of ['data-bm-key', 'data-bm-url', 'data-bm-purpose', 'data-bm-searchurl', 'data-bm-resultclass']) {
-  ok(`${attr} 在渲染里出现（save.js 靠它取值）`, new RegExp(attr).test(js));
+for (const attr of ['data-bm-key', 'data-bm-url', 'data-bm-purpose', 'data-bm-searchurl', 'data-bm-resultclass', 'data-bm-probe', 'data-bm-status']) {
+  ok(`${attr} 在渲染里出现（save.js 与自动检测靠它取值）`, new RegExp(attr).test(js));
 }
+// 自动检测按钮：必须有 try/finally 复位 disabled，否则一次失败就永久点不动
+ok('「检测」按钮绑了 click 且跑完会复位 disabled',
+  /closest\('\[data-bm-probe\]'\)/.test(js) && /\.finally\(\(\) => \{ probeBtn\.disabled = false; \}\)/.test(js));
+ok('检测请求打到 /api/search-bookmark/probe 且带上 hint',
+  /api\('\/api\/search-bookmark\/probe', \{ method: 'POST', body: JSON\.stringify\(\{ site, hint \}\) \}\)/.test(js));
+// 检测出的类名**只在有值时才覆盖**：检测不出类名不代表用户原来填的是错的
+ok('检测出的 resultClass 只在有值时才写入（不覆盖用户手填的值）',
+  /if \(clsInput && res\.resultClass\) clsInput\.value = res\.resultClass;/.test(js));
+ok('检测结果就地显示在按钮下方（不用去别处找结论）',
+  /row\?\.querySelector\('\[data-bm-status\]'\)/.test(js));
 // 后两列是**可选**的：空值必须整键不写（而不是写空串）。写空串会让后端拿到一个
 // "存在但无意义"的值，而 bookmarkList() 按"非空才带"处理 —— 两处口径不同时，
 // 配置页显示有值、运行期当没有，正是那种查半天的问题。

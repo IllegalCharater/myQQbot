@@ -119,7 +119,14 @@ export function renderBookmarkRows(bookmarks) {
     + `<td><input type="text" data-bm-key value="${esc(key)}" placeholder="wiki" /></td>`
     + `<td><input type="text" data-bm-url value="${esc(url)}" placeholder="zh.wikipedia.org" /></td>`
     + `<td><input type="text" data-bm-purpose value="${esc(purpose)}" placeholder="查百科条目、定义、背景事实" /></td>`
-    + `<td><input type="text" data-bm-searchurl value="${esc(searchUrl)}" placeholder="https://…/search?q={q}" /></td>`
+    + `<td>`
+    + `<div style="display:flex;gap:6px;align-items:center">`
+    + `<input type="text" data-bm-searchurl value="${esc(searchUrl)}" placeholder="https://…/search?q={q}" style="flex:1" />`
+    + `<button class="btn btn-small" data-bm-probe type="button" title="自动检测这个站的站内搜索地址">检测</button>`
+    + `</div>`
+    // 检测结果就地显示在这一行下面：把结论放在按钮旁边，用户不用去别处找
+    + `<div class="muted" data-bm-status style="font-size:11px;margin-top:3px"></div>`
+    + `</td>`
     + `<td><input type="text" data-bm-resultclass value="${esc(resultClass)}" placeholder="（留空=通用解析）" /></td>`
     + '<td><button class="btn btn-small btn-danger" data-bm-del type="button" title="删除这条">×</button></td>'
     + '</tr>';

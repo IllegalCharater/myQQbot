@@ -652,6 +652,231 @@ export async function webSearch(query: unknown, site?: unknown): Promise<SearchR
   return mergeScoped(clean, all.map((item) => item.host), sites);
 }
 
+// ── 站内搜索地址的自动探测（设置页那个「自动检测」按钮的后端）────────────
+//
+// **它必须用对照查询，不能只看"有没有解析出结果"**：真实搜索页里满是导航/页脚链接，
+// 通用启发式会把它们当结果。实测：GitHub 的结果页用真查询解析出 124 条、用乱串解析出
+// 66 条（全是导航），**只看真查询就会把一个只有噪声的模板判成可用**。所以判据是
+// "真查询的条数要明显多于乱串查询"——JS 渲染的站点两边一样多（MDN 实测 15 vs 15），
+// 于是被正确拒掉。
+//
+// 已知边界（写在这里免得下次误以为是 bug）：**带结果容器类名的候选只做真查询**，
+// 不跑对照。因为稀有类名本身就是强证据（实测 GitHub 的 `search-title` 真查询命中 10 条、
+// 乱串命中 0 条），而"每个候选都跑两次"会把 12 次请求变成 24 次。
+
+/** 探测用的"必然搜不到"的乱串：真查询的条数要明显多于它，才算这个模板真的在出结果。 */
+const PROBE_JUNK_QUERY = 'zzqxvbnmklpoiuytrewqqzxcv';
+
+/** 探测用的真查询。选一个**几乎任何站点都该有结果**的通用词，避免"该站确实没这个内容"。 */
+const PROBE_QUERY = 'test';
+
+/**
+ * 候选结果容器类名。都来自真机观察，不是猜的：
+ *   · `mw-search-result` —— MediaWiki 的 Special:Search；
+ *   · `b_algo`           —— Bing 的结果块（注意：反爬时 Bing 会把结果标记整个去掉，
+ *                           实测同一个模板有时 9 条、有时 0 条 —— 所以它只是候选，不是保证）；
+ *   · `search-title`     —— GitHub 搜索；
+ *   · `fps-result`       —— Discourse 论坛。
+ */
+const PROBE_CLASS_CANDIDATES = ['mw-search-result', 'b_algo', 'search-title', 'fps-result'];
+
+/** 把模板里的 `{q}` 换成查询词。 */
+function fillProbe(template: string, query: string): string {
+  return template.split('{q}').join(encodeURIComponent(query));
+}
+
+/** 一条 URL 的规范化键（去 fragment 与尾斜杠），用于"这条链接在首页上也有吗"的判断。 */
+function linkKey(url: string): string {
+  try {
+    const u = new URL(url);
+    u.hash = '';
+    return u.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 一页 HTML 里所有链接的规范化键集合。
+ *
+ * 用途是**减去"这个站本来就有的链接"**：真实搜索页里满是导航/页脚，通用解析会把它们当
+ * 结果。实测 Bing 的结果页对真查询与乱串查询都解析出 **16 条**（全是导航），
+ * GitHub 是 130 vs 66 —— 所以"有没有解析出结果"完全不能作为判据。
+ * 与首页取差集之后，只剩"因为这次搜索才出现"的链接，那才是真结果。
+ */
+function linkKeysIn(html: string, pageUrl: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const href = m[1].match(/\bhref="([^"]*)"/i);
+    if (!href) continue;
+    try {
+      const u = new URL(decodeNumericEntities(href[1]).replace(/&amp;/g, '&').trim(), pageUrl);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+      const k = linkKey(u.toString());
+      if (k) out.add(k);
+    } catch { /* 认不出就跳过 */ }
+  }
+  return out;
+}
+
+/**
+ * 由一个站点首页/任意页面推出候选搜索地址模板。
+ *
+ * 只按**已经观察到的**参数名与路径组合，不穷举：五个通用查询参数 × 两个路径形态。
+ * 顺序即优先级 —— `?q=` 是最常见的，`/search?q=` 次之。
+ */
+export function siteSearchCandidates(input: string): string[] {
+  let origin = '';
+  let hostname = '';
+  try {
+    const url = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`);
+    origin = url.origin;
+    hostname = url.hostname;
+  } catch {
+    return [];
+  }
+  // **宿主名必须是个像域名的东西**（带点，或 IP 字面量）。少了这条，"不是地址"这种输入会被
+  // WHATWG URL 的 punycode 接受（变成 `https://xn--ihqq6tnb086g`），于是探测会去打一个
+  // 毫无意义的域名、白等一轮超时，用户却看不出是自己输错了。
+  if (!hostname.includes('.') && !/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) return [];
+  const params = ['q', 'query', 'search', 'keyword', 'wd'];
+  const paths = ['/search', '/'];
+  const out: string[] = [];
+  for (const path of paths) for (const p of params) out.push(`${origin}${path}?${p}={q}`);
+  return out;
+}
+
+export interface SiteSearchProbe {
+  ok: boolean;
+  /** 可用的模板（`ok` 为真时才有）。 */
+  searchUrl?: string;
+  /** 建议的结果容器类名（用了类名才有；空表示通用解析即可）。 */
+  resultClass?: string;
+  /** `ok` 为假时说明为什么。 */
+  note?: string;
+  /** 实际发出的请求数，便于用户判断"是不是试都没试"。 */
+  tried?: number;
+  /** 逐候选的实测计数，让用户能自己判断推荐值可不可信（而不是只给一个结论）。 */
+  diagnostics?: Array<{ template: string; resultClass?: string; kept?: number; raw?: number; error?: string }>;
+}
+
+/**
+ * 探测某个站点的站内搜索地址。
+ *
+ * `hint` 是用户**自己填的候选模板**（他在站内搜过一次、从地址栏抄下来的），优先级最高 ——
+ * 它是唯一能覆盖"参数名不在这几个里"或"结果在另一个主机上"（如 Bing 的
+ * `cn.bing.com` 出结果的是 `www.bing.com`）的办法。自动生成的候选只是兜底。
+ *
+ * 需要联网，所以调用方（HTTP 路由）负责先做 URL 校验与网络例外判断。
+ */
+export async function probeSiteSearch(
+  siteInput: string,
+  options: { hint?: string; timeoutMs?: number; budgetMs?: number } = {}
+): Promise<SiteSearchProbe> {
+  const timeoutMs = Math.max(3000, Math.min(20000, Number(options.timeoutMs) || 6000));
+  // 总预算：**必须有**。候选是 10 个通用 + 10×4 个类名组合，每个都可能在慢站上耗到超时，
+  // 实测 MDN 在没预算的一版里跑满 64 秒（用户对着按钮干等）。超预算就停止探测并如实说明。
+  const budgetMs = Math.max(4000, Number(options.budgetMs) || 12000);
+  const deadline = Date.now() + budgetMs;
+
+  const hintTemplate = String(options.hint ?? '').trim();
+  const generated = siteSearchCandidates(siteInput);
+  if (!generated.length && !hintTemplate) {
+    return { ok: false, note: '站点地址无法解析成 URL（形如 `https://example.com` 或 `example.com`）' };
+  }
+  // 用户给的候选排在第一位；它若不含 `{q}` 则整条丢弃（理由同配置层那条校验）
+  const candidates = [
+    ...(hintTemplate && hintTemplate.includes('{q}') ? [hintTemplate] : []),
+    ...generated.filter((c) => c !== hintTemplate)
+  ];
+
+  let tried = 0;
+  let budgetExceeded = false;
+  const diagnostics: NonNullable<SiteSearchProbe['diagnostics']> = [];
+
+  /** 取一页 HTML。失败返回 null；超预算返回 'budget'。 */
+  const fetchHtml = async (url: string): Promise<string | null | 'budget'> => {
+    if (Date.now() > deadline) { budgetExceeded = true; return 'budget'; }
+    tried++;
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+          'accept-language': 'zh-CN,zh;q=0.9'
+        },
+        signal: AbortSignal.timeout(Math.min(timeoutMs, Math.max(1000, deadline - Date.now()))),
+        redirect: 'follow'
+      });
+      if (!res.ok) return null;
+      return await res.text();
+    } catch {
+      return null;
+    }
+  };
+
+  // 站点自身的基线链接集合：拿"首页/普通页"当对照，用来把导航、页脚、侧栏减掉。
+  // **这是整套探测的判据所在**：不与基线比，任何真实搜索页都会"解析出十几条结果"，
+  // 而那十几条在乱串查询下一样存在（实测 Bing 16 vs 16、MDN 15 vs 15）。
+  const baseRaw = await fetchHtml(siteSearchCandidates(siteInput)[0]?.replace(/\/search\?q=\{q\}$/, '/') || siteInput);
+  const baseUrl = (() => { try { return new URL(siteInput).toString(); } catch { return siteInput; } })();
+  const baseline = baseRaw && baseRaw !== 'budget' ? linkKeysIn(baseRaw, baseUrl) : new Set<string>();
+
+  /** 一个模板是否真的在出结果：把"基线里已有的链接"减掉，看还剩几条。 */
+  const scoreTemplate = async (template: string, cls?: string): Promise<{ kept: number; raw: number } | null | 'budget'> => {
+    const html = await fetchHtml(fillProbe(template, PROBE_QUERY));
+    if (html === 'budget') return 'budget';
+    if (html === null) return null;
+    const raw = parseSiteSearch(html, fillProbe(template, PROBE_QUERY), cls).length;
+    // 按类名命中时不再减基线：类名本身已经把范围收到结果块上（Bing 的 b_algo、
+    // MediaWiki 的 mw-search-result 都不是导航用的类名）。
+    if (cls) return { kept: raw, raw };
+    const kept = parseSiteSearch(html, fillProbe(template, PROBE_QUERY), cls)
+      .filter((r) => !baseline.has(linkKey(r.url))).length;
+    return { kept, raw };
+  };
+
+  // ① 通用解析：只认"减掉基线后还剩 ≥3 条"的模板
+  let best: { url: string; kept: number; raw: number } | null = null;
+  for (const template of candidates) {
+    const s = await scoreTemplate(template);
+    if (s === 'budget') break;
+    if (!s) { diagnostics.push({ template, error: '取页失败' }); continue; }
+    diagnostics.push({ template, kept: s.kept, raw: s.raw });
+    if (s.kept < 3) continue;
+    if (!best || s.kept > best.kept) best = { url: template, kept: s.kept, raw: s.raw };
+  }
+  if (best) {
+    return {
+      ok: true, searchUrl: best.url, tried, diagnostics,
+      note: `通用解析：减掉导航后剩 ${best.kept} 条（原始 ${best.raw} 条）`
+    };
+  }
+
+  // ② 结果容器类名：类名把范围收窄到结果块，所以只看命中数（≥2 条）
+  for (const template of candidates) {
+    for (const cls of PROBE_CLASS_CANDIDATES) {
+      const s = await scoreTemplate(template, cls);
+      if (s === 'budget') break;
+      if (!s) { diagnostics.push({ template, resultClass: cls, error: '取页失败' }); continue; }
+      diagnostics.push({ template, resultClass: cls, kept: s.kept, raw: s.raw });
+      if (s.kept < 2) continue;
+      return { ok: true, searchUrl: template, resultClass: cls, tried, diagnostics, note: `按容器类名「${cls}」命中 ${s.kept} 条` };
+    }
+    if (budgetExceeded) break;
+  }
+
+  const tail = budgetExceeded ? `（已发 ${tried} 次请求后到时间上限，探测未跑完）` : '';
+  return {
+    ok: false,
+    tried,
+    diagnostics,
+    note: '没找到可用的站内搜索地址。常见原因：① 该站结果由 JavaScript 动态渲染（抓到的 HTML 里没有结果）；' +
+      '② 查询参数名不在这几个里（q/query/search/keyword/wd），或结果在别的主机上；' +
+      '③ 该站需要登录或被反爬拦截（反爬时连结果标记都会被去掉）。' +
+      '最可靠的做法：自己在站内搜一次，把地址栏里的 URL 贴到「站内搜索地址」栏，再把查询词换成 {q}。' + tail
+  };
+}
+
 /**
  * 「受限那一发 + 全网那一发」的并集，收藏夹命中排最前。
  *

@@ -1,5 +1,6 @@
 import { chatCompletion, resolveApiKey } from '../../llm/llm.js';
-import { customSearch } from '../../media/web-search.js';
+import { customSearch, probeSiteSearch } from '../../media/web-search.js';
+import { validateFetchUrl } from '../../media/safe-fetch.js';
 import {
   addModelsToProvider, currentProviders, fetchModelsFrom, removeModelFromProvider,
   setProviderKey, testAllProviders, testModelChat, testOneProvider, upsertProvider,
@@ -221,6 +222,30 @@ export const providerRoutes: Route[] = [
         const body = bodyRecord(await readBody(req).catch(() => ({}))); const result = await customSearch('qq agent 测试', String(body.providerId ?? '').trim() || null);
         return { status: 200, body: { ok: true, result: { ok: true, count: result.results.length, sample: result.results[0]?.title || '', latencyMs: Date.now() - startedAt } } };
       } catch (error) { return { status: 200, body: { ok: true, result: { ok: false, note: errorMessage(error), latencyMs: Date.now() - startedAt } } }; }
+    },
+  },
+  {
+    // 收藏夹的「自动检测站内搜索地址」。**只做 URL 校验 + 探测**，不写配置 ——
+    // 唯一的配置写入口仍是鉴权过的 `POST /api/config`（与 python-probe 同一条规矩：
+    // 别凭空开一个"用 HTTP 改配置"的旁路）。
+    method: 'POST', path: '/api/search-bookmark/probe', async handle(_ctx, req) {
+      const startedAt = Date.now();
+      const body = bodyRecord(await readBody(req).catch(() => ({})));
+      const site = String(body.site ?? body.url ?? '').trim();
+      if (!site) return { status: 400, body: { ok: false, error: '缺少 site' } };
+      // **先过 SSRF 校验**：这个端点会按用户给的域名去联网抓页面，是仓库里少数
+      // "由请求内容决定目标地址"的出口之一。`validateFetchUrl` 会拒掉非 http/https、
+      // URL 内嵌凭据、本机/内网/链路本地/云元数据地址，并做一次 DNS 解析检查。
+      // ⚠️ 已知残余风险（知情取舍，不是疏忽）：实际发请求用的是 `fetch`，它会**再解析一次**
+      // DNS，所以"解析后固定到已校验 IP"这层防护在这里不成立（`safeFetch` 才有那层）。
+      // 换来的是不必为探测再写一遍有界读取与逐跳校验；本端点仅管理员可达、只读、一次性。
+      try {
+        await validateFetchUrl(site);
+      } catch (error) {
+        return { status: 400, body: { ok: false, error: `站点地址不可用：${errorMessage(error)}` } };
+      }
+      const result = await probeSiteSearch(site, { hint: String(body.hint ?? '').trim() });
+      return { status: 200, body: { ok: true, result: { ...result, latencyMs: Date.now() - startedAt } } };
     },
   },
   {

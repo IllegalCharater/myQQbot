@@ -302,10 +302,43 @@ export function bindSettingsEvents(c) {
   });
   // 删除走事件委托：新增行是后插进来的，绑到具体按钮上会漏掉它们。
   $('#search-bookmarks-body')?.addEventListener('click', (event) => {
-    const btn = event.target instanceof Element ? event.target.closest('[data-bm-del]') : null;
-    if (!btn) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
     const body = $('#search-bookmarks-body');
     if (!body) return;
+    // ── 自动检测站内搜索地址 ──
+    const probeBtn = target.closest('[data-bm-probe]');
+    if (probeBtn) {
+      const row = probeBtn.closest('tr');
+      const status = row?.querySelector('[data-bm-status]');
+      const site = (row?.querySelector('[data-bm-url]')?.value || '').trim();
+      // 用户已经填了一半的地址当 hint 发过去：这是唯一能覆盖"参数名不在这几个里"
+      // 与"结果在另一个主机上"（如 cn.bing.com 的搜索其实由 www.bing.com 出结果）的办法。
+      const hint = (row?.querySelector('[data-bm-searchurl]')?.value || '').trim();
+      if (!site) { if (status) status.textContent = '请先填「网页地址」，检测要靠它找搜索入口'; return; }
+      probeBtn.disabled = true;
+      if (status) status.textContent = '检测中…（最多约 12 秒）';
+      api('/api/search-bookmark/probe', { method: 'POST', body: JSON.stringify({ site, hint }) })
+        .then((r) => {
+          const res = r?.result || {};
+          if (res.ok) {
+            const urlInput = row?.querySelector('[data-bm-searchurl]');
+            if (urlInput) urlInput.value = res.searchUrl || '';
+            const clsInput = row?.querySelector('[data-bm-resultclass]');
+            // 只在检测出类名时才覆盖：检测不出类名不代表用户原来填的是错的
+            if (clsInput && res.resultClass) clsInput.value = res.resultClass;
+            if (status) status.textContent = `✓ 已填入。${res.note || ''}（请自己搜一次确认结果对不对）`;
+          } else {
+            if (status) status.textContent = `✗ ${res.note || '检测失败'}`;
+          }
+        })
+        .catch((e) => { if (status) status.textContent = `✗ 检测请求失败：${e.message}`; })
+        .finally(() => { probeBtn.disabled = false; });
+      return;
+    }
+    // ── 删一行 ──
+    const btn = target.closest('[data-bm-del]');
+    if (!btn) return;
     btn.closest('tr')?.remove();
     // 删空了就补一个空行，否则用户没有可填的输入框（得先点"添加一条"才能开始填）
     if (!body.querySelector('tr[data-bm]')) body.insertAdjacentHTML('beforeend', renderBookmarkRows([]));
