@@ -120,6 +120,17 @@ export const DEFAULT_CONFIG = {
     //   · `purpose` 用途。**注入 system prompt 给模型当"该选哪一条"的依据** —— 这是枚举值
     //             能被真正用起来的关键：只给模型一个 `wiki` 而不说它是什么，等于没给。
     // 三项都限长：这条文本每轮都要进 system prompt，不设上限时 20 条能吃掉大块预算。
+    //
+    // 另有两个**可选**字段，用来把"限定站点"真正做成"站内搜索"：
+    //   · `searchUrl` 站内搜索地址模板，用 `{q}` 占位（如
+    //     `https://zh.wikipedia.org/w/index.php?search={q}`）。
+    //     **为什么必须有它**：实测 `cn.bing.com` 与 `www.bing.com` 对程序化请求**完全忽略
+    //     `site:` 限定符**（带与不带的结果逐字节相同，换个必然收录的站点也一样），
+    //     所以只靠拼 `site:` 等于没限定。填了模板就直接去那个站自己的搜索页取内容，
+    //     绕开搜索引擎。留空则退回 `site:` 行为（对自建 SearXNG 等仍有效）。
+    //   · `resultClass` 站内搜索页里"每条结果容器"的类名，用于解析。
+    //     留空时用**通用启发式**（见 media/web-search.ts 的 parseSiteSearch）——
+    //     抓取解析天生易碎，这个字段是页面改版时的自救通路（同 yandex 那四个选择器）。
     bookmarks: [],
     // 收藏夹的**默认行为**，只影响"模型没说搜哪个站点"时走哪条路：
     //   'prefer' —— 按关键字先问收藏夹、再补全网（收藏夹命中排最前）；
@@ -446,6 +457,12 @@ const BOOKMARK_KEY_RE = /^[A-Za-z0-9_-]+$/;
 /** 用途字段的长度上限。它每轮都进 system prompt，20 条不设限能吃掉大块预算。 */
 const MAX_BOOKMARK_PURPOSE = 60;
 
+/** 站内搜索地址模板的长度上限（防把整页 HTML 粘进输入框）。 */
+const MAX_BOOKMARK_SEARCH_URL = 500;
+
+/** 结果容器类名的长度上限（同上；类名本身通常只有十几字符）。 */
+const MAX_BOOKMARK_CLASS = 80;
+
 /** 枚举值是否合法（形状见 BOOKMARK_KEY_RE 的注释）。 */
 function isBookmarkKey(value: unknown): boolean {
   const key = String(value ?? '').trim();
@@ -590,7 +607,7 @@ function normalizeConfigShape<T>(input: T): T {
       usedKeys.add(candidate);
       return candidate;
     };
-    const bookmarks: Array<{ key: string; url: string; purpose: string }> = [];
+    const bookmarks: Array<{ key: string; url: string; purpose: string; searchUrl?: string; resultClass?: string }> = [];
     for (const item of rawBookmarks) {
       if (bookmarks.length >= MAX_BOOKMARK_SITES) break;
       // 旧形状：字符串 → 造一个枚举值，用途留空（用途空条目**仍然入库**，因为它是迁移来的，
@@ -610,7 +627,20 @@ function normalizeConfigShape<T>(input: T): T {
       if (!host || !isBookmarkKey(rawKey) || !purpose) continue;
       if (usedKeys.has(rawKey)) continue;   // 重复枚举值：先到先得，否则模型传一个键会命中两条
       usedKeys.add(rawKey);
-      bookmarks.push({ key: rawKey, url: host, purpose });
+      const entry: { key: string; url: string; purpose: string; searchUrl?: string; resultClass?: string } = { key: rawKey, url: host, purpose };
+      // `searchUrl` 模板：**只接受 http/https，且必须带 `{q}` 占位符**。
+      // 两条都是硬要求，理由各不同：
+      //   · 协议白名单 —— 这个地址会被直接请求，`file:`/`javascript:` 之类不该有机会；
+      //   · 必须带 `{q}` —— 没有占位符就拼不出查询词，请求会打到搜索页首页并返回
+      //     "什么都能搜"的页面，表现为"结果文不对题"而不是报错，比直接拒掉难查得多。
+      const searchUrl = String(item.searchUrl ?? '').trim().slice(0, MAX_BOOKMARK_SEARCH_URL);
+      if (searchUrl) {
+        if (/^https?:\/\//i.test(searchUrl) && searchUrl.includes('{q}')) entry.searchUrl = searchUrl;
+        else console.warn(`[config] 收藏夹「${rawKey}」的站内搜索地址被忽略：必须是 http(s) 且含 {q} 占位符。`);
+      }
+      const resultClass = String(item.resultClass ?? '').trim().slice(0, MAX_BOOKMARK_CLASS);
+      if (resultClass) entry.resultClass = resultClass;
+      bookmarks.push(entry);
     }
     w.bookmarks = bookmarks;
     if (legacyShape && bookmarks.length) {

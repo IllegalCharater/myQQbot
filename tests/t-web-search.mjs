@@ -15,7 +15,7 @@ import { load } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-websearch-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
 
-const { webSearch, sanitizeQuery, yandexSearch, bookmarkList, resolveBookmarkSite } = await load('media/web-search.js');
+const { webSearch, sanitizeQuery, yandexSearch, bookmarkList, resolveBookmarkSite, parseSiteSearch } = await load('media/web-search.js');
 const { updateConfig, getConfig } = await load('core/config.js');
 const { buildSystemPrompt } = await load('agent/prompting/prompt-builder.js');
 
@@ -105,14 +105,18 @@ const baseSearch = {
 };
 
 /**
- * 造一条收藏夹条目（新形状：枚举值 + 网页地址 + 用途）。
+ * 造一条收藏夹条目（枚举值 + 网页地址 + 用途，后两项可选）。
  *
  * ⚠️ 必须走这个 helper 而不是手写字符串：`updateConfig` 走 `deepMerge`，
  * **不会**经过 `normalizeConfigShape`（迁移只发生在 `loadConfig` 读盘那一步）。
  * 所以夹具里塞旧形状的字符串数组不会被迁移，只会让 `bookmarkList()` 过滤成空 ——
  * 表现为"收藏夹配了却完全不生效"，而套件报错指向别处（本套件初版就是这么红的）。
+ *
+ * 同理，**多出来的字段也必须在这里显式接住**：helper 少一个形参就会把 `searchUrl`
+ * 静默丢掉，于是"站内搜索"那一节实际跑的是 `site:` 路径 —— 断言看着过了，
+ * 测的却是别的东西（本节初版 9 条红里有 5 条就是这么来的）。
  */
-const bm = (key, url, purpose = '测试用途') => ({ key, url, purpose });
+const bm = (key, url, purpose = '测试用途', extra = {}) => ({ key, url, purpose, ...extra });
 
 console.log('\n═══ 1. 没有收藏夹时不发第二发（行为与从前逐字相同） ═══');
 updateConfig({ webSearch: { ...baseSearch, bookmarks: [], bookmarkMode: 'prefer' } });
@@ -199,7 +203,125 @@ let noList = '';
 try { await webSearch('测试查询', 'book'); } catch (error) { noList = String(error?.message || error); }
 ok('名单为空时传 site 报"还没配置收藏夹"', noList.includes('收藏夹'), JSON.stringify(noList));
 
-console.log('\n═══ 6. bookmarkMode=web：名单保留，但不传 site 时完全不理会它 ═══');
+console.log('\n═══ 6. 站内搜索模板：真正"只在这个站里搜"的那条路 ═══');
+// 这一节的存在理由是一条**实测出来的硬限制**：Bing 对程序化请求完全忽略 `site:` 限定符
+// （带与不带的结果逐字节相同，连 zhihu.com 这种必然被收录的站也零命中）。所以只靠拼
+// `site:` 的"限定站点"是假的；填了站内搜索模板才有真效果。
+// 夹具里的链接用**绝对地址**：这是真实站内搜索页的常态（MediaWiki、Discourse 等都吐绝对
+// 链接）。相对地址的解析另有一条独立断言覆盖（见下面 parseSiteSearch 那次直接调用）——
+// 混在这里会让"只收本站链接"的判据与"相对地址基准"纠缠，红了分不清是哪一个。
+const siteHtml = `<!doctype html><html><body>
+<div class="searchresults">
+  <li class="result"><a href="__BASE__/wiki/DeepSeek">DeepSeek - 维基百科</a>
+    <div class="snippet">深度求索是一家中国人工智能公司，开发了 DeepSeek 系列模型。</div></li>
+  <li class="result"><a href="__BASE__/wiki/Artificial_intelligence">人工智能 - 维基百科</a>
+    <div class="snippet">人工智能是计算机科学的一个分支，研究智能体的构建。</div></li>
+  <li class="result"><a href="https://other.example.com/x">站外链接不该被收</a>
+    <div class="snippet">这是一条足够长的站外摘要文本，用来验证跨站链接会被过滤掉。</div></li>
+  <li class="result"><a href="__BASE__/wiki/DeepSeek">重复条目</a>
+    <div class="snippet">同一条 URL 重复出现时只该保留一次，否则白占一个名额。</div></li>
+</div>
+</body></html>`;
+let siteHits = 0, siteLastUrl = '';
+const ssrv = http.createServer((req, res) => {
+  siteHits++;
+  siteLastUrl = req.url || '';
+  res.writeHead(200, { 'content-type': 'text/html' });
+  const base = `http://127.0.0.1:${ssrv.address().port}`;
+  res.end(siteHtml.split('__BASE__').join(base));
+});
+await new Promise((r) => ssrv.listen(0, '127.0.0.1', r));
+const siteBase = `http://127.0.0.1:${ssrv.address().port}`;
+const siteTemplate = `${siteBase}/search?q={q}`;
+
+updateConfig({
+  webSearch: {
+    ...baseSearch, bookmarkMode: 'web',
+    bookmarks: [bm('wiki', 'zh.wikipedia.org', '维基百科，查事实依据', { searchUrl: siteTemplate })]
+  }
+});
+siteHits = 0; siteLastUrl = '';
+scopedHits = 0; generalHits = 0;
+out = await webSearch('深度求索', 'wiki');
+ok('传了带模板的 site 时**不走搜索引擎**（不产生 site: 请求）',
+  scopedHits === 0 && generalHits === 0, `scoped=${scopedHits} general=${generalHits}`);
+ok('只请求站内搜索页一次', siteHits === 1, `hits=${siteHits}`);
+ok('查询词被填进模板（{q} 占位符）', siteLastUrl.includes(encodeURIComponent('深度求索')), siteLastUrl);
+ok('解析出结果', out.results.length > 0, JSON.stringify(out.results.map((r) => r.url)));
+ok('相对链接被解析成绝对地址', out.results[0].url === `${siteBase}/wiki/DeepSeek`, out.results[0].url);
+// 相对地址的解析基准：以**结果页的真实 URL** 为基准（`/wiki/X` 要落在它的源上）。
+// 这一条单独测，是因为上面的夹具用的是绝对链接（真实站内搜索页的常态）——
+// 把两种混在一起会让"只收本站链接"的判据与"相对基准"纠缠，红了分不清是哪一个。
+const relParsed = parseSiteSearch(
+  '<li><a href="/wiki/Rel">相对链接条目</a><div>这是一段足够长的摘要文本，用来通过最小长度门槛。</div></li>',
+  `${siteBase}/search?q=%E6%B5%8B%E8%AF%95`
+);
+ok('相对链接按结果页的源解析（不是拼成怪路径）',
+  relParsed.length === 1 && relParsed[0].url === `${siteBase}/wiki/Rel`, JSON.stringify(relParsed));
+ok('只收本站链接（站外那条被丢掉）',
+  !out.results.some((r) => r.url.includes('other.example.com')), JSON.stringify(out.results.map((r) => r.url)));
+ok('重复 URL 只保留一条',
+  out.results.filter((r) => r.url.endsWith('/wiki/DeepSeek')).length === 1, `共 ${out.results.length} 条`);
+ok('摘要被解析出来', out.results[0].snippet.includes('深度求索'), JSON.stringify(out.results[0].snippet));
+
+console.log('\n═══ 7. 站内搜索：容器类名可配 + 失败必须归因 ═══');
+// 配了 resultClass 时按类名切块（改动标记后通用启发式会多收，类名能把它收窄）
+updateConfig({
+  webSearch: {
+    ...baseSearch, bookmarkMode: 'web',
+    bookmarks: [bm('wiki', 'zh.wikipedia.org', '维基百科', { searchUrl: siteTemplate, resultClass: 'result' })]
+  }
+});
+out = await webSearch('深度求索', 'wiki');
+ok('配了 resultClass 仍能解析出结果', out.results.length >= 1, JSON.stringify(out.results.map((r) => r.url)));
+// 模板缺 {q} 时必须被**忽略**（退回 site: 路径），否则请求会打到搜索页首页、
+// 返回"文不对题"的结果而不是报错——那种失败比直接拒掉难查得多。
+updateConfig({
+  webSearch: {
+    ...baseSearch, bookmarkMode: 'web',
+    bookmarks: [bm('wiki', 'zh.wikipedia.org', '维基百科', { searchUrl: `${siteBase}/search` })]
+  }
+});
+scopedHits = 0; generalHits = 0;
+out = await webSearch('深度求索', 'wiki');
+ok('模板缺 {q} 时被忽略，退回 site: 路径（两发并发）',
+  scopedHits === 1 && generalHits === 1, `scoped=${scopedHits} general=${generalHits}`);
+// 非 http(s) 的模板同样应被忽略
+updateConfig({
+  webSearch: { ...baseSearch, bookmarkMode: 'web', bookmarks: [bm('wiki', 'zh.wikipedia.org', '维基百科', { searchUrl: 'file:///x?q={q}' })] }
+});
+ok('file:// 模板被忽略（不进 bookmarkList）',
+  bookmarkList()[0].searchUrl === undefined, JSON.stringify(bookmarkList()[0]));
+// 站内搜索页结构变化 → 必须报错并说清"结构可能变了"，而不是返回空列表让模型说"没有内容"
+const emptySrv = http.createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body>没有结果</body></html>'); });
+await new Promise((r) => emptySrv.listen(0, '127.0.0.1', r));
+updateConfig({
+  webSearch: {
+    ...baseSearch, bookmarkMode: 'web',
+    bookmarks: [bm('wiki', 'zh.wikipedia.org', '维基百科', { searchUrl: `http://127.0.0.1:${emptySrv.address().port}/s?q={q}` })]
+  }
+});
+let siteEmpty = '';
+try { await webSearch('x', 'wiki'); } catch (e) { siteEmpty = String(e?.message || e); }
+ok('站内搜索解析不出结果时抛错（不返回空列表）', siteEmpty.length > 0, JSON.stringify(siteEmpty));
+ok('报错点明是该站搜索页结构问题，并指向「结果容器类名」',
+  siteEmpty.includes('结构') && siteEmpty.includes('结果容器类名'), JSON.stringify(siteEmpty));
+const badSrv = http.createServer((_req, res) => { res.writeHead(500); res.end('boom'); });
+await new Promise((r) => badSrv.listen(0, '127.0.0.1', r));
+updateConfig({
+  webSearch: {
+    ...baseSearch, bookmarkMode: 'web',
+    bookmarks: [bm('wiki', 'zh.wikipedia.org', '维基百科', { searchUrl: `http://127.0.0.1:${badSrv.address().port}/s?q={q}` })]
+  }
+});
+let siteHttp = '';
+try { await webSearch('x', 'wiki'); } catch (e) { siteHttp = String(e?.message || e); }
+ok('站内搜索 HTTP 错误如实带上状态码与站点', siteHttp.includes('500') && siteHttp.includes('zh.wikipedia.org'), JSON.stringify(siteHttp));
+await new Promise((r) => emptySrv.close(r));
+await new Promise((r) => badSrv.close(r));
+await new Promise((r) => ssrv.close(r));
+
+console.log('\n═══ 8. bookmarkMode=web：名单保留，但不传 site 时完全不理会它 ═══');
 updateConfig({ webSearch: { ...baseSearch, bookmarks: [bm('book', 'book.mark')], bookmarkMode: 'web' } });
 scopedHits = 0; generalHits = 0;
 out = await webSearch('测试查询');

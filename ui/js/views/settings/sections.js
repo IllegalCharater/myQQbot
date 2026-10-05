@@ -114,21 +114,19 @@ export function renderApiSection(c) {
  */
 export function renderBookmarkRows(bookmarks) {
   const list = Array.isArray(bookmarks) ? bookmarks : [];
-  if (!list.length) {
-    return '<tr data-bm><td><input type="text" data-bm-key placeholder="wiki" /></td>'
-      + '<td><input type="text" data-bm-url placeholder="zh.wikipedia.org" /></td>'
-      + '<td><input type="text" data-bm-purpose placeholder="查百科条目、定义、背景事实" /></td>'
-      + '<td><button class="btn btn-small btn-danger" data-bm-del type="button" title="删除这条">×</button></td></tr>';
-  }
-  return list.map((item) => {
-    const key = esc(item?.key || '');
-    const url = esc(item?.url || '');
-    const purpose = esc(item?.purpose || '');
-    return `<tr data-bm><td><input type="text" data-bm-key value="${key}" placeholder="wiki" /></td>`
-      + `<td><input type="text" data-bm-url value="${url}" placeholder="zh.wikipedia.org" /></td>`
-      + `<td><input type="text" data-bm-purpose value="${purpose}" placeholder="查百科条目、定义、背景事实" /></td>`
-      + '<td><button class="btn btn-small btn-danger" data-bm-del type="button" title="删除这条">×</button></td></tr>';
-  }).join('');
+  const row = (key, url, purpose, searchUrl, resultClass) =>
+    '<tr data-bm>'
+    + `<td><input type="text" data-bm-key value="${esc(key)}" placeholder="wiki" /></td>`
+    + `<td><input type="text" data-bm-url value="${esc(url)}" placeholder="zh.wikipedia.org" /></td>`
+    + `<td><input type="text" data-bm-purpose value="${esc(purpose)}" placeholder="查百科条目、定义、背景事实" /></td>`
+    + `<td><input type="text" data-bm-searchurl value="${esc(searchUrl)}" placeholder="https://…/search?q={q}" /></td>`
+    + `<td><input type="text" data-bm-resultclass value="${esc(resultClass)}" placeholder="（留空=通用解析）" /></td>`
+    + '<td><button class="btn btn-small btn-danger" data-bm-del type="button" title="删除这条">×</button></td>'
+    + '</tr>';
+  if (!list.length) return row('', '', '', '', '');
+  return list.map((item) => row(
+    item?.key || '', item?.url || '', item?.purpose || '', item?.searchUrl || '', item?.resultClass || ''
+  )).join('');
 }
 
 export function renderSearchSection(c) {
@@ -237,18 +235,29 @@ export function renderSearchSection(c) {
     <div class="field">
       <label>收藏的站点（枚举值 + 网页地址 + 用途；最多 20 条）</label>
       <div class="muted" style="font-size:12px;margin-bottom:6px">
-        三项都要填，缺一条这一条就不生效：<br />
+        前三项都要填，缺一条这一条就不生效：<br />
         · <strong>枚举值</strong>：模型在 <code>web_search</code> 的 <code>site</code> 参数里传的就是它。
         只能是字母/数字/<code>-</code>/<code>_</code>（如 <code>wiki</code>、<code>news-yc</code>），中文会被丢弃。<br />
-        · <strong>网页地址</strong>：只取它的<strong>域名</strong>参与检索（填整条网址也行，路径会被丢掉）。<br />
-        · <strong>用途</strong>：<strong>会随每轮提示词交给模型</strong>，是它判断"该选哪一条"的依据。写得越具体，模型越选得准。
+        · <strong>网页地址</strong>：只取它的<strong>域名</strong>（填整条网址也行，路径会被丢掉）。<br />
+        · <strong>用途</strong>：<strong>会随每轮提示词交给模型</strong>，是它判断"该选哪一条"的依据。<br />
+        <br />
+        <strong>⚠️ 想让它真的"只在这个站里搜"，请填「站内搜索地址」。</strong>
+        实测 Bing 对程序化请求<strong>忽略 <code>site:</code> 限定符</strong>（带与不带的结果完全一样），
+        所以只靠域名等于没限定。填了模板就直接去那个站自己的搜索页取内容：<br />
+        · <code>https://zh.wikipedia.org/w/index.php?search={q}</code>（维基，<code>{q}</code> 是查询词占位符）<br />
+        · <code>https://your-docs.example.com/search?q={q}</code><br />
+        必须含 <code>{q}</code>，否则这一栏会被忽略。留空则退回 <code>site:</code> 行为（对自建 SearXNG 等有效）。<br />
+        <strong>结果容器类名</strong>留空时用通用解析，会带上一些导航链接；知道该站结果块的类名时填上更准
+        （页面改版导致"解析不出结果"时，就改这一栏）。
       </div>
       <table class="bookmark-table" style="width:100%;border-collapse:collapse">
         <thead>
           <tr>
-            <th style="text-align:left;width:22%">枚举值</th>
-            <th style="text-align:left;width:33%">网页地址</th>
-            <th style="text-align:left">用途</th>
+            <th style="text-align:left;width:13%">枚举值</th>
+            <th style="text-align:left;width:18%">网页地址</th>
+            <th style="text-align:left;width:22%">用途</th>
+            <th style="text-align:left;width:26%">站内搜索地址（可选）</th>
+            <th style="text-align:left;width:15%">结果容器类名（可选）</th>
             <th style="width:36px"></th>
           </tr>
         </thead>

@@ -152,9 +152,15 @@ const searchSave = seg("if (sec === 'search')", "if (sec === 'image-source')");
 // 收藏夹现在是「枚举值 + 网页地址 + 用途」三列，用 `data-bm-*` 标记每一格。
 // 这三个属性名是 save.js 逐行取值的**唯一接口**：改名只改一端会静默读出 undefined，
 // 于是每一项都因"三项不全"被丢弃 —— 表现为"收藏夹存不进去"，而没有任何报错。
-for (const attr of ['data-bm-key', 'data-bm-url', 'data-bm-purpose']) {
+for (const attr of ['data-bm-key', 'data-bm-url', 'data-bm-purpose', 'data-bm-searchurl', 'data-bm-resultclass']) {
   ok(`${attr} 在渲染里出现（save.js 靠它取值）`, new RegExp(attr).test(js));
 }
+// 后两列是**可选**的：空值必须整键不写（而不是写空串）。写空串会让后端拿到一个
+// "存在但无意义"的值，而 bookmarkList() 按"非空才带"处理 —— 两处口径不同时，
+// 配置页显示有值、运行期当没有，正是那种查半天的问题。
+ok('可选两列空值时不写键（避免"存在但无意义"的空串）',
+  /if \(searchUrl\) item\.searchUrl = searchUrl;/.test(searchSave)
+  && /if \(resultClass\) item\.resultClass = resultClass;/.test(searchSave));
 ok('保存分支按行读三列（缺一列那一条就丢）',
   /querySelector\('\[data-bm-key\]'\)/.test(searchSave)
   && /querySelector\('\[data-bm-url\]'\)/.test(searchSave)

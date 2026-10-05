@@ -431,14 +431,18 @@ function bookmarkPreference(): BookmarkMode {
   return cfg?.bookmarkFirst === false ? 'web' : 'prefer';
 }
 
-/** 收藏夹站点（已归一）。三项都在：枚举值、宿主名、用途。 */
+/** 收藏夹站点（已归一）。前四项都在：枚举值、宿主名、用途；后两项可选。 */
 export interface BookmarkSite {
   /** 枚举值，**模型在 `web_search.site` 里传的就是它**。 */
   key: string;
-  /** 从 URL 归一出来的宿主名，实际参与 `site:` 检索。 */
+  /** 从 URL 归一出来的宿主名。没有站内搜索模板时用它拼 `site:`。 */
   host: string;
   /** 用途，给模型判断"该选哪一条"用。 */
   purpose: string;
+  /** 站内搜索地址模板（含 `{q}`）。填了就**直接去站内搜**，绕开搜索引擎的 `site:`。 */
+  searchUrl?: string;
+  /** 站内搜索页里"每条结果容器"的类名；留空走通用启发式。 */
+  resultClass?: string;
 }
 
 /**
@@ -460,7 +464,15 @@ export function bookmarkList(): BookmarkSite[] {
     const key = String(raw.key ?? '').trim();
     const host = String(raw.url ?? '').trim().toLowerCase();
     if (!key || !host) continue;
-    out.push({ key, host, purpose: String(raw.purpose ?? '').trim() });
+    const entry: BookmarkSite = { key, host, purpose: String(raw.purpose ?? '').trim() };
+    const searchUrl = String(raw.searchUrl ?? '').trim();
+    // 形状检查在这里再做一次（配置层已经做过）：调用方可能来自夹具或未过 `loadConfig`
+    // 的路径，而一个缺 `{q}` 的模板会让请求打到搜索页首页、返回"文不对题"的结果
+    // 而不是报错 —— 那种失败比直接拒掉难查得多。
+    if (searchUrl && /^https?:\/\//i.test(searchUrl) && searchUrl.includes('{q}')) entry.searchUrl = searchUrl;
+    const resultClass = String(raw.resultClass ?? '').trim();
+    if (resultClass) entry.resultClass = resultClass;
+    out.push(entry);
   }
   return out;
 }
@@ -488,6 +500,126 @@ export function resolveBookmarkSite(raw: unknown): BookmarkSite {
   throw new Error(`收藏夹里没有枚举值「${asked}」。可选的只有：${options}。请改用其中之一，或不要传 site 直接做全网搜索`);
 }
 
+// ── 站内搜索（收藏夹填了 searchUrl 时走这条路）────────────────────────────
+//
+// **它解决的是一条实测出来的硬限制**：`cn.bing.com` 与 `www.bing.com` 对程序化请求
+// **完全忽略 `site:` 限定符** —— 带与不带的结果逐字节相同，连换一个必然被收录的站点
+// （zhihu.com）也零命中。所以"只在这个站里搜"若只靠拼 `site:`，等于没限定。
+// 填了站内搜索模板就直接请求那个站自己的搜索页，绕开搜索引擎。
+//
+// ⚠️ 抓取解析天生易碎（同 Yandex 那条）：容器类名做成配置项（`resultClass`），
+// 那是页面改版时的自救通路。没配置时走通用启发式 —— 判据是"本站链接 + 有实义的文本"。
+
+/** 通用启发式下，一条结果的摘要至少要这么长，否则只当它没有摘要。 */
+const SITE_RESULT_MIN_TEXT = 20;
+
+/**
+ * 把查询词填进站内搜索模板。
+ *
+ * 用 split/join 而不是 `String.replace`：`{q}` 若在模板里出现两次也该全替换，
+ * 而 `replace` 的替换串会把查询词里的 `$&`、`$1` 当特殊序列解释（查询词是模型给的，
+ * 出现 `$` 完全可能，那会把查询词悄悄改掉）。
+ */
+function fillSiteTemplate(template: string, query: string): string {
+  return template.split('{q}').join(encodeURIComponent(query));
+}
+
+/** `htmlToText` 的别名式调用点，保持与 yandex 那段一致的可读性。 */
+function textOf(input: string): string {
+  return htmlToText(input);
+}
+
+/**
+ * 从站内搜索页解析结果。
+ *
+ * `resultClass` 有值时按它切块（更准，也是改版时的自救通路）；否则逐锚点通用启发式。
+ * 通用启发式会带上一些非结果链接（导航、页脚），所以**它只是兜底**：
+ * 用它时后面的条目质量会差，配 `resultClass` 才准。
+ */
+export function parseSiteSearch(html: string, pageUrl: string, resultClass?: string): SearchResult[] {
+  const baseHost = (() => { try { return new URL(pageUrl).hostname; } catch { return ''; } })();
+  const results: SearchResult[] = [];
+  const seen = new Set<string>();
+
+  /** 收一条结果；不是本站链接、认不出 URL、重复的都会被丢掉。 */
+  const take = (href: string, title: string, snippet: string) => {
+    const raw = decodeNumericEntities(href).replace(/&amp;/g, '&').trim();
+    // **先把相对地址按结果页的 URL 解成绝对地址，再判本站**。少了这一步，
+    // 站内搜索页里所有相对链接（`/wiki/X` 很常见）都会在下面 `new URL` 抛错而被丢掉 ——
+    // 而这条链本身能跑通只是因为夹具/真实页面大多吐绝对链接，属于侥幸。
+    let target: URL;
+    try {
+      target = new URL(raw, pageUrl);
+    } catch {
+      return;
+    }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') return;
+    // **只收本站链接**：站内搜索页里跨站的通常是"相关站点/广告"之类的噪声，
+    // 而收藏夹的意义正是要这个站自己的内容。
+    if (baseHost && !(target.hostname === baseHost || target.hostname.endsWith(`.${baseHost}`))) return;
+    const url = target.toString();
+    const key = urlKey(url);
+    if (key && seen.has(key)) return;
+    if (key) seen.add(key);
+    if (!title) return;
+    results.push({ title, url, snippet });
+  };
+
+  const blocks = resultClass ? splitByClass(html, resultClass) : [html];
+  for (const block of blocks) {
+    const anchorRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = anchorRe.exec(block)) !== null) {
+      const href = m[1].match(/\bhref="([^"]*)"/i);
+      if (!href) continue;
+      const title = textOf(m[2]);
+      if (!title || title.length > 200) continue;
+      // 摘要：取锚点之后到下一个块级闭合标签之间的文本
+      const after = block.slice(m.index + m[0].length);
+      const cut = after.search(/<\/(?:li|p|div|td|h[1-6]|dd)>/i);
+      const snippet = textOf(cut >= 0 ? after.slice(0, cut) : '');
+      take(href[1], title, snippet.length >= SITE_RESULT_MIN_TEXT ? snippet : '');
+      // 配了容器类名时，一个块只取第一条锚点当结果（块内其余锚点多半是附件/编辑链接）
+      if (resultClass) break;
+    }
+  }
+  return results;
+}
+
+/** 按类名把页面切成若干块（`<li>/<div>/...` 里 `class` 含该名字的元素的开始标签）。 */
+function splitByClass(html: string, className: string): string[] {
+  const escaped = className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`<[a-z0-9]+\\b[^>]*\\bclass="[^"]*\\b${escaped}\\b[^"]*"[^>]*>`, 'gi');
+  const starts: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) starts.push(m.index);
+  return starts.map((start, i) => html.slice(start, i + 1 < starts.length ? starts[i + 1] : html.length));
+}
+
+/** 按站内搜索模板取结果（模板的合法性已由 `bookmarkList()` 过滤保证）。 */
+async function siteSearch(site: BookmarkSite, clean: string, maxResults: number): Promise<SearchResponse> {
+  const target = fillSiteTemplate(site.searchUrl as string, clean);
+  const res = await fetch(target, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'accept-language': 'zh-CN,zh;q=0.9'
+    },
+    signal: AbortSignal.timeout(20000),
+    redirect: 'follow'
+  });
+  if (!res.ok) throw new Error(`站内搜索 HTTP ${res.status}（${site.host}）`);
+  const results = parseSiteSearch(await res.text(), target, site.resultClass).slice(0, maxResults);
+  if (!results.length) {
+    // 与 Yandex 那条同一条规矩：**不返回空列表**。空列表会让模型说"这个站没有内容"，
+    // 而真实原因往往是"搜索页结构变了"或"这个站要登录"——归因错了就没人去改配置。
+    throw new Error(
+      `站内搜索没有解析出结果（${site.host}）：该站搜索页的结构可能变了，或它要求登录。` +
+      '可在设置页给这条收藏夹填「结果容器类名」，或先用 web_fetch 打开它的搜索页确认。'
+    );
+  }
+  return { query: clean, results };
+}
+
 /**
  * 给工具用的统一入口。
  *
@@ -504,10 +636,14 @@ export async function webSearch(query: unknown, site?: unknown): Promise<SearchR
   if (!clean) throw new Error('查询词为空');
   const all = bookmarkList();
   const sites = new Set(all.map((item) => item.host));
+  const maxResults = Math.max(1, Math.min(10, Number(getConfig().webSearch?.maxResults) || 6));
 
-  // ── 模型点了名：只按它说的那个站点优先 ──
+  // ── 模型点了名 ──
   if (site !== undefined && site !== null && String(site).trim() !== '') {
     const picked = resolveBookmarkSite(site);
+    // 填了站内搜索模板就**直接去那个站搜**：这是唯一能真正"只在这个站里搜"的办法
+    // （实测搜索引擎对程序化请求会忽略 `site:`）。没填才退回旧的 `site:` 路径。
+    if (picked.searchUrl) return siteSearch(picked, clean, maxResults);
     return mergeScoped(clean, [picked.host], sites);
   }
 

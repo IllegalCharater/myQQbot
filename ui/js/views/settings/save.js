@@ -123,11 +123,22 @@ export async function saveConfig({ quiet = false } = {}) {
     //
     // 三项有一项为空就**整条丢掉**：后端也会丢（半残条目比没有更坏），但前端先丢能让用户
     // 当场看见"这条没保存进去"，而不是保存后回来发现少了一条却不知为何。
-    const bookmarks = $$('#search-bookmarks-body tr[data-bm]').map((row) => ({
-      key: (row.querySelector('[data-bm-key]')?.value || '').trim(),
-      url: (row.querySelector('[data-bm-url]')?.value || '').trim(),
-      purpose: (row.querySelector('[data-bm-purpose]')?.value || '').trim()
-    })).filter((item) => item.key && item.url && item.purpose);
+    //
+    // 后两项是**可选**：空值就整键不写（而不是写空串）。写空串会让后端拿到一个"存在但无意义"
+    // 的值，而 `bookmarkList()` 又按"非空才带"处理——两处口径不同时，配置页显示有值、
+    // 运行期当没有，正是那种查半天的问题。
+    const bookmarks = $$('#search-bookmarks-body tr[data-bm]').map((row) => {
+      const item = {
+        key: (row.querySelector('[data-bm-key]')?.value || '').trim(),
+        url: (row.querySelector('[data-bm-url]')?.value || '').trim(),
+        purpose: (row.querySelector('[data-bm-purpose]')?.value || '').trim()
+      };
+      const searchUrl = (row.querySelector('[data-bm-searchurl]')?.value || '').trim();
+      if (searchUrl) item.searchUrl = searchUrl;
+      const resultClass = (row.querySelector('[data-bm-resultclass]')?.value || '').trim();
+      if (resultClass) item.resultClass = resultClass;
+      return item;
+    }).filter((item) => item.key && item.url && item.purpose);
     patch.webSearch = {
       ...c.webSearch,
       enabled: chk('#cfg-websearch', c.webSearch?.enabled !== false),
