@@ -94,11 +94,26 @@ export function createConsole(deps: ConsoleDeps): Console {
   }
 
   // ── 配置脱敏 ────────────────────────────────────────────────────────────
-  // 凡是字段名命中这些模式的，值一律替换为空串（保留"有/无"的 hasXxx 标记）。
+  // 凡是**字段名**命中这些模式的，值一律删掉（保留"有/无"的 hasXxx 标记）。
   // 覆盖：apiKey / api_key / accessToken / httpAccessToken / token / secret / password …
   const SECRET_KEY_PATTERN = /(apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key)/i;
   // 形如 apiKeyFrom 的字段存的是"密钥来源标识"（如 manual），不是密钥本身，不要脱敏
   const SECRET_KEY_EXCLUDE = /from$/i;
+  /**
+   * 「**用户自己起的键名**」的容器：里面的键是**数据**，不是配置的 schema 字段，
+   * **绝不能按名字脱敏、更不能往里面写 `has…` 标记**。
+   *
+   * 为什么必须排除（**实测反馈的 bug**）：收藏夹的 `request.params` 是"静态参数"，它的键
+   * 是用户照接口文档起的参数名（`top_k`、`api_key`、`API Key`）。旧逻辑把 `api_key` 当普通
+   * 密钥字段脱敏，于是：
+   *   ① 回显成了 `{"hasApi_key": true}` —— **凭空造了一个要发给接口的参数**；
+   *   ② 前端把回显原样回传，保存一次变 `{"hasApi_key": "true"}`，再保存变 `hasHasApi_key`…
+   *      每保存一次多一层（`hasHasAPI_KEY` 就是这么来的）；
+   *   ③ **真正的密钥值被删掉且再也回不来**。
+   *
+   * 顺带一提：`params` 的值本来就要发到接口去，不是"只在本机用的密钥"，遮它也没有意义。
+   */
+  const DATA_MAP_KEYS = new Set(['params']);
 
   function sanitizeConfig(cfg: AppConfig) {
     const parsed: unknown = JSON.parse(JSON.stringify(cfg ?? {}));
@@ -110,15 +125,19 @@ export function createConsole(deps: ConsoleDeps): Console {
       seen.add(node);
       for (const key of Object.keys(node)) {
         const value = node[key];
+        // 数据容器整棵子树不做任何脱敏（它的键是用户数据，不是 schema）
+        if (DATA_MAP_KEYS.has(key)) continue;
         if (isRecord(value)) { walk(value); continue; }
         if (Array.isArray(value)) {
           for (const item of value) if (isRecord(item)) walk(item);
           continue;
         }
         if (SECRET_KEY_EXCLUDE.test(key)) continue;
-        // 已生成的 hasXxx 布尔标记本身也会被 apikey 模式匹配到，
-        // 不排除就会连锁生成 hasHasXxx
-        if (/^has/i.test(key) && typeof value === 'boolean') continue;
+        // 已生成的 hasXxx 布尔标记本身也会被 apikey 模式匹配到，不排除就会连锁生成 hasHasXxx。
+        // ⚠️ 必须**不区分大小写**：标记名由 `key.charAt(0).toUpperCase()` 生成，小写的
+        // `api_key` 会变成 `hasApi_key` —— 区分大小写的 `/^has/` 匹配不到它，于是它又被脱敏成
+        // `hasHasApi_key`（**实测反馈**）。
+        if (/^has/i.test(key) && (typeof value === 'boolean' || value === 'true' || value === 'false')) continue;
         if (SECRET_KEY_PATTERN.test(key)) {
           // ⚠️ 必须"删除字段"而不是"置为空串"。
           // 前端保存设置时会把整个 config 展开成 patch 回传（...c.webSearch?.deepseek），

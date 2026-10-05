@@ -263,6 +263,46 @@ eq('非图片内容 → 415（不把 HTML 注入面板同源页）', evil.status
 eq('取不到图 → 502', (await api2('/api/stickers/p_dead/image')).status, 502);
 eq('图片代理对不存在的 id → 404', (await api2('/api/stickers/nope/image')).status, 404);
 
+// ── 配置脱敏：真密钥要遮住，但**用户自己起的参数名不能被当成密钥** ──
+//
+// 实测反馈的 bug：`request.params` 的键是用户照接口文档写的参数名，其中 `api_key`
+// 命中了密钥模式 → 被脱敏成 `{"hasApi_key": true}` → 前端把回显原样回传 →
+// `{"hasApi_key": "true"}` → 再保存变 `hasHasApi_key`… 每保存一次多一层，
+// **而真正的密钥值被删掉且再也回不来**（用户看到的就是 `hasHasAPI_KEY: true`）。
+console.log('\n-- 配置脱敏：密钥 vs 用户参数名 --');
+updateConfig({
+  webSearch: {
+    ...(getConfig().webSearch || {}),
+    bookmarks: [{
+      key: 'baike', url: 'appbuilder.baidu.com', purpose: '查百科',
+      request: { method: 'GET', endpoint: 'https://appbuilder.baidu.com/x?q={q}' },
+      params: { top_k: '5', api_key: 'PARAM-SECRET', 'API Key': 'PARAM-SECRET-2' }
+    }]
+  }
+});
+const masked = await api2('/api/config');
+// 判据必须是**字段在不在**加"有/无"标记，不能拿密钥字面去搜整个 JSON ——
+// 夹具里的密钥是 `'x'`，那个字符到处都是，搜字符串永远命中（本断言初版就这么假红）。
+ok('真正的密钥字段被删掉（不是留空串：留空串会在回传时覆盖真值）',
+  masked.body.api?.apiKey === undefined, JSON.stringify(masked.body.api));
+ok('留下 hasApiKey 标记，让前端知道"已经配过了"',
+  masked.body.api?.hasApiKey === true, JSON.stringify(masked.body.api));
+const echoedParams = masked.body.webSearch?.bookmarks?.[0]?.params || {};
+ok('params 里的 api_key 原样回显（它是**参数名**，不是配置的密钥字段）',
+  echoedParams.api_key === 'PARAM-SECRET', JSON.stringify(echoedParams));
+ok('带空格的 `API Key` 也原样回显', echoedParams['API Key'] === 'PARAM-SECRET-2', JSON.stringify(echoedParams));
+ok('params 里没有凭空多出的 has* 键（旧版会造一个要发给接口的假参数）',
+  !Object.keys(echoedParams).some((k) => /^has/i.test(k)), JSON.stringify(Object.keys(echoedParams)));
+// 反复"保存回显"不该累积 has 层（旧版每轮加一层）
+for (let i = 0; i < 3; i++) {
+  const cur = await api2('/api/config');
+  await api2('/api/config', { method: 'POST', body: JSON.stringify({ webSearch: { bookmarks: [cur.body.webSearch.bookmarks[0]] } }) });
+}
+const afterRoundTrips = getConfig().webSearch?.bookmarks?.[0]?.params || {};
+ok('三次"回显再保存"往返后 params 仍原样（没有 has / hasHas，真值没丢）',
+  afterRoundTrips.api_key === 'PARAM-SECRET' && afterRoundTrips['API Key'] === 'PARAM-SECRET-2'
+  && !Object.keys(afterRoundTrips).some((k) => /^has/i.test(k)), JSON.stringify(afterRoundTrips));
+
 // ── 表情图片本地缓存（需求 2：从文件夹里拿图片）──
 console.log('\n-- 表情图片本地缓存 --');
 const CACHE_DIR = path.join(DIR, 'sticker-cache');

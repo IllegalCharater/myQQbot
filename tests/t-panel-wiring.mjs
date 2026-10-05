@@ -168,6 +168,24 @@ ok('合并那一栏：没有独立的 searchUrl 输入框了（旧 data-bm-searc
   !/data-bm-searchurl/.test(js));
 ok('「请求结构」入口存在，且读数走 dataset（弹窗写、save.js 读）',
   /data-bm-req-json/.test(searchSave) && /dataset\.bmParamsJson/.test(searchSave));
+
+// ── 「请求结构」弹窗里的静态参数编辑器 ──
+// 形状与设置页「模型 API」那套**故意一致**：`type="password"` 的输入框 + 旁边的「显示」按钮，
+// 用户不必学第二种交互。改成"一行一个参数"（而不是一个 `名字: 值` 的多行 textarea）正是
+// 为了让**密钥能单独切换显示** —— textarea 里没法给某一行加按钮。
+const reqModalSrc = readUI('js/parts/bookmark-request.js');
+ok('参数值是 password 输入框（与「模型 API」同一形状，密钥默认不明文）',
+  /type="password" data-bqp-value/.test(reqModalSrc));
+ok('每个参数旁有「显示」按钮，且按 type 切换 password ⇄ text',
+  /data-bqp-toggle/.test(reqModalSrc) && /input\.type = toText \? 'text' : 'password'/.test(reqModalSrc));
+ok('按钮文案随状态切换「显示」/「隐藏」',
+  /toggle\.textContent = toText \? '隐藏' : '显示'/.test(reqModalSrc));
+ok('参数可增可删，且走事件委托（动态插入的行不会漏绑）',
+  /bqr-add-param/.test(reqModalSrc) && /del\.closest\('\[data-bqp-row\]'\)\?\.remove\(\)/.test(reqModalSrc)
+  && /paramsBox\.addEventListener\('click'/.test(reqModalSrc));
+ok('保存时从**行**里收参数（不再读一个 textarea 的文本）',
+  /querySelectorAll\('\[data-bqp-row\]'\)/.test(reqModalSrc) && /collectParams\(overlay\)/.test(reqModalSrc));
+
 // ⚠️ **渲染也必须把请求结构写进 dataset** —— 这是"刷新后还能看到已配的请求结构"的唯一途径。
 // 初版只有弹窗会写它、渲染从不写，于是刷新后行上没有该属性，弹窗一打开就是空的
 // （**实测反馈**）；更糟的是此时再点「保存设置」（哪怕只改了别的行），这一行的请求结构

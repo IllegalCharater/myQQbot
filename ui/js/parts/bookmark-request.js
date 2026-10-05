@@ -9,7 +9,7 @@
 //   · 其它 `{xxx}` —— **静态参数**，在这一栏按需展开给每个填一个固定值；
 //   · 凭据       —— **不进这个弹窗**，它存在配置的密钥区（设置页另有入口），
 //                   这里只把 `Authorization` 显示成占位提示，不显示真值。
-import { $ } from '../dom.js';
+import { $, esc } from '../dom.js';
 
 /**
  * 请求头文本 ↔ 数组。
@@ -38,24 +38,37 @@ export function textToHeaders(text) {
   return out;
 }
 
-/** 静态参数文本 ↔ 对象。同样是 `名字: 值` 逐行。 */
-export function paramsToText(params) {
-  const rec = params && typeof params === 'object' ? params : {};
-  return Object.entries(rec).map(([k, v]) => `${k}: ${v}`).join('\n');
+/**
+ * 静态参数从对象 → DOM 行。
+ *
+ * 为什么改成「一行一个参数」而不是一个 `名字: 值` 的多行文本框：**密钥要能单独切换显示**，
+ * 而一个 textarea 里没法给某一行加按钮。这与设置页「模型 API」那套是同一个形状
+ * （`type="password"` 的输入框 + 旁边的「显示」按钮），用户不必学第二种交互。
+ *
+ * 值用 `esc` 转义后写进 `value="…"`。
+ */
+function paramsRowsHtml(params) {
+  const entries = Object.entries(params && typeof params === 'object' ? params : {});
+  if (!entries.length) return '';
+  return entries.map(([k, v]) =>
+    '<div class="field-row" data-bqp-row style="align-items:center;gap:6px;margin-bottom:4px">'
+    + `<input type="text" data-bqp-key value="${esc(k)}" placeholder="参数名（如 top_k / api_key）" style="flex:1" />`
+    + '<span style="opacity:.6">:</span>'
+    + `<input type="password" data-bqp-value value="${esc(v)}" placeholder="参数值" autocomplete="new-password" style="flex:2" />`
+    // 与「模型 API」区块同一个按钮文案与语义：password ⇄ text
+    + '<button class="btn btn-small" data-bqp-toggle type="button">显示</button>'
+    + '<button class="btn btn-small btn-danger" data-bqp-del type="button" title="删掉这个参数">×</button>'
+    + '</div>'
+  ).join('');
 }
 
-export function textToParams(text) {
+/** 把 DOM 行收成参数对象（空名字丢弃；`q` 是运行时查询词，挡掉）。 */
+function collectParams(overlay) {
   const out = {};
-  for (const raw of String(text || '').split('\n')) {
-    const line = raw.trim();
-    if (!line) continue;
-    const i = line.indexOf(':');
-    if (i <= 0) continue;
-    const name = line.slice(0, i).trim();
-    const value = line.slice(i + 1).trim();
-    // `q` 是运行时查询词，后端也会忽略它；这里先挡掉，免得用户以为配了就生效
+  for (const row of overlay.querySelectorAll('[data-bqp-row]')) {
+    const name = (row.querySelector('[data-bqp-key]')?.value || '').trim();
     if (!name || name === 'q') continue;
-    out[name] = value;
+    out[name] = row.querySelector('[data-bqp-value]')?.value || '';
   }
   return out;
 }
@@ -97,8 +110,15 @@ export function openBookmarkRequestModal(current, onApply) {
             placeholder="Host: appbuilder.baidu.com&#10;Authorization: Bearer {API Key}"></textarea>
         </div>
         <div class="field">
-          <label>静态参数（每行一条：<code>名字: 值</code>）</label>
-          <textarea id="bqr-params" rows="2" placeholder="top_k: 5&#10;API Key: bce-v3/ALTAK-..."></textarea>
+          <label>静态参数（<code>{名字}</code> 的值，含密钥）</label>
+          <div id="bqr-params"></div>
+          <div style="margin-top:6px">
+            <button class="btn btn-small" id="bqr-add-param" type="button">＋ 添加参数</button>
+          </div>
+          <div class="hint" style="margin-top:4px">
+            密钥就填在这里（例如 <code>API Key</code> → 你的密钥），请求头里用 <code>{API Key}</code> 引用。
+            点「显示」可临时看到明文；输入框默认是密码态。
+          </div>
         </div>
         <div class="hint" id="bqr-hint"></div>
       </div>
@@ -114,7 +134,30 @@ export function openBookmarkRequestModal(current, onApply) {
   $('#bqr-method', overlay).value = String(req.method || 'GET').toUpperCase() === 'POST' ? 'POST' : 'GET';
   $('#bqr-endpoint', overlay).value = String(req.endpoint || req.url || '');
   $('#bqr-headers', overlay).value = headersToText(req.headers);
-  $('#bqr-params', overlay).value = paramsToText(current?.params);
+  const paramsBox = $('#bqr-params', overlay);
+  paramsBox.innerHTML = paramsRowsHtml(current?.params);
+
+  // ── 静态参数的增删与「显示/隐藏」──
+  // 全部走 overlay 上的事件委托：行是动态插进来的，绑到具体按钮上会漏掉新增行。
+  // 切显示的行为与设置页「模型 API」一致：password ⇄ text，按钮文案「显示」/「隐藏」。
+  $('#bqr-add-param', overlay).addEventListener('click', () => {
+    paramsBox.insertAdjacentHTML('beforeend', paramsRowsHtml({ '': '' }));
+    // 新行的名字框聚焦，省得用户再点一下
+    paramsBox.lastElementChild?.querySelector('[data-bqp-key]')?.focus();
+  });
+  paramsBox.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const del = target.closest('[data-bqp-del]');
+    if (del) { del.closest('[data-bqp-row]')?.remove(); return; }
+    const toggle = target.closest('[data-bqp-toggle]');
+    if (!toggle) return;
+    const input = toggle.closest('[data-bqp-row]')?.querySelector('[data-bqp-value]');
+    if (!input) return;
+    const toText = input.type === 'password';
+    input.type = toText ? 'text' : 'password';
+    toggle.textContent = toText ? '隐藏' : '显示';
+  });
 
   const close = () => overlay.remove();
   $('#bqr-cancel', overlay).addEventListener('click', close);
@@ -133,7 +176,8 @@ export function openBookmarkRequestModal(current, onApply) {
       endpoint,
       headers: textToHeaders($('#bqr-headers', overlay).value)
     };
-    const params = textToParams($('#bqr-params', overlay).value);
+    // 参数从**行**里收（不再是一个 textarea 的文本）
+    const params = collectParams(overlay);
     onApply({ request, params });
     close();
   });
