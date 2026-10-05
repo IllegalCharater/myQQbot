@@ -211,6 +211,9 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 下一轮模型输出需要回填到 session 的 `toolImages.reply`，UI 在图片工具卡片中显示；对应 assistant 条目标记 `imageReply`，避免相同读图结果显示两次。
 
+**`get_message_images` 的结果必须点名「这张图**是谁发的**」，不能只印消息 id**（**实测反馈**）：甲发了一张图、乙也发了一张，模型连着读了这两张，然后把它做的吐槽算到了**乙**头上（图是甲的）。原因是标签原来只写 `消息 -1135000659 的图片内容` —— **id 对模型没有"这是谁发的"含义**，两条结果长得几乎一样，模型就把"图"和"先说话的那个人"配了对。现在拼成 `消息 <id>（<发送者名> 发的）的图片内容`（回退那条是 `消息 <id> 引用的是消息 #<来源id>（<名> 发的）图片内容`），并同步在 `TOOL_PROMPT_TEXT.get_message_images.description` 里写明"返回内容开头会写明是谁发的、同一轮多张图不要算到另一个群友头上"——**承诺与实现必须一致**，套件里有一条断言钉住"实现真的把『X 发的』放在开头附近"。这跟上面那条"走回退时必须说清图是从哪条消息取的"是**同一个病**的两种形态：那条修的是"把图归到被引用者名下"，这条修的是"把图归到错误的发送者名下"。守护在 `t-vision-log.mjs` 第 5 段：**两个不同发送者各一张图**，各自只能出现自己的名字（对照断言是"甲某那张里不出现乙某"，否则等于没点名）。
+- ⚠️ 写这条链的套件时注意：`get_message_images` 的 `content` 是**内容部件数组**（`shared.ts` 的 `imageParts` 返回 `[{type:'text'}, {type:'image_url'}…]`），不是字符串。直接 `String(content)` 会得到 `[object Object],[object Object]` —— 本套件初版就这么假红了一条。取文本要 `content.map(p => typeof p === 'string' ? p : p?.text || '').join('')`。
+
 修改此链路时重点运行 `t-vision-log.mjs` 和 `t-ui-render.mjs`。
 
 会话 JSON 面板只以 `session.llmRequests` 展示逐轮真实模型输入（完整 messages/tools），不要再建立首次输入副本。

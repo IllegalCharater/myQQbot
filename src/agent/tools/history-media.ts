@@ -234,11 +234,19 @@ export function historyMediaTools(): ToolDefinition[] {
           }
           if (!dataUrls.length) return err(`图片获取失败：${failed.join('；')}`);
           const note = failed.length ? `（另有 ${failed.length} 张获取失败）` : '';
-          // 走回退时必须说清图是从哪条消息取的：不说的话模型会以为"它问的那条就是图"，
-          // 于是后续引用/描述会把图片归到错误的发送者名下。
+          // ── 标签里必须带**发送者**，不能只给 id ──
+          //
+          // **实测反馈**：群友甲发了图、群友乙也发了图，模型连着读了这两张，然后把它做的
+          // 吐槽算到了**乙**头上 —— 因为原来这里只印 `消息 -1135000659 的图片内容`，
+          // **id 对模型没有"这是谁发的"含义**。它只看到两条长得几乎一样的句子 + 两张图，
+          // 于是把"图"和"先说话的那个人"配了对。
+          //
+          // 这跟下面那段"走回退时必须说清图是从哪条消息取的"是**同一个病**：那条修的是
+          // "把图归到被引用者名下"，这条修的是"把图归到错误的发送者名下"。两处都要点名。
+          const who = `${source.senderName || source.senderId || '未知'} 发的`;
           const label = viaReply
-            ? `消息 ${args.messageId} 引用的消息 #${source.mid} 的图片内容`
-            : `消息 ${args.messageId} 的图片内容`;
+            ? `消息 ${args.messageId} 引用的是消息 #${source.mid}（${who}）的图片内容`
+            : `消息 ${args.messageId}（${who}）的图片内容`;
           return { content: imageParts(`${label}${note}：`, dataUrls) };
         } catch (error) {
           return err(errorMessage(error));

@@ -198,6 +198,28 @@ console.log('\n=== 5. 填了没有图的那条 → 顺着 reply.mid 取被引用
     JSON.stringify(readCall?.toolCall));
   ok('结果里点明图来自被引用的 #81（模型不能以为图属于它问的那条）',
     String(readCall?.toolCall?.result || '').includes('#81'), String(readCall?.toolCall?.result || '').slice(0, 160));
+  // ⚠️ **必须点名发送者，不能只给 id**（**实测反馈**的 bug）：群友甲发图、群友乙也发图，
+  // 模型连着读了两张，然后把吐槽算到了**乙**头上 —— 因为原来只印 `消息 N 的图片内容`，
+  // **id 对模型没有"这是谁发的"含义**，两条句子长得一样，它就把图和"先说话的人"配了对。
+  // 所以这里同时钉住"直接取图"和"顺引用回退"两条路都要带发送者。
+  ok('结果里点明发送者是谁（"张三 发的"），模型才不会把图归错人',
+    String(readCall?.toolCall?.result || '').includes('张三'), String(readCall?.toolCall?.result || '').slice(0, 160));
+
+  // 直接取图那条路同样要点名（上面的回退路已经验过"张三"，这里换成另一个发送者，
+  // 避免"名字碰巧出现在别处"造成假绿）
+  const { buildToolDefs: btd, executeTool: exe } = await load('agent/tools/index.js');
+  // ⚠️ `content` 是**内容部件数组**（`imageParts`），不是字符串 —— 直接拼会得到
+  // "[object Object]"（本套件初版就这么假红了一条）。另有 `injectedImages` 带 meta。
+  const direct = await exe(btd(), {
+    chatKey: env.key, store: env.store,
+    triggerEntries: [{ mid: 81, senderId: '555', senderName: '王五', text: '[图片]', media: [{ kind: 'image', url: `${base}/ok.png` }] }],
+    onebot
+  }, 'get_message_images', { messageId: 81 });
+  const directText = Array.isArray(direct.content)
+    ? direct.content.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('')
+    : String(direct.content);
+  ok('直接取图那条路也点名了发送者「王五 发的」',
+    directText.includes('王五 发的'), directText.slice(0, 160));
   // 反向对照：引用链上都没有图时不能凭空取图，也不能说成"取到了"。
   env.store.appendIncoming(env.key, {
     mid: 83, ts: Date.now() + 20, senderId: '777', senderName: '李四', text: '再看这条',
@@ -210,6 +232,45 @@ console.log('\n=== 5. 填了没有图的那条 → 顺着 reply.mid 取被引用
   ok('引用链上没有图时如实说没有，不返回图片内容',
     String(plain.content).includes('没有可查看的图片') && !String(plain.content).includes('图片内容'),
     JSON.stringify(plain).slice(0, 200));
+}
+
+// ═══ 5. 两个人各发一张图 → 每张图必须点名各自的发送者 ═══
+//
+// **实测反馈的 bug**：群友甲发了图、群友乙也发了一张，模型连着读这两张，
+// 然后把它做的吐槽算到了**乙**头上。原来工具只印 `消息 <id> 的图片内容` ——
+// **id 对模型没有"这是谁发的"含义**，两条结果长得几乎一样，模型就把"图"和
+// "先说话的那个人"配了对。所以这里用**两个不同发送者**钉住：
+// 每条结果只能带**自己那条**的发送者名，不能串。
+console.log('\n=== 5. 两个人各发一张图：每张图各点各的名（不能张冠李戴）===');
+{
+  const { buildToolDefs, executeTool } = await load('agent/tools/index.js');
+  const env = boot('group:129');
+  const entries = [
+    { mid: 91, senderId: '555', senderName: '甲某', text: '[图片]', media: [{ kind: 'image', url: `${base}/ok.png` }] },
+    { mid: 92, senderId: '777', senderName: '乙某', text: '[图片]', media: [{ kind: 'image', url: `${base}/ok.png` }] }
+  ];
+  const textOf = (r) => (Array.isArray(r.content)
+    ? r.content.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('')
+    : String(r.content));
+  const a = await executeTool(buildToolDefs(), { chatKey: env.key, store: env.store, triggerEntries: entries, onebot }, 'get_message_images', { messageId: 91 });
+  const b = await executeTool(buildToolDefs(), { chatKey: env.key, store: env.store, triggerEntries: entries, onebot }, 'get_message_images', { messageId: 92 });
+  const ta = textOf(a), tb = textOf(b);
+  ok('第一张图点的是发送者「甲某」', ta.includes('甲某 发的'), ta.slice(0, 140));
+  ok('第二张图点的是发送者「乙某」', tb.includes('乙某 发的'), tb.slice(0, 140));
+  // **对照必须存在**：这两条最容易的病就是"两条结果里都出现同一个名字"
+  ok('★ 第一张图里**不出现**乙某的名字（否则模型又分不清）', !ta.includes('乙某'), ta.slice(0, 140));
+  ok('★ 第二张图里**不出现**甲某的名字', !tb.includes('甲某'), tb.slice(0, 140));
+  // 两条结果不能一模一样，否则"点名"等于没点
+  ok('★ 两条结果文本不同（点名真的生效了）', ta !== tb, JSON.stringify([ta.slice(0, 80), tb.slice(0, 80)]));
+
+  // 工具 description 里承诺了"返回内容开头会写明这张图是谁发的" —— 承诺与实现必须一致，
+  // 否则模型会照着一个不存在的格式去找（这类"文案说 A、代码给 B"没人会去核对）。
+  const { PROMPT_CATALOG } = await load('core/prompt-catalog.js');
+  const desc = String(PROMPT_CATALOG.tools.get_message_images.description || '');
+  ok('工具 description 里承诺了会写明发送者', desc.includes('是谁发的'), desc.slice(-80));
+  ok('实现真的把"X 发的"放在**开头附近**（description 说的是"开头会写明"）',
+    ta.indexOf('甲某 发的') >= 0 && ta.indexOf('甲某 发的') < 40, `位置=${ta.indexOf('甲某 发的')} | ${ta.slice(0, 90)}`);
+  ok('description 里也提醒了"不要算到另一个群友头上"', desc.includes('不要把某张图算到另一个群友头上'));
 }
 
 model.close();
