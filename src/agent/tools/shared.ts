@@ -10,6 +10,7 @@ import { normalizeMessageList, unquoteJsonString, formatShortTime } from '../../
 import { formatStickerList } from '../../stickers/stickers.js';
 import { validateImageUrl, safeFetchBinary, detectMime } from '../../media/safe-fetch.js';
 import { webSearch, webFetch } from '../../media/web-search.js';
+import { SlidingWindowBudget } from '../../media/call-budget.js';
 import { expandForwardNodes, extractMediaFromSegments, forwardIdFromData } from '../../qq/onebot.js';
 import { enqueueJmcomicDownload } from '../../media/jmcomic.js';
 import { cachedDataUrl, isCacheFile, sendTarget } from '../../stickers/sticker-cache.js';
@@ -30,6 +31,39 @@ async function downloadImageAsDataUrl(url: unknown, timeoutMs = 30000): Promise<
   if (!buffer || !buffer.length) throw new Error('图片内容为空');
   const mime = detectMime(buffer) || String(contentType || 'image/jpeg').split(';')[0];
   return `data:${mime};base64,${buffer.toString('base64')}`;
+}
+
+// ── 联网调用的成本闸门 ──
+//
+// 三个工具共用一个实例，所以 **web_search 与 web_fetch 是同一份额度**：两者都是"发一次
+// 外部网络请求"，分开记两本账只会让用户以为各有限额，实际却按两份算。这与
+// `agent-runner.ts` 把两者计进同一个 `webSearchCount` 的口径一致。
+//
+// 模块级单例是**有意的**：滑动窗口的状态必须跨调用累积，放进 `execute` 里每次新建就等于
+// 没有闸门。限额本身每次调用现读配置（`getLimits` 是回调），所以改完设置即时生效。
+const webBudget = new SlidingWindowBudget({
+  getLimits: () => {
+    const cfg = getConfig().webSearch;
+    return { perChatPerHour: cfg?.maxCallsPerChatPerHour, perDay: cfg?.maxCallsPerDay };
+  }
+});
+
+/**
+ * 在真正联网**之前**领一次额度；超限返回给模型看的一句话，未超限返回 null。
+ *
+ * 排在联网之前是刻意的（与 image-source 同一条）：被拒绝的调用不该真去发请求，也不该占额度。
+ * 返回文案而不是抛错，是因为这两个工具的既有约定就是"失败原因作为结果交回模型，
+ * 由模型决定怎么向群友交代"——工具**不替模型发言**。
+ */
+function takeWebBudget(chatKey: string): string | null {
+  try {
+    webBudget.take(chatKey);
+    return null;
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== 'RATE_LIMITED') throw error;
+    const cfg = getConfig().webSearch;
+    return `联网调用太频繁（本会话每小时最多 ${cfg?.maxCallsPerChatPerHour ?? 20} 次、全部会话每天最多 ${cfg?.maxCallsPerDay ?? 200} 次），稍后再试。`;
+  }
 }
 
 // 按魔数判图片类型的实现搬到了 safe-fetch.js（那边没有依赖，sticker-cache.js 也要用）。
@@ -695,6 +729,9 @@ export function buildAllToolDefs(): ToolDefinition[] {
         required: ['query']
       },
       async execute(ctx, args) {
+        // 限频排在联网之前：被拒绝的调用不该真去发请求，也不该占额度。
+        const limited = takeWebBudget(ctx.chatKey);
+        if (limited) return err(limited);
         try {
           const result = await webSearch(String(args.query ?? ''));
           if (!result.results.length) {
@@ -715,6 +752,8 @@ export function buildAllToolDefs(): ToolDefinition[] {
         required: ['url']
       },
       async execute(ctx, args) {
+        const limited = takeWebBudget(ctx.chatKey);
+        if (limited) return err(limited);
         try {
           const result = await webFetch(String(args.url ?? ''));
           const body = String(result.body || '');

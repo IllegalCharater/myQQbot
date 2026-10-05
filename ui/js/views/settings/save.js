@@ -113,11 +113,26 @@ export async function saveConfig({ quiet = false } = {}) {
     const enteredBochaKey = val('#cfg-bocha-key', '').trim();
     const enteredBaiduKey = val('#cfg-baidu-key', '').trim();
     const enteredMetasoKey = val('#cfg-metaso-key', '').trim();
+    // 网页收藏夹：每行一个，前端只做"按行拆分 + 去空行"，**不做域名归一化**。
+    // 归一化（剥 scheme/路径、去重、限量）的唯一实现在 core/config.ts 的 hostnameOf /
+    // normalizeConfigShape —— 前端再写一份必然漂移，而两边规则不一致时，用户看到的名单
+    // 与实际参与检索的名单会不一样（先例见 prompt-catalog 与 chats.js 的 replyPrefixHtml：
+    // 够不着 src/ 的那份必须与 src 同形，同形就得两处一起改）。
+    const bookmarks = String($('#cfg-search-bookmarks')?.value || '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
     patch.webSearch = {
       ...c.webSearch,
       enabled: chk('#cfg-websearch', c.webSearch?.enabled !== false),
       provider: val('#cfg-searchprovider', c.webSearch?.provider || 'bing'),
       searchUrl: val('#cfg-searchurl', c.webSearch?.searchUrl || 'https://cn.bing.com/search').trim() || 'https://cn.bing.com/search',
+      bookmarks,
+      bookmarkFirst: chk('#cfg-search-bookmarkfirst', c.webSearch?.bookmarkFirst !== false),
+      // 与后端 normalizeConfigShape 的钳制口径保持一致（1–200 / 1–5000）：
+      // 前端钳一次是为了让用户当场看到被改成的值，后端那一次才是权威。
+      maxCallsPerChatPerHour: clampInt($('#cfg-search-chat-hourly')?.value, 1, 200, 20),
+      maxCallsPerDay: clampInt($('#cfg-search-daily')?.value, 1, 5000, 200),
       deepseek: {
         ...(c.webSearch?.deepseek || {}),
         ...(enteredDsKey && enteredDsKey !== '******' ? { apiKey: enteredDsKey } : {}),

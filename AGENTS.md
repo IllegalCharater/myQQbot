@@ -266,6 +266,27 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 唯一不走它的是 `applyTokens`（401 轮换路径上必须先写 token 再无条件重连，刻意保留）。守护在 `tests/t-timers.mjs` 第 5 段。
 
+**联网搜索的两层入口与网页收藏夹（域名优先检索）**：`media/web-search.ts` 有**两个**导出层次，改这条链之前先分清职责：
+
+- `webSearch()` —— 对工具的唯一入口，负责收藏夹逻辑；
+- `searchOnce()` —— 按 `webSearch.provider` 分发到六路 provider，**不认识收藏夹**。新增 provider 只接进这张分发表即可，不必重复实现优先逻辑（这与 image-source "引擎知识在 Python、映射唯一实现在客户端"是同一种"把易变的部分收进一层"的取舍）。
+
+三条不变量：
+
+- **是"域名优先"而不是"只搜收藏夹"**。结构上照 reverse-image-source 的 `ORDER`（专属来源先答、一般向兜底），但**不能命中即停**：收藏夹里没有对应内容时，只搜收藏夹会让整次搜索彻底落空，而模型无从分辨"站内没有"与"搜索引擎坏了"。所以做法是**两发并发 + 取并集**，收藏夹命中排最前并打 `fromBookmark` 标记。用 `Promise.allSettled` 而不是 `all`：受限那一发失败（provider 不认 `site:` 语法等）不该把已经拿到手的普通结果一起丢掉；两发都失败时抛的是**普通那一发**的原因（受限查询是我们额外加的，报错该对应模型真正请求的那件事）。
+- **域名匹配必须用点边界后缀，不能用 `includes`**：收藏 `example.com` 要命中 `m.example.com`，但**不能**命中 `notexample.com`。这条是**探针实测出来的**——第一版夹具用的是 `book.mark` vs `other.com`，两者无共享子串，`includes` 与后缀匹配结果完全相同，于是那条断言是**假的绿**（改成 `includes` 后 29 条里只红 0 条）；换成 `example.com` / `m.example.com` / `notexample.com` 这组才有判别力（改成 `includes` 会红 2 条）。写域名类断言时注意夹具必须让两种实现**可分**。
+- **归一化只在 `core/config.ts` 的 `hostnameOf` + `normalizeConfigShape` 里做一次**（剥 scheme 与路径、只留宿主名、小写去重、上限 20）。运行期只做拼接，前端只做"按行拆分 + 去空行"。前端再写一份必然漂移，而两边规则不一致时"用户看到的名单"与"实际参与检索的名单"会不一样。**上限与"单次查询塞几个"是两个不同的数**：`MAX_BOOKMARK_SITES`（20，管名单长度）在 config，`MAX_SITES_PER_QUERY`（5，管查询串长度）在 web-search —— 二者的正确值由不同约束决定，合并成一个会让另一侧失守。名单为空或 `bookmarkFirst === false` 时**一次额外请求都不发**，行为与没有这个功能时逐字相同。
+
+`fromBookmark` 由**字段的缺席**表示"不是收藏夹结果"（不写 `false`，同 `ImageSourceResult.similarity` 与 `time` 的规矩）。它的语义说明写在 `prompt-catalog.ts` 的 `qqSceneRules` 里（"标记只代表被收藏，不代表更权威"），**不按收藏夹是否为空分支**——配置随时可改而 system prompt 每轮重建，分支只会让两边措辞漂移；也不再往 `web_search.description` 里塞（那个字段每轮都进模型上下文，别把它当文档）。
+
+**联网调用阀门复用 `media/call-budget.ts` 的 `SlidingWindowBudget`**（与 image-source / transcription 同形），但有三点与它们不同，改动时注意：
+
+- `web_search` 与 `web_fetch` **共用同一份额度**——两者都算"发一次外部网络请求"。分开记两本账会让用户以为各有限额，实际按两份算。口径与 `agent-runner.ts` 把两者计进同一个 `webSearchCount` 一致。
+- 模块级单例（`agent/tools/shared.ts` 的 `webBudget`）是**有意的**：滑动窗口状态必须跨调用累积，放进 `execute` 里每次新建就等于没有闸门。限额每次现读配置（`getLimits` 是回调），改完设置即时生效。
+- 默认值 **20/时·200/日**，比搜图（5/30）与转写（3/10）宽松——默认的 Bing 页面解析**不直接产生费用**，这两项的用途是**压住刷屏**而不是护第三方配额；换到按次计费的 provider 时应由用户调小。**这条不对称是有意的，别为了"看起来整齐"把它们调成一样。**
+
+守护：行为套件 `tests/t-web-search.mjs`（29 条，起本地假搜索引擎真跑两次请求，覆盖并集/去重/排序/标记/两发失败/清洗），前端接线在 `tests/t-panel-wiring.mjs` 的「联网搜索」段（含一条"前端不重复实现域名归一化"的**剥注释**扫描——不剥注释会因为它自己那句 `hostnameOf` 注释永远假红），配置归一化在 `tests/t-cfg.mjs`（DIAG，只打印）。**改这条链要跑 `t-web-search.mjs`**：它对"优先级反了"与"匹配放宽成 includes"两个变异都真的会红（本轮各跑过一次）。
+
 ## 测试约定
 
 - 测试加载 `dist/`，因此不要用未 build 的结果判断源码行为。**推论：搬动/删除 `src/` 文件后必须先 `rm -rf dist` 再 build**——`npm run build` 是裸 `tsc`，**不清理旧产物**，实测 `dist/` 里曾积了 29 个化石文件。旧位置的编译产物还在时，一个指向旧路径的 `load('web/xxx.js')` 会**照样解析成功、套件全绿**（实测：伪造 `dist/web/router.js` + 把 `t-web-router.mjs` 的字面量改回旧路径 → `11 通过 / 0 失败`），所以"纯搬运"的验证在没清 dist 时是假的。

@@ -1,6 +1,13 @@
 // 联网搜索（移植自原版 bingSearch）：Bing 中文搜索，无需 API key。
 // 搜索请求本身用普通 fetch（搜索 URL 是管理端配置的可信地址，只需清洗查询词）；
 // 对外抓取网页正文一律走 safe-fetch（web_fetch 工具）。
+//
+// 入口有两个层次，改这条链之前先分清：
+//   · `webSearch()` —— 对工具的唯一入口。负责**网页收藏夹（域名优先检索）**：名单非空时
+//     并行发两发（收藏夹限定 + 普通），合并后把收藏夹命中整体上提并打 `fromBookmark` 标记。
+//     名单为空时只发一发，行为与没有这个功能时逐字相同。
+//   · `searchOnce()` —— 按 `webSearch.provider` 分发到具体 provider，只认一个查询词。
+//     **它不认识收藏夹**，所以新增 provider 只需要接进这张分发表，不必重复实现优先逻辑。
 import { getConfig } from '../core/config.js';
 import { safeFetch } from './safe-fetch.js';
 
@@ -8,6 +15,16 @@ interface SearchResult {
   title: string;
   url: string;
   snippet: string;
+  /**
+   * 这条结果来自网页收藏夹里的站点（由 `annotateBookmarks` 在服务层标记）。
+   *
+   * 为什么要把"为什么它排在前面"告诉模型，而不是悄悄重排：收藏夹是我们替他做的排序，
+   * 模型看不到排序依据时，会把"排第一"读成"最权威"，从而照着一条其实只是"用户常去"
+   * 的站点回答。带上这个字段，它才能在需要时自己权衡。
+   * 由**字段的缺席**表示"不是收藏夹结果"，与 ImageSourceResult.similarity 同一条规矩
+   * （不写 false：那会让每条普通结果都多一个无信息量的键）。
+   */
+  fromBookmark?: true;
 }
 
 interface SearchResponse {
@@ -82,10 +99,128 @@ export async function bingSearch(query: string): Promise<SearchResponse> {
   return { query, results };
 }
 
+/**
+ * 一次 `site:` 子句里最多放几个站点。
+ *
+ * 与配置层的站点上限（`MAX_BOOKMARK_SITES` = 20）是**两个数、管两件事**：那个管"名单能有多长"，
+ * 这个管"单次查询串里塞几个"。不合并成一个是因为二者的正确值由不同约束决定：名单长度由
+ * 用户想收藏多少决定，而查询串长度只影响这一次搜索的质量。超出部分不丢——它们仍参与
+ * 结果优先级的判定（`annotateBookmarks` 用的是整份名单）。
+ */
+const MAX_SITES_PER_QUERY = 5;
+
+/** 收藏夹站点命中判定用的纯宿主名集合。 */
+function bookmarkSiteSet(): Set<string> {
+  const list = getConfig().webSearch?.bookmarks;
+  const set = new Set<string>();
+  if (!Array.isArray(list)) return set;
+  for (const item of list) {
+    const host = String(item ?? '').toLowerCase().trim().replace(/\.$/, '');
+    if (host) set.add(host);
+  }
+  return set;
+}
+
+/**
+ * 这条结果是否落在某个收藏夹站点下。
+ *
+ * 用**后缀匹配 + 点边界**，不是 `includes`：否则收藏了 `a.com` 会连带把 `nota.com`
+ * 也算命中（真机实测里最容易发生的一类串台：域名是别名的后缀）。
+ */
+function hostMatchesSet(host: string, sites: Set<string>): boolean {
+  if (!host) return false;
+  for (const site of sites) {
+    if (host === site || host.endsWith(`.${site}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * 给结果打上「来自收藏夹站点」的标记，并把它们**整体上提到最前面**。
+ *
+ * 两个动作合成一件事：排序是我们做的，标记是让模型知道排序依据。只做前者会让模型把
+ * "用户常去"误读成"最权威"；只做后者则收藏夹不起任何作用（这正是本轮之前的状态）。
+ *
+ * 顺带按规范化 URL 去重：受限查询与普通查询的**重叠部分通常是绝大多数**（收藏的站点
+ * 本来就可能排在前面），不去重会让同一篇文章在结果里出现两次、白占一个名额。
+ */
+function annotateBookmarks(results: SearchResult[], sites: Set<string>): SearchResult[] {
+  const scored = results.map((item) => ({ item, bookmark: hostMatchesSet(hostOf(item.url), sites) }));
+  const seen = new Set<string>();
+  const out: SearchResult[] = [];
+  for (const pass of [true, false]) {
+    for (const { item, bookmark } of scored) {
+      if (bookmark !== pass) continue;
+      const key = urlKey(item.url);
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      out.push(bookmark ? { ...item, fromBookmark: true } : item);
+    }
+  }
+  return out;
+}
+
+function hostOf(url: string): string {
+  try { return new URL(url).hostname.toLowerCase().replace(/\.$/, ''); } catch { return ''; }
+}
+
+/**
+ * 去重键。**规范化掉末尾斜杠与 fragment**，但保留查询串与路径——
+ * `a.com/x` 与 `a.com/x#sec2` 是同一篇，而 `a.com/x` 与 `a.com/y` 不是。
+ * 认不出 URL 时返回空串，调用方按"不参与去重"处理（宁可重复也不误删）。
+ */
+function urlKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+/** 把若干站点拼成一条 `(site:a OR site:b)` 子句；没有可用站点时返回空串。 */
+function siteClause(sites: string[]): string {
+  const picks = sites.slice(0, MAX_SITES_PER_QUERY).map((site) => `site:${site}`);
+  return picks.length ? `(${picks.join(' OR ')})` : '';
+}
+
 /** 给工具用的统一入口：搜索 + 紧凑序列化。 */
 export async function webSearch(query: unknown): Promise<SearchResponse> {
   const clean = sanitizeQuery(query);
   if (!clean) throw new Error('查询词为空');
+  const cfg = getConfig().webSearch ?? {};
+  const sites = cfg.bookmarkFirst === false ? new Set<string>() : bookmarkSiteSet();
+  if (!sites.size) return searchOnce(clean);
+
+  // ── 收藏夹优先检索（"域名优先"而不是"只搜收藏夹"）──
+  //
+  // 结构与 reverse-image-source 的 ORDER 那条链是同一种判据：**专属来源先答，答不上再
+  // 问一般向兜底**。区别在于这里不能"命中即停"——收藏夹里没有对应内容时，只搜收藏夹会
+  // 让整次搜索彻底落空，而模型无从知道"是站内没有"还是"搜索引擎坏了"。
+  //
+  // 两发**并行**：串行会让每次带收藏夹的搜索都多付一个完整往返；而"命中即停"在这里
+  // 本来就不成立（我们必须拿到普通结果才能知道收藏夹有没有答上）。
+  // `allSettled` 而不是 `all`：受限那一发失败（provider 不认 site: 语法等）不该把
+  // 已经拿到手的普通结果一起丢掉。
+  const [scoped, general] = await Promise.allSettled([
+    searchOnce(`${clean} ${siteClause([...sites])}`),
+    searchOnce(clean)
+  ]);
+
+  const merged: SearchResult[] = [];
+  if (scoped.status === 'fulfilled') merged.push(...scoped.value.results);
+  if (general.status === 'fulfilled') merged.push(...general.value.results);
+  // 两发都失败时，把**普通那一发**的真实原因抛出去：受限查询是我们额外加的，
+  // 用户/模型看到的原因该对应他们真正请求的那件事。
+  if (!merged.length && scoped.status === 'rejected' && general.status === 'rejected') {
+    throw general.reason;
+  }
+  return { query: clean, results: annotateBookmarks(merged, sites) };
+}
+
+/** 按配置分发到具体 provider。收藏夹逻辑在外层，这里只认"一个查询词"。 */
+async function searchOnce(clean: string): Promise<SearchResponse> {
   const cfg = getConfig().webSearch ?? {};
   const provider = String(cfg.provider || 'bing').toLowerCase();
   if (provider === 'deepseek') return deepSeekSearch(clean);

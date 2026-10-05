@@ -4,10 +4,18 @@ import path from 'node:path';
 import { load } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-'));
 // 模拟"老配置文件"：只有旧键，没有 reply/compact/maxContextMessages
+// 收藏夹里塞满各种形态的脏值 —— 后端必须在配置层就把它们收口成宿主名，
+// 因为脏值不会报错，只会让发给搜索引擎的 site: 子句静默作废。
 fs.writeFileSync(path.join(DIR, 'config.json'), JSON.stringify({
   api: { model: 'x' }, wakeDelayMs: 1500,
   store: { maxMessagesPerChat: 0, contextTier: 4, allCount: 77 },
-  send: { maxPerMinute: 80 }, reply: { maxPerMinute: 3 }
+  send: { maxPerMinute: 80 }, reply: { maxPerMinute: 3 },
+  webSearch: {
+    // 合法的三种写法（裸域名 / 整条 URL / 大小写混合）+ 三种必须被丢掉的值
+    bookmarks: ['zh.wikipedia.org', 'https://www.example.com/a/b?c=1#d', 'News.YCombinator.com',
+      '   ', 'localhost', 'not a host', 'ZH.WIKIPEDIA.ORG'],
+    maxCallsPerChatPerHour: 999, maxCallsPerDay: 0
+  }
 }), 'utf8');
 process.env.QQ_AGENT_DATA_DIR = DIR;
 const { loadConfig, getConfig } = await load('core/config.js');
@@ -21,4 +29,9 @@ console.log('store 旧档位已迁移为唯一滑条字段:', c.store.contextSli
 console.log('旧四套历史深度已迁移为独立字段:', c.store.historyCount === 77,
   !('atCount' in c.store), !('keywordCount' in c.store), !('randomCount' in c.store), !('allCount' in c.store));
 console.log('旧回复态频率并入统一上限:', c.send.maxPerMinute === 3, !('maxPerMinute' in c.reply));
+// 网页收藏夹归一化：整条 URL 收成域名、大小写归一、去重、丢掉非宿主名的脏值。
+console.log('收藏夹已归一为宿主名:', JSON.stringify(c.webSearch.bookmarks) === JSON.stringify(['zh.wikipedia.org', 'www.example.com', 'news.ycombinator.com']));
+console.log('收藏夹脏值已丢弃（localhost / 含空格 / 纯空白）:', c.webSearch.bookmarks.length === 3);
+console.log('收藏夹大小写去重生效:', c.webSearch.bookmarks.filter((h) => h === 'zh.wikipedia.org').length === 1);
+console.log('阀门上限钳制（999→200，0→1）:', c.webSearch.maxCallsPerChatPerHour === 200, c.webSearch.maxCallsPerDay === 1);
 fs.rmSync(DIR, { recursive: true, force: true });

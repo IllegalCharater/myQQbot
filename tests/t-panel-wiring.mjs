@@ -9,7 +9,7 @@
 //   3. 过滤/分页的账本又跑回未过滤的 state.chatMessages（"还有 N 条"永远算不对）
 import fs from 'node:fs';
 import path from 'node:path';
-import { readUI, uiFile } from './lib/src.mjs';
+import { readUI, uiFile, stripComments } from './lib/src.mjs';
 
 const html = readUI('index.html');
 const jsRoot = uiFile('js');
@@ -139,6 +139,34 @@ ok('自检原文用 textContent 照登（不拼 HTML、不截断：worker 的映
   /pre\.textContent = r\.output \|\| /.test(pythonBlock) && !/pre\.innerHTML/.test(pythonBlock));
 ok('自检按钮跑完会复位（finally 里恢复 disabled，否则一次失败就永久禁用）',
   /finally \{\s*\r?\n\s*pythonCheck\.disabled = false;/.test(pythonBlock));
+
+console.log('\n═══ 联网搜索：网页收藏夹与调用阀门 ═══');
+// 这一段的四个 id 此前一个都不存在，而它们在 save.js 里全是 `$('#…')?.value` 的形式：
+// id 写错**不会报错**，只会让收藏夹静默保存成空数组（`?.` 兜住 undefined），
+// 表现为"填了收藏夹但搜索完全不理会它"—— 与"功能本身没生效"长得一模一样。
+for (const id of ['cfg-search-bookmarks', 'cfg-search-bookmarkfirst', 'cfg-search-chat-hourly', 'cfg-search-daily']) {
+  ok(`#${id} 已加入设置模板`, new RegExp(`id="${id}"`).test(js));
+  ok(`#${id} 可解析`, resolves(id));
+}
+const searchSave = seg("if (sec === 'search')", "if (sec === 'image-source')");
+ok('搜索保存分支生成 patch.webSearch', /patch\.webSearch = \{/.test(searchSave));
+ok('收藏夹按行拆分并丢掉空行',
+  /const bookmarks = String\(\$\('#cfg-search-bookmarks'\)\?\.value \|\| ''\)\s*\n\s*\.split\('\\n'\)\s*\n\s*\.map\(\(line\) => line\.trim\(\)\)\s*\n\s*\.filter\(Boolean\)/.test(searchSave));
+// 前端**不做**域名归一化：唯一实现在 core/config.ts 的 hostnameOf。前端再写一份必然漂移，
+// 而两边规则不一致时"用户看到的名单"与"实际参与检索的名单"会不一样。
+// ⚠️ 必须 stripComments 后再扫：这条断言的靶子是**注释里那个词**（上面几行就写着
+// "hostnameOf"），不剥注释会永远假红 —— 反向的坑（一句注释把已删的调用伪装成还在用）
+// 在 t-ports.mjs 第 2 段踩过，判据是"扫有没有 X"和"扫还有没有人在用 X"都要剥。
+const searchSaveCode = stripComments(searchSave);
+ok('前端不重复实现域名归一化（剥 scheme/路径只由后端做）',
+  !/replace\(\/\^https\?/.test(searchSaveCode) && !/hostname/.test(searchSaveCode));
+ok('阀门两个数值都走 clampInt，且与后端钳制口径一致（1-200 / 1-5000）',
+  /maxCallsPerChatPerHour: clampInt\([^\n]+, 1, 200, 20\)/.test(searchSave)
+  && /maxCallsPerDay: clampInt\([^\n]+, 1, 5000, 200\)/.test(searchSave));
+ok('bookmarkFirst 的兜底是 true（未配置时等于开启）',
+  /bookmarkFirst: chk\('#cfg-search-bookmarkfirst', c\.webSearch\?\.bookmarkFirst !== false\)/.test(searchSave));
+// 动态列表不能随表单提交被覆盖（这条是既有的有意设计，本次新增字段不得把它挤掉）
+ok('自定义搜索服务列表仍不被表单覆盖', /providers: c\.webSearch\?\.providers \|\| \[\]/.test(searchSave));
 
 const REGIONS = {
   '表情包页': stickerJs,

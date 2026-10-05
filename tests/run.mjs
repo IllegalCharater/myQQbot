@@ -43,6 +43,7 @@ const ASSERT = [
   't-hot-search.mjs',      // 每日热搜（接口契约、重试、去重分页、幂等与互斥）
   't-image-source.mjs',    // 图片来源识别（Provider、队列、缓存、脱敏与 UI 接线）
   't-media-tools.mjs',     // 模型自主调用的两个能力工具（取榜单 / 转写、配额闸门与按配置过滤）
+  't-web-search.mjs',      // 联网搜索：网页收藏夹（域名优先检索）与查询词清洗，起本地假搜索引擎
   't-jmcomic.mjs',         // 漫画队列去重（按请求者+漫画ID）与完成后记录留存
   't-jmcomic-callback.mjs',// 漫画 Python 结果帧与上传完成后的 Agent 回流
   't-jmcomic-upload.mjs',  // 漫画上传超时/重启恢复只核验，不盲目重传

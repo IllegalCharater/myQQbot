@@ -172,6 +172,27 @@ export function renderSearchSection(c) {
         <button class="btn btn-small" id="cfg-metaso-key-toggle" type="button">显示</button>
       </div></div>
 
+    <h3>网页收藏夹</h3>
+    <div class="field">
+      <label>收藏的站点（每行一个域名或网址；最多 20 个）</label>
+      <textarea id="cfg-search-bookmarks" rows="4" placeholder="zh.wikipedia.org&#10;https://www.example.com/some/page&#10;news.ycombinator.com">${esc((Array.isArray(c.webSearch?.bookmarks) ? c.webSearch.bookmarks : []).join('\n'))}</textarea>
+      <div class="muted" style="font-size:12px;margin-top:4px">
+        搜索时先在这些站点里查一轮，命中的结果排在最前面（并带 <code>fromBookmark</code> 标记）；
+        站内没有对应内容时，会自动补上全网搜索结果，所以收藏夹不会让搜索"变窄到搜不到"。
+        填整条网址只会取它的<strong>域名</strong>——收藏的是整个站点，不是那一个页面。
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>单会话每小时最多搜索次数</label>
+        <input type="number" id="cfg-search-chat-hourly" min="1" max="200" value="${esc(c.webSearch?.maxCallsPerChatPerHour ?? 20)}" /></div>
+      <div class="field"><label>全部会话每天最多搜索次数</label>
+        <input type="number" id="cfg-search-daily" min="1" max="5000" value="${esc(c.webSearch?.maxCallsPerDay ?? 200)}" /></div>
+    </div>
+    <div class="field">
+      <div class="checkbox-row"><input type="checkbox" id="cfg-search-bookmarkfirst" ${c.webSearch?.bookmarkFirst !== false ? 'checked' : ''} />
+        <label for="cfg-search-bookmarkfirst">启用收藏夹优先（关掉后名单保留，但搜索不再理会它）</label></div>
+    </div>
+
     <h3>添加自定义搜索服务</h3>
     <div class="field-row">
       <div class="field"><label>名称（自己辨认用）</label>

@@ -97,7 +97,24 @@ export const DEFAULT_CONFIG = {
       model: '',                      // openai 类型可选： Responses API 风格的模型名
       count: 6,
       timeoutMs: 20000
-    }
+    },
+    // ── 网页收藏夹（域名优先检索）──
+    // 用户配置的"常用站点"名单。作用**不是**把搜索锁死在这些站点里：命中即停式的
+    // "只搜收藏夹"会在站内没有对应内容时让整次搜索彻底落空，而模型无从知道为什么
+    // 什么都没搜到。做法改为**先限定查一轮、再补一轮不限定的并集**，收藏夹命中排在
+    // 前面并带 fromBookmark 标记（见 media/web-search.ts 的 webSearch）。
+    // 门控在配置层完成：列表为空时**一次额外的搜索都不发**，所以没用这个功能的部署
+    // 行为与从前逐字相同。
+    bookmarks: [],
+    // 收藏夹总开关。false = 忽略 bookmarks 名单（名单留着，方便临时关掉而不丢数据）。
+    bookmarkFirst: true,
+    // 调用阀门（与 imageSource / transcription 同形，实现见 media/call-budget.ts）。
+    //
+    // ⚠️ 与那两个能力不同，web_search 在默认的 Bing 页面解析下**不直接产生费用**，
+    // 所以这两项的作用不是"护住第三方配额"，而是**压住刷屏**：搜索是日常高频动作，
+    // 阈值定得比搜图/转写宽松。换成按次计费的 provider（智谱/博查/百度）时请自行调小。
+    maxCallsPerChatPerHour: 20,
+    maxCallsPerDay: 200
   },
   // 安全例外（默认全部关闭）
   security: {
@@ -388,6 +405,48 @@ export function loadConfig(): AppConfig {
 }
 
 /**
+ * 网页收藏夹的站点上限。
+ *
+ * 为什么是一个写死的常量而不是配置项：它保护的是**查询串长度**，不是用户偏好——
+ * 每家搜索引擎对 URL 长度都有一条不公开的线，而超长不报错、只是结果变差。20 个站点
+ * 拼出的 `site:` 子句约 300 字符，仍在安全区内；再多就该先用别的手段筛选了。
+ * 与 image-source 那四个"写明的常量而不是配置项"同一条理由（改它等于改行为）。
+ */
+const MAX_BOOKMARK_SITES = 20;
+
+/**
+ * 把用户填的一条收藏夹条目归一成宿主名；认不出返回空串（由调用方丢弃）。
+ *
+ * 设计决定：**只接受宿主名或完整 URL，不接受带路径的任意串，也不接受裸词**。
+ * 三条理由：
+ *   · 裸词（`example`）没有点、也不是合法 IPv4，只会让查询串变成一条无效的 site: 条件；
+ *   · 带路径的 URL 拼进 `site:` 没有意义（site: 只认站点），留着会让用户以为自己
+ *     "收藏了某个页面"，而检索范围其实是整个站——这是**承诺与行为不符**；
+ *   · 但用户复制粘贴出来的通常就是整条 URL（`https://a.com/x/y`），所以必须能收下它，
+ *     只是把路径丢掉，并**在设置页的提示里说明这件事**（见 sections.js 的收藏夹说明）。
+ */
+function hostnameOf(input: unknown): string {
+  const raw = String(input ?? '').trim();
+  if (!raw) return '';
+  // 先按"完整 URL"试。没写 scheme 的 `example.com/path` 会在这里抛错，下面再补一次。
+  for (const candidate of [raw, `https://${raw}`]) {
+    try {
+      const url = new URL(candidate);
+      // 只认 http/https：ftp:、file: 之类既搜不到也不该出现在这个名单里。
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+      const host = url.hostname.toLowerCase().replace(/\.$/, '');
+      // 必须带点（域名）或是 IP 字面量；`localhost`、单标签主机名一律丢弃。
+      if (!host.includes('.') && !/^\d+\.\d+\.\d+\.\d+$/.test(host)) continue;
+      if (!/^[a-z0-9.\-:[\]]+$/.test(host)) continue;
+      return host;
+    } catch {
+      // 换下一种写法再试
+    }
+  }
+  return '';
+}
+
+/**
  * 把旧配置迁移到当前形状。历史深度曾按响应原因拆成四项；现在迁移为独立的
  * historyCount。迁移时采用旧配置当前响应档位所对应的那一项，尽量保持原成本。
  */
@@ -425,6 +484,38 @@ function normalizeConfigShape<T>(input: T): T {
       p.maxResults = Math.round(clamp(p.maxResults, 1, 10, maxResults));
       if (name === 'sauceNao') p.apiKey = String(p.apiKey ?? '').trim();
     }
+  }
+  // ── 网页收藏夹 + 搜索调用阀门 ──
+  //
+  // **收藏夹为什么必须在配置层清洗，而不是在搜索时顺手兜住**：宿主名会被拼进发给
+  // 搜索引擎的查询串（`site:a.com OR site:b.com`），脏值不会报错、只会让整条查询
+  // 静默作废；而 400 个站点的名单拼出来是一个长度失控的 URL。所以在这里一次性
+  // 收口成"合法宿主名 + 去重 + 限量"，运行期只做拼接。
+  //
+  // 这里**不**用 `delete c.bookmarks` 之类的迁移写法：这些键是新加的，老配置里不存在，
+  // 不存在"旧值要删"的场景（同款判断见 python.path 那段）。
+  const webSearch = root.webSearch;
+  if (webSearch && typeof webSearch === 'object' && !Array.isArray(webSearch)) {
+    const w = webSearch as Record<string, unknown>;
+    const clamp = (value: unknown, min: number, max: number, fallback: number) => {
+      const n = Number(value); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    w.bookmarkFirst = w.bookmarkFirst !== false;
+    const rawList = Array.isArray(w.bookmarks) ? w.bookmarks : [];
+    const seen = new Set<string>();
+    const cleaned: string[] = [];
+    for (const entry of rawList) {
+      const host = hostnameOf(entry);
+      // 去重按小写比较：`Example.com` 与 `example.com` 是同一个站点，留着两条会让
+      // 查询串里出现两个等价条件，白占一个位置。
+      if (!host || seen.has(host)) continue;
+      seen.add(host);
+      cleaned.push(host);
+      if (cleaned.length >= MAX_BOOKMARK_SITES) break;
+    }
+    w.bookmarks = cleaned;
+    w.maxCallsPerChatPerHour = Math.round(clamp(w.maxCallsPerChatPerHour, 1, 200, 20));
+    w.maxCallsPerDay = Math.round(clamp(w.maxCallsPerDay, 1, 5000, 200));
   }
   const store = root.store;
   if (store && typeof store === 'object' && !Array.isArray(store)) {
