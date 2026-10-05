@@ -16,6 +16,40 @@ const { updateConfig } = await load('core/config.js');
 
 const { ok, done } = checker();
 const model = await fakeModelServer({ model: 'stub-tool-protocol' });
+
+// ── 漫画搜索与下载的边界 ──
+//
+// 这是用户明确要求的分界：**搜索只搜索，不自动下载**。所以除了 schema，还要正面钉住
+// "搜索这条路上没有下载代码" —— 光断言描述文字说了什么是不够的（文字可以留着、代码却接上了）。
+{
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+  const { buildToolDefs } = await load('agent/tools/index.js');
+  const tools = buildToolDefs();
+  const searchTool = tools.find((tool) => tool.name === 'search_jmcomic');
+  ok('search_jmcomic 工具存在', !!searchTool, tools.map((tool) => tool.name).join('、'));
+  ok('search_jmcomic 只要求 query，mode/orderBy/limit 都是可选（能用手写 tag:xxx 的简写）',
+    JSON.stringify(searchTool.parameters.required) === '["query"]' &&
+    ['keyword', 'tag', 'author', 'work', 'actor'].every((m) => searchTool.parameters.properties.mode.enum.includes(m)) &&
+    searchTool.parameters.properties.limit.maximum === 40,
+    JSON.stringify(searchTool.parameters));
+  ok('search_jmcomic 的 description 明说不会下载',
+    String(searchTool.description).includes('不会下载任何东西'), String(searchTool.description));
+
+  const root = pathMod.resolve(import.meta.dirname, '..');
+  const body = fsMod.readFileSync(pathMod.join(root, 'src/agent/tools/admin-tools.ts'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ' ');
+  const searchBody = body.slice(body.indexOf("name: 'search_jmcomic'"), body.indexOf("name: 'download_jmcomic'"));
+  ok('search_jmcomic 的执行体里没有下载调用（搜索绝不入队）',
+    searchBody.includes('searchJmcomic(') && !searchBody.includes('enqueueJmcomicDownload'),
+    `执行体长度 ${searchBody.length}`);
+
+  // Catalog 里这一项是**函数**（拼好再返回字符串），不是常量字符串。
+  const protocol = String(PROMPT_CATALOG.system.toolProtocol());
+  ok('system prompt 里有"搜到之后先问用户、不要自己挑一本下载"这条规则',
+    protocol.includes('search_jmcomic') && protocol.includes('不要自己挑一本下载') &&
+    protocol.includes('不要编造 ID'), protocol.slice(-200));
+}
 updateConfig({
   // 两轮刚好只够“调用工具 → 错误地返回普通文本”；纠正仍应获得独立的第三轮。
   api: { baseUrl: model.url, model: 'stub-tool-protocol', maxRounds: 2 },

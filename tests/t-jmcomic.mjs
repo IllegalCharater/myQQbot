@@ -417,7 +417,112 @@ ok('迁移会落盘：保存一次后 config.json 里没有 jmcomic、python.pat
   migrated.diskPath === 'D:\\probe python\\python.exe' && migrated.legacyGoneOnDisk,
   `拿到 ${JSON.stringify(migrated)} —— 不落盘的话旧键会永远留在用户的 config.json 里`);
 
-// ── 5. 安全网自证 ──
+// ── 5. 搜索漫画：只有搜索，绝不下载 ──
+//
+// 这一段的重点是那条**用户明确要求的分界**：搜索必须只读。所以除了"参数传对了"，
+// 还要正面钉住"它没有碰下载队列、没有产生任务、没有触发任何 onebot 上传调用"。
+{
+  const searchJobsBefore = fs.readFileSync(JOBS_FILE, 'utf8');
+  const uploadCallsBefore = calls.length;
+
+  const searchSpecs = [];
+  /**
+   * 假 spawn：认出 search 子命令就回一帧结果，其它一律失败（安全网段需要解释器起不来）。
+   *
+   * ⚠️ **不能用 `args[0] === 'search'` 判断**：`resolvePythonCommand` 可能给出
+   * `conda run --no-capture-output -n my_bot python <脚本> search …` 这种带前缀的形态，
+   * 那时子命令根本不在第 0 位。判据要看**脚本路径后面**那一段（实测踩到过：
+   * 用 args[0] 判会把 search 当成非搜索，直接抛"不该启动真实子进程"）。
+   */
+  const isSearchCall = (args) => {
+    const at = args.findIndex((value) => String(value).endsWith('jmcomic_download.py'));
+    return at >= 0 && args[at + 1] === 'search';
+  };
+  const searchSpawn = (command, args, options) => {
+    searchSpecs.push({ command, args: [...args], options });
+    if (isSearchCall(args)) {
+      // 把实际收到的参数回显进结果，就能在不解析 argv 的前提下断言"模式/排序/上限真的传下去了"
+      const mode = args[args.indexOf('--mode') + 1];
+      const limit = Number(args[args.indexOf('--limit') + 1]);
+      const query = args[args.indexOf('--mode') - 1];
+      return fakeChild({
+        stdout: '__QQ_AGENT_RESULT__' + JSON.stringify({
+          ok: true, mode, query, orderBy: args[args.indexOf('--orderBy') + 1], page: 1, total: 3,
+          items: Array.from({ length: Math.min(limit, 3) }, (_, index) => ({
+            comicId: String(1000 + index), title: `条目${index + 1}`, tags: ['标签A']
+          }))
+        }) + '\n'
+      });
+    }
+    throw new Error(`不该在搜索用例里启动真实子进程：${args.join(' ')}`);
+  };
+  jmcomic.initJmcomicQueue({ ...fakeRuntime, spawnProcess: searchSpawn });
+
+  const hit = await jmcomic.searchJmcomic({ query: '测试关键词' });
+  ok('关键词搜索返回解析后的条目（id / 标题 / 标签都取到了）',
+    hit.items.length === 3 && hit.items[0].comicId === '1000' && hit.items[0].title === '条目1' &&
+    hit.items[0].tags[0] === '标签A',
+    JSON.stringify(hit.items));
+  ok('默认按关键词搜、默认排序 latest，且命令是 jmcomic 脚本的 search 子命令',
+    hit.mode === 'keyword' && hit.orderBy === 'latest' && isSearchCall(searchSpecs.at(-1).args) &&
+    searchSpecs.at(-1).args[searchSpecs.at(-1).args.indexOf('--mode') - 1] === '测试关键词',
+    JSON.stringify(searchSpecs.at(-1).args));
+  ok('搜索词原样作为独立 argv 传入（不会被拼进 shell 串，注入面为零）',
+    searchSpecs.at(-1).args.includes('测试关键词') && searchSpecs.at(-1).args.includes('--mode'),
+    JSON.stringify(searchSpecs.at(-1).args.slice(-7)));
+
+  const tagHit = await jmcomic.searchJmcomic({ query: '巨乳', mode: 'tag', orderBy: 'view', page: 3 });
+  const tagArgs = searchSpecs.at(-1).args;
+  ok('tag 模式与排序、页码真的传到 Python（不是只在 Node 侧记了个字段）',
+    tagHit.mode === 'tag' && tagArgs[tagArgs.indexOf('--mode') + 1] === 'tag' &&
+    tagArgs[tagArgs.indexOf('--orderBy') + 1] === 'view' && tagArgs[tagArgs.indexOf('--page') + 1] === '3',
+    JSON.stringify(tagArgs.slice(-8)));
+
+  await jmcomic.searchJmcomic({ query: 'x', limit: 9999 });
+  ok('limit 被夹到上限 40（不把超长列表塞进上下文）',
+    searchSpecs.at(-1).args[searchSpecs.at(-1).args.indexOf('--limit') + 1] === '40',
+    JSON.stringify(searchSpecs.at(-1).args.slice(-4)));
+
+  // 逐条校验必须给出"下一步"，否则模型只看到一句失败、不知道能改什么
+  const expectThrow = async (label, run, mustInclude) => {
+    let message = '';
+    try { await run(); } catch (error) { message = String(error?.message || error); }
+    ok(label, message.length > 0 && mustInclude.every((piece) => message.includes(piece)), JSON.stringify(message));
+  };
+  await expectThrow('空搜索词被拒', () => jmcomic.searchJmcomic({ query: '   ' }), ['搜索词不能为空']);
+  await expectThrow('超长搜索词被拒', () => jmcomic.searchJmcomic({ query: 'x'.repeat(101) }), ['过长']);
+  await expectThrow('非法搜索范围被拒，并给出可选值（拼进查询串的值必须走白名单）',
+    () => jmcomic.searchJmcomic({ query: 'x', mode: 'bogus' }), ['不支持的搜索范围', 'keyword']);
+  await expectThrow('非法排序被拒，并给出可选值',
+    () => jmcomic.searchJmcomic({ query: 'x', orderBy: 'raw;drop' }), ['不支持的排序方式', 'latest']);
+
+  // 失败帧与"库没装"两条必须能分开说：后者要带上可执行的那句安装提示。
+  // 用一次性开关区分这两枪，而不是让同一个假 spawn 回同一帧 —— 两者都回"失败帧"的话，
+  // 第二枪会在解析结果帧时就reject，永远走不到 close 那条兜底路径（实测踩到过，
+  // 断言拿到的是上一枪的错误文案）。
+  let moduleMissing = false;
+  jmcomic.initJmcomicQueue({
+    ...fakeRuntime,
+    spawnProcess: (c, a) => (isSearchCall(a) && !moduleMissing
+      ? fakeChild({ stdout: '__QQ_AGENT_RESULT__' + JSON.stringify({ ok: false, error: '搜索页解析失败' }) + '\n' })
+      : fakeChild({ close: true, code: 1, stderr: 'No module named jmcomic' }))
+  });
+  await expectThrow('Python 报失败时把它的原文带出来（不吞成"没搜到"）',
+    () => jmcomic.searchJmcomic({ query: 'x' }), ['搜索页解析失败']);
+  moduleMissing = true;
+  await expectThrow('库缺失时给出可执行的安装提示（否则用户只看到 No module named）',
+    () => jmcomic.searchJmcomic({ query: 'x' }), ['No module named']);
+
+  ok('搜索全程没有产生下载任务、也没有触发任何 onebot 调用（这是本次改动的核心约束）',
+    fs.readFileSync(JOBS_FILE, 'utf8') === searchJobsBefore && calls.length === uploadCallsBefore,
+    `jobs.json 变了=${fs.readFileSync(JOBS_FILE, 'utf8') !== searchJobsBefore}；` +
+    `onebot 调用数 ${uploadCallsBefore} -> ${calls.length}`);
+
+  // 收尾：把 runtime 还原成下游段期望的样子（安全网段需要"解释器起不来"）
+  jmcomic.initJmcomicQueue(fakeRuntime);
+}
+
+// ── 6. 安全网自证 ──
 //
 // 这是整套夹具里**唯一**能证明"安全网真的生效"的证据。安全网失效时，第 3 位用户那条任务会真的
 // 去下载漫画 —— 而**下载成功**在断言里与"压根没跑"长得一模一样（都是没有 lastError），

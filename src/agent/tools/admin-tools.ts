@@ -1,6 +1,6 @@
 import { EVENTS } from '../../core/events.js';
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
-import { enqueueJmcomicDownload } from '../../media/jmcomic.js';
+import { enqueueJmcomicDownload, searchJmcomic } from '../../media/jmcomic.js';
 import { err, errorMessage, ok } from './shared.js';
 import type { ToolDefinition } from '../shared/types.js';
 
@@ -32,6 +32,54 @@ function feedbackTools(): ToolDefinition[] {
 /** 漫画下载与显式结束会话的工具。 */
 function completionTools(): ToolDefinition[] {
   return [
+    {
+      name: 'search_jmcomic',
+      description: TOOL_PROMPT_TEXT.search_jmcomic.description,
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: TOOL_PROMPT_TEXT.search_jmcomic.query },
+          mode: {
+            type: 'string',
+            enum: ['keyword', 'tag', 'author', 'work', 'actor'],
+            description: TOOL_PROMPT_TEXT.search_jmcomic.mode
+          },
+          orderBy: {
+            type: 'string',
+            enum: ['latest', 'view', 'picture', 'like', 'score', 'comment'],
+            description: TOOL_PROMPT_TEXT.search_jmcomic.orderBy
+          },
+          page: { type: 'integer', minimum: 1, description: TOOL_PROMPT_TEXT.search_jmcomic.page },
+          limit: { type: 'integer', minimum: 1, maximum: 40, description: TOOL_PROMPT_TEXT.search_jmcomic.limit }
+        },
+        required: ['query'],
+        additionalProperties: false
+      },
+      async execute(_ctx, args) {
+        try {
+          const result = await searchJmcomic({
+            query: args.query, mode: args.mode, orderBy: args.orderBy, page: args.page, limit: args.limit
+          });
+          if (!result.items.length) {
+            // **"没搜到"和"搜索坏了"必须分开说**：都返回空列表的话模型会以为搜索结果就是空的，
+            // 而实际可能是查询词不对（换词就行）或分页越界（回去第 1 页就行）。
+            return ok({
+              ...result,
+              note: result.total > 0
+                ? `第 ${result.page} 页没有条目（共 ${result.total} 条）。换更常见的词，或把 page 调回前几页。`
+                : `没有搜到与「${result.query}」相关的漫画。可以换个更常见的词，或改用 tag:标签名 试试。`
+            });
+          }
+          return ok({
+            ...result,
+            // 明确重申不下载：模型很容易把"搜到了"当成"那就下载吧"。
+            note: `以上只是搜索结果，**不会自动下载**。把候选告诉用户，等对方指定要哪一本（或给出 ID）再调 download_jmcomic。`
+          });
+        } catch (error) {
+          return err(errorMessage(error));
+        }
+      }
+    },
     {
       name: 'download_jmcomic',
       description: TOOL_PROMPT_TEXT.download_jmcomic.description,

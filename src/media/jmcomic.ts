@@ -277,6 +277,29 @@ function validatePdf(pdfPath: unknown): string {
   return resolved;
 }
 
+/**
+ * 从累计 stdout 里抽最后一帧 `RESULT_PREFIX` JSON。
+ *
+ * 抽成公用是因为**搜索**与**下载**两条路都要用它，而这段的坑（stdout 任意分块、
+ * JSON 可能还没收全、只看最后一帧）不该写两份。返回 `null` 表示"帧还没到齐，等下一块"。
+ */
+function parseResultFrame(stdout: string): { ok: boolean; payload: Record<string, unknown> } | null {
+  const line = stdout.split(/\r?\n/).reverse().find((item) => item.startsWith(RESULT_PREFIX));
+  if (!line) return null;
+  try {
+    const parsed: unknown = JSON.parse(line.slice(RESULT_PREFIX.length));
+    if (!isRecord(parsed)) return null;
+    return { ok: parsed.ok === true, payload: parsed };
+  } catch {
+    return null;
+  }
+}
+
+/** 给 Python 用的通用报错文案（两条路共用，措辞里的路径与解释器都是实测踩过的点）。 */
+const PYTHON_MISSING_HINT =
+  '当前 Python 解释器未安装 jmcomic。请用**同一个**解释器装一遍项目依赖'
+  + '（设置页「Python 工具」里有解释器路径，也可以用环境变量 QQ_AGENT_PYTHON 指定）';
+
 function runPython(job: JmJob): Promise<PythonResult> {
   ensureDirs();
   // 解释器与脚本路径都来自 core/python-runtime（两个 Python 工具共用一条解析链）。
@@ -334,22 +357,15 @@ function runPython(job: JmJob): Promise<PythonResult> {
      */
     const settleFromResultFrame = (): boolean => {
       if (settled) return true;
-      const line = stdout.split(/\r?\n/).reverse().find((item) => item.startsWith(RESULT_PREFIX));
-      if (!line) return false;
-      let result: Record<string, unknown> | null = null;
-      try {
-        const parsed: unknown = JSON.parse(line.slice(RESULT_PREFIX.length));
-        result = isRecord(parsed) ? parsed : null;
-      } catch {
-        return false;
-      }
-      if (result?.ok !== true) {
-        const didFinish = finish(reject, new Error(String(result?.error || stderr.trim() || 'Python 返回下载失败')));
+      const frame = parseResultFrame(stdout);
+      if (!frame) return false;
+      if (!frame.ok) {
+        const didFinish = finish(reject, new Error(String(frame.payload.error || stderr.trim() || 'Python 返回下载失败')));
         if (didFinish) try { child.kill(); } catch { /* ignore */ }
         return true;
       }
       try {
-        const value: PythonResult = { ...result, ok: true, pdfPath: validatePdf(result.pdfPath) };
+        const value: PythonResult = { ...frame.payload, ok: true, pdfPath: validatePdf(frame.payload.pdfPath) };
         const didFinish = finish(resolve, value);
         // 结果帧写出前 PDF 已经原子换入最终路径；此后 Python 的工作已经结束。若第三方库
         // 留下后台线程，就主动收掉进程，避免它继续钉住 Node/Electron。
@@ -671,4 +687,160 @@ export function enqueueJmcomicDownload(ctx: JmContext, comicId: unknown) {
   saveJobs();
   void runWorker();
   return { queued: true, jobId: job.id, comicId: id, position: waitingBefore + 1 };
+}
+
+// ── 按关键词 / tag 搜索漫画（只搜索，不下载）────────────────────────────────
+//
+// **为什么是一个独立函数而不是给下载加参数**：搜索是廉价的只读操作，下载要过页数检查、
+// 拉全部图片、导出 PDF、上传群文件（30 分钟超时、不可撤销）。合成一个动作就等于
+// "模型猜一个关键词"触发一次完整下载。这里**只返回条目**，要不要下载由模型看过结果后
+// 再单独调 `enqueueJmcomicDownload` 决定 —— 与"工具不得代模型发言"是同一条取舍：
+// 工具只提供事实，动作由模型在这一次运行里自己选。
+
+/** 搜索范围。与 Python 侧 `SEARCH_MODES` 的键一一对应。 */
+export type JmSearchMode = 'keyword' | 'tag' | 'author' | 'work' | 'actor';
+
+/** 排序方式。与 Python 侧 `ORDER_BY_CHOICES` 的键一一对应（**不是**直接透传库的魔法值）。 */
+export type JmSearchOrder = 'latest' | 'view' | 'picture' | 'like' | 'score' | 'comment';
+
+export interface JmSearchItem {
+  comicId: string;
+  title: string;
+  tags: string[];
+}
+
+export interface JmSearchOutput {
+  mode: JmSearchMode;
+  query: string;
+  orderBy: JmSearchOrder;
+  page: number;
+  total: number;
+  items: JmSearchItem[];
+}
+
+const SEARCH_MODES: readonly JmSearchMode[] = ['keyword', 'tag', 'author', 'work', 'actor'];
+const SEARCH_ORDERS: readonly JmSearchOrder[] = ['latest', 'view', 'picture', 'like', 'score', 'comment'];
+export const MAX_SEARCH_QUERY_CHARS = 100;
+/** 一次返回多少条。上限与 Python 侧的 `MAX_SEARCH_RESULTS` 对齐。 */
+export const MAX_SEARCH_LIMIT = 40;
+/**
+ * 搜索超时。**远短于下载的 30 分钟**：这是模型在等结果的同步调用，不是后台任务。
+ * 实测一次搜索 1 秒上下，12 秒足够覆盖慢网络，再久就该如实报失败而不是让模型干等。
+ */
+const SEARCH_TIMEOUT_MS = 12_000;
+
+function isJmSearchMode(value: unknown): value is JmSearchMode {
+  return typeof value === 'string' && (SEARCH_MODES as readonly string[]).includes(value);
+}
+
+function isJmSearchOrder(value: unknown): value is JmSearchOrder {
+  return typeof value === 'string' && (SEARCH_ORDERS as readonly string[]).includes(value);
+}
+
+/**
+ * 跑一次搜索子进程并把结果帧解析出来。
+ *
+ * 与下载那条路的区别是刻意的：**不写 per-job 日志、不碰 `jobs`、不做心跳**。
+ * 搜索结果没有留存价值（下次搜同一个词还要重新查），也不会被上传或被核验。
+ */
+function runPythonSearch(args: string[]): Promise<Record<string, unknown>> {
+  ensureDirs();
+  const { command, prefix } = resolvePythonCommand(getConfig());
+  return new Promise<Record<string, unknown>>((resolve, reject) => {
+    const spawnProcess = runtime?.spawnProcess ?? spawn;
+    const child = spawnProcess(command, [...prefix, JMCOMIC_SCRIPT, ...args], {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill(); } catch { /* ignore */ }
+      reject(new Error(`搜索超时（${SEARCH_TIMEOUT_MS / 1000} 秒），请稍后重试或换个关键词`));
+    }, SEARCH_TIMEOUT_MS);
+    timer.unref?.();
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
+    child.stdout.on('data', (chunk) => {
+      stdout = (stdout + chunk.toString('utf8')).slice(-200_000);
+      const frame = parseResultFrame(stdout);
+      if (!frame) return;
+      finish(() => {
+        if (frame.ok) resolve(frame.payload);
+        else reject(new Error(String(frame.payload.error || stderr.trim() || '搜索失败')));
+      });
+      // 结果帧已出，Python 的活干完了；收掉可能残留的后台线程。
+      try { child.kill(); } catch { /* ignore */ }
+    });
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString('utf8')).slice(-20_000); });
+    child.on('error', (error) => {
+      // 解释器起不来时的错误必须点明"是解释器问题"，否则会被当成"搜不到"（同下载那条路）。
+      finish(() => reject(new Error(`无法启动 Python（${command}）：${error.message}`)));
+    });
+    child.on('close', (code) => {
+      finish(() => {
+        const frame = parseResultFrame(stdout);
+        if (frame?.ok) return resolve(frame.payload);
+        const detail = String(stderr.trim() || `Python 异常退出（${code}）`);
+        // 库缺失是很常见的一类失败，把可执行的下一步直接带上（否则用户只看到
+        // "No module named 'jmcomic'"，不知道要用哪个解释器去装）。
+        reject(new Error(detail.includes('No module named') ? `${PYTHON_MISSING_HINT}（原始错误：${detail}）` : detail));
+      });
+    });
+  });
+}
+
+/**
+ * 按关键词或 tag 搜索漫画。**只搜索，不下载。**
+ *
+ * 参数在这里做白名单校验（模式、排序），**不是**直接透传给库的魔法值：
+ * 它们会拼进查询串，透传等于让模型决定 URL 内容。
+ */
+export async function searchJmcomic(input: {
+  query: unknown;
+  mode?: unknown;
+  orderBy?: unknown;
+  page?: unknown;
+  limit?: unknown;
+}): Promise<JmSearchOutput> {
+  const query = String(input.query ?? '').trim();
+  if (!query) throw new Error('搜索词不能为空');
+  if (query.length > MAX_SEARCH_QUERY_CHARS) {
+    throw new Error(`搜索词过长（上限 ${MAX_SEARCH_QUERY_CHARS} 字）`);
+  }
+  const rawMode = String(input.mode ?? 'keyword').trim().toLowerCase() || 'keyword';
+  if (!isJmSearchMode(rawMode)) {
+    throw new Error(`不支持的搜索范围：${rawMode}（可选：${SEARCH_MODES.join('、')}）`);
+  }
+  const rawOrder = String(input.orderBy ?? 'latest').trim().toLowerCase() || 'latest';
+  if (!isJmSearchOrder(rawOrder)) {
+    throw new Error(`不支持的排序方式：${rawOrder}（可选：${SEARCH_ORDERS.join('、')}）`);
+  }
+  const page = Math.max(1, Math.trunc(Number(input.page) || 1));
+  const limit = Math.min(MAX_SEARCH_LIMIT, Math.max(1, Math.trunc(Number(input.limit) || 10)));
+
+  const payload = await runPythonSearch([
+    'search', query, '--mode', rawMode, '--orderBy', rawOrder, '--page', String(page), '--limit', String(limit)
+  ]);
+
+  const items: JmSearchItem[] = Array.isArray(payload.items)
+    ? payload.items.map((item) => {
+        const record = isRecord(item) ? item : {};
+        return {
+          comicId: String(record.comicId ?? ''),
+          title: String(record.title ?? ''),
+          tags: Array.isArray(record.tags) ? record.tags.map((tag) => String(tag)) : []
+        };
+      }).filter((item) => item.comicId !== '')
+    : [];
+
+  return { mode: rawMode, query, orderBy: rawOrder, page, total: Number(payload.total) || 0, items };
 }

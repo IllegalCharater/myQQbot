@@ -24,7 +24,7 @@ const expectedNames = [
   'send_message', 'send_sticker', 'list_stickers', 'get_sticker_image', 'sticker_note', 'collect_sticker', 'send_poke',
   'get_recent_messages', 'read_forward', 'read_group_notice', 'get_active_members', 'get_message_detail', 'get_message_images', 'reverse_image_source',
   'get_hot_search', 'transcribe_video',
-  'memory_append', 'memory_query', 'memory_remove', 'report_feedback', 'web_search', 'web_fetch', 'download_jmcomic', 'finish'
+  'memory_append', 'memory_query', 'memory_remove', 'report_feedback', 'web_search', 'web_fetch', 'search_jmcomic', 'download_jmcomic', 'finish'
 ];
 ok('工具名称和顺序保持不变', JSON.stringify(tools.map((tool) => tool.name)) === JSON.stringify(expectedNames));
 ok('所有工具 description 来自 Catalog 且非空', tools.every((tool) => typeof tool.description === 'string' && tool.description.length > 0));

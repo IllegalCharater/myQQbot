@@ -11,6 +11,32 @@ RESULT_PREFIX = "__QQ_AGENT_RESULT__"
 IMAGE_CONCURRENCY = 6
 REQUEST_TIMEOUT_SECONDS = 120
 
+# 搜索：只返回条目，**绝不下载**。
+# 分页大小由服务端决定（实测 page_count 与条数对不上，只认 total/条数）。
+MAX_SEARCH_RESULTS = 40
+# 关键词与 tag 的长度上限。搜索词会进 URL，超长值没有意义还容易被服务端拒。
+MAX_QUERY_LEN = 100
+
+# 排序方式白名单（对应 JmMagicConstants.ORDER_BY_*）。**必须白名单**：
+# 这些值会拼进查询串，直接透传模型给的字符串等于让模型决定 URL 内容。
+ORDER_BY_CHOICES = {
+    "latest": "mr",   # 最新
+    "view": "mv",     # 最多观看
+    "picture": "mp",  # 最多图片
+    "like": "tf",     # 最多点赞
+    "score": "tr",    # 评分
+    "comment": "md",  # 最多评论
+}
+
+# 搜索范围。`keyword` 是站内搜索，其余是禁漫的分类检索入口。
+SEARCH_MODES = {
+    "keyword": "search_site",
+    "tag": "search_tag",
+    "author": "search_author",
+    "actor": "search_actor",
+    "work": "search_work",
+}
+
 
 def emit_result(payload):
     line = RESULT_PREFIX + json.dumps(payload, ensure_ascii=False) + "\n"
@@ -149,6 +175,122 @@ def is_valid_pdf(path):
         return False
 
 
+def normalize_query(value):
+    """搜一个词之前先清一遍：去空白、限长。"""
+    text = str(value or "").strip()
+    if len(text) > MAX_QUERY_LEN:
+        raise ValueError(f"搜索词过长（上限 {MAX_QUERY_LEN} 字）")
+    return text
+
+
+def to_int(value, default):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def search_comics(argv):
+    """
+    按关键词或 tag 搜索漫画。
+
+    **只搜索、只返回条目，绝不下载。** 这是刻意的：搜索是廉价的只读操作，下载要跑
+    页数检查、拉全部图片、导出 PDF、上传群文件，代价高且不可撤销。把两者合成一个动作
+    就等于让"模型猜一个关键词"触发一次完整下载。要不要下载由模型看到结果后再单独决定，
+    走的仍是既有的 download_jmcomic。
+    """
+    try:
+        from jmcomic import JmOption
+    except ImportError as error:
+        raise RuntimeError(
+            "当前 Python 解释器未安装 jmcomic。请用**同一个**解释器装一遍项目依赖："
+            f"{sys.executable} -m pip install -r python-tools/requirements.txt"
+            "（两个 Python 工具共用一个解释器，路径在设置页「Python 工具」里配置，"
+            "也可以用环境变量 QQ_AGENT_PYTHON 指定）"
+        ) from error
+
+    raw = argv[0] if argv else ""
+    # 支持两种写法：`tag:巨乳`（简写）与显式 `--mode tag 巨乳`。
+    # 简写是为了让模型少一层参数，但**只有带已知前缀时才切**，
+    # 否则一个正常含冒号的标题会被误当成模式。
+    mode = "keyword"
+    query = raw
+    if ":" in raw:
+        prefix, _, rest = raw.partition(":")
+        if prefix.strip().lower() in SEARCH_MODES:
+            mode = prefix.strip().lower()
+            query = rest
+
+    options = {}
+    rest_args = list(argv)
+    index = 0
+    while index < len(rest_args) - 1:
+        token = rest_args[index]
+        if token.startswith("--"):
+            options[token[2:]] = rest_args[index + 1]
+            index += 2
+        else:
+            index += 1
+
+    if "mode" in options:
+        candidate = str(options["mode"]).strip().lower()
+        if candidate not in SEARCH_MODES:
+            raise ValueError(
+                f"不支持的搜索范围：{candidate}（可选：{'、'.join(sorted(SEARCH_MODES))}）"
+            )
+        mode = candidate
+    if "query" in options:
+        query = options["query"]
+
+    query = normalize_query(query)
+    if not query:
+        raise ValueError("搜索词不能为空")
+
+    order_key = str(options.get("orderBy", "latest")).strip().lower()
+    if order_key not in ORDER_BY_CHOICES:
+        raise ValueError(
+            f"不支持的排序方式：{order_key}（可选：{'、'.join(sorted(ORDER_BY_CHOICES))}）"
+        )
+    order_by = ORDER_BY_CHOICES[order_key]
+
+    page = max(1, to_int(options.get("page"), 1))
+    limit = min(MAX_SEARCH_RESULTS, max(1, to_int(options.get("limit"), 10)))
+
+    option = JmOption.default()
+    option.client.timeout = REQUEST_TIMEOUT_SECONDS
+    option.client.postman.meta_data.timeout = REQUEST_TIMEOUT_SECONDS
+    client = option.new_jm_client()
+
+    method = getattr(client, SEARCH_MODES[mode])
+    result_page = method(query, page=page, order_by=order_by)
+
+    items = []
+    for album_id, title, tags in result_page.iter_id_title_tag():
+        items.append({
+            "comicId": str(album_id),
+            "title": str(title or "").strip(),
+            "tags": [str(tag) for tag in (tags or [])],
+        })
+        if len(items) >= limit:
+            break
+
+    print(
+        f"[搜索] {mode}={query} 排序={order_key} 第 {page} 页，返回 {len(items)} 条"
+        f"（共 {getattr(result_page, 'total', 0)} 条）",
+        file=sys.stderr,
+        flush=True,
+    )
+    emit_result({
+        "ok": True,
+        "mode": mode,
+        "query": query,
+        "orderBy": order_key,
+        "page": page,
+        "total": to_int(getattr(result_page, "total", 0), 0),
+        "items": items,
+    })
+
+
 def main():
     # Node 按 UTF-8 保存子进程日志；显式统一编码，避免中文日志变成乱码。
     if hasattr(sys.stdout, "reconfigure"):
@@ -156,14 +298,26 @@ def main():
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    if len(sys.argv) != 3:
-        raise ValueError("参数格式：jmcomic_download.py <漫画ID> <下载目录>")
+    argv = sys.argv[1:]
 
-    comic_id = sys.argv[1].strip()
+    # 子命令分发。**默认（无子命令）= 旧的下载路径**，参数与语义逐字不变：
+    # 老的 `jmcomic_download.py <漫画ID> <下载目录>` 必须继续可用（Node 侧的下单路径
+    # 与已有测试都按这个形状调用）。
+    if argv and argv[0] == "search":
+        search_comics(argv[1:])
+        return
+
+    if len(argv) != 2:
+        raise ValueError(
+            "参数格式：jmcomic_download.py <漫画ID> <下载目录>"
+            "，或 jmcomic_download.py search <关键词|tag:标签> [--mode keyword] [--page 1] [--limit 10]"
+        )
+
+    comic_id = argv[0].strip()
     if not comic_id.isdigit() or len(comic_id) > 20:
         raise ValueError("漫画ID必须是 1 至 20 位数字")
 
-    pdf_path, cached = get_comic_pdf(comic_id, sys.argv[2])
+    pdf_path, cached = get_comic_pdf(comic_id, argv[1])
     emit_result({
         "ok": True,
         "comicId": comic_id,

@@ -258,6 +258,17 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - 设置页的两个按钮（**测试解释器** / **跑一遍依赖自检**）对应 `POST /api/system/python-probe` 与 `POST /api/system/python-selfcheck`（`src/web/routes/system.ts`），逻辑在 `src/core/python-probe.ts`。三条边界：① 两个端点**只读已保存的配置、刻意忽略请求体**——接受请求体里的可执行路径等于凭空开一个"用 HTTP 启动任意本机程序"的一步接口，唯一的写入口仍是鉴权过的 `POST /api/config`（所以 UI 必须先 `saveConfig` 再探测，`t-panel-wiring.mjs` 有断言钉着这个顺序）；② 它们是**请求作用域**的短命子进程，**不进 `LONG_TERM_TASKS`**，也不碰常驻的搜图 worker 客户端单例；③ argv 里**不含任何密钥**（自检不拿 `apiKey`/`engineOptions`），与"SauceNAO 的 apiKey 绝不进 argv"是同一条不变量。自检的 409 忙等分支（`pythonSelfCheck.running`，照 `providers.ts` 的 `visionScan`）**没有行为断言**——触发它需要一次真的耗时 spawn，而测试约定不许启动真解释器，别以为它被管着。
 - 守护分布：脚本路径锚点与"两个脚本真的在同一个目录里"在 `tests/t-paths.mjs` 第 5 段（改名会红），解释器优先级/来源层级/探测与自检模块在 `tests/t-jmcomic.mjs` 第 1、1b、1c 段，端点在 `tests/t-admin.mjs` 的 D 段（把 `python.path` 配成不存在路径 → 200 + `ok:false` + 请求体里的路径被忽略），UI 接线在 `tests/t-panel-wiring.mjs`。`.gitignore` 已挡 `__pycache__/` 与 `*.pyc`——`python-tools/` 是要提交的源码，跑一次脚本就会在它旁边生成字节码缓存。
 
+**漫画搜索与下载是刻意分开的两条路**（`search_jmcomic` / `download_jmcomic`），这是用户明确要求的分界，别"顺手合并"：
+
+- **搜索只搜索，绝不入队**。搜索是廉价的只读操作（实测 1.9～2.3 秒）；下载要过页数检查、拉全部图片、导出 PDF、上传群文件（30 分钟超时且**不可撤销**）。合成一个动作等于"模型猜一个关键词"触发一次完整下载。`search_jmcomic` 的执行体**不得出现 `enqueueJmcomicDownload`**（`tests/t-tool-protocol.mjs` 用切片后的源码文本钉这条）。
+- **对模型的约束在 system prompt 里**（`toolProtocol` 那条"搜到之后不要自己挑一本下载"）：要它把候选标题（带 ID）念给用户、等对方指定后再 `download_jmcomic`。这是**刻意的人工闸门**，不是没做完。工具结果里也重申了一句"以上只是搜索结果，不会自动下载"——模型很容易把"搜到了"当成"那就下载吧"。
+- **参数走白名单，不透传库的魔法值**：排序是 `latest/view/picture/like/score/comment`（映射到 `mr/mv/mp/tf/tr/md`），范围是 `keyword/tag/author/work/actor`（映射到 `search_site`/`search_tag`/…）。**Node 与 Python 两侧各校验一次**，这些值会拼进查询串，透传等于让模型决定 URL 内容。两侧的表必须同步改（`SEARCH_MODES`/`ORDER_BY_CHOICES` ⇄ `JmSearchMode`/`JmSearchOrder`）。
+- **`search` 是子命令，无子命令 = 旧的下载契约**：`jmcomic_download.py <漫画ID> <下载目录>` 必须继续逐字可用（Node 的下单路径与既有测试都按这个形状调用）。判据写的是"第一个参数是不是 `search`"，**不要**改成"参数个数"或"位置推断"。
+- **`parseResultFrame` 是两条路共用的**（`media/jmcomic.ts`）：stdout 任意分块、JSON 可能没收全、只看最后一帧，这三条坑不该写两份。改它要同时想到下载的 `validatePdf` 收尾与搜索的失败文案。
+- **搜索超时 12 秒，远短于下载的 30 分钟**：它是模型在等的同步调用，不是后台任务。它**不写 per-job 日志、不碰 `jobs`、不做心跳**——搜索结果没有留存价值（同名再搜还要重查）。`tests/t-jmcomic.mjs` 第 5 段正面钉住"搜索前后 `jobs.json` 逐字节相同、onebot 调用数为 0"。
+- **"没搜到"与"搜索坏了"必须分开说**：都返回空列表的话模型会以为结果就是空的，而实际可能是查询词不对（`total > 0` 时提示换词或回前几页）或分页越界。库缺失时把"用哪个解释器装依赖"那句一并带出（同下载路径的 `PYTHON_MISSING_HINT`）。
+- 实测（2026-10-05，jmcomic 2.7.0）：`client.search_site/search_tag/search_author/search_work/search_actor` 都返回 `JmSearchPage`，用 `iter_id_title_tag()` 拿 `(album_id, name, tags)`；`total` 是总数（tag 搜索能到 10000），**分页大小由服务端定**，所以 `limit` 只在客户端截断。`iter_id` 是**方法不是属性**（写成属性会 `TypeError: 'method' object is not iterable`）。
+
 **`snowluma` 端点的热生效只有一条路（S11b）**：`applyConfigPatch` 把 `next.snowluma` 的四个字段交给 `OneBotClient.applyEndpoint(next)`，**它返回 `true` 才** `onebot.reconnect()`。三条不变量，改动时别拆散：
 
 - `applyEndpoint` 的归一化（`normalizeWsUrl`/`normalizeHttpUrl`）与**构造函数共用同一份**——只要规则在比较的那一侧另写一份，`http://127.0.0.1:3000/` 与 `http://127.0.0.1:3000` 就会被判成变更，**用户每保存一次设置就断一次连接**；
