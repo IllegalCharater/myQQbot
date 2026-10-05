@@ -149,43 +149,71 @@ for (const id of ['cfg-search-bookmarkmode', 'search-bookmarks-body', 'add-searc
   ok(`#${id} 可解析`, resolves(id));
 }
 const searchSave = seg("if (sec === 'search')", "if (sec === 'image-source')");
-// 收藏夹现在是「枚举值 + 网页地址 + 用途」三列，用 `data-bm-*` 标记每一格。
-// 这三个属性名是 save.js 逐行取值的**唯一接口**：改名只改一端会静默读出 undefined，
-// 于是每一项都因"三项不全"被丢弃 —— 表现为"收藏夹存不进去"，而没有任何报错。
-for (const attr of ['data-bm-key', 'data-bm-url', 'data-bm-purpose', 'data-bm-searchurl', 'data-bm-resultclass', 'data-bm-probe', 'data-bm-status']) {
+// 收藏夹用 `data-bm-*` 标记每一格，密钥区用 `data-bmc-*`。
+// 这些属性名是 save.js 逐行取值的**唯一接口**：改名只改一端会静默读出 undefined，
+// 于是每一项都因"不全"被丢弃 —— 表现为"收藏夹存不进去"，而没有任何报错。
+//
+// ⚠️ `data-bm-searchurl` **已经不存在了**：它与 `data-bm-url` 合并成一栏（见下面那条）。
+// 收藏夹每一行还额外带 `data-bm-req-json` / `data-bm-params-json` 两个 dataset
+// （由「请求结构」弹窗写入，save.js 从这里读），它们是属性不是元素，所以单独断言。
+for (const attr of ['data-bm-key', 'data-bm-url', 'data-bm-purpose', 'data-bm-resultclass', 'data-bm-probe', 'data-bm-status', 'data-bm-req',
+  'data-bmc-key', 'data-bmc-header', 'data-bmc-scheme', 'data-bmc-value', 'data-bmc-del']) {
   ok(`${attr} 在渲染里出现（save.js 与自动检测靠它取值）`, new RegExp(attr).test(js));
 }
+// 「网页地址」与「站内搜索地址」合并：**不能再有一个独立的 searchurl 输入框**，
+// 否则两栏会各自写一个值，而后端只认一个 —— 那种"两处口径不同"最难查。
+ok('合并那一栏：没有独立的 searchUrl 输入框了（旧 data-bm-searchurl 已移除）',
+  !/data-bm-searchurl/.test(js));
+ok('「请求结构」入口存在，且读数走 dataset（弹窗写、save.js 读）',
+  /data-bm-req-json/.test(searchSave) && /dataset\.bmParamsJson/.test(searchSave));
+// 密钥：值不得回显。后端脱敏删掉 value 只留 hasValue，前端必须按"留空=不改"处理，
+// 否则用户点一次保存就把没动过的密钥全清掉。
+ok('密钥输入框是 password 且不回显真值（只提示"已设置"）',
+  /data-bmc-value value=""/.test(js) && /已设置（留空=不修改）/.test(js));
+ok('密钥保存规则：**非空才写**，空值保留服务端原值',
+  /if \(typed\) \{/.test(searchSave) && /else if \(credentials\[key\]\)/.test(searchSave));
+
 // 自动检测按钮：必须有 try/finally 复位 disabled，否则一次失败就永久点不动
 ok('「检测」按钮绑了 click 且跑完会复位 disabled',
   /closest\('\[data-bm-probe\]'\)/.test(js) && /\.finally\(\(\) => \{ probeBtn\.disabled = false; \}\)/.test(js));
 // 检测请求：**必须同时带上 searchUrl**，后端的"填了就只测这一个"全靠它。
 // 只发 hint 的话后端拿不到"用户已填"这个事实，会退化成"拿他的输入当线索去猜别的" ——
 // 那正是要修掉的旧行为（点完检测，框里的地址被悄悄换掉）。
-ok('检测请求打到 /api/search-bookmark/probe 且带上 searchUrl（区分"填了/没填"的唯一依据）',
-  /api\('\/api\/search-bookmark\/probe', \{ method: 'POST', body: JSON\.stringify\(\{ site, hint, searchUrl: filled \}\) \}\)/.test(js));
+// 合并成一栏之后，`site` 还得是**域名**（后端拿它做 URL 校验与找入口），所以要拆开发。
+ok('检测请求带上 searchUrl，且 site 拆成域名（合并那一栏带来的额外一步）',
+  /api\('\/api\/search-bookmark\/probe', \{ method: 'POST', body: JSON\.stringify\(\{ site, hint, searchUrl: filled\.includes\('\{q\}'\) \? filled : '' \}\) \}\)/.test(js)
+  && /new URL\(filled\)\.hostname/.test(js));
 ok('填了地址时提示语说的是"测试你填的"，空着时说的是"自动查找"（两种行为对用户可见）',
-  /测试你填的地址/.test(js) && /正在自动查找可用地址/.test(js));
+  /测试你填的地址/.test(js) && /正在自动查找/.test(js));
 // 检测出的类名**只在有值时才覆盖**：检测不出类名不代表用户原来填的是错的
 ok('检测出的 resultClass 只在有值时才写入（不覆盖用户手填的值）',
   /if \(clsInput && res\.resultClass\) clsInput\.value = res\.resultClass;/.test(js));
 ok('检测结果就地显示在按钮下方（不用去别处找结论）',
   /row\?\.querySelector\('\[data-bm-status\]'\)/.test(js));
-// 后两列是**可选**的：空值必须整键不写（而不是写空串）。写空串会让后端拿到一个
-// "存在但无意义"的值，而 bookmarkList() 按"非空才带"处理 —— 两处口径不同时，
-// 配置页显示有值、运行期当没有，正是那种查半天的问题。
-ok('可选两列空值时不写键（避免"存在但无意义"的空串）',
-  /if \(searchUrl\) item\.searchUrl = searchUrl;/.test(searchSave)
-  && /if \(resultClass\) item\.resultClass = resultClass;/.test(searchSave));
+// 可选列的**空值必须整键不写**（而不是写空串）。写空串会让后端拿到一个"存在但无意义"
+// 的值，而 bookmarkList() 按"非空才带"处理 —— 两处口径不同时，配置页显示有值、
+// 运行期当没有，正是那种查半天的问题。
+// 「站内搜索地址」与「网页地址」合并成一栏之后，这一条变成"含 `{q}` 才写 searchUrl"：
+// 判据必须与后端 `normalizeConfigShape` 逐字同形。
+ok('合并那一栏：含 {q} 才写 searchUrl（空值仍不写键）',
+  /if \(\/\^https\?:\\\/\\\/\/i\.test\(input\) && input\.includes\('\{q\}'\)\) item\.searchUrl = input;/.test(searchSave));
+ok('可选列空值时不写键（避免"存在但无意义"的空串）',
+  /if \(resultClass\) item\.resultClass = resultClass;/.test(searchSave));
 ok('保存分支按行读三列（缺一列那一条就丢）',
   /querySelector\('\[data-bm-key\]'\)/.test(searchSave)
   && /querySelector\('\[data-bm-url\]'\)/.test(searchSave)
   && /querySelector\('\[data-bm-purpose\]'\)/.test(searchSave));
-ok('三项不全的条目在保存时被丢掉（后端也会丢，前端先丢让用户当场看见）',
-  /\.filter\(\(item\) => item\.key && item\.url && item\.purpose\)/.test(searchSave));
-// 前端不做域名归一化、也不校验枚举值：两件事的唯一实现都在 core/config.ts
-// （hostnameOf / isBookmarkKey）。前端再写一份必然漂移。
-ok('前端不重复实现域名归一化与枚举值校验',
-  !/hostname/.test(stripComments(searchSave)) && !/replace\(\/\^https\?/.test(stripComments(searchSave)));
+// 过滤判据：**有用途、或填了搜索模板、或配了请求结构**都保留。
+// 不能退回"三空就丢" —— 后端对"只配了请求结构/模板、用途还空着"的条目是收的
+// （那是迁移来的老数据，丢掉等于删用户的收藏），前端先丢会让它静默消失。
+ok('保存过滤与后端同形（只配了请求结构/模板的条目也保留）',
+  /\.filter\(\(item\) => item\.key && item\.url && \(item\.purpose \|\| item\.searchUrl \|\| item\.request\)\)/.test(searchSave));
+// ⚠️ 这条**偏离**了原来的"前端不做域名归一"约定，是合并那一栏带来的：
+// 一个 input 里可能填域名、也可能填带 `{q}` 的整条地址，而 `url` 必须存域名
+// （它是提示词里给模型看的站点，也是拼 `site:` 的依据）。所以前端必须从输入里取出域名。
+// 枚举值校验（isBookmarkKey）仍然只在 core/config.ts —— 那一半没动。
+ok('前端只做"从合并输入里取域名"，不重复实现枚举值校验',
+  !/isBookmarkKey/.test(stripComments(searchSave)) && !/replace\(\/\^\[\^a-z0-9_\]\//.test(stripComments(searchSave)));
 ok('收藏夹增删走 DOM 操作 + 事件委托（不重渲染整页，否则会冲掉未保存的其它输入）',
   /add-search-bookmark-btn'\)\?\.addEventListener\('click'/.test(js)
   && /search-bookmarks-body'\)\?\.addEventListener\('click'/.test(js)

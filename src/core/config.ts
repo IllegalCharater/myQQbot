@@ -132,6 +132,15 @@ export const DEFAULT_CONFIG = {
     //     留空时用**通用启发式**（见 media/web-search.ts 的 parseSiteSearch）——
     //     抓取解析天生易碎，这个字段是页面改版时的自救通路（同 yandex 那四个选择器）。
     bookmarks: [],
+    // 收藏夹的**凭据**（密钥）：`{ [收藏夹枚举值]: { header, scheme, value } }`。
+    //
+    // **为什么密钥必须单独放、不能写进请求结构正文**：那一栏的内容会进设置页回显、
+    // 可能进日志、也会被复制粘贴分享；而 `Authorization` 的密钥是一次配置长期有效的
+    // 凭据。与 `SauceNAO` 的 `apiKey` 只走 stdin 是同一条不变量。
+    //   · `header` 默认 `Authorization`（少数接口用 `X-API-Key` 之类）；
+    //   · `scheme` 默认 `Bearer`，最终拼成 `Bearer <value>`；留空则只发裸值。
+    // 回显时必须脱敏（见 http/console.ts 的配置脱敏），这是它单独成区的主要理由之一。
+    credentials: {},
     // 收藏夹的**默认行为**，只影响"模型没说搜哪个站点"时走哪条路：
     //   'prefer' —— 按关键字先问收藏夹、再补全网（收藏夹命中排最前）；
     //   'web'    —— 直接全网，**只有模型显式传 site 时才进收藏夹**。
@@ -463,6 +472,25 @@ const MAX_BOOKMARK_SEARCH_URL = 500;
 /** 结果容器类名的长度上限（同上；类名本身通常只有十几字符）。 */
 const MAX_BOOKMARK_CLASS = 80;
 
+/**
+ * 「请求结构」相关上限。逐条都防同一件事：**用户把整篇接口文档粘进输入框**。
+ * 这些值会进 `config.json`，也会在每次检索时参与拼装。
+ */
+const MAX_BOOKMARK_ENDPOINT = 2000;
+const MAX_BOOKMARK_HEADERS = 20;
+const MAX_BOOKMARK_HEADER_NAME = 100;
+const MAX_BOOKMARK_HEADER_VALUE = 1000;
+/** 静态参数值（`{top_k}` 这类）的上限。 */
+const MAX_BOOKMARK_PARAM_VALUE = 500;
+/**
+ * 收藏夹凭据（密钥）长度上限。
+ *
+ * 给得比别处宽：千帆的 API Key 形如
+ * `bce-v3/ALTAK-xxxxxxxxxxxx/yyyyyyyyyyyy…`，本身就有 60+ 字符，而各家格式不一。
+ * 它不进提示词、不进日志，所以这里只需要防"粘错东西"，不需要防"太长影响预算"。
+ */
+const MAX_BOOKMARK_CREDENTIAL = 500;
+
 /** 枚举值是否合法（形状见 BOOKMARK_KEY_RE 的注释）。 */
 function isBookmarkKey(value: unknown): boolean {
   const key = String(value ?? '').trim();
@@ -607,7 +635,8 @@ function normalizeConfigShape<T>(input: T): T {
       usedKeys.add(candidate);
       return candidate;
     };
-    const bookmarks: Array<{ key: string; url: string; purpose: string; searchUrl?: string; resultClass?: string }> = [];
+    type NormalizedRequest = { method: string; endpoint: string; headers?: Array<{ name: string; value: string }> };
+    const bookmarks: Array<{ key: string; url: string; purpose: string; searchUrl?: string; resultClass?: string; request?: NormalizedRequest; params?: Record<string, string> }> = [];
     for (const item of rawBookmarks) {
       if (bookmarks.length >= MAX_BOOKMARK_SITES) break;
       // 旧形状：字符串 → 造一个枚举值，用途留空（用途空条目**仍然入库**，因为它是迁移来的，
@@ -618,33 +647,101 @@ function normalizeConfigShape<T>(input: T): T {
         continue;
       }
       if (!isPlainRecord(item)) continue;
-      const host = hostnameOf(item.url ?? item.site ?? '');
+      // **「网页地址」这一栏现在两用**（与「站内搜索地址」合并后的一栏）：
+      //   · 只填域名 → 当站点标识，`url` 存域名（原「网页地址」的行为）；
+      //   · 填了含 `{q}` 的完整地址 → 它是**站内搜索模板**，存进 `searchUrl`，
+      //     而 `url` 退化成它归一出来的域名（检索要靠域名归因，也是提示词里给模型看的站点）。
+      // 这样"合并成一栏"不需要用户做任何选择：填什么形态，程序自己认。
+      const rawInput = String(item.url ?? item.site ?? '').trim();
+      const asTemplate = /^https?:\/\//i.test(rawInput) && rawInput.includes('{q}') ? rawInput : '';
+      const host = hostnameOf(rawInput);
       const rawKey = String(item.key ?? '').trim();
       const purpose = String(item.purpose ?? '').trim().slice(0, MAX_BOOKMARK_PURPOSE);
       // 新形状三条硬约束：域名可解析、枚举值是合法 ASCII 标识符、**用途非空**。
-      // 任一不满足就丢掉这一条：半残的条目比没有更坏 —— 模型会拿到一个没有用途的枚举值，
-      // 于是要么不用、要么乱用，而配置页看起来"配了"。
-      if (!host || !isBookmarkKey(rawKey) || !purpose) continue;
+      // 例外：**只填了搜索模板、用途还空着**的条目仍然入库（那是迁移来的老数据，
+      // 丢掉就等于删了用户的收藏），但域名必须能解析出来 —— 没有域名就没有 `site:` 兜底。
+      if ((!host || !isBookmarkKey(rawKey) || !purpose) && !(asTemplate && host && isBookmarkKey(rawKey))) continue;
       if (usedKeys.has(rawKey)) continue;   // 重复枚举值：先到先得，否则模型传一个键会命中两条
       usedKeys.add(rawKey);
-      const entry: { key: string; url: string; purpose: string; searchUrl?: string; resultClass?: string } = { key: rawKey, url: host, purpose };
+      const entry: typeof bookmarks[number] = { key: rawKey, url: host, purpose };
       // `searchUrl` 模板：**只接受 http/https，且必须带 `{q}` 占位符**。
       // 两条都是硬要求，理由各不同：
       //   · 协议白名单 —— 这个地址会被直接请求，`file:`/`javascript:` 之类不该有机会；
       //   · 必须带 `{q}` —— 没有占位符就拼不出查询词，请求会打到搜索页首页并返回
       //     "什么都能搜"的页面，表现为"结果文不对题"而不是报错，比直接拒掉难查得多。
-      const searchUrl = String(item.searchUrl ?? '').trim().slice(0, MAX_BOOKMARK_SEARCH_URL);
+      const searchUrl = (asTemplate || String(item.searchUrl ?? '').trim()).slice(0, MAX_BOOKMARK_SEARCH_URL);
       if (searchUrl) {
         if (/^https?:\/\//i.test(searchUrl) && searchUrl.includes('{q}')) entry.searchUrl = searchUrl;
         else console.warn(`[config] 收藏夹「${rawKey}」的站内搜索地址被忽略：必须是 http(s) 且含 {q} 占位符。`);
       }
       const resultClass = String(item.resultClass ?? '').trim().slice(0, MAX_BOOKMARK_CLASS);
       if (resultClass) entry.resultClass = resultClass;
+
+      // ── 请求结构（可选）──
+      // 这是"权威 JSON 接口"唯一的接入方式：站内搜索链只解析 HTML 链接，而接口没有结果页。
+      // 三条校验，与 `searchUrl` 同一个判据：
+      //   · 方法在白名单内（只 GET/POST —— 这是取数据的配置，不该有副作用）；
+      //   · 地址非空、且**必须含 `{q}`**（拼不出查询词的请求不如不配）；
+      //   · 请求头逐条 trim + 限长（防止整页文档被粘进来）。
+      const rawReq = isPlainRecord(item.request) ? item.request : null;
+      if (rawReq) {
+        const method = String(rawReq.method ?? 'GET').trim().toUpperCase();
+        const endpoint = String(rawReq.endpoint ?? rawReq.url ?? '').trim().slice(0, MAX_BOOKMARK_ENDPOINT);
+        const headers: Array<{ name: string; value: string }> = [];
+        if (Array.isArray(rawReq.headers)) {
+          for (const h of rawReq.headers) {
+            if (headers.length >= MAX_BOOKMARK_HEADERS) break;
+            if (!isPlainRecord(h)) continue;
+            const name = String(h.name ?? '').trim().slice(0, MAX_BOOKMARK_HEADER_NAME);
+            if (!name) continue;
+            headers.push({ name, value: String(h.value ?? '').trim().slice(0, MAX_BOOKMARK_HEADER_VALUE) });
+          }
+        }
+        if (method !== 'GET' && method !== 'POST') {
+          console.warn(`[config] 收藏夹「${rawKey}」的请求结构被忽略：方法只支持 GET/POST（收到 ${method || '空'}）。`);
+        } else if (!endpoint || !endpoint.includes('{q}')) {
+          console.warn(`[config] 收藏夹「${rawKey}」的请求结构被忽略：请求地址必须含 {q} 占位符（查询词要能填进去）。`);
+        } else {
+          entry.request = headers.length ? { method, endpoint, headers } : { method, endpoint };
+        }
+      }
+      // ── 静态参数（可选）──
+      // 给 `{q}` 之外的占位符用（如 `{top_k}`）。`q` 被显式排除：它是运行时查询词，
+      // 不许被一个静态值顶掉 —— 否则"查什么"就变成配置里写死的了。
+      if (isPlainRecord(item.params)) {
+        const params: Record<string, string> = {};
+        for (const [k, v] of Object.entries(item.params)) {
+          const name = String(k).trim().slice(0, MAX_BOOKMARK_HEADER_NAME);
+          if (!name || name === 'q') continue;
+          params[name] = String(v ?? '').trim().slice(0, MAX_BOOKMARK_PARAM_VALUE);
+        }
+        if (Object.keys(params).length) entry.params = params;
+      }
       bookmarks.push(entry);
     }
     w.bookmarks = bookmarks;
     if (legacyShape && bookmarks.length) {
       console.warn(`[config] 网页收藏夹已迁移为「枚举值 + 网页URL + 用途」共 ${bookmarks.length} 条；用途为空，请在设置页补上——模型要靠用途判断该选哪一条。`);
+    }
+
+    // ── 收藏夹凭据（密钥）──
+    // 只清洗形状、保留 `value`（真值由脱敏层负责遮住）。**不校验 header 是不是合法
+    // HTTP 头名**：各家接口的自定义头五花八门，写一条自以为是的正则只会把用户手工
+    // 填对的值打回去（同 yandex 那四个选择器的判据）。
+    if (isPlainRecord(w.credentials)) {
+      const creds: Record<string, { header: string; scheme: string; value: string }> = {};
+      for (const [k, v] of Object.entries(w.credentials)) {
+        const key = String(k).trim();
+        if (!key || !isPlainRecord(v)) continue;
+        const value = String(v.value ?? '').trim().slice(0, MAX_BOOKMARK_CREDENTIAL);
+        if (!value) continue;
+        creds[key] = {
+          header: String(v.header ?? 'Authorization').trim().slice(0, MAX_BOOKMARK_HEADER_NAME) || 'Authorization',
+          scheme: String(v.scheme ?? 'Bearer').trim().slice(0, 40),
+          value
+        };
+      }
+      w.credentials = creds;
     }
 
     w.maxCallsPerChatPerHour = Math.round(clamp(w.maxCallsPerChatPerHour, 1, 200, 20));

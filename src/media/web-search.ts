@@ -10,6 +10,19 @@
 //     **它不认识收藏夹**，所以新增 provider 只需要接进这张分发表，不必重复实现优先逻辑。
 import { getConfig } from '../core/config.js';
 import { safeFetch } from './safe-fetch.js';
+import {
+  fetchBookmarkRequest, flattenJson, jsonToResults,
+  type BookmarkSite, type BookmarkRequest, type BookmarkHeader
+} from './bookmark-request.js';
+
+/**
+ * 请求结构返回单个对象（没有条目列表）时，压平成资料的字符上限。
+ *
+ * 为什么要有：`summary` 这类字段可能有几千字，一条资料不该吃掉整轮上下文预算
+ * （统一预算是 `store.promptContextMaxChars`，默认 32000）。2000 字足够放下
+ * 一条百科的词条摘要 + 主要字段，又不至于挤掉别的资料。
+ */
+const BOOKMARK_JSON_MAX_CHARS = 2000;
 
 interface SearchResult {
   title: string;
@@ -431,19 +444,14 @@ function bookmarkPreference(): BookmarkMode {
   return cfg?.bookmarkFirst === false ? 'web' : 'prefer';
 }
 
-/** 收藏夹站点（已归一）。前四项都在：枚举值、宿主名、用途；后两项可选。 */
-export interface BookmarkSite {
-  /** 枚举值，**模型在 `web_search.site` 里传的就是它**。 */
-  key: string;
-  /** 从 URL 归一出来的宿主名。没有站内搜索模板时用它拼 `site:`。 */
-  host: string;
-  /** 用途，给模型判断"该选哪一条"用。 */
-  purpose: string;
-  /** 站内搜索地址模板（含 `{q}`）。填了就**直接去站内搜**，绕开搜索引擎的 `site:`。 */
-  searchUrl?: string;
-  /** 站内搜索页里"每条结果容器"的类名；留空走通用启发式。 */
-  resultClass?: string;
-}
+/**
+ * 收藏夹站点（已归一）。
+ *
+ * 类型定义在 `bookmark-request.ts` —— 请求结构那条链（拼请求、发请求、把 JSON 转成
+ * 候选）与这里共用同一个形状，**两边各写一份必然漂移**。这里重新导出，保持
+ * `web-search.ts` 作为收藏夹检索对外入口的既有用法不变。
+ */
+export type { BookmarkSite, BookmarkRequest, BookmarkHeader } from './bookmark-request.js';
 
 /**
  * 读收藏夹名单（顺序稳定）。
@@ -472,6 +480,32 @@ export function bookmarkList(): BookmarkSite[] {
     if (searchUrl && /^https?:\/\//i.test(searchUrl) && searchUrl.includes('{q}')) entry.searchUrl = searchUrl;
     const resultClass = String(raw.resultClass ?? '').trim();
     if (resultClass) entry.resultClass = resultClass;
+    // 请求结构：形状检查同样在这里再做一次（同上面两条的理由）。
+    // `endpoint` 必须含 `{q}`，否则拼不出查询词 —— 与 `searchUrl` 完全一样的要求。
+    const req = isRecord(raw.request) ? raw.request : null;
+    if (req) {
+      const method = String(req.method ?? 'GET').toUpperCase();
+      const endpoint = String(req.endpoint ?? req.url ?? '').trim();
+      if ((method === 'GET' || method === 'POST') && endpoint.includes('{q}')) {
+        const headers: BookmarkHeader[] = Array.isArray(req.headers)
+          ? (req.headers as unknown[])
+            .filter(isRecord)
+            .map((h) => ({ name: String(h.name ?? '').trim(), value: String(h.value ?? '') }))
+            .filter((h) => h.name)
+          : [];
+        entry.request = headers.length ? { method, endpoint, headers } : { method, endpoint };
+      }
+    }
+    const params = isRecord(raw.params) ? raw.params : null;
+    if (params) {
+      const clean: Record<string, string> = {};
+      for (const [k, v] of Object.entries(params)) {
+        const name = String(k).trim();
+        if (!name) continue;
+        clean[name] = String(v ?? '');
+      }
+      if (Object.keys(clean).length) entry.params = clean;
+    }
     out.push(entry);
   }
   return out;
@@ -616,8 +650,42 @@ function splitByClass(html: string, className: string): string[] {
   return starts.map((start, i) => html.slice(start, i + 1 < starts.length ? starts[i + 1] : html.length));
 }
 
-/** 按站内搜索模板取结果（模板的合法性已由 `bookmarkList()` 过滤保证）。 */
+/**
+ * 按收藏夹取自结果。三种形态，由配置里填了什么决定：
+ *
+ *   1. **请求结构**（`site.request`）—— 按方法/地址/请求头发一次请求。响应用 JSON 或
+ *      HTML 两路解析。这是权威数据源（如千帆百科接口）唯一能走通的路。
+ *   2. **站内搜索地址**（`site.searchUrl`）—— 去搜索页抓 HTML，从链接里解析候选。
+ *   3. 两者都没有 —— 由调用方走搜索引擎的 `site:`（不进这个函数）。
+ */
 async function siteSearch(site: BookmarkSite, clean: string, maxResults: number): Promise<SearchResponse> {
+  // ── 形态 1：请求结构 ──
+  if (site.request) {
+    const credential = bookmarkCredential(site.key);
+    const sent = await fetchBookmarkRequest(site.request, { q: clean, params: site.params, credential });
+    if (!sent.ok) throw new Error(`请求结构调用失败（${site.key}）：${sent.error}`);
+    const { response } = sent;
+    if (response.kind === 'json') {
+      const list = jsonToResults(response.body, maxResults, response.url);
+      if (list.length) return { query: clean, results: list };
+      // 没有条目列表 → 接口给的是**单个对象的资料**（如 `get_content` 的整条词条）。
+      // 这时"一段压平后的资料"本身就是答案，**不是失败**：把它包成一条结果返回，
+      // 否则模型会得到"这个站没有内容"的错误归因。
+      const flat = flattenJson(response.body, BOOKMARK_JSON_MAX_CHARS);
+      if (flat.trim()) {
+        return { query: clean, results: [{ title: `${site.purpose || site.key}（接口返回）`, url: response.url, snippet: flat }] };
+      }
+      throw new Error(`请求结构返回的 JSON 里没有可用内容（${site.key}）：检查接口是否要求鉴权、或参数是否对。`);
+    }
+    if (response.kind === 'html') {
+      const list = parseSiteSearch(response.body, response.url, site.resultClass).slice(0, maxResults);
+      if (list.length) return { query: clean, results: list };
+      throw new Error(`请求结构返回的是网页，但没解析出结果（${site.key}）：可在设置页填「结果容器类名」。`);
+    }
+    throw new Error(`请求结构返回的内容既不是 JSON 也不是网页（${site.key}，content-type: ${response.contentType || '未知'}）。`);
+  }
+
+  // ── 形态 2：站内搜索地址 ──
   const target = fillSiteTemplate(site.searchUrl as string, clean);
   const res = await fetch(target, {
     headers: {
@@ -641,6 +709,22 @@ async function siteSearch(site: BookmarkSite, clean: string, maxResults: number)
 }
 
 /**
+ * 取某个收藏夹的凭据（`Authorization` 之类）。
+ *
+ * 真值存在配置的密钥区（`webSearch.credentials[key]`），**模板正文里只有占位**。
+ * 单独抽出来是为了让"密钥从哪来"只有一个答案 —— 不要在这里顺手读别的字段。
+ */
+function bookmarkCredential(bookmarkKey: string): { header: string; scheme: string; value: string } | undefined {
+  const store = getConfig().webSearch?.credentials;
+  if (!isRecord(store)) return undefined;
+  const entry = store[bookmarkKey];
+  if (!isRecord(entry)) return undefined;
+  const value = String(entry.value ?? '').trim();
+  if (!value) return undefined;
+  return { header: String(entry.header ?? 'Authorization'), scheme: String(entry.scheme ?? 'Bearer'), value };
+}
+
+/**
  * 给工具用的统一入口。
  *
  * `site` 由**模型**给出，值是收藏夹里的**枚举值**（不是域名）。照 reverse-image-source 的
@@ -661,9 +745,12 @@ export async function webSearch(query: unknown, site?: unknown): Promise<SearchR
   // ── 模型点了名 ──
   if (site !== undefined && site !== null && String(site).trim() !== '') {
     const picked = resolveBookmarkSite(site);
-    // 填了站内搜索模板就**直接去那个站搜**：这是唯一能真正"只在这个站里搜"的办法
-    // （实测搜索引擎对程序化请求会忽略 `site:`）。没填才退回旧的 `site:` 路径。
-    if (picked.searchUrl) return siteSearch(picked, clean, maxResults);
+    // 填了**站内搜索模板**或**请求结构**，就直接去那个站取内容：这是唯一能真正
+    // "只在这个站里搜"的办法（实测搜索引擎对程序化请求会忽略 `site:`）。
+    // ⚠️ `request` 必须算在这里 —— 只配了请求结构（典型的 JSON 接口书签，如千帆百科）
+    // 而没填搜索地址时，漏判会让它**掉进下面的 `site:` 分支**：于是请求结构根本不被执行，
+    // 用户看到的是真实搜索引擎的结果，而配置页看起来配好了（**实测踩到**）。
+    if (picked.searchUrl || picked.request) return siteSearch(picked, clean, maxResults);
     return mergeScoped(clean, [picked.host], sites);
   }
 
@@ -871,9 +958,19 @@ export async function probeSiteSearch(
    * 不该让一次探测给出错误的"找不到"。重试只在**还来得及**时做（离死线太近就直接放弃），
    * 且只重试一次，避免把预算耗在真的不可达的站点上。
    */
-  const fetchHtml = async (url: string): Promise<string | null | 'budget'> => {
+  /**
+   * 一页抓下来的东西：正文 + **它自己的** `content-type`。
+   *
+   * 必须随身带，不能记在共享变量里：`fetchHtml` 还被基线（站点根）与乱串对照用，
+   * 记在共享变量上会被**后一次**抓取覆盖，于是"判定这一页是不是网页"读到的是**别人**的
+   * content-type。实测踩到：JSON 夹具被判成 HTML（基线那一次把类型刷成了 text/html），
+   * 于是新加的 JSON 识别完全不生效、断言全假绿。
+   */
+  type SitePage = { body: string; contentType: string };
+
+  const fetchHtml = async (url: string): Promise<SitePage | null | 'budget'> => {
     const netTimeout = () => Math.min(timeoutMs, Math.max(1000, deadline - Date.now()));
-    const attempt = async (): Promise<string | null> => {
+    const attempt = async (): Promise<SitePage | null> => {
       tried++;
       try {
         const res = await fetch(url, {
@@ -885,7 +982,7 @@ export async function probeSiteSearch(
           redirect: 'follow'
         });
         if (!res.ok) return null;
-        return await res.text();
+        return { body: await res.text(), contentType: String(res.headers.get('content-type') || '') };
       } catch {
         return null;
       }
@@ -914,17 +1011,17 @@ export async function probeSiteSearch(
     const normalized = normalizeSiteInput(siteInput);
     const root = (() => { try { return `${new URL(normalized).origin}/`; } catch { return normalized; } })();
     const html = await fetchHtml(root);
-    baselineCache = html && html !== 'budget' ? linkKeysIn(html, root) : new Set<string>();
+    baselineCache = html && html !== 'budget' ? linkKeysIn(html.body, root) : new Set<string>();
     return baselineCache;
   };
 
   /** 取一页 HTML（真查询），供"类名试解析"与"通用解析"共用。 */
-  const fetchRealHtml = async (template: string): Promise<{ html: string; url: string } | null | 'budget'> => {
+  const fetchRealHtml = async (template: string): Promise<{ html: string; url: string; contentType: string } | null | 'budget'> => {
     const url = fillProbe(template, PROBE_QUERY);
-    const html = await fetchHtml(url);
-    if (html === 'budget') return 'budget';
-    if (html === null) return null;
-    return { html, url };
+    const page = await fetchHtml(url);
+    if (page === 'budget') return 'budget';
+    if (page === null) return null;
+    return { html: page.body, url, contentType: page.contentType };
   };
 
   /**
@@ -943,6 +1040,33 @@ export async function probeSiteSearch(
     const real = await fetchRealHtml(template);
     if (real === 'budget') return { template, accepted: false, note: '预算用尽' };
     if (real === null) return { template, accepted: false, note: '取页失败' };
+
+    // ⓞ **先认"这不是网页"**。站内搜索链只解析 HTML 链接，JSON/纯文本接口必然解析不出东西，
+    //    而且继续往下试类名与基线只是白烧请求。实测就是这个形状：用户填了第三方 JSON 百科接口，
+    //    旧文案说"结构可能变了"，把人引去改「结果容器类名」——方向完全错。
+    //
+    //    ⚠️ 顺序很关键：**JSON 判据必须排在 HTML 判据之前**。
+    //    `content-type: text/html` 里天然含 "html" 子串，而接口站经常把 content-type 写错
+    //    （实测夹具就是这样）；先看 content-type 的话一个 JSON 接口会被当成网页放过去，
+    //    这段识别等于白写（实测踩到一次：断言全红）。**正文形态**才是权威。
+    const bodyHead = real.html.slice(0, 200);
+    const shortType = real.contentType.split(';')[0];
+    const isJson = /json/i.test(real.contentType) || /^\s*[{[]/.test(bodyHead);
+    if (isJson) {
+      return {
+        template, accepted: false,
+        note: `这个地址返回的是 JSON 接口数据（content-type: ${shortType || '未知'}），不是网页 —— `
+          + '站内搜索只会从 HTML 页面里解析链接，所以任何 JSON 接口都填不进这一栏（检测也永远通不过）。'
+          + '若它就是你要的数据源，需要单独支持 JSON 接口；这一栏请填该站的网页搜索页地址。'
+      };
+    }
+    const looksHtml = /html/i.test(real.contentType) || /^\s*</.test(bodyHead);
+    if (real.contentType && !looksHtml) {
+      return {
+        template, accepted: false,
+        note: `这个地址返回的不是网页（content-type: ${shortType || '未知'}），站内搜索只能解析 HTML。`
+      };
+    }
 
     // ① 结果容器类名：命中 ≥2 条即可接受（`mw-search-result`/`b_algo` 都不是导航会用到的类名）
     for (const cls of PROBE_CLASS_CANDIDATES) {
@@ -964,7 +1088,7 @@ export async function probeSiteSearch(
     const junkHtml = await fetchHtml(fillProbe(template, PROBE_JUNK_QUERY));
     if (junkHtml === 'budget') return { template, accepted: false, kept, note: '预算用尽' };
     if (junkHtml === null) return { template, accepted: false, kept, note: '乱串对照取页失败' };
-    const junkKept = parseSiteSearch(junkHtml, fillProbe(template, PROBE_JUNK_QUERY))
+    const junkKept = parseSiteSearch(junkHtml.body, fillProbe(template, PROBE_JUNK_QUERY))
       .filter((r) => !base.has(linkKey(r.url))).length;
     if (kept < junkKept + 3) {
       return { template, accepted: false, kept, junkKept, note: `乱串查询也拿到 ${junkKept} 条，区分不开` };
@@ -999,7 +1123,8 @@ export async function probeSiteSearch(
     }
     return {
       ok: false, tried, searchUrl: fixedTemplate, diagnostics,
-      note: `你填的地址没通过检测：${verdict.note || '判定不通过'}。`
+      // 不给 `verdict.note` 补句号：那几条文案自己带标点，补了会出现"。。"（实测看到过）
+      note: `你填的地址没通过检测：${verdict.note || '判定不通过'}`
         + '（清空这一栏再点检测，我可以自动去这个站里找。）'
     };
   }

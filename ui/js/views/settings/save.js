@@ -128,23 +128,73 @@ export async function saveConfig({ quiet = false } = {}) {
     // 的值，而 `bookmarkList()` 又按"非空才带"处理——两处口径不同时，配置页显示有值、
     // 运行期当没有，正是那种查半天的问题。
     const bookmarks = $$('#search-bookmarks-body tr[data-bm]').map((row) => {
+      // ⚠️ 这一栏**两用**（「网页地址」与「站内搜索地址」已合并）：含 `{q}` 就是
+      // 站内搜索模板，否则当域名。**判据必须与后端 `normalizeConfigShape` 逐字同形** ——
+      // 两端各写一套的话，设置页显示的和实际参与检索的会不是同一份（那种问题极难查）。
+      const input = (row.querySelector('[data-bm-url]')?.value || '').trim();
+      // 输入可能是域名，也可能是整条地址（含 `{q}` 的搜索模板、或普通网址）。
+      // `url` 一律存**归一出来的域名** —— 它就是提示词里给模型看的"这个站在哪儿"，
+      // 也是没有模板时拼 `site:` 的依据。与后端 `hostnameOf()` 同一个结果。
+      let host = input;
+      try {
+        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(input)) host = new URL(input).hostname;
+        else host = input.split('/')[0].split('?')[0].split('#')[0];
+      } catch { host = input; }
       const item = {
         key: (row.querySelector('[data-bm-key]')?.value || '').trim(),
-        url: (row.querySelector('[data-bm-url]')?.value || '').trim(),
+        url: host,
         purpose: (row.querySelector('[data-bm-purpose]')?.value || '').trim()
       };
-      const searchUrl = (row.querySelector('[data-bm-searchurl]')?.value || '').trim();
-      if (searchUrl) item.searchUrl = searchUrl;
+      if (/^https?:\/\//i.test(input) && input.includes('{q}')) item.searchUrl = input;
       const resultClass = (row.querySelector('[data-bm-resultclass]')?.value || '').trim();
       if (resultClass) item.resultClass = resultClass;
+      // 请求结构与静态参数由弹窗写进行上的隐藏字段（`data-bm-req-json` / `data-bm-params-json`）。
+      // 用 JSON 存而不是拆成一堆 input：弹窗是唯一编辑入口，拆开只会让"哪个 input 属于
+      // 哪条请求头"这种账在重渲染后对不上。
+      const reqJson = row.dataset.bmReqJson || '';
+      if (reqJson) { try { item.request = JSON.parse(reqJson); } catch { /* 坏值当没配 */ } }
+      const paramsJson = row.dataset.bmParamsJson || '';
+      if (paramsJson) { try { const p = JSON.parse(paramsJson); if (p && Object.keys(p).length) item.params = p; } catch { /* 同上 */ } }
       return item;
-    }).filter((item) => item.key && item.url && item.purpose);
+      // 过滤判据与后端一致：**只配了请求结构/搜索模板而没填用途**的条目，后端也收
+      // （那是迁移来的老数据，丢掉等于删用户的收藏），所以这里不能按"三空就丢"卡掉它。
+    }).filter((item) => item.key && item.url && (item.purpose || item.searchUrl || item.request));
+
+    // 接口密钥。
+    //
+    // **从 `c.webSearch.credentials` 起手、只覆盖用户真改了的键**，不能凭空造一份新的：
+    // 后端脱敏会把 `value` 删掉（只回显 `hasValue`），所以"读到的当前值"本来就不含真值。
+    // 于是规则是 —— **输入框非空才写**，空着表示"不改"（placeholder 也这么提示）。
+    // 如果这里按行整体重建，用户点一次保存就会把没动过的那些密钥全清掉。
+    const credentials = { ...(c.webSearch?.credentials && typeof c.webSearch.credentials === 'object' ? c.webSearch.credentials : {}) };
+    const seenCredKeys = new Set();
+    for (const row of $$('#search-credentials-body tr[data-bmc]')) {
+      const key = (row.querySelector('[data-bmc-key]')?.value || '').trim();
+      if (!key) continue;
+      seenCredKeys.add(key);
+      const typed = row.querySelector('[data-bmc-value]')?.value || '';
+      const header = (row.querySelector('[data-bmc-header]')?.value || '').trim() || 'Authorization';
+      const scheme = (row.querySelector('[data-bmc-scheme]')?.value || '').trim();
+      if (typed) {
+        // 用户这次输入了新密钥 → 覆盖（scheme 留空表示只发裸值）
+        credentials[key] = { header, scheme: scheme === '' ? '' : scheme, value: typed };
+      } else if (credentials[key]) {
+        // 没输入 → 保留真值，只更新头名与 scheme（这两个是回显出来的，可以安全改）
+        credentials[key] = { ...credentials[key], header, scheme: scheme === '' ? '' : scheme };
+      }
+    }
+    // 用户删掉的行要跟着消失，否则删了还留着（值在服务端，前端看不见）
+    for (const key of Object.keys(credentials)) {
+      if (!seenCredKeys.has(key)) delete credentials[key];
+    }
+
     patch.webSearch = {
       ...c.webSearch,
       enabled: chk('#cfg-websearch', c.webSearch?.enabled !== false),
       provider: val('#cfg-searchprovider', c.webSearch?.provider || 'bing'),
       searchUrl: val('#cfg-searchurl', c.webSearch?.searchUrl || 'https://cn.bing.com/search').trim() || 'https://cn.bing.com/search',
       bookmarks,
+      credentials,
       // 旧键 bookmarkFirst 不再写入：它会由后端 normalizeConfigShape 迁移成 bookmarkMode
       // 并删除，前端再写回一个废弃键只会让它永远留在 config.json 里。
       bookmarkMode: val('#cfg-search-bookmarkmode', c.webSearch?.bookmarkMode === 'web' ? 'web' : 'prefer') === 'web' ? 'web' : 'prefer',

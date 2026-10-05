@@ -114,25 +114,67 @@ export function renderApiSection(c) {
  */
 export function renderBookmarkRows(bookmarks) {
   const list = Array.isArray(bookmarks) ? bookmarks : [];
-  const row = (key, url, purpose, searchUrl, resultClass) =>
+  // 「网页地址」与「站内搜索地址」**已合并成一栏**（`data-bm-url`）：填域名就是站点标识，
+  // 填含 `{q}` 的完整地址就是站内搜索模板 —— 由后端按形态自己认，用户不用选。
+  // 那一栏的值优先显示 `searchUrl`（更具体），没有才显示域名。
+  const row = (key, urlOrTemplate, purpose, resultClass, hasRequest) =>
     '<tr data-bm>'
     + `<td><input type="text" data-bm-key value="${esc(key)}" placeholder="wiki" /></td>`
-    + `<td><input type="text" data-bm-url value="${esc(url)}" placeholder="zh.wikipedia.org" /></td>`
-    + `<td><input type="text" data-bm-purpose value="${esc(purpose)}" placeholder="查百科条目、定义、背景事实" /></td>`
     + `<td>`
-    + `<div style="display:flex;gap:6px;align-items:center">`
-    + `<input type="text" data-bm-searchurl value="${esc(searchUrl)}" placeholder="https://…/search?q={q}" style="flex:1" />`
-    + `<button class="btn btn-small" data-bm-probe type="button" title="自动检测这个站的站内搜索地址">检测</button>`
+    + `<input type="text" data-bm-url value="${esc(urlOrTemplate)}" placeholder="zh.wikipedia.org 或 https://…/search?q={q}" />`
+    + `<div style="display:flex;gap:6px;align-items:center;margin-top:3px">`
+    + `<button class="btn btn-small" data-bm-probe type="button" title="这一栏空着=自动查找搜索地址；已填=只测你填的那条">检测</button>`
     + `</div>`
     // 检测结果就地显示在这一行下面：把结论放在按钮旁边，用户不用去别处找
     + `<div class="muted" data-bm-status style="font-size:11px;margin-top:3px"></div>`
     + `</td>`
-    + `<td><input type="text" data-bm-resultclass value="${esc(resultClass)}" placeholder="（留空=通用解析）" /></td>`
+    + `<td><input type="text" data-bm-purpose value="${esc(purpose)}" placeholder="查百科条目、定义、背景事实" /></td>`
+    + `<td>`
+    + `<button class="btn btn-small" data-bm-req type="button" title="按指定的方法/地址/请求头去取数据（JSON 接口用）">`
+    + `${hasRequest ? '已配置 ✓' : '配置…'}</button>`
+    + `<input type="text" data-bm-resultclass value="${esc(resultClass)}" placeholder="容器类名（留空=通用）" style="margin-top:3px" />`
+    + `</td>`
     + '<td><button class="btn btn-small btn-danger" data-bm-del type="button" title="删除这条">×</button></td>'
     + '</tr>';
-  if (!list.length) return row('', '', '', '', '');
+  if (!list.length) return row('', '', '', '', false);
   return list.map((item) => row(
-    item?.key || '', item?.url || '', item?.purpose || '', item?.searchUrl || '', item?.resultClass || ''
+    item?.key || '',
+    item?.searchUrl || item?.url || '',
+    item?.purpose || '',
+    item?.resultClass || '',
+    !!(item?.request && item.request.endpoint)
+  )).join('');
+}
+
+/**
+ * 接口密钥的行。
+ *
+ * **密钥真值读不到**：后端脱敏时会把 `credentials.<key>.value` 整个删掉、只留一个
+ * `hasValue` 布尔标记（理由见 `http/console.ts` 那段：留着空串会让前端回传时覆盖真值）。
+ * 所以这里的分工是：
+ *   · 输入框**永远留空**，`placeholder` 根据 `hasValue` 显示"已设置（留空=不改）"；
+ *   · 保存时**只有非空才写** —— 空值整键不写，服务端原值才不会被清掉。
+ * 这是"值不回显又不被误清"的唯一可行组合，别为了好看向 input 里塞掩码字符。
+ */
+export function renderCredentialRows(credentials) {
+  const map = credentials && typeof credentials === 'object' ? credentials : {};
+  const keys = Object.keys(map);
+  const row = (key, header, scheme, hasValue) =>
+    '<tr data-bmc>'
+    + `<td><input type="text" data-bmc-key value="${esc(key)}" placeholder="baike" /></td>`
+    + `<td><input type="text" data-bmc-header value="${esc(header)}" placeholder="Authorization" /></td>`
+    + `<td><input type="text" data-bmc-scheme value="${esc(scheme)}" placeholder="Bearer" /></td>`
+    + `<td><div style="display:flex;gap:6px;align-items:center">`
+    + `<input type="password" data-bmc-value value="" placeholder="${hasValue ? '已设置（留空=不修改）' : '粘贴密钥'}" style="flex:1" autocomplete="new-password" />`
+    + `<button class="btn btn-small btn-danger" data-bmc-del type="button" title="删除这条密钥">×</button>`
+    + '</div></td>'
+    + '</tr>';
+  if (!keys.length) return row('', '', '', false);
+  return keys.map((k) => row(
+    k,
+    String(map[k]?.header || ''),
+    String(map[k]?.scheme || ''),
+    Boolean(map[k]?.hasValue)
   )).join('');
 }
 
@@ -267,10 +309,9 @@ export function renderSearchSection(c) {
         <thead>
           <tr>
             <th style="text-align:left;width:13%">枚举值</th>
-            <th style="text-align:left;width:18%">网页地址</th>
+            <th style="text-align:left;width:38%">网页地址 / 站内搜索地址</th>
             <th style="text-align:left;width:22%">用途</th>
-            <th style="text-align:left;width:26%">站内搜索地址（可选）</th>
-            <th style="text-align:left;width:15%">结果容器类名（可选）</th>
+            <th style="text-align:left;width:22%">请求结构 / 容器类名</th>
             <th style="width:36px"></th>
           </tr>
         </thead>
@@ -287,6 +328,31 @@ export function renderSearchSection(c) {
         <input type="number" id="cfg-search-chat-hourly" min="1" max="200" value="${esc(c.webSearch?.maxCallsPerChatPerHour ?? 20)}" /></div>
       <div class="field"><label>全部会话每天最多搜索次数</label>
         <input type="number" id="cfg-search-daily" min="1" max="5000" value="${esc(c.webSearch?.maxCallsPerDay ?? 200)}" /></div>
+    </div>
+
+    <h3>接口密钥（配了「请求结构」的收藏夹用）</h3>
+    <div class="hint">
+      填了「请求结构」的收藏夹（典型是 JSON 接口）如果要求鉴权，密钥填在这里。<br />
+      <b>为什么不填在请求结构里</b>：那一栏的内容会被回显、可能被复制分享，而密钥是长期凭据。
+      这里存的值<b>不回显</b>（只显示"已设置"），保存时也不会被空值覆盖。<br />
+      左边填<b>收藏夹的枚举值</b>（要和上面那张表的枚举值一致），右边填密钥原文（不用写 <code>Bearer</code>，
+      下面有单独的 scheme 输入框）。
+    </div>
+    <table class="bookmark-table" style="width:100%;border-collapse:collapse">
+      <thead>
+        <tr>
+          <th style="text-align:left;width:18%">收藏夹枚举值</th>
+          <th style="text-align:left;width:22%">请求头名</th>
+          <th style="text-align:left;width:14%">scheme</th>
+          <th style="text-align:left;width:46%">密钥</th>
+        </tr>
+      </thead>
+      <tbody id="search-credentials-body">
+        ${renderCredentialRows(c.webSearch?.credentials)}
+      </tbody>
+    </table>
+    <div style="margin-top:6px">
+      <button class="btn btn-small" id="add-search-credential-btn" type="button">＋ 添加一条密钥</button>
     </div>
 
     <h3>添加自定义搜索服务</h3>

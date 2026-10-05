@@ -10,10 +10,12 @@ import { clampInt, renderChatSection, sliderDesc, sliderToTierUI, sliderToTierUI
 import {
   renderAllowSection, renderApiSection, renderDesktopSection, renderMemorySettingsSection,
   renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderPythonSection,
-  renderSearchSection, renderTranscriptionSection, renderImageSourceSection, renderBookmarkRows
+  renderSearchSection, renderTranscriptionSection, renderImageSourceSection, renderBookmarkRows,
+  renderCredentialRows
 } from './sections.js';
 import { parseList, saveConfig } from './save.js';
 import { openBlocklistModal } from '../../parts/blocklist.js';
+import { openBookmarkRequestModal } from '../../parts/bookmark-request.js';
 import { openPersonaCreateModal, openPersonaPicker } from '../../parts/persona.js';
 import { openMemoryModelPicker, openModelAddModal, openModelDeleteModal, openModelPicker } from '../../parts/model-modals.js';
 import { openWhitelistPicker } from '../../parts/whitelist.js';
@@ -311,25 +313,28 @@ export function bindSettingsEvents(c) {
     if (probeBtn) {
       const row = probeBtn.closest('tr');
       const status = row?.querySelector('[data-bm-status]');
-      const site = (row?.querySelector('[data-bm-url]')?.value || '').trim();
-      // 这一栏**空着 = 让它自动去找**（自动检测）；**填了 = 只测这一个**（不当线索去猜别的）。
-      // 判据只由"这栏空不空"决定，所以同一个按钮能表达两件事，用户不必选模式。
-      // 旧行为把填写值当 hint（优先试、试不通继续自动找），点完检测框里的值会被悄悄换成
-      // 另一个地址 —— 看起来像"检测把我的配置改了"。
-      const filled = (row?.querySelector('[data-bm-searchurl]')?.value || '').trim();
+      // 这一栏**已合并**（网页地址 + 站内搜索地址）：空着 = 让它自动去找；
+      // 填了 = 只测你填的这条（不当线索去猜别的）。判据只由"这栏空不空"决定，
+      // 所以同一个按钮能表达两件事，用户不必选模式。旧行为把填写值当 hint
+      // （优先试、试不通继续自动找），点完检测框里的值会被悄悄换成另一个地址。
+      const filled = (row?.querySelector('[data-bm-url]')?.value || '').trim();
+      if (!filled) { if (status) status.textContent = '请先填「网页地址」，检测要靠它找搜索入口'; return; }
+      // 发给后端要拆成两个字段：`site` 是**站点标识**（后端要拿它做 URL 校验与找入口，
+      // 所以必须是域名形态），`searchUrl` 是**用户已填的模板**（含 `{q}`）。
+      // 合并成一个输入框之后，这一步拆分只能在前端做 —— 后端拿不到"用户填的是哪一种"。
+      const site = /^https?:\/\//i.test(filled) ? (() => { try { return new URL(filled).hostname; } catch { return filled; } })() : filled;
       const hint = filled;
-      if (!site) { if (status) status.textContent = '请先填「网页地址」，检测要靠它找搜索入口'; return; }
       probeBtn.disabled = true;
       if (status) {
-        status.textContent = filled
+        status.textContent = filled.includes('{q}')
           ? '测试你填的地址…（最多约 12 秒）'
-          : '这一栏是空的，正在自动查找可用地址…（最多约 12 秒）';
+          : '这一栏没填搜索地址，正在自动查找…（最多约 12 秒）';
       }
-      api('/api/search-bookmark/probe', { method: 'POST', body: JSON.stringify({ site, hint, searchUrl: filled }) })
+      api('/api/search-bookmark/probe', { method: 'POST', body: JSON.stringify({ site, hint, searchUrl: filled.includes('{q}') ? filled : '' }) })
         .then((r) => {
           const res = r?.result || {};
           if (res.ok) {
-            const urlInput = row?.querySelector('[data-bm-searchurl]');
+            const urlInput = row?.querySelector('[data-bm-url]');
             if (urlInput) urlInput.value = res.searchUrl || '';
             const clsInput = row?.querySelector('[data-bm-resultclass]');
             // 只在检测出类名时才覆盖：检测不出类名不代表用户原来填的是错的
@@ -346,12 +351,49 @@ export function bindSettingsEvents(c) {
         .finally(() => { probeBtn.disabled = false; });
       return;
     }
+    // ── 请求结构（JSON 接口书签）──
+    const reqBtn = target.closest('[data-bm-req]');
+    if (reqBtn) {
+      const row = reqBtn.closest('tr');
+      if (!row) return;
+      let request = null, params = null;
+      try { request = row.dataset.bmReqJson ? JSON.parse(row.dataset.bmReqJson) : null; } catch { request = null; }
+      try { params = row.dataset.bmParamsJson ? JSON.parse(row.dataset.bmParamsJson) : null; } catch { params = null; }
+      openBookmarkRequestModal({ request, params }, ({ request: nextReq, params: nextParams }) => {
+        // 写回**行上的 dataset**，不直接改配置：与其它弹窗一致，改动先落 DOM，
+        // 点「保存设置」才落盘（`save.js` 从 dataset 里读）。
+        if (nextReq && nextReq.endpoint) {
+          row.dataset.bmReqJson = JSON.stringify(nextReq);
+          if (nextParams && Object.keys(nextParams).length) row.dataset.bmParamsJson = JSON.stringify(nextParams);
+          else delete row.dataset.bmParamsJson;
+          reqBtn.textContent = '已配置 ✓';
+        } else {
+          delete row.dataset.bmReqJson;
+          delete row.dataset.bmParamsJson;
+          reqBtn.textContent = '配置…';
+        }
+      });
+      return;
+    }
     // ── 删一行 ──
     const btn = target.closest('[data-bm-del]');
     if (!btn) return;
     btn.closest('tr')?.remove();
     // 删空了就补一个空行，否则用户没有可填的输入框（得先点"添加一条"才能开始填）
     if (!body.querySelector('tr[data-bm]')) body.insertAdjacentHTML('beforeend', renderBookmarkRows([]));
+  });
+
+  // ── 接口密钥的增删（同样是事件委托 + DOM 操作，不重渲染整页）──
+  const credBody = $('#search-credentials-body');
+  $('#add-search-credential-btn')?.addEventListener('click', () => {
+    credBody?.insertAdjacentHTML('beforeend', renderCredentialRows({}));
+  });
+  credBody?.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const del = target.closest('[data-bmc-del]');
+    if (!del) return;
+    del.closest('tr')?.remove();
   });
 
   // 搜索提供方切换

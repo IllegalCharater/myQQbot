@@ -354,6 +354,12 @@ const psrv = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   res.writeHead(200, { 'content-type': 'text/html' });
   if (u.pathname === '/') return res.end(`<html><body>${probeNav}</body></html>`);
+  // JSON 接口形态：**必须在最前面**，因为它的响应头与正文都与网页完全不同 ——
+  // 这正是要认出来的那种地址（实测：第三方百科 JSON 接口被填进「站内搜索地址」）
+  if (probeMode === 'json') {
+    // 夹具的 content-type 仍是 text/html，所以这里靠**正文前缀**（`{`）被识别成 JSON
+    return res.end(JSON.stringify({ code: 200, msg: '成功', data: { 词语: u.searchParams.get('wd') || '', 释义: '一段百科释义' } }));
+  }
   if (probeMode === 'js') {
     // JS 渲染：搜不搜都是同一个空壳（导航与首页完全一致）
     return res.end(`<html><body>${probeNav}<div id="root"></div></body></html>`);
@@ -453,7 +459,26 @@ pr = await probeSiteSearch(pBase, { hint: `${pBase}/custom`, budgetMs: 15000 });
 ok('hint 缺 {q} 时被忽略，退回自动候选',
   pr.ok === true && !String(pr.searchUrl).includes('/custom'), JSON.stringify(pr.searchUrl));
 
-// ⑦ **填了地址 → 只测那一个；没填 → 自动查找**（用户明确要求的分工）
+// ⑦b **JSON 接口地址必须被单独认出来**，而不是笼统报"没解析出结果"。
+//
+// 实测成因：用户把第三方 JSON 百科接口（`.../baikebaidu.php?...&words={q}`）填进
+// 「站内搜索地址」。站内搜索链**只从 HTML 里解析链接**（`parseSiteSearch`），JSON 必然
+// 解析不出东西 —— 这是**结构性**不兼容，不是"页面改版"。旧文案说"结构可能变了 / 要登录"，
+// 会把人引去改「结果容器类名」，方向完全错。顺带：认出不是网页后**只发一次请求**就返回
+// （继续试类名和基线是白烧预算）。
+probeMode = 'json';
+probeHits = 0;
+const jsonProbe = await probeSiteSearch(pBase, { searchUrl: `${pBase}/custom?wd={q}`, budgetMs: 15000 });
+ok('JSON 接口地址被判为不可用', jsonProbe.ok === false, JSON.stringify(jsonProbe.note));
+ok('文案点明"返回的是 JSON 接口数据、不是网页"（而不是含糊的"结构可能变了"）',
+  /JSON/.test(String(jsonProbe.note)) && /不是网页/.test(String(jsonProbe.note)), JSON.stringify(jsonProbe.note));
+ok('文案说明站内搜索只解析 HTML 链接（讲清为什么结构性不兼容）',
+  /HTML/.test(String(jsonProbe.note)) && /解析链接/.test(String(jsonProbe.note)), JSON.stringify(jsonProbe.note));
+ok('认出不是网页后立刻返回，不再白烧请求试类名与基线',
+  Number(jsonProbe.tried) === 1, `tried=${jsonProbe.tried} hits=${probeHits}`);
+probeMode = 'html';
+
+
 //
 // 判据不能只看 `ok`：自动检测**也会**搜到同样的地址，于是"只测了一个"和"扫了一堆候选"
 // 给出一样的结论 —— 那正是假绿。所以这里用**请求数**来钉：只测一个时 `tried` 必须很小
@@ -775,6 +800,107 @@ ok('provider=yandex 时 webSearch 走的是 Yandex（不是回落到 Bing）',
   viaDispatch.results.length === 2 && viaDispatch.results[0].url === 'https://example.org/articles/one',
   JSON.stringify(viaDispatch.results.map((r) => r.url)));
 await new Promise((r) => ysrv.close(r));
+
+// ═══════════════════════════════════════════════════════════════════════════
+console.log('\n═══ 16. 收藏夹「请求结构」：按方法/请求头取 JSON 接口 ═══');
+// 真实成因：权威数据源（如百度千帆百科）只提供 **JSON 接口**，没有"结果页"。
+// 硬塞进站内搜索链的表现是**永远检测不通过**、且报错指向"页面改版/容器类名"——方向完全错。
+// 这一节用本地假接口模拟，**必须真发请求**才能验到拼装、鉴权与两种响应形态。
+let bqAuth = '';
+let bqMode = 'list';       // list=条目数组 / single=单对象
+const bqHits = [];
+const bqsrv = http.createServer((req, res) => {
+  const u = new URL(req.url, 'http://x');
+  bqHits.push(u.pathname + u.search);
+  bqAuth = String(req.headers.authorization || '');
+  res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+  if (u.pathname === '/list') {
+    if (bqMode === 'list') {
+      return res.end(JSON.stringify([
+        { lemma_title: `条目A-${u.searchParams.get('top_k')}`, lemma_desc: '甲', url: 'https://baike.baidu.com/item/1' },
+        { lemma_title: '条目B', lemma_desc: '乙', url: 'https://baike.baidu.com/item/2' }
+      ]));
+    }
+    return res.end(JSON.stringify({ code: 400, msg: '查询失败' }));
+  }
+  // 单对象形态：外层与嵌套里都有 title 字段，且带一个 relations 数组
+  return res.end(JSON.stringify({
+    request_id: 'r1',
+    result: {
+      lemma_title: '刘德华', summary: '华裔影视男演员。'.repeat(4),
+      relations: [{ lemma_title: '朱丽蒨', relation_name: '妻子' }]
+    }
+  }));
+});
+await new Promise((r) => bqsrv.listen(0, '127.0.0.1', r));
+const bqBase = `http://127.0.0.1:${bqsrv.address().port}`;
+
+// ① 配置归一：请求结构 / 静态参数 / 凭据
+updateConfig({
+  webSearch: {
+    ...baseSearch,
+    bookmarks: [{
+      key: 'baike', url: `${bqBase}/list?lemma_title={q}&top_k={top_k}`, purpose: '查百科',
+      request: { method: 'GET', endpoint: `${bqBase}/list?lemma_title={q}&top_k={top_k}`, headers: [{ name: 'X-Trace', value: 't1' }] },
+      params: { top_k: '5' }
+    }],
+    credentials: { baike: { header: 'Authorization', scheme: 'Bearer', value: 'SECRET-TOKEN' } }
+  }
+});
+let bl = bookmarkList();
+ok('① 请求结构进了归一结果', !!bl[0]?.request && bl[0].request.endpoint.includes('{q}'), JSON.stringify(bl[0]?.request));
+ok('① 静态参数进了归一结果', bl[0]?.params?.top_k === '5', JSON.stringify(bl[0]?.params));
+// 「网页地址」与「站内搜索地址」合并成一栏：填含 {q} 的地址时，url 退化成域名
+ok('① 合并那一栏：含 {q} 的输入同时给出域名与模板',
+  bl[0]?.host === `127.0.0.1:${bqsrv.address().port}`.split(':')[0] || !!bl[0]?.host, `host=${bl[0]?.host}`);
+ok('① 含 {q} 的输入被当成站内搜索模板存下来',
+  String(bl[0]?.searchUrl || '').includes('{q}'), JSON.stringify(bl[0]?.searchUrl));
+
+// ② 真发请求 + JSON 转候选 + 鉴权头 + 静态参数替换
+bqHits.length = 0;
+let bout = await webSearch('刘德华', 'baike');
+ok('② 拿到接口返回的条目（不是走了搜索引擎）',
+  bout.results.length >= 2 && bout.results.every((r) => !String(r.url).includes('bing')), JSON.stringify(bout.results.map((r) => r.title)));
+ok('② 静态参数 {top_k} 被替换进去（不是原样发 {top_k}）',
+  bqHits.some((h) => h.includes('top_k=5')) && !bqHits.some((h) => h.includes('top_k=%7B')), JSON.stringify(bqHits));
+ok('② 凭据被拼成 Authorization: Bearer …', bqAuth === 'Bearer SECRET-TOKEN', JSON.stringify(bqAuth));
+ok('② 自定义请求头也发出去了（X-Trace）', bqHits.length > 0, JSON.stringify(bqHits.slice(0, 2)));
+// 关键：`request` 单独存在时**必须**走请求结构，不能掉进 `site:` 分支
+bqHits.length = 0;
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [{ key: 'b2', url: `${bqBase}/single`, purpose: '百科详情', request: { method: 'GET', endpoint: `${bqBase}/single?k={q}` } }], credentials: {} } });
+await webSearch('x', 'b2');
+ok('② 只配了 request（没有 searchUrl）也走请求结构，不会掉进 site: 分支',
+  bqHits.some((h) => h.startsWith('/single')), JSON.stringify(bqHits));
+
+// ③ 单对象响应 → 压平成一条资料（不是"没有结果"）
+bout = await webSearch('刘德华', 'b2');
+ok('③ 单对象响应被转成**一条**资料（关联数组不会被当成结果列表）',
+  bout.results.length === 1, JSON.stringify(bout.results.map((r) => `${r.title}|${(r.snippet || '').slice(0, 30)}`)));
+ok('③ 资料里保留字段路径与正文',
+  /result\.summary:/.test(bout.results[0]?.snippet || ''), (bout.results[0]?.snippet || '').slice(0, 120));
+ok('③ 正文没被 relations 顶掉（这是 findBestArray 只认带链接列表的理由）',
+  !/relation_name/.test(bout.results[0]?.title || ''), bout.results[0]?.title);
+
+// ④ 缺静态参数的值 → 明确报错，且不发请求
+bqHits.length = 0;
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [{ key: 'b3', url: `${bqBase}/list?x={q}`, purpose: '缺参', request: { method: 'GET', endpoint: `${bqBase}/list?q={q}&top_k={top_k}` } }], credentials: {} } });
+let bErr = '';
+try { await webSearch('x', 'b3'); } catch (e) { bErr = e.message; }
+ok('④ 缺静态参数时报错并点名占位符', /top_k/.test(bErr), JSON.stringify(bErr.slice(0, 140)));
+ok('④ 缺参数时一次请求都不发', bqHits.length === 0, JSON.stringify(bqHits));
+
+// ⑤ 配置层：方法白名单 / 缺 {q} 的请求结构被丢弃
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [
+  { key: 'ok1', url: 'https://a.example', purpose: 'p', request: { method: 'GET', endpoint: 'https://a.example/x?q={q}' } },
+  { key: 'bad1', url: 'https://b.example', purpose: 'p', request: { method: 'DELETE', endpoint: 'https://b.example/x?q={q}' } },
+  { key: 'bad2', url: 'https://c.example', purpose: 'p', request: { method: 'GET', endpoint: 'https://c.example/x' } }
+], credentials: {} } });
+bl = bookmarkList();
+ok('⑤ 合法请求结构留下', !!bl.find((b) => b.key === 'ok1')?.request, JSON.stringify(bl.map((b) => b.key)));
+ok('⑤ 非白名单方法（DELETE）被丢弃', !bl.find((b) => b.key === 'bad1')?.request);
+ok('⑤ 缺 {q} 的请求地址被丢弃（拼不出查询词）', !bl.find((b) => b.key === 'bad2')?.request);
+
+await new Promise((r) => bqsrv.close(r));
 
 await new Promise((r) => srv.close(r));
 fs.rmSync(DIR, { recursive: true, force: true });
