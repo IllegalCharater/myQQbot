@@ -186,6 +186,26 @@ ok('参数可增可删，且走事件委托（动态插入的行不会漏绑）'
 ok('保存时从**行**里收参数（不再读一个 textarea 的文本）',
   /querySelectorAll\('\[data-bqp-row\]'\)/.test(reqModalSrc) && /collectParams\(overlay\)/.test(reqModalSrc));
 
+// ── 检测到 JSON 接口 → 把地址搬进「请求结构」并弹窗 ──
+// 这一栏只解析 HTML，JSON 接口填这里**永远**通不过；但能力早就有（就是「请求结构」）。
+// 不加这步，用户看到的就是一句"没通过检测"然后**卡住**，还得自己换按钮 + 手抄地址（**实测反馈**）。
+// 判据必须是后端给的**机器可读标记**，不许匹配 note 文案（文案改过，匹配文案会静默失效）。
+ok('检测结果按 detectedJson 标记分流，**不匹配 note 文案**',
+  /res\.detectedJson/.test(js) && !/note[^\n]*JSON 接口数据/.test(js));
+ok('检测到 JSON 时打开「请求结构」并预填地址',
+  /openRequestModalFor\(row, \{[\s\S]{0,200}buildJsonRequest\(res\.jsonApiUrl\)/.test(js));
+ok('弹窗的打开与回填只有**一份**实现（点击与预填共用，否则会"看 A 写 B"）',
+  (js.match(/function openRequestModalFor\(/g) || []).length === 1
+  && /openRequestModalFor\(reqBtn\.closest\('tr'\)\)/.test(js));
+ok('预填只在**该行还没配过**请求结构时生效（不顶掉已有配置）',
+  /if \(!request && prefill\?\.request\)/.test(js) && /!row\.dataset\.bmReqJson/.test(js));
+// 地址必须**逐字照抄**：new URL() 会做归一化（默认端口、主机大小写、中文路径），
+// 搬过去与用户填的不一致会让人以为"检测改了我的配置"。
+ok('预填的地址由字符串切出、逐字保留（不用 new URL 重建）',
+  /function buildJsonRequest\(template\)/.test(js) && /m\[1\] \+ m\[2\]/.test(js));
+ok('弹窗支持 prefillNote（说明"这地址是哪来的"），没预填时与原来完全一样',
+  /prefillNote/.test(reqModalSrc) && /\$\{prefillNote \?/.test(reqModalSrc));
+
 // ⚠️ **渲染也必须把请求结构写进 dataset** —— 这是"刷新后还能看到已配的请求结构"的唯一途径。
 // 初版只有弹窗会写它、渲染从不写，于是刷新后行上没有该属性，弹窗一打开就是空的
 // （**实测反馈**）；更糟的是此时再点「保存设置」（哪怕只改了别的行），这一行的请求结构

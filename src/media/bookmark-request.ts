@@ -254,6 +254,10 @@ const pickString = (obj: Record<string, unknown>, keys: string[]): string => {
 export function jsonToResults(raw: string, limit: number, baseUrl = ''): Array<{ title: string; url: string; snippet: string }> {
   let data: unknown;
   try { data = JSON.parse(raw); } catch { return []; }
+  // MediaWiki OpenSearch（`action=opensearch`）要走**专用**解析：它是"并列的字符串数组"，
+  // 不是"对象数组"，`findBestArray` 的通用判据（条目要自带链接字段）**必然认不出它**。
+  const openSearch = openSearchToResults(data, Math.max(1, limit));
+  if (openSearch.length) return openSearch;
   const best = findBestArray(data, Math.max(1, limit));
   if (!best.length) return [];
   return best.map((item) => {
@@ -267,6 +271,41 @@ export function jsonToResults(raw: string, limit: number, baseUrl = ''): Array<{
     return { title, url: url || baseUrl, snippet };
   }).filter((r) => r.title || r.snippet);
 }
+
+/**
+ * MediaWiki **OpenSearch** 格式 → 结果列表。
+ *
+ * 形状是一段**固定长度的数组**（下标即语义）：
+ *
+ * ```json
+ * ["查询词", ["标题1","标题2"], ["描述1","描述2"], ["URL1","URL2"]]
+ * ```
+ *
+ * 为什么必须单独写一支：通用解析只看"对象数组里有没有链接字段"，而这里是**并列的
+ * 字符串数组**（标题与 URL 分在两个数组里、靠**下标**对应），那条判据认不出来 ——
+ * 实测结果就是**整份响应退回 `flattenJson()` 压成一段文本**，模型看到的是
+ * `[3]: https://…` 这样的字段路径，而不是 5 条可点的条目。
+ *
+ * 判据写得很紧（四个元素 + 下标 0 是字符串 + 1/3 是等长字符串数组），因为这是**按位置
+ * 取值**的格式：判松了会把随便一个四元素数组当成结果，取出来的东西毫无意义。
+ */
+function openSearchToResults(data: unknown, limit: number): Array<{ title: string; url: string; snippet: string }> {
+  if (!Array.isArray(data) || data.length < 4) return [];
+  const titles = data[1];
+  const descs = data[2];
+  const urls = data[3];
+  const isStrArr = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === 'string');
+  if (typeof data[0] !== 'string' || !isStrArr(titles) || !isStrArr(urls)) return [];
+  if (titles.length !== urls.length) return [];
+  // 描述数组可以为空、也可以与标题等长（MediaWiki 通常给等长的空串）
+  const descArr = isStrArr(descs) ? descs : [];
+  return titles.slice(0, limit).map((title, i) => ({
+    title: String(title).trim() || '（无标题）',
+    url: String(urls[i]).trim(),
+    snippet: String(descArr[i] ?? '').trim()
+  })).filter((r) => r.url);
+}
+
 
 /**
  * 在 JSON 里找"最像**结果列表**"的那个数组。

@@ -476,6 +476,33 @@ ok('文案说明站内搜索只解析 HTML 链接（讲清为什么结构性不�
   /HTML/.test(String(jsonProbe.note)) && /解析链接/.test(String(jsonProbe.note)), JSON.stringify(jsonProbe.note));
 ok('认出不是网页后立刻返回，不再白烧请求试类名与基线',
   Number(jsonProbe.tried) === 1, `tried=${jsonProbe.tried} hits=${probeHits}`);
+// ⚠️ 只说"不行"是不够的：初版写的是"若它就是你要的数据源，需要单独支持 JSON 接口"——
+// 而那个能力**早就有了**（就是收藏夹那行的「请求结构」）。用户照着那句话只会以为
+// "这个站接不了"（**实测反馈**）。文案必须点名该去哪填。
+ok('文案**给出下一步**：点名「请求结构」并说明那一栏要留空',
+  /请求结构/.test(String(jsonProbe.note)) && /留空/.test(String(jsonProbe.note)), JSON.stringify(jsonProbe.note));
+ok('文案不再说"需要单独支持 JSON 接口"（那能力早就有，会误导）',
+  !/需要单独支持/.test(String(jsonProbe.note)), JSON.stringify(jsonProbe.note));
+// JSON 接口主机上"清空再自动找"多半是死路，而且会把用户从正确的下一步带走 —— 不加这句
+ok('JSON 接口那条不追加"清空这一栏再自动找"（那是 HTML 场景的提示）',
+  !/清空这一栏再点检测/.test(String(jsonProbe.note)), JSON.stringify(jsonProbe.note));
+// ⚠️ **机器可读标记**：前端靠它决定"把地址搬进「请求结构」并弹窗"。
+// **不许让前端去正则匹配 note 文案** —— 文案本轮就改过一次，匹配文案会静默失效。
+ok('检测到 JSON 时回一个机器可读标记 detectedJson + 要预填的地址',
+  jsonProbe.detectedJson === true && String(jsonProbe.jsonApiUrl || '').includes('{q}'),
+  JSON.stringify({ detectedJson: jsonProbe.detectedJson, jsonApiUrl: jsonProbe.jsonApiUrl }));
+ok('预填的就是**用户填的那条**模板（不是别的候选）',
+  String(jsonProbe.jsonApiUrl) === `${pBase}/custom?wd={q}`, JSON.stringify(jsonProbe.jsonApiUrl));
+probeMode = 'html';
+
+// 对照：非 JSON 的失败路径**仍然**要带那句自动检测提示（别一刀切删掉）
+probeMode = 'js';   // 结果由 JS 渲染：解析不出结果，且不是 JSON
+const jsProbe = await probeSiteSearch(pBase, { searchUrl: `${pBase}/search?q={q}`, budgetMs: 8000 });
+ok('对照：非 JSON 失败仍带"清空这一栏再点检测"提示（没被误删）',
+  /清空这一栏再点检测/.test(String(jsProbe.note)) && !/JSON/.test(String(jsProbe.note)), JSON.stringify(jsProbe.note));
+ok('对照：非 JSON 失败**不带** detectedJson（前端不该弹请求结构窗口）',
+  jsProbe.detectedJson !== true && !jsProbe.jsonApiUrl,
+  JSON.stringify({ detectedJson: jsProbe.detectedJson, jsonApiUrl: jsProbe.jsonApiUrl }));
 probeMode = 'html';
 
 
@@ -895,6 +922,35 @@ ok('③ 资料里保留字段路径与正文',
   /result\.summary:/.test(bout.results[0]?.snippet || ''), (bout.results[0]?.snippet || '').slice(0, 120));
 ok('③ 正文没被 relations 顶掉（这是 findBestArray 只认带链接列表的理由）',
   !/relation_name/.test(bout.results[0]?.title || ''), bout.results[0]?.title);
+
+// ③b MediaWiki OpenSearch（`action=opensearch`）—— **并列字符串数组**，要走专用解析
+//
+// 形状是按下标定语义的：`["查询词", [标题…], [描述…], [URL…]]`。
+// 通用解析只看"对象数组里有没有链接字段"，对它是**瞎的** —— 实测后果是整份响应退回
+// `flattenJson()` 压成一段文本，模型看到 `[3]: https://…` 而不是 5 条可点的条目。
+// 萌娘百科的 `action=query&list=search` 被官方关了（`action-notallowed`），
+// 而 `action=opensearch` **放行**，所以这一支是接入它的唯一途径。
+console.log('\n═══ 18 MediaWiki OpenSearch 格式 ═══');
+const { jsonToResults: j2r } = await load('media/bookmark-request.js');
+const osXml = JSON.stringify(['初音未来', ['初音未来', '初音未来的消失'], ['', ''], ['https://m.example/A', 'https://m.example/B']]);
+let osRes = j2r(osXml, 5);
+ok('③b OpenSearch 解析出 2 条（不是退回压平）', osRes.length === 2, JSON.stringify(osRes));
+ok('③b 标题按下标对应', osRes[0]?.title === '初音未来' && osRes[1]?.title === '初音未来的消失', JSON.stringify(osRes.map((r) => r.title)));
+ok('③b URL 按下标对应', osRes[0]?.url === 'https://m.example/A' && osRes[1]?.url === 'https://m.example/B', JSON.stringify(osRes.map((r) => r.url)));
+ok('③b 描述为空串时不编造摘要', osRes[0]?.snippet === '', JSON.stringify(osRes.map((r) => r.snippet)));
+// 紧判据：这是**按位置**取值的格式，判松了会把随便一个四元素数组当结果
+ok('③b 长度不匹配（标题 2 / URL 1）→ 不认', j2r('["q",["a","b"],[],["u1"]]', 5).length === 0);
+ok('③b 下标 3 不是字符串数组 → 不认', j2r('["q",["a"],[],[{"u":1}]]', 5).length === 0);
+ok('③b 不足四个元素 → 不认', j2r('["q",["a"],[]]', 5).length === 0);
+ok('③b 四个数字 → 不认', j2r('[1,2,3,4]', 5).length === 0);
+// 对照：既有的通用形状**不能被误伤**
+ok('③b 对照：对象数组带链接仍然照旧解析',
+  j2r(JSON.stringify({ result: { list: [
+    { lemma_title: '甲', lemma_desc: '甲描述', url: 'https://a.example/1' },
+    { lemma_title: '乙', lemma_desc: '乙描述', url: 'https://a.example/2' }
+  ] } }), 5).length === 2);
+ok('③b 对照：单对象响应仍交给压平（jsonToResults 返回空）',
+  j2r('{"result":{"lemma_title":"熊本熊","summary":"正文"}}', 5).length === 0);
 
 // ④ 缺静态参数的值 → 明确报错，且不发请求
 bqHits.length = 0;

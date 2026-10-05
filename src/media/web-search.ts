@@ -887,6 +887,17 @@ export interface SiteSearchProbe {
   note?: string;
   /** 实际发出的请求数，便于用户判断"是不是试都没试"。 */
   tried?: number;
+  /**
+   * 判定结果：**用户填的那个地址是个 JSON 接口**（不是 HTML 搜索页）。
+   *
+   * 单独给一个**机器可读**的标记，而不是让前端去正则匹配 `note` 文案 —— 前端要靠它
+   * 决定「把这条地址搬进『请求结构』并弹窗」。文案随时会改（本轮就改过一次），
+   * 匹配文案的做法会在改文案时静默失效。
+   *
+   * 同时给出 `jsonApiUrl`：预填时要用**用户填的那个模板**（含 `{q}`），不是别的候选。
+   */
+  detectedJson?: boolean;
+  jsonApiUrl?: string;
   /** 逐候选的实测计数，让用户能自己判断推荐值可不可信（而不是只给一个结论）。 */
   diagnostics?: Array<{ template: string; resultClass?: string; kept?: number; raw?: number; error?: string }>;
 }
@@ -1021,7 +1032,7 @@ export async function probeSiteSearch(
    */
   const judgeTemplate = async (
     template: string
-  ): Promise<{ template: string; accepted: boolean; classHit?: { cls: string; n: number }; kept?: number; junkKept?: number; note?: string }> => {
+  ): Promise<{ template: string; accepted: boolean; classHit?: { cls: string; n: number }; kept?: number; junkKept?: number; note?: string; jsonApi?: boolean }> => {
     const real = await fetchRealHtml(template);
     if (real === 'budget') return { template, accepted: false, note: '预算用尽' };
     if (real === null) return { template, accepted: false, note: '取页失败' };
@@ -1039,10 +1050,15 @@ export async function probeSiteSearch(
     const isJson = /json/i.test(real.contentType) || /^\s*[{[]/.test(bodyHead);
     if (isJson) {
       return {
-        template, accepted: false,
+        template, accepted: false, jsonApi: true,
+        // ⚠️ 文案必须**给出下一步**，不能只说"不行"。
+        // 初版写的是"若它就是你要的数据源，需要单独支持 JSON 接口" —— 而那个能力**早就有了**，
+        // 就是收藏夹那一行的「请求结构」按钮。用户照着这句话只会以为"这个站接不了"，
+        // 或者去改「结果容器类名」（方向完全错，实测就是这样）。所以这里直接点名该去哪填。
         note: `这个地址返回的是 JSON 接口数据（content-type: ${shortType || '未知'}），不是网页 —— `
-          + '站内搜索只会从 HTML 页面里解析链接，所以任何 JSON 接口都填不进这一栏（检测也永远通不过）。'
-          + '若它就是你要的数据源，需要单独支持 JSON 接口；这一栏请填该站的网页搜索页地址。'
+          + '「网页地址」这一栏只会从 HTML 页面里解析链接，所以 JSON 接口填这里检测永远通不过。'
+          + `但这不代表它接不了：请点同一条收藏夹右侧的「请求结构」，把这条地址原样填进去`
+          + '（JSON 接口是它的用途），然后「网页地址」留空即可。'
       };
     }
     const looksHtml = /html/i.test(real.contentType) || /^\s*</.test(bodyHead);
@@ -1108,9 +1124,16 @@ export async function probeSiteSearch(
     }
     return {
       ok: false, tried, searchUrl: fixedTemplate, diagnostics,
+      // 机器可读的"这是 JSON 接口"标记 + 要预填的那条模板（见 `SiteSearchProbe` 注释）
+      ...(verdict.jsonApi ? { detectedJson: true, jsonApiUrl: fixedTemplate } : {}),
       // 不给 `verdict.note` 补句号：那几条文案自己带标点，补了会出现"。。"（实测看到过）
+      //
+      // ⚠️ "清空这一栏再点检测"那句**只在真可能找得到时才加**。判定说"这是个 JSON 接口"
+      // 时，自动检测那一支去试的是**HTML 搜索页**，而这个地址本身多半就是接口主机
+      // （实测萌娘百科 `api.php` 就是这样）—— 让它去自动找等于指一条大概率死路，
+      // 而且会把用户从"该去填请求结构"这个正确的下一步上带走。
       note: `你填的地址没通过检测：${verdict.note || '判定不通过'}`
-        + '（清空这一栏再点检测，我可以自动去这个站里找。）'
+        + (verdict.jsonApi ? '' : '（清空这一栏再点检测，我可以自动去这个站里找。）')
     };
   }
 

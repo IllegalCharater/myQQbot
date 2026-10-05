@@ -301,9 +301,66 @@ export function bindSettingsEvents(c) {
     if (!body) return;
     body.insertAdjacentHTML('beforeend', renderBookmarkRows([]));
   });
+  // ── 把"检测到的 JSON 接口地址"转成一份请求结构草稿 ──
+  //
+  // **地址原样照抄**，不用 `URL` 对象重建。原因是 `new URL(x).toString()` 会做**归一化**，
+  // 实测（9 个用例，5 个被改动）它会：去掉默认端口（`:443`/`:80`）、把主机名转小写、
+  // 把中文路径百分号编码、把路径里的空格编码成 `%20`。
+  // 这些改动在这里全是**白添的**：地址是用户自己填的、检测时也是照这个字符串去请求的，
+  // 搬过来就该**逐字一致** —— 否则用户会看到"我填的和搬过去的不是同一条"。
+  //
+  // ⚠️ 顺带纠正一个**曾经写错**的说法：`new URL()` **不会**把查询串里的 `{q}` 编码成
+  // `%7Bq%7D`（实测 `new URL(...).toString()` 保留花括号）。会编码花括号的是
+  // `URLSearchParams`。所以"必须字符串切"的理由是上面那些归一化，不是花括号。
+  function buildJsonRequest(template) {
+    const text = String(template || '').trim();
+    const m = /^(https?:\/\/[^/?#]+)([\s\S]*)$/i.exec(text);
+    // 兜底：解析不出主机就整条当地址（后端认 http(s) 开头的完整地址）
+    if (!m) return { method: 'GET', endpoint: text, headers: [{ name: 'Accept', value: 'application/json' }] };
+    return {
+      method: 'GET',
+      endpoint: m[1] + m[2],
+      // 给一个能兑现的默认头：JSON 接口基本都吃 `Accept`，且它无害。
+      // 需要鉴权的接口由用户在弹窗里自己加 `Authorization`（密钥走静态参数）。
+      headers: [{ name: 'Accept', value: 'application/json' }]
+    };
+  }
+
+  // ── 请求结构弹窗的打开与回填 ──
+  //
+  // 从 `[data-bm-req]` 的点击处理里抽出来，因为**检测按钮也要调它**：
+  // 检测发现"你填的那栏其实是个 JSON 接口"时，正确动作就是把地址搬进请求结构并打开这个弹窗
+  // （见下面 probe 那段）。两处各写一份必然漂移 —— 而这里漂移的表现是"回填到了 A、弹窗写的是 B"。
+  function openRequestModalFor(row, prefill) {
+    if (!row) return;
+    const reqBtn = row.querySelector('[data-bm-req]');
+    // 从**行上的 dataset** 读当前值 —— 渲染时就会写进去（`renderBookmarkRows`），
+    // 弹窗保存时也会更新它。刷新后能读回来全靠渲染那一步；这里不再另找数据源，
+    // 否则"弹窗看的是 A、保存写的是 B"会再次分叉。
+    let request = null, params = null;
+    try { request = row.dataset.bmReqJson ? JSON.parse(row.dataset.bmReqJson) : null; } catch { request = null; }
+    try { params = row.dataset.bmParamsJson ? JSON.parse(row.dataset.bmParamsJson) : null; } catch { params = null; }
+    // 预填只在**这一行还没配过请求结构**时生效：已经配了的不该被检测结果悄悄顶掉
+    if (!request && prefill?.request) { request = prefill.request; params = prefill.params || params; }
+    const prefillNote = !row.dataset.bmReqJson ? String(prefill?.note || '') : '';
+    openBookmarkRequestModal({ request, params, prefillNote }, ({ request: nextReq, params: nextParams }) => {
+      // 写回**行上的 dataset**，不直接改配置：与其它弹窗一致，改动先落 DOM，
+      // 点「保存设置」才落盘（`save.js` 从 dataset 里读）。
+      if (nextReq && nextReq.endpoint) {
+        row.dataset.bmReqJson = JSON.stringify(nextReq);
+        if (nextParams && Object.keys(nextParams).length) row.dataset.bmParamsJson = JSON.stringify(nextParams);
+        else delete row.dataset.bmParamsJson;
+        if (reqBtn) reqBtn.textContent = '已配置 ✓';
+      } else {
+        delete row.dataset.bmReqJson;
+        delete row.dataset.bmParamsJson;
+        if (reqBtn) reqBtn.textContent = '配置…';
+      }
+    });
+  }
+
   // 删除走事件委托：新增行是后插进来的，绑到具体按钮上会漏掉它们。
-  $('#search-bookmarks-body')?.addEventListener('click', (event) => {
-    const target = event.target instanceof Element ? event.target : null;
+  $('#search-bookmarks-body')?.addEventListener('click', (event) => {    const target = event.target instanceof Element ? event.target : null;
     if (!target) return;
     const body = $('#search-bookmarks-body');
     if (!body) return;
@@ -343,6 +400,24 @@ export function bindSettingsEvents(c) {
                 + `${res.note || ''}（请自己搜一次确认结果对不对）`;
             }
           } else {
+            // ── 检测出"这其实是个 JSON 接口"→ 把地址搬进「请求结构」并打开它 ──
+            //
+            // 为什么要有这一步：这一栏（「网页地址/站内搜索地址」）**只解析 HTML 链接**，
+            // JSON 接口填这里检测**永远**通不过。但那个能力早就有 —— 就是同一条收藏夹的
+            // 「请求结构」。不加这一步的话，用户看到的就是一句"没通过检测"，然后**卡住**：
+            // 他得自己意识到"该换另一个按钮"，再**手抄一遍地址**过去（**实测反馈**）。
+            //
+            // 判据用后端给的机器可读标记 `detectedJson`，**不匹配 note 文案** ——
+            // 文案随时会改，匹配文案会在改文案时静默失效。
+            if (res.detectedJson && res.jsonApiUrl) {
+              if (status) status.textContent = '这条地址是 JSON 接口，已搬进「请求结构」（接着点它的「配置…」或看已弹出的窗口）。';
+              openRequestModalFor(row, {
+                request: buildJsonRequest(res.jsonApiUrl),
+                note: '这个地址是刚检测出来的 JSON 接口，已自动填好请求地址（「方法」与「请求头」可直接用）。'
+                  + '点「确定」后记得再点页面下方的「保存设置」才会落盘。'
+              });
+              return;
+            }
             if (status) status.textContent = `✗ ${res.note || '检测失败'}`;
           }
         })
@@ -353,28 +428,7 @@ export function bindSettingsEvents(c) {
     // ── 请求结构（JSON 接口书签）──
     const reqBtn = target.closest('[data-bm-req]');
     if (reqBtn) {
-      const row = reqBtn.closest('tr');
-      if (!row) return;
-      // 从**行上的 dataset** 读当前值 —— 渲染时就会写进去（`renderBookmarkRows`），
-      // 弹窗保存时也会更新它。刷新后能读回来全靠渲染那一步；这里不再另找数据源，
-      // 否则"弹窗看的是 A、保存写的是 B"会再次分叉。
-      let request = null, params = null;
-      try { request = row.dataset.bmReqJson ? JSON.parse(row.dataset.bmReqJson) : null; } catch { request = null; }
-      try { params = row.dataset.bmParamsJson ? JSON.parse(row.dataset.bmParamsJson) : null; } catch { params = null; }
-      openBookmarkRequestModal({ request, params }, ({ request: nextReq, params: nextParams }) => {
-        // 写回**行上的 dataset**，不直接改配置：与其它弹窗一致，改动先落 DOM，
-        // 点「保存设置」才落盘（`save.js` 从 dataset 里读）。
-        if (nextReq && nextReq.endpoint) {
-          row.dataset.bmReqJson = JSON.stringify(nextReq);
-          if (nextParams && Object.keys(nextParams).length) row.dataset.bmParamsJson = JSON.stringify(nextParams);
-          else delete row.dataset.bmParamsJson;
-          reqBtn.textContent = '已配置 ✓';
-        } else {
-          delete row.dataset.bmReqJson;
-          delete row.dataset.bmParamsJson;
-          reqBtn.textContent = '配置…';
-        }
-      });
+      openRequestModalFor(reqBtn.closest('tr'));
       return;
     }
     // ── 删一行 ──

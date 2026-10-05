@@ -76,18 +76,22 @@ function collectParams(overlay) {
 /**
  * 打开请求结构编辑弹窗。
  *
- * @param {{ request?: object, params?: object }} current 当前值（来自该行）
+ * @param {{ request?: object, params?: object, prefillNote?: string }} current 当前值（来自该行）
+ *   `prefillNote` 是**给用户看的一句话**，说明"这个地址是哪来的"（例如刚刚检测出它是 JSON
+ *   接口、地址被自动搬进来了）。没有它时弹窗与原来完全一样。
  * @param {(next: {request?: object, params?: object}) => void} onApply 点确定后回填到行里
  *   —— **不直接写配置**：与其它弹窗一致，改动先落在 DOM，点「保存设置」才落盘。
  */
 export function openBookmarkRequestModal(current, onApply) {
   const req = current?.request && typeof current.request === 'object' ? current.request : {};
+  const prefillNote = String(current?.prefillNote || '').trim();
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal" style="max-width:720px">
       <div class="modal-head">请求结构（按指定的方法与请求头去取数据）</div>
       <div style="padding:10px 0">
+        ${prefillNote ? `<div class="hint" style="margin-bottom:8px;color:var(--orange)">${esc(prefillNote)}</div>` : ''}
         <div class="hint" style="margin-bottom:8px">
           <b>{q}</b> 是每次搜索的查询词，<b>必须出现</b>。<br />
           其它 <b>{名字}</b> 是<b>静态参数</b>（如 <code>{top_k}</code>），在下面「静态参数」里各填一个值。<br />
