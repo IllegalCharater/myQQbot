@@ -10,6 +10,20 @@
 //   · 凭据       —— **不进这个弹窗**，它存在配置的密钥区（设置页另有入口），
 //                   这里只把 `Authorization` 显示成占位提示，不显示真值。
 import { $, esc } from '../dom.js';
+import { api } from '../api.js';
+
+/**
+ * 测试按钮的默认查询词。
+ *
+ * ⚠️ 这个字面量**必须与后端 `TEST_QUERY_DEFAULT`（`src/media/bookmark-request.ts`）逐字相同**。
+ * `ui/` 是浏览器原生 ES Module，**够不着 `dist/`**（没有打包器、也没有取值端点），所以只能各留一份；
+ * `t-panel-wiring.mjs` 有一条断言把两边钉在一起 —— 漂移的表现是"提示说会用 A、实际发了 B"，
+ * 而这种不一致没人会去核对。
+ *
+ * 挑这个词的理由：它几乎必然有结果。用空查询或罕见词会让"接口配置对不对"与
+ * "这个词有没有内容"两件事混在一起，而测试要回答的是**前者**。
+ */
+const TEST_QUERY_DEFAULT = '初音未来';
 
 /**
  * 请求头文本 ↔ 数组。
@@ -76,15 +90,18 @@ function collectParams(overlay) {
 /**
  * 打开请求结构编辑弹窗。
  *
- * @param {{ request?: object, params?: object, prefillNote?: string }} current 当前值（来自该行）
- *   `prefillNote` 是**给用户看的一句话**，说明"这个地址是哪来的"（例如刚刚检测出它是 JSON
- *   接口、地址被自动搬进来了）。没有它时弹窗与原来完全一样。
+ * @param {{ request?: object, params?: object, prefillNote?: string, testQuery?: string }} current
+ *   当前值（来自该行）。`prefillNote` 是**给用户看的一句话**，说明"这个地址是哪来的"
+ *   （例如刚刚检测出它是 JSON 接口、地址被自动搬进来了）；`testQuery` 是「测试」的初始查询词
+ *   （留空 = 用后端默认词）。没有这两项时弹窗与原来完全一样。
  * @param {(next: {request?: object, params?: object}) => void} onApply 点确定后回填到行里
  *   —— **不直接写配置**：与其它弹窗一致，改动先落在 DOM，点「保存设置」才落盘。
  */
 export function openBookmarkRequestModal(current, onApply) {
   const req = current?.request && typeof current.request === 'object' ? current.request : {};
   const prefillNote = String(current?.prefillNote || '').trim();
+  // 测试查询词的初值：调用方可以给一个（例如将来想"用它刚搜过的词"），默认留空 = 用后端默认词
+  const testQuery = String(current?.testQuery || '').trim();
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
@@ -125,9 +142,19 @@ export function openBookmarkRequestModal(current, onApply) {
           </div>
         </div>
         <div class="hint" id="bqr-hint"></div>
+        <div class="field" style="margin-top:8px">
+          <label>测试用的查询词（可留空）</label>
+          <input type="text" id="bqr-test-query" value="${esc(testQuery)}" placeholder="${esc(TEST_QUERY_DEFAULT)}" />
+          <div class="hint" style="margin-top:4px">
+            点下面「测试」时用这个词发一次真实请求。<b>留空</b>就用 <code>${esc(TEST_QUERY_DEFAULT)}</code>
+            （它几乎必然有结果）。想知道某个具体词能不能搜到，就填那个词。
+          </div>
+        </div>
+        <div id="bqr-test-out" class="hint" style="margin-top:6px;white-space:pre-wrap"></div>
       </div>
       <div class="modal-foot">
         <button class="btn btn-primary" id="bqr-ok" type="button">确定</button>
+        <button class="btn" id="bqr-test" type="button">测试</button>
         <button class="btn" id="bqr-clear" type="button">清空（不用请求结构）</button>
         <button class="btn" id="bqr-cancel" type="button">取消</button>
       </div>
@@ -166,6 +193,66 @@ export function openBookmarkRequestModal(current, onApply) {
   const close = () => overlay.remove();
   $('#bqr-cancel', overlay).addEventListener('click', close);
   $('#bqr-clear', overlay).addEventListener('click', () => { onApply({}); close(); });
+
+  // ── 「测试」：把当前这套配置**原样**发一次真实请求并解释结果 ──
+  //
+  // 为什么这一栏特别需要它：地址拼错、占位符没填值、密钥不对、接口要求 POST 却填了 GET，
+  // 这些**除了保存都没有验证手段**，要等到模型真的去搜、在群里答不出话时才暴露。
+  // 而「网页地址」那一栏早有「检测」按钮（**实测反馈**）。
+  //
+  // 判据走**后端同一条解析链**（`testBookmarkRequest` 用的就是真实检索那批函数），
+  // 所以"测试通过"的含义是**真能搜到条目**，不只是"连得上"。
+  const testOut = $('#bqr-test-out', overlay);
+  const testBtn = $('#bqr-test', overlay);
+  const testQueryInput = $('#bqr-test-query', overlay);
+  // 在查询词框里按回车 = 点「测试」——填完词顺手回车是最自然的动作
+  testQueryInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); testBtn.click(); }
+  });
+  testBtn.addEventListener('click', async () => {
+    const endpoint = ($('#bqr-endpoint', overlay).value || '').trim();
+    const request = {
+      method: $('#bqr-method', overlay).value === 'POST' ? 'POST' : 'GET',
+      endpoint,
+      headers: textToHeaders($('#bqr-headers', overlay).value)
+    };
+    // 本地先挡一次空地址：省一轮网络往返，也让提示更即时
+    if (!endpoint) { testOut.textContent = '请求地址是空的，先填一条含 {q} 的地址。'; return; }
+    testBtn.disabled = true;
+    const label = testBtn.textContent;
+    testBtn.textContent = '测试中…';
+    testOut.textContent = '正在按当前配置发一次真实请求…';
+    try {
+      // 查询词留空 → 发**空串**，由后端回落到它自己的默认词。
+      // 不在这里兜一个前端默认值：那样"用户留空"与"用户手打了默认词"在后端看起来一样，
+      // 而后端的 `TEST_QUERY_DEFAULT` 才是唯一权威（两边的字面量由套件钉住一致）。
+      const rawQuery = ($('#bqr-test-query', overlay)?.value || '').trim();
+      const r = await api('/api/search-bookmark/test-request', {
+        method: 'POST',
+        body: JSON.stringify({ request, params: collectParams(overlay), sampleQuery: rawQuery })
+      });
+      const res = r?.result || {};
+      // 结论 + 实测细节一起给：只说"成功/失败"用户没法判断"结果对不对"
+      const detail = [];
+      if (res.status) detail.push(`HTTP ${res.status}`);
+      if (res.kind) detail.push(res.kind);
+      if (res.bodyChars !== undefined) detail.push(`${res.bodyChars} 字符`);
+      if (res.latencyMs !== undefined) detail.push(`${res.latencyMs}ms`);
+      const head = res.ok ? '✓ ' : '✗ ';
+      testOut.textContent = head + String(res.note || '测试没有返回结论')
+        + (detail.length ? `\n实测：${detail.join(' / ')}` : '')
+        + (res.sampleQuery ? `\n查询词：${res.sampleQuery}` : '')
+        + (res.sampleTitles?.length ? `\n前几条标题：${res.sampleTitles.join(' / ')}` : '');
+      testOut.style.color = res.ok ? '' : 'var(--red)';
+    } catch (e) {
+      testOut.textContent = `✗ 测试请求失败：${e.message}`;
+      testOut.style.color = 'var(--red)';
+    } finally {
+      testBtn.disabled = false;
+      testBtn.textContent = label;
+    }
+  });
+
   $('#bqr-ok', overlay).addEventListener('click', () => {
     const endpoint = ($('#bqr-endpoint', overlay).value || '').trim();
     if (!endpoint) { hint.textContent = '请求地址不能为空。'; return; }

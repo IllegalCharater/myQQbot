@@ -1,5 +1,6 @@
 import { chatCompletion, resolveApiKey } from '../../llm/llm.js';
 import { customSearch, probeSiteSearch, normalizeSiteInput } from '../../media/web-search.js';
+import { testBookmarkRequest, MAX_ENDPOINT_CHARS } from '../../media/bookmark-request.js';
 import { validateFetchUrl } from '../../media/safe-fetch.js';
 import {
   addModelsToProvider, currentProviders, fetchModelsFrom, removeModelFromProvider,
@@ -254,6 +255,76 @@ export const providerRoutes: Route[] = [
         hint: String(body.hint ?? '').trim()
       });
       return { status: 200, body: { ok: true, result: { ...result, latencyMs: Date.now() - startedAt } } };
+    },
+  },
+  {
+    // 「请求结构」弹窗里的「测试」按钮。
+    //
+    // 为什么需要它：那一栏填的东西**除了保存没有别的验证手段** —— 地址拼错了、占位符没填值、
+    // 密钥不对、接口要求 POST 而填了 GET，全都要等到模型真的去搜、或者在群里答不出话时
+    // 才暴露。而「网页地址」那一栏早就有「检测」按钮了，这一栏却没有（**实测反馈**）。
+    //
+    // 它与真实检索**走同一条解析链**（`testBookmarkRequest` → 与 `siteSearch()` 同一批
+    // `jsonToResults`/`flattenJson`），所以"测试通过"就是"真能搜到"，不是"连得上"。
+    method: 'POST', path: '/api/search-bookmark/test-request', async handle(ctx, req) {
+      const startedAt = Date.now();
+      const body = bodyRecord(await readBody(req).catch(() => ({})));
+      const raw = bodyRecord(body.request);
+      const endpoint = String(raw.endpoint ?? '').trim();
+      if (!endpoint) return { status: 400, body: { ok: false, error: '缺少 request.endpoint' } };
+      if (endpoint.length > MAX_ENDPOINT_CHARS) {
+        return { status: 400, body: { ok: false, error: `请求地址过长（上限 ${MAX_ENDPOINT_CHARS} 字符）` } };
+      }
+      const method = String(raw.method ?? 'GET').trim().toUpperCase() || 'GET';
+      const headers = Array.isArray(raw.headers)
+        ? raw.headers.filter(isRecord).map((h) => ({ name: String(h.name ?? ''), value: String(h.value ?? '') }))
+        : [];
+      const params = isRecord(body.params)
+        ? Object.fromEntries(Object.entries(body.params).map(([k, v]) => [String(k), String(v ?? '')]))
+        : undefined;
+
+      // **先过 SSRF 校验**，与 probe 同一个理由：这是"由请求内容决定目标地址"的出口之一。
+      // 校验的是**填好占位符之后**的最终地址：用户填的是模板，`{q}` 会让 `new URL` 直接抛。
+      // ⚠️ 只写路径、靠 `Host` 头补全的写法（`/v2/x?q={q}` + `Host: api.example.com`）
+      // 要在这里补出协议再校验 —— `resolveEndpoint()` 支持那种写法，漏了它会把**合法配置**
+      // 误报成"地址不可用"（判据必须与那条链一致）。
+      const bareHost = headers.find((h) => h.name.trim().toLowerCase() === 'host')?.value.trim();
+      const endpointWithHost = /^https?:\/\//i.test(endpoint)
+        ? endpoint
+        : (bareHost ? `https://${bareHost}/` : '') + endpoint.replace(/^\/+/, '');
+      const filled = endpointWithHost.replace(/\{q\}/g, encodeURIComponent('test'))
+        .replace(/\{[^{}]{1,60}\}/g, 'test');
+      try {
+        // ⚠️ 要**尊重** `security.allowPrivateImageHosts`（与 `safeFetch` 同一条判据）。
+        // 内网/本机上的自建 JSON 接口是**正常用法**（自建百科、Dify、内网知识库），
+        // 硬挡会把这条路走死；而这个开关本来就是为"本地测试/自建服务"准备的。
+        // 不传的话默认仍是拒绝内网 —— 那是安全的那一侧，不是漏掉。
+        const allowPrivate = (ctx.getConfig() as { security?: { allowPrivateImageHosts?: boolean } })
+          .security?.allowPrivateImageHosts === true;
+        await validateFetchUrl(filled, { allowPrivate });
+      } catch (error) {
+        return { status: 400, body: { ok: false, error: `请求地址不可用：${errorMessage(error)}` } };
+      }
+
+      // 响应体长度：`testBookmarkRequest` 已经把进诊断文案的响应原文**截到 200 字符**
+      // （见它那几条 note），所以这里不必再设二次上限 —— 别把一个用不上的常量放进来假装有保护。
+      try {
+        const result = await testBookmarkRequest(
+          { method: method as 'GET' | 'POST', endpoint, headers },
+          params,
+          { sampleQuery: String(body.sampleQuery ?? '').trim(), limit: Number(body.limit) || 5 }
+        );
+        return {
+          status: 200,
+          body: { ok: true, result: { ...result, latencyMs: Date.now() - startedAt } }
+        };
+      } catch (error) {
+        // 与 probe 一致：探测类端点**不把异常抛给上层**，如实回报给界面看
+        return {
+          status: 200,
+          body: { ok: true, result: { ok: false, note: `测试失败：${errorMessage(error)}`, latencyMs: Date.now() - startedAt } }
+        };
+      }
     },
   },
   {

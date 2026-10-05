@@ -34,6 +34,14 @@ const MAX_HEADERS = 20;
 export const MAX_ENDPOINT_CHARS = 2000;
 export const MAX_HEADER_NAME_CHARS = 100;
 export const MAX_HEADER_VALUE_CHARS = 1000;
+/**
+ * 单对象 JSON 响应压平成一段资料时的**字符上限**。
+ *
+ * 定义在这里而不是 `web-search.ts`：真实检索与设置页的「测试」都要用它，
+ * 拿两份字面量的话两边会漂移 —— 那种漂移的表现是"测试说压了 5000 字、实际只给 2000"，
+ * 谁也不会去核对。（`web-search.ts` 从本文件 import，方向本来就是它依赖这里。）
+ */
+export const BOOKMARK_JSON_MAX_CHARS = 2000;
 
 /** HTTP 方法白名单。**不开 PUT/DELETE/PATCH**：这是"取数据"的配置，不该有副作用。 */
 export const BOOKMARK_METHODS = ['GET', 'POST'] as const;
@@ -373,3 +381,144 @@ export function flattenJson(raw: string, maxChars: number): string {
   walk(data, '', 0);
   return lines.join('\n').slice(0, maxChars);
 }
+
+// ── 链接测试（设置页「请求结构」弹窗那个「测试」按钮的后端）──────────────────
+//
+// ⚠️ **它必须与真实检索走同一条解析链**，否则测试通过而实际搜不到（或反过来），
+// 测试就成了骗人的东西。所以这里复用 `jsonToResults` / `openSearchToResults` /
+// `flattenJson`（与 `siteSearch()` 的 JSON 分支同一批函数），只把"发不发得出去、
+// 回来的是什么"这些**诊断信息**额外带出来给用户看。
+// `t-web-search.mjs` 有一条断言钉住"两条链用的是同一批解析函数"。
+
+/** 一次链接测试的结论。`ok` 为真表示**已经能拿到内容**，不只是"连得上"。 */
+export interface BookmarkRequestTestResult {
+  ok: boolean;
+  /** 一句话结论（成功与失败都给人看）。 */
+  note: string;
+  /** 最终请求到的地址（`resolveEndpoint` 之后）。 */
+  url?: string;
+  status?: number;
+  contentType?: string;
+  /** 响应体长度（字符）。用户能据此判断"是不是返回了空"。 */
+  bodyChars?: number;
+  /** 识别成哪一类：json / html / other。 */
+  kind?: string;
+  /** **解析出多少条条目**（走 `jsonToResults`，与真实检索同一支）。 */
+  resultCount?: number;
+  /** 是否退到了"压平成一段资料"那条路（单对象响应，如百科 `get_content`）。 */
+  flattened?: boolean;
+  /** 压平后正文的长度（`flattened` 为真时有意义）。 */
+  flattenedChars?: number;
+  /** 前几条结果的标题，让用户当场判断"结果对不对"。 */
+  sampleTitles?: string[];
+  /** 实测用的查询词（回显，便于用户理解"我测的是这个"）。 */
+  sampleQuery?: string;
+}
+
+/** 默认的实测查询词：挑一个**几乎必然有结果**的词，空查询会被很多接口拒绝。 */
+export const TEST_QUERY_DEFAULT = '初音未来';
+
+/**
+ * 把一次请求结构调用"跑一遍并解释结果"。
+ *
+ * @param request 归一后的请求结构（`method` / `endpoint` / `headers`）
+ * @param params  静态参数（`{q}` 之外那些占位符的值）
+ * @param options.sampleQuery 实测用的查询词；留空用 `TEST_QUERY_DEFAULT`
+ * @param options.limit 最多解析多少条（与真实检索同一个上限语义）
+ */
+export async function testBookmarkRequest(
+  request: BookmarkRequest,
+  params: Record<string, string> | undefined,
+  options: { sampleQuery?: string; limit?: number; timeoutMs?: number } = {}
+): Promise<BookmarkRequestTestResult> {
+  // 先做**不需要联网**的静态校验，把用户能当场改的问题排在前面
+  const endpoint = String(request?.endpoint || '').trim();
+  if (!endpoint) return { ok: false, note: '请求地址是空的：请在「请求地址」里填一条含 {q} 的地址。' };
+  if (!endpoint.includes('{q}')) {
+    return { ok: false, note: '请求地址里没有 {q}：它会被替换成每次搜索的查询词，缺了它拼不出查询，后端会直接丢弃这条配置。' };
+  }
+  const method = String(request?.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'POST') {
+    return { ok: false, note: `方法只能是 GET 或 POST（当前是 ${method || '空'}）。` };
+  }
+  // 缺静态参数的值是**硬错误**（与真实检索同判据）：留着占位符发出去会得到参数错误，
+  // 而看起来像是"接口不支持这个查询词"，归因就错了。
+  const missing = staticPlaceholders(endpoint)
+    .filter((name) => !String(params?.[name] ?? '').trim());
+  if (missing.length) {
+    return {
+      ok: false,
+      note: `这些占位符还没填值：${missing.map((n) => `{${n}}`).join('、')}。`
+        + '请在下面「静态参数」里给它们各填一个值，否则地址里的占位符会原样发出去、接口会报参数错误。'
+    };
+  }
+
+  const sampleQuery = String(options.sampleQuery ?? '').trim() || TEST_QUERY_DEFAULT;
+  const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
+  const sent = await fetchBookmarkRequest(
+    { method: method as BookmarkRequest['method'], endpoint, headers: request.headers },
+    { q: sampleQuery, params },
+    { timeoutMs: options.timeoutMs }
+  );
+  if (!sent.ok) {
+    return { ok: false, note: sent.error, sampleQuery };
+  }
+  const { response } = sent;
+  const base: BookmarkRequestTestResult = {
+    ok: false,
+    note: '',
+    url: response.url,
+    status: response.status,
+    contentType: response.contentType,
+    bodyChars: response.body.length,
+    kind: response.kind,
+    sampleQuery
+  };
+
+  if (response.kind === 'json') {
+    const list = jsonToResults(response.body, limit, response.url);
+    if (list.length) {
+      return {
+        ...base,
+        ok: true,
+        resultCount: list.length,
+        sampleTitles: list.slice(0, 3).map((r) => r.title),
+        note: `拿到 ${list.length} 条结果。`
+      };
+    }
+    // 与真实检索同一判据：单对象响应的**正文本身就是答案**，不是失败
+    const flat = flattenJson(response.body, BOOKMARK_JSON_MAX_CHARS);
+    if (flat.trim()) {
+      return {
+        ...base,
+        ok: true,
+        resultCount: 0,
+        flattened: true,
+        flattenedChars: flat.length,
+        note: `接口给的是一份**资料**（不是条目列表）：已压平成 ${flat.length} 字符的正文，`
+          + '检索时会作为一条结果给它。看下面预览确认内容对不对。'
+      };
+    }
+    return {
+      ...base,
+      note: '接口返回了 JSON，但里面既没有条目列表、也没有可读的正文。'
+        + `（响应前 200 字：${response.body.slice(0, 200).replace(/\s+/g, ' ')}）`
+    };
+  }
+
+  if (response.kind === 'html') {
+    // 请求结构收 HTML 是**合法的**（有些站没有 JSON 接口），只是解析靠类名而不是 JSON 字段。
+    // 所以这里不报错，但要说清"这条链拿不到结构化条目"这件事，避免用户以为配错了。
+    return {
+      ...base,
+      note: '这个地址返回的是**网页**而不是 JSON —— 请求结构能用它，但只会返回整页文本、拿不到条目列表。'
+        + '如果这个站有 JSON 接口，建议换成接口地址；如果只想抓正文，用 web_fetch 更直接。'
+    };
+  }
+
+  return {
+    ...base,
+    note: `返回的内容既不是 JSON 也不是网页（content-type: ${response.contentType || '未知'}）。`
+  };
+}
+

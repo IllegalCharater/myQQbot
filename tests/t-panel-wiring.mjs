@@ -206,6 +206,34 @@ ok('预填的地址由字符串切出、逐字保留（不用 new URL 重建）'
 ok('弹窗支持 prefillNote（说明"这地址是哪来的"），没预填时与原来完全一样',
   /prefillNote/.test(reqModalSrc) && /\$\{prefillNote \?/.test(reqModalSrc));
 
+// ── 「请求结构」弹窗里的「测试」按钮 ──
+// 这一栏填的东西**除了保存没有别的验证手段**（地址拼错 / 占位符没填值 / 密钥不对 /
+// 该用 POST 却填了 GET），都要等模型真去搜、在群里答不出话时才暴露。
+// 「网页地址」那一栏早有「检测」按钮，这一栏一直没有（**实测反馈**）。
+ok('弹窗里有「测试」按钮与结果区', /id="bqr-test"/.test(reqModalSrc) && /id="bqr-test-out"/.test(reqModalSrc));
+ok('测试打的是专用端点 /api/search-bookmark/test-request',
+  /\/api\/search-bookmark\/test-request/.test(reqModalSrc));
+ok('测试把当前**行里的**配置一起送过去（请求头与静态参数都要带上）',
+  /params: collectParams\(overlay\)/.test(reqModalSrc) && /textToHeaders\(\$\('#bqr-headers', overlay\)\.value\)/.test(reqModalSrc));
+ok('测试按钮有 try/finally 复位，失败也能再点（与「检测」同一判据）',
+  /finally \{[\s\S]{0,120}testBtn\.disabled = false;/.test(reqModalSrc));
+ok('结论里回显实测细节与样本标题（只说"成功/失败"用户没法判断结果对不对）',
+  /实测：\$\{detail\.join/.test(reqModalSrc) && /sampleTitles/.test(reqModalSrc));
+// 测试查询词可自己指定
+ok('弹窗里有「测试用的查询词」输入框，留空回落默认词',
+  /id="bqr-test-query"/.test(reqModalSrc) && /placeholder="\$\{esc\(TEST_QUERY_DEFAULT\)\}"/.test(reqModalSrc));
+ok('查询词随测试请求发给后端（后端已有 sampleQuery 参数）',
+  /sampleQuery: rawQuery/.test(reqModalSrc));
+ok('在查询词框里回车 = 点「测试」', /e\.key === 'Enter'[\s\S]{0,60}testBtn\.click\(\)/.test(reqModalSrc));
+// ⚠️ 默认词是**两边各留一份字面量**（`ui/` 够不着 `dist/`，没有打包器也没有取值端点）。
+// 漂移的表现是"提示说会用 A、实际发了 B"—— 这种不一致没人会去核对，所以钉住。
+{
+  const uiDefault = (/const TEST_QUERY_DEFAULT = '([^']+)'/.exec(reqModalSrc) || [])[1];
+  const beDefault = (/export const TEST_QUERY_DEFAULT = '([^']+)'/.exec(readSrc('media/bookmark-request.js')) || [])[1];
+  ok(`测试默认查询词前后端逐字一致（UI=${JSON.stringify(uiDefault)} / 后端=${JSON.stringify(beDefault)}）`,
+    !!uiDefault && uiDefault === beDefault);
+}
+
 // ⚠️ **渲染也必须把请求结构写进 dataset** —— 这是"刷新后还能看到已配的请求结构"的唯一途径。
 // 初版只有弹窗会写它、渲染从不写，于是刷新后行上没有该属性，弹窗一打开就是空的
 // （**实测反馈**）；更糟的是此时再点「保存设置」（哪怕只改了别的行），这一行的请求结构

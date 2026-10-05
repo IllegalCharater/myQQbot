@@ -303,6 +303,86 @@ ok('三次"回显再保存"往返后 params 仍原样（没有 has / hasHas，�
   afterRoundTrips.api_key === 'PARAM-SECRET' && afterRoundTrips['API Key'] === 'PARAM-SECRET-2'
   && !Object.keys(afterRoundTrips).some((k) => /^has/i.test(k)), JSON.stringify(afterRoundTrips));
 
+// ── 「请求结构」的链接测试（POST /api/search-bookmark/test-request）──
+//
+// 这一栏填的东西**除了保存没有别的验证手段**：地址拼错、占位符没填值、密钥不对、
+// 该用 POST 却填了 GET —— 全都要等模型真的去搜、在群里答不出话时才暴露。
+// 判据是"走**与真实检索同一条解析链**"：测试通过 == 真能搜到条目，不是"连得上"。
+console.log('\n-- 请求结构：链接测试 --');
+const treqSrv = http.createServer((req, res) => {
+  const u = new URL(req.url, 'http://x');
+  const q = u.searchParams.get('search') || '';
+  if (u.pathname === '/api.php') {          // MediaWiki OpenSearch 形状
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify([q, ['甲条目', '乙条目'], ['', ''], ['https://m.example/A', 'https://m.example/B']]));
+    return;
+  }
+  if (u.pathname === '/single') {           // 单对象资料
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ result: { lemma_title: '熊本熊', summary: '正文在这里' } }));
+    return;
+  }
+  if (u.pathname === '/auth') {             // 要鉴权（期望含 `/` 的真实格式密钥）
+    if (String(req.headers.authorization || '') !== 'Bearer bce-v3/ALTAK-abc/def') {
+      res.writeHead(401, { 'content-type': 'application/json' }); res.end('{"error":"bad key"}'); return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ list: [{ title: '甲', url: 'https://a/1' }, { title: '乙', url: 'https://a/2' }] }));
+    return;
+  }
+  res.writeHead(404, { 'content-type': 'text/plain' }); res.end('nope');
+});
+await new Promise((r) => treqSrv.listen(0, '127.0.0.1', r));
+const treqBase = `http://127.0.0.1:${treqSrv.address().port}`;
+const testReq = async (body) => (await api2('/api/search-bookmark/test-request', {
+  method: 'POST', body: JSON.stringify(body)
+})).body?.result || {};
+
+let tr = await testReq({ request: { method: 'GET', endpoint: `${treqBase}/api.php?action=opensearch&search={q}&format=json` } });
+ok('OpenSearch 形状 → 解析出 2 条（走真实解析链，不是"连得上"）',
+  tr.ok === true && tr.resultCount === 2, JSON.stringify(tr));
+ok('回显前几条标题（用户能当场判断结果对不对）',
+  JSON.stringify(tr.sampleTitles) === JSON.stringify(['甲条目', '乙条目']), JSON.stringify(tr.sampleTitles));
+ok('带实测细节（status/kind/bodyChars/latencyMs）',
+  tr.status === 200 && tr.kind === 'json' && tr.bodyChars > 0 && typeof tr.latencyMs === 'number', JSON.stringify(tr));
+
+tr = await testReq({ request: { method: 'GET', endpoint: `${treqBase}/single?x={q}` } });
+ok('单对象响应 → ok=true 且标记 flattened（正文本身就是答案，不是失败）',
+  tr.ok === true && tr.flattened === true && tr.flattenedChars > 0 && !tr.resultCount, JSON.stringify(tr));
+
+tr = await testReq({ request: { method: 'GET', endpoint: `${treqBase}/api.php?action=opensearch&search={q}&format=json` }, sampleQuery: '自定义词' });
+ok('自定义查询词被真的用上，且在结论里回显（用户能确认"测的是这个词"）',
+  tr.sampleQuery === '自定义词', JSON.stringify(tr.sampleQuery));
+tr = await testReq({ request: { method: 'GET', endpoint: `${treqBase}/api.php?action=opensearch&search={q}&format=json` }, sampleQuery: '   ' });
+ok('查询词只填空白 → 回落默认词（不能被当成"搜空格"）',
+  tr.sampleQuery === '初音未来', JSON.stringify(tr.sampleQuery));
+
+tr = await testReq({ request: { method: 'GET', endpoint: `${treqBase}/x?q={q}&top_k={top_k}` }, params: {} });
+ok('占位符没填值 → 不发请求就报错，并点名 top_k',
+  tr.ok === false && /top_k/.test(String(tr.note)), JSON.stringify(tr.note));
+tr = await testReq({ request: { method: 'GET', endpoint: `${treqBase}/x?q=1` } });
+ok('缺 {q} → 明确说明（否则保存后会被配置层静默丢弃）',
+  tr.ok === false && /\{q\}/.test(String(tr.note)), JSON.stringify(tr.note));
+tr = await testReq({ request: { method: 'DELETE', endpoint: `${treqBase}/x?q={q}` } });
+ok('方法非法 → 明确说明只支持 GET/POST', tr.ok === false && /GET|POST/.test(String(tr.note)), JSON.stringify(tr.note));
+
+// 密钥走静态参数 + 请求头占位符，且**绝不能被 URL 编码**（`/` 变 `%2F` 会让鉴权失败）
+tr = await testReq({
+  request: { method: 'GET', endpoint: `${treqBase}/auth?q={q}`, headers: [{ name: 'Authorization', value: 'Bearer {API Key}' }] },
+  params: { 'API Key': 'bce-v3/ALTAK-abc/def' }
+});
+ok('鉴权成功（密钥经请求头占位符发出、未被编码）', tr.ok === true && tr.resultCount === 2, JSON.stringify(tr));
+
+const bad = await api2('/api/search-bookmark/test-request', {
+  method: 'POST', body: JSON.stringify({ request: { method: 'GET', endpoint: 'file:///etc/passwd?q={q}' } })
+});
+ok('非 http(s) 地址被 SSRF 闸挡在路由上（400）', bad.status === 400, JSON.stringify(bad.body));
+// 内网/本机自建接口是**正常用法**：路由必须尊重 `security.allowPrivateImageHosts`
+// （上面那次 `updateConfig` 已把它打开 —— 这个夹具本身就跑在 127.0.0.1 上）
+ok('allowPrivateImageHosts 打开时本机地址可用（自建 JSON 接口不被走死）',
+  tr.ok === true, JSON.stringify(tr.note));
+await new Promise((r) => treqSrv.close(r));
+
 // ── 表情图片本地缓存（需求 2：从文件夹里拿图片）──
 console.log('\n-- 表情图片本地缓存 --');
 const CACHE_DIR = path.join(DIR, 'sticker-cache');

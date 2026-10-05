@@ -11,18 +11,13 @@
 import { getConfig } from '../core/config.js';
 import { safeFetch } from './safe-fetch.js';
 import {
-  fetchBookmarkRequest, flattenJson, jsonToResults,
+  fetchBookmarkRequest, flattenJson, jsonToResults, BOOKMARK_JSON_MAX_CHARS,
   type BookmarkSite, type BookmarkRequest, type BookmarkHeader
 } from './bookmark-request.js';
 
-/**
- * 请求结构返回单个对象（没有条目列表）时，压平成资料的字符上限。
- *
- * 为什么要有：`summary` 这类字段可能有几千字，一条资料不该吃掉整轮上下文预算
- * （统一预算是 `store.promptContextMaxChars`，默认 32000）。2000 字足够放下
- * 一条百科的词条摘要 + 主要字段，又不至于挤掉别的资料。
- */
-const BOOKMARK_JSON_MAX_CHARS = 2000;
+// `BOOKMARK_JSON_MAX_CHARS` 定义在 `bookmark-request.ts`：设置页的「测试」按钮也用同一支
+// 压平逻辑（`testBookmarkRequest`），两份字面量会漂移成"测试说 5000、实际 2000"。
+// 这里只 import —— 依赖方向本来就是 web-search → bookmark-request。
 
 interface SearchResult {
   title: string;
