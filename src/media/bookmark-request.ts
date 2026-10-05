@@ -92,18 +92,31 @@ export function staticPlaceholders(template: string): string[] {
  * **没给值的占位符要报错，不能原样留下**：留着 `{top_k}` 会被 URL 编码成 `%7Btop_k%7D`
  * 发给服务端，表现为"接口返回空/报参数错误"，而配置页看起来配好了 —— 与
  * `bookmarkList()` 那条"必须含 `{q}`"是同一条判据：**拼不出查询的请求不如直接拒掉**。
+ *
+ * ## `mode` 是必须的，不是可选的洁癖
+ *
+ * 同一个占位符在**两个地方**要两种处理：
+ *   · **URL 里**（`?lemma_title={q}`）→ 必须 `encodeURIComponent`
+ *     （查询词里有 `&`、空格、`#` 时不编码会把 URL 结构撑坏）；
+ *   · **请求头里**（`Authorization: Bearer {API Key}`）→ **绝不能编码**。
+ *
+ * 后者是实测踩出来的：千帆的 API Key 形如 `bce-v3/ALTAK-xxx/yyy`，一编码 `/` 就变成
+ * `%2F`，服务端报 `InvalidHTTPAuthHeader: Fail to parse apikey authorization` ——
+ * 而配置页看起来完全正确，用户根本不会想到是"密钥被转义了"。
  */
 export function fillRequestTemplate(
   template: string,
-  values: { q: string; params?: Record<string, string> }
+  values: { q: string; params?: Record<string, string> },
+  mode: 'url' | 'raw' = 'url'
 ): { ok: true; value: string } | { ok: false; error: string } {
   const params = values.params || {};
   const missing: string[] = [];
+  const encode = mode === 'url' ? encodeURIComponent : (text: string) => text;
   const value = String(template ?? '').replace(PLACEHOLDER_RE, (_all, name: string) => {
-    if (name === 'q') return encodeURIComponent(values.q);
+    if (name === 'q') return encode(values.q);
     const v = params[name];
     if (v === undefined || v === '') { missing.push(name); return ''; }
-    return encodeURIComponent(v);
+    return encode(v);
   });
   if (missing.length) {
     const names = [...new Set(missing)].map((n) => `{${n}}`).join('、');
@@ -186,7 +199,10 @@ export async function fetchBookmarkRequest(
   for (const h of (request.headers || []).filter((x) => x.name.trim().toLowerCase() !== 'host')) {
     const name = String(h.name || '').trim();
     if (!name) continue;
-    const v = fillRequestTemplate(String(h.value ?? ''), values);
+    // ⚠️ 请求头用 **raw** 模式：头里的值不能被 URL 编码。
+    // 实测：`Bearer {API Key}` 里的密钥含 `/`，编码成 `%2F` 后服务端报
+    // `InvalidHTTPAuthHeader: Fail to parse apikey authorization`（配置页看起来却完全正确）。
+    const v = fillRequestTemplate(String(h.value ?? ''), values, 'raw');
     // 头部占位符缺值时**保留原文**（而不是报错）：头里的占位符可能是用户写着备忘的，
     // 报错会让"只想改地址"的人被一句看不懂的话拦住。URL 里缺值才是硬错误（见上面那条）。
     headers[name] = v.ok ? v.value : String(h.value ?? '');

@@ -836,6 +836,9 @@ await new Promise((r) => bqsrv.listen(0, '127.0.0.1', r));
 const bqBase = `http://127.0.0.1:${bqsrv.address().port}`;
 
 // ① 配置归一：请求结构 / 静态参数（**密钥也走静态参数**）
+// ⚠️ 密钥用**带斜杠的真实格式**（千帆是 `bce-v3/ALTAK-xxx/yyy`）。用 `abc123` 这种
+// 不含特殊字符的假值会让"请求头被 URL 编码"这个 bug **测不出来** —— 实测踩过一次。
+const REAL_KEY = 'bce-v3/ALTAK-abc123/125eeb1c5e9ddc8cf3edf18ef6d03f1517ec9408';
 updateConfig({
   webSearch: {
     ...baseSearch,
@@ -848,14 +851,14 @@ updateConfig({
         // 占位符**允许空格**（用户是照文档写的，文档里就是 `{API Key}`）。
         headers: [{ name: 'X-Trace', value: 't1' }, { name: 'Authorization', value: 'Bearer {API Key}' }]
       },
-      params: { top_k: '5', 'API Key': 'SECRET-TOKEN' }
+      params: { top_k: '5', 'API Key': REAL_KEY }
     }]
   }
 });
 let bl = bookmarkList();
 ok('① 请求结构进了归一结果', !!bl[0]?.request && bl[0].request.endpoint.includes('{q}'), JSON.stringify(bl[0]?.request));
 ok('① 静态参数进了归一结果（含带空格的名字）',
-  bl[0]?.params?.top_k === '5' && bl[0]?.params?.['API Key'] === 'SECRET-TOKEN', JSON.stringify(bl[0]?.params));
+  bl[0]?.params?.top_k === '5' && bl[0]?.params?.['API Key'] === REAL_KEY, JSON.stringify(bl[0]?.params));
 // 「网页地址」与「站内搜索地址」合并成一栏：填含 {q} 的地址时，url 退化成域名
 ok('① 合并那一栏：含 {q} 的输入同时给出域名与模板',
   bl[0]?.host === `127.0.0.1:${bqsrv.address().port}`.split(':')[0] || !!bl[0]?.host, `host=${bl[0]?.host}`);
@@ -870,7 +873,12 @@ ok('② 拿到接口返回的条目（不是走了搜索引擎）',
 ok('② 静态参数 {top_k} 被替换进去（不是原样发 {top_k}）',
   bqHits.some((h) => h.includes('top_k=5')) && !bqHits.some((h) => h.includes('top_k=%7B')), JSON.stringify(bqHits));
 ok('② 密钥（静态参数 `{API Key}`）被替换进请求头，拼成 Bearer',
-  bqAuth === 'Bearer SECRET-TOKEN', JSON.stringify(bqAuth));
+  bqAuth === `Bearer ${REAL_KEY}`, JSON.stringify(bqAuth));
+// ⚠️ 这条单独钉"请求头**不做 URL 编码**"：URL 参数必须编码，请求头绝不能编码。
+// 千帆的 Key 含 `/`，编码成 `%2F` 后服务端报 `InvalidHTTPAuthHeader:
+// Fail to parse apikey authorization` —— 配置页看起来却完全正确（**实测报错**）。
+ok('② 请求头里的密钥没有被 URL 编码（`/` 不该变成 `%2F`）',
+  !bqAuth.includes('%2F') && bqAuth.includes('/ALTAK-'), JSON.stringify(bqAuth));
 ok('② 自定义请求头也发出去了（X-Trace）', bqHits.length > 0, JSON.stringify(bqHits.slice(0, 2)));
 // 关键：`request` 单独存在时**必须**走请求结构，不能掉进 `site:` 分支
 bqHits.length = 0;
