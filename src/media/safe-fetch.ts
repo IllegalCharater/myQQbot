@@ -197,7 +197,14 @@ function readBounded(res: IncomingMessage, maxBytes: number, asText: boolean): P
   });
 }
 
-interface RequestResult { statusCode: number; redirect?: string; body?: string | Buffer; contentType?: string }
+interface RequestResult {
+  statusCode: number;
+  redirect?: string;
+  body?: string | Buffer;
+  contentType?: string;
+  /** 只带出识别"被站点拦截"所需的那两个头（见 `safeFetch` 里的注释）。 */
+  headers?: { server?: string; 'cf-mitigated'?: string };
+}
 
 export interface SafeStreamResult {
   url: URL;
@@ -234,7 +241,17 @@ function requestOnce(url: URL, ip: string, { asBinary = false, maxBytes = 50000,
         return;
       }
       const bodyPromise = asBinary ? readBounded(res, maxBytes, false) : readBounded(res, maxBytes, true);
-      bodyPromise.then((body) => resolve({ statusCode, body, contentType: String(res.headers['content-type'] || '') })).catch(reject);
+      bodyPromise.then((body) => resolve({
+        statusCode,
+        body,
+        contentType: String(res.headers['content-type'] || ''),
+        // `server` 与 `cf-mitigated` 是**识别 Cloudflare 挑战页**用的（见 `looksBlocked()`）：
+        // 那种响应是 **200 + 一整页脚本**，正文为空，光看状态码会误判成"抓取成功"。
+        headers: {
+          server: String(res.headers.server || ''),
+          'cf-mitigated': String(res.headers['cf-mitigated'] || '')
+        }
+      })).catch(reject);
     });
     req.on('timeout', () => req.destroy(new Error(`请求超时：${url.hostname}`)));
     req.on('error', reject);
@@ -332,12 +349,16 @@ export async function safeFetch(urlString: unknown) {
     const body = typeof result.body === 'string' ? result.body : '';
     // `contentType` 要一起带出去：`web_fetch` 靠它决定"要不要按 HTML 剥正文"
     // （见 `media/html-to-text.ts` 开头那个 bug）。少了它只能猜正文形态。
+    // `headers` 同理：Cloudflare 挑战页是 **200 + 一整页脚本**，光看状态码会把
+    // "被站点拦截"报成"抓取成功"（**实测反馈**：模型拿到 `content: ""` 却看到成功）。
     return {
       url: url.toString(),
       statusCode: result.statusCode,
       truncated: body.length >= TEXT_MAX_BYTES,
       body,
-      contentType: result.contentType || ''
+      contentType: result.contentType || '',
+      server: result.headers?.server || '',
+      cfMitigated: result.headers?.['cf-mitigated'] || ''
     };
   }
   throw new Error('重定向次数过多，已停止');

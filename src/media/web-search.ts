@@ -11,12 +11,13 @@
 import { getConfig } from '../core/config.js';
 import { safeFetch } from './safe-fetch.js';
 import {
-  fetchBookmarkRequest, flattenJson, jsonToResults, BOOKMARK_JSON_MAX_CHARS,
+  fetchBookmarkRequest, flattenJson, jsonToResults,
+  BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS,
   type BookmarkSite, type BookmarkRequest, type BookmarkHeader
 } from './bookmark-request.js';
 
-// `BOOKMARK_JSON_MAX_CHARS` 定义在 `bookmark-request.ts`：设置页的「测试」按钮也用同一支
-// 压平逻辑（`testBookmarkRequest`），两份字面量会漂移成"测试说 5000、实际 2000"。
+// 压平预算那组常量定义在 `bookmark-request.ts`：设置页的「测试」按钮也用同一支压平逻辑
+// （`testBookmarkRequest`），两份字面量会漂移成"测试说 5000、实际 2000"。
 // 这里只 import —— 依赖方向本来就是 web-search → bookmark-request。
 
 interface SearchResult {
@@ -667,7 +668,7 @@ async function siteSearch(site: BookmarkSite, clean: string, maxResults: number)
       // 没有条目列表 → 接口给的是**单个对象的资料**（如 `get_content` 的整条词条）。
       // 这时"一段压平后的资料"本身就是答案，**不是失败**：把它包成一条结果返回，
       // 否则模型会得到"这个站没有内容"的错误归因。
-      const flat = flattenJson(response.body, BOOKMARK_JSON_MAX_CHARS);
+      const flat = flattenJson(response.body, BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS);
       if (flat.trim()) {
         return { query: clean, results: [{ title: `${site.purpose || site.key}（接口返回）`, url: response.url, snippet: flat }] };
       }

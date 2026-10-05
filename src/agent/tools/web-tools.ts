@@ -1,6 +1,6 @@
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
 import { webFetch, webSearch } from '../../media/web-search.js';
-import { htmlToText, looksLikeHtml } from '../../media/html-to-text.js';
+import { htmlToText, looksLikeHtml, looksBlocked } from '../../media/html-to-text.js';
 import { err, errorMessage, ok, takeWebBudget } from './shared.js';
 import type { ToolDefinition } from '../shared/types.js';
 
@@ -65,6 +65,16 @@ export function webTools(): ToolDefinition[] {
           // 模型于是以为"抓取失败/被限流"并反复重试。剥过之后同一页能给 **2 万多字**。
           const isHtml = looksLikeHtml(body, contentType);
           const text = isHtml ? htmlToText(body, String(result.url || '')) : body;
+          // ⚠️ **"剥完是空的"绝不能说成成功**（**实测反馈**）：模型抓到 `content: ""` 却看到
+          // 一条"已从 HTML 中提取可读正文"，于是它以为修复没生效，而真实原因是站点在拦它
+          // （Cloudflare 挑战页 / `未授权操作`，两者都是 **HTTP 200**）。
+          // 判据只用一次、放在这里，因为**同一个 `text` 才是模型真正会看到的东西**。
+          const verdict = looksBlocked(body, {
+            server: String(result.server || ''),
+            cfMitigated: String(result.cfMitigated || ''),
+            text
+          });
+          if (verdict.blocked) return err(`抓取不到内容：${verdict.reason}`);
           return ok({
             url: result.url,
             statusCode: result.statusCode,

@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { load, ROOT } from './lib/src.mjs';
+import { load, readSrc, ROOT } from './lib/src.mjs';
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-websearch-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
@@ -1062,6 +1062,65 @@ ok('⑦ 截断作用在剥完的 `text` 上（不是原始 body）',
 // ≥50000 字符）来说事，剥完 HTML 之后那个数已经不代表模型看到的东西了（会误报）
 ok('⑦ `truncated` 按正文长度判，不再用 `result.truncated`',
   /truncated: text\.length > FETCH_TEXT_MAX_CHARS/.test(webToolsSrc) && !/truncated: result\.truncated/.test(webToolsSrc));
+
+// ── ⑧ "HTTP 200 但被站点拦了"必须报失败，不能报"成功但内容为空" ──
+//
+// **实测反馈**：模型抓到 moegirl 时得到
+//   { "statusCode": 200, "truncated": false, "content": "", "note": "（已从 HTML 中提取可读正文）" }
+// —— 内容为空却报成功，模型于是说"你这修复好像没生效"。真实原因是**站点在拦它**：
+// `action=raw` 返回 `<title>未授权操作</title>`，主站/移动版返回 **Cloudflare 挑战页**，
+// 两者都是 200（实测：raw 183360 字符里可读只有 182，就是一个 `cdn-cgi/content?id=…`）。
+console.log('\n═══ 20. web_fetch 的"被站点拦截"识别 ═══');
+const { looksBlocked } = await load('media/html-to-text.js');
+const blockedText = (html) => htmlToText(html);
+const cfPage = '<!DOCTYPE html><html><head><title>洛天依 - 萌娘百科</title><script>' + 'x'.repeat(40000)
+  + '</script></head><body><a href="https://zh.moegirl.org.cn/cdn-cgi/content?id=abc">c</a></body></html>';
+ok('⑧ Cloudflare 挑战页（200）被判为拦截',
+  looksBlocked(cfPage, { server: 'cloudflare', text: blockedText(cfPage) }).blocked === true);
+ok('⑧ 原因说清是"人机验证页、不是配置问题"',
+  /人机验证/.test(looksBlocked(cfPage, { server: 'cloudflare', text: blockedText(cfPage) }).reason));
+const unauthPage = '<html><head><title>未授权操作 - 萌娘百科 万物皆可萌的百科全书</title><script>'
+  + 'y'.repeat(40000) + '</script></head><body></body></html>';
+ok('⑧ "未授权操作"页被判为拦截，且原因回显页面标题',
+  (() => { const v = looksBlocked(unauthPage, { server: 'cloudflare', text: blockedText(unauthPage) });
+    return v.blocked === true && /未授权操作/.test(v.reason); })());
+ok('⑧ `cf-mitigated` 头直接判拦截',
+  looksBlocked('<html><body>hi</body></html>', { cfMitigated: 'challenge' }).blocked === true);
+ok('⑧ 403 Forbidden 标题被判拦截', looksBlocked('<html><head><title>403 Forbidden</title></head></html>', {}).blocked === true);
+const jsOnlyPage = '<html><head><script>' + 'z'.repeat(30000) + '</script></head><body></body></html>';
+ok('⑧ 正文全是脚本（纯 JS 渲染站）也被判为抓不到内容',
+  looksBlocked(jsOnlyPage, { text: blockedText(jsOnlyPage) }).blocked === true);
+// **对照必须存在**：正常页面不能被误判，否则 web_fetch 会拒绝一切有脚本的站点
+const goodPage = '<html><head><title>初音未来 - 萌娘百科</title><script>' + 'x'.repeat(20000)
+  + '</script></head><body><div class="mw-parser-output"><p>' + '正文内容'.repeat(2000) + '</p></div></body></html>';
+ok('⑧ 对照：正常长正文页（同样有 20000 字脚本）**不**被误判',
+  looksBlocked(goodPage, { server: 'cloudflare', text: blockedText(goodPage) }).blocked === false);
+ok('⑧ 对照：内容确实很少的**短**页面不误判（只看占比会误判）',
+  looksBlocked('<html><body><p>一句话。</p></body></html>', { text: blockedText('<html><body><p>一句话。</p></body></html>') }).blocked === false);
+// 工具必须**在返回之前**用这个判据（否则模型又拿到"成功但空"）
+ok('⑧ 工具把拦截判成错误（`err`）而不是 ok',
+  /const verdict = looksBlocked\(/.test(webToolsSrc) && /if \(verdict\.blocked\) return err\(/.test(webToolsSrc));
+
+// ── ⑨ 压平"整条正文"型接口时，单行上限不能把文章砍成开头一段 ──
+//
+// `flattenJson` 原本每行砍 500、总预算 2000。对千帆 `get_content` 那种"几行结构化资料"
+// 够用，但对**整篇文章**是灾难：实测萌娘 `prop=extracts` 的 `extract` 有 **7036 字符**，
+// 压完只剩 **608** —— 模型拿到一份"看起来完整"的摘要，**不知道后面还有 6000 多字**。
+// 这种静默丢内容比报错难查得多。
+console.log('\n═══ 21. 压平"整条正文"的预算 ═══');
+const { flattenJson: fj, BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS } = await load('media/bookmark-request.js');
+const longExtract = JSON.stringify({ query: { pages: { 1: { pageid: 1, title: '洛天依', extract: '正'.repeat(7036) } } } });
+ok('⑨ 检索用的单行上限远大于 500（否则整篇文章只剩开头）',
+  BOOKMARK_FLATTEN_LINE_CHARS > 2000, String(BOOKMARK_FLATTEN_LINE_CHARS));
+ok('⑨ 检索用的总预算远大于 2000', BOOKMARK_FLATTEN_MAX_CHARS > 2000, String(BOOKMARK_FLATTEN_MAX_CHARS));
+ok('⑨ 7036 字的正文能装进预算（按总预算截断，而不是被单行砍掉）',
+  fj(longExtract, BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS).length >= BOOKMARK_FLATTEN_MAX_CHARS - 20,
+  String(fj(longExtract, BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS).length));
+// 对照：默认参数（设置页「测试」用紧凑值）仍应是原来那个小值，别顺手把测试也放大
+ok('⑨ 对照：不传参数时仍是 500 单行上限（「测试」按钮保持紧凑）',
+  fj(longExtract, 2000).length <= 700, String(fj(longExtract, 2000).length));
+// 源级接线：检索那条路必须把这两个常量传下去
+ok('⑨ 检索那条路传了宽松的预算与单行上限', /flattenJson\(response\.body, BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS\)/.test(readSrc('media/web-search.js')));
 
 await new Promise((r) => bqsrv.close(r));
 

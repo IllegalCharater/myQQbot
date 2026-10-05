@@ -43,6 +43,24 @@ export const MAX_HEADER_VALUE_CHARS = 1000;
  */
 export const BOOKMARK_JSON_MAX_CHARS = 2000;
 
+/**
+ * **真实检索**压平"整条正文"型接口时的预算与单行上限。
+ *
+ * 为什么与上面那个 2000/500 分开：那组数是按"接口给一份**结构化资料**"（千帆
+ * `get_content`：几行标题/摘要/关联词条）定的，单行 500 足够。
+ *
+ * 但接口给**整篇文章**时（实测萌娘百科 `action=query&prop=extracts&explaintext=1`
+ * 的 `extract` 有 **7036 字符**），500 的单行上限会把文章砍成开头一段 —— 而模型看到的
+ * 是一份"看起来完整"的摘要，**不会知道后面还有 6000 多字**，于是它会拿一段残缺信息
+ * 去回答。这种"静默丢内容"比报错难查得多。
+ *
+ * 4000 的依据：它是**单次收藏夹检索**返回给模型的上限，与 `promptContextMaxChars`
+ * 默认 32000 相比是个合理占比（一场对话里 web_search 通常只调 2~3 次）。
+ * 单行上限设成同一个数，意思是"把整段正文都装进来、只在总预算处截断"。
+ */
+export const BOOKMARK_FLATTEN_MAX_CHARS = 4000;
+export const BOOKMARK_FLATTEN_LINE_CHARS = 4000;
+
 /** HTTP 方法白名单。**不开 PUT/DELETE/PATCH**：这是"取数据"的配置，不该有副作用。 */
 export const BOOKMARK_METHODS = ['GET', 'POST'] as const;
 export type BookmarkMethod = (typeof BOOKMARK_METHODS)[number];
@@ -354,11 +372,17 @@ function findBestArray(data: unknown, limit: number, depth = 0): Array<Record<st
  * 答案。压平之后模型能直接读，而且**字段路径保留**（`relations[0].relation_name`），
  * 模型知道每一行的含义，比丢一坨 JSON 给它强。
  *
- * 值一律**截断**：`summary` 这类字段可能有几千字，一条资料不该吃掉整轮上下文预算。
+ * @param maxChars 总预算（所有行加起来）
+ * @param perLineChars 单行上限。**默认 500 对"整条正文"型接口太小**：实测萌娘百科
+ *   `prop=extracts` 返回的 `extract` 有 7036 字符，被砍成 500 —— 一篇文章只剩开头一段，
+ *   而模型看到的是一份"看起来完整"的摘要，不会知道后面还有 6000 多字。
+ *   调用方按场景传：**真实检索**给宽松值（模型要读正文），**设置页的「测试」**给紧凑值
+ *   （只是给你看"接口通不通、内容对不对"）。
  */
-export function flattenJson(raw: string, maxChars: number): string {
+export function flattenJson(raw: string, maxChars: number, perLineChars = 500): string {
   let data: unknown;
   try { data = JSON.parse(raw); } catch { return raw.slice(0, maxChars); }
+  const lineCap = Math.max(50, Number(perLineChars) || 500);
   const lines: string[] = [];
   let used = 0;
   const walk = (value: unknown, path: string, depth: number): void => {
@@ -374,7 +398,7 @@ export function flattenJson(raw: string, maxChars: number): string {
     }
     const text = String(value).replace(/\s+/g, ' ').trim();
     if (!text) return;
-    const line = `${path}: ${text.length > 500 ? `${text.slice(0, 500)}…` : text}`;
+    const line = `${path}: ${text.length > lineCap ? `${text.slice(0, lineCap)}…` : text}`;
     lines.push(line);
     used += line.length + 1;
   };

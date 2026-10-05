@@ -132,3 +132,73 @@ export function looksLikeHtml(body: string, contentType = ''): boolean {
   const head = String(body ?? '').slice(0, 2000);
   return /<\s*(!doctype|html|head|body|div|p|span|a|script|meta|table|ul|li)\b/i.test(head);
 }
+
+/** `looksBlocked` 的结论。 */
+export interface BlockedVerdict {
+  blocked: boolean;
+  /** 给模型/用户看的原因（`blocked` 为假时为空串）。 */
+  reason: string;
+}
+
+/**
+ * 判断"这次抓取其实被站点拦了"，即使 HTTP 是 200。
+ *
+ * ── 为什么需要（**实测反馈**）──
+ *
+ * 模型调用 `web_fetch` 抓萌娘百科，拿到的是：
+ *
+ * ```
+ * { "statusCode": 200, "truncated": false, "content": "",
+ *   "note": "（已从 HTML 中提取可读正文）" }
+ * ```
+ *
+ * **内容为空却报成功** —— 模型于是说"你这修复好像没生效"，而真实原因是**站点在拦它**：
+ * `action=raw` 返回 `<title>未授权操作</title>`，移动版与主站返回的是 **Cloudflare 挑战页**
+ * （`<title>` 是正常条目名，但正文全是脚本，剥完只剩一段 `cdn-cgi/content?id=…` 的 URL）。
+ * 这两种都是 **200**，所以"看状态码"判不出来。
+ *
+ * ── 判据 ──
+ *
+ * 1. **明确的 Cloudflare 标记**：`cf-mitigated` 头、`server: cloudflare` 配合正文里的
+ *    `cdn-cgi/content` / `challenge-platform`；或正文里出现 `/cdn-cgi/` 字样。
+ * 2. **显式的拒绝标题**：`<title>` 里是"未授权操作 / 403 Forbidden / Access denied"这类。
+ * 3. **兜底：正文被剥成几乎没有**。原始响应不小（> 5000 字符）而剥完不到 200
+ *    字符且不到原始的 1% —— 那说明响应主体是脚本/样式而不是给人看的内容。
+ *    这条同时兜住"还没见过的挑战页形态"和"纯 JS 渲染的站点"。
+ *
+ * ⚠️ 第 3 条**故意同时要求"绝对量小"和"占比小"**：只看占比会把"内容确实很少的正常页"
+ * 误判（如一个 500 字符的短页面剥完 50 字符 = 10%，占比不小但绝对量小，不该报错）；
+ * 只看绝对量则会把"200KB 里只有 250 字符正文"的正常窄页误判。
+ */
+export function looksBlocked(body: string, opts: { server?: string; cfMitigated?: string; text?: string } = {}): BlockedVerdict {
+  const raw = String(body ?? '');
+  const text = String(opts.text ?? '');
+  const server = String(opts.server || '').toLowerCase();
+  const cfMitigated = String(opts.cfMitigated || '').trim();
+
+  if (cfMitigated) {
+    return { blocked: true, reason: `站点返回了拦截标记（cf-mitigated: ${cfMitigated}）` };
+  }
+  // 挑战页的特征串。`/cdn-cgi/` 之外还看 `challenge-platform`（Cloudflare 的 JS 挑战脚本）。
+  const cfHit = /\/cdn-cgi\/|challenge-platform|cf-challenge|__cf_chl/i.test(raw);
+  if (cfHit && (/cloudflare/i.test(server) || /cdn-cgi\/content/i.test(raw))) {
+    return {
+      blocked: true,
+      reason: '站点返回的是 Cloudflare 的**人机验证页**（HTTP 200，但正文是脚本、没有内容）。'
+        + '这不是配置问题，是站点在拦自动抓取 —— 换个镜像站/接口，或过一会儿再试。'
+    };
+  }
+  const title = (/<title[^>]*>([\s\S]{0,200}?)<\/title>/i.exec(raw) || [, ''])[1].replace(/\s+/g, ' ').trim();
+  if (/未授权|无权限|禁止访问|拒绝访问|forbidden|access denied|unauthorized|just a moment|attention required|请稍候/i.test(title)) {
+    return { blocked: true, reason: `站点拒绝了这次抓取（页面标题是「${title}」）` };
+  }
+  // 兜底：剥完几乎没东西，而原始响应并不小
+  if (raw.length > 5000 && text.length < 200 && text.length < raw.length * 0.01) {
+    return {
+      blocked: true,
+      reason: `抓回来的 ${raw.length} 字符几乎全是脚本/样式，剥完只剩 ${text.length} 字符可读内容`
+        + '（站点可能在拦截自动抓取，或这个页面完全靠 JavaScript 渲染）。'
+    };
+  }
+  return { blocked: false, reason: '' };
+}
