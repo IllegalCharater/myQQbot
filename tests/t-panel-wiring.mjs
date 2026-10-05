@@ -440,7 +440,7 @@ ok('漫画完成回调行有独立样式 .jmcomic-result-row', css.includes('.ar
 // 右边、后半截根本看不到（**实测反馈**）。这几块是 `pre-wrap`（自然语言照常软换行）
 // **加** `overflow-x`，不是二选一 —— 覆盖不到的话这个 bug 会静默回来。
 // ⚠️ 这条只证明声明**存在**，证明不了它生效（被后续规则覆盖同样会红不了）。
-for (const sel of ['.collapsible .coll-body', '.tool-args', '.tool-result']) {
+for (const sel of ['.collapsible .coll-body', '.tool-args', '.tool-result', '.bubble']) {
   const esc2 = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   ok(`${sel} 有 overflow-x: auto（否则长行被截、看不到后半截）`,
     new RegExp(`${esc2}[^{]*\\{[^}]*overflow-x:\\s*auto`, 's').test(css));

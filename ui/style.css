@@ -388,22 +388,30 @@ body {
      · `overflow-x` 兜住**折不了的行**：JSON 里被 `\n` 转义成两字符的长串、URL、
        没有空格的长 token。这类内容 `pre-wrap` 折不动，旧版会被 `.detail-pane`
        （只有 `overflow-y:auto`，横向是 visible）截掉右边，**看不到后半截**（**实测反馈**）。
-   `pre` 会取消软换行、滚动条常驻，对普通文本反而更难读，所以不用它。 */
+   `pre` 会取消软换行、滚动条常驻，对普通文本反而更难读，所以不用它。
+
+   `.bubble` 也在这一组里：气泡是 `word-break: break-word`，它只在"实在放不下"时才断开，
+   而且**没有 `overflow-x`** —— 于是气泡里的超长 token（工具回执、URL）同样会被截掉。
+   气泡的 `max-width: 82%` 决定了它比日志块窄得多，反而**更容易**溢出，所以这里不能漏。 */
 .collapsible .coll-body,
 .tool-args,
-.tool-result {
+.tool-result,
+.bubble {
   overflow-x: auto;
 }
 /* 内容真的横向溢出时给个细滚动条，别用默认的粗条压住代码 */
 .collapsible .coll-body::-webkit-scrollbar,
 .tool-args::-webkit-scrollbar,
-.tool-result::-webkit-scrollbar { height: 8px; width: 8px; }
+.tool-result::-webkit-scrollbar,
+.bubble::-webkit-scrollbar { height: 8px; width: 8px; }
 .collapsible .coll-body::-webkit-scrollbar-thumb,
 .tool-args::-webkit-scrollbar-thumb,
-.tool-result::-webkit-scrollbar-thumb { background: #3a4152; border-radius: 4px; }
+.tool-result::-webkit-scrollbar-thumb,
+.bubble::-webkit-scrollbar-thumb { background: #3a4152; border-radius: 4px; }
 .collapsible .coll-body::-webkit-scrollbar-track,
 .tool-args::-webkit-scrollbar-track,
-.tool-result::-webkit-scrollbar-track { background: transparent; }
+.tool-result::-webkit-scrollbar-track,
+.bubble::-webkit-scrollbar-track { background: transparent; }
 
 .msg-flow { display: flex; flex-direction: column; gap: 10px; }
 
