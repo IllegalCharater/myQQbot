@@ -99,43 +99,27 @@ export function createConsole(deps: ConsoleDeps): Console {
   const SECRET_KEY_PATTERN = /(apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key)/i;
   // 形如 apiKeyFrom 的字段存的是"密钥来源标识"（如 manual），不是密钥本身，不要脱敏
   const SECRET_KEY_EXCLUDE = /from$/i;
-  /**
-   * 这些键底下的**所有标量**都算密钥，不管它们自己叫什么名字。
-   *
-   * 为什么需要它：收藏夹凭据的形状是 `{ header, scheme, value }` —— 密钥字段叫 `value`，
-   * 名字本身匹配不到上面那条模式，于是旧逻辑会把它**明文回显**给浏览器。
-   * 改名叫 `apiKey` 是不行的：脱敏层对命中模式的字段是**删除**（见下面那段），
-   * 前端把整个 config 展开成 patch 回传时会把服务端真值覆盖掉。
-   * 所以判据必须从"字段名"扩展到"字段所在的路径"。
-   */
-  const SECRET_SECTION = /^(credentials|secrets)$/i;
 
   function sanitizeConfig(cfg: AppConfig) {
     const parsed: unknown = JSON.parse(JSON.stringify(cfg ?? {}));
     const out: Record<string, unknown> = isRecord(parsed) ? parsed : {};
     const seen = new WeakSet<object>();
 
-    /**
-     * @param inSecretSection 当前节点是否位于一个「密钥区」内部（如 `credentials.baike`）。
-     *   为真时所有标量都按密钥处理，不再看字段名。
-     */
-    const walk = (node: Record<string, unknown>, inSecretSection = false) => {
+    const walk = (node: Record<string, unknown>) => {
       if (seen.has(node)) return;
       seen.add(node);
       for (const key of Object.keys(node)) {
         const value = node[key];
-        // 进入密钥区之前先判断：这一层是普通字段名，仍然按名字匹配
-        const childIsSecretSection = inSecretSection || SECRET_SECTION.test(key);
-        if (isRecord(value)) { walk(value, childIsSecretSection); continue; }
+        if (isRecord(value)) { walk(value); continue; }
         if (Array.isArray(value)) {
-          for (const item of value) if (isRecord(item)) walk(item, childIsSecretSection);
+          for (const item of value) if (isRecord(item)) walk(item);
           continue;
         }
-        if (SECRET_KEY_EXCLUDE.test(key) && !inSecretSection) continue;
+        if (SECRET_KEY_EXCLUDE.test(key)) continue;
         // 已生成的 hasXxx 布尔标记本身也会被 apikey 模式匹配到，
         // 不排除就会连锁生成 hasHasXxx
         if (/^has/i.test(key) && typeof value === 'boolean') continue;
-        if (inSecretSection || SECRET_KEY_PATTERN.test(key)) {
+        if (SECRET_KEY_PATTERN.test(key)) {
           // ⚠️ 必须"删除字段"而不是"置为空串"。
           // 前端保存设置时会把整个 config 展开成 patch 回传（...c.webSearch?.deepseek），
           // 若这里留一个空串，deepMerge 会拿空串覆盖掉服务端保存的真 Key ——

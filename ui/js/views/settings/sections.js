@@ -146,38 +146,6 @@ export function renderBookmarkRows(bookmarks) {
   )).join('');
 }
 
-/**
- * 接口密钥的行。
- *
- * **密钥真值读不到**：后端脱敏时会把 `credentials.<key>.value` 整个删掉、只留一个
- * `hasValue` 布尔标记（理由见 `http/console.ts` 那段：留着空串会让前端回传时覆盖真值）。
- * 所以这里的分工是：
- *   · 输入框**永远留空**，`placeholder` 根据 `hasValue` 显示"已设置（留空=不改）"；
- *   · 保存时**只有非空才写** —— 空值整键不写，服务端原值才不会被清掉。
- * 这是"值不回显又不被误清"的唯一可行组合，别为了好看向 input 里塞掩码字符。
- */
-export function renderCredentialRows(credentials) {
-  const map = credentials && typeof credentials === 'object' ? credentials : {};
-  const keys = Object.keys(map);
-  const row = (key, header, scheme, hasValue) =>
-    '<tr data-bmc>'
-    + `<td><input type="text" data-bmc-key value="${esc(key)}" placeholder="baike" /></td>`
-    + `<td><input type="text" data-bmc-header value="${esc(header)}" placeholder="Authorization" /></td>`
-    + `<td><input type="text" data-bmc-scheme value="${esc(scheme)}" placeholder="Bearer" /></td>`
-    + `<td><div style="display:flex;gap:6px;align-items:center">`
-    + `<input type="password" data-bmc-value value="" placeholder="${hasValue ? '已设置（留空=不修改）' : '粘贴密钥'}" style="flex:1" autocomplete="new-password" />`
-    + `<button class="btn btn-small btn-danger" data-bmc-del type="button" title="删除这条密钥">×</button>`
-    + '</div></td>'
-    + '</tr>';
-  if (!keys.length) return row('', '', '', false);
-  return keys.map((k) => row(
-    k,
-    String(map[k]?.header || ''),
-    String(map[k]?.scheme || ''),
-    Boolean(map[k]?.hasValue)
-  )).join('');
-}
-
 export function renderSearchSection(c) {
   // 每个提供方区块的初始显隐都要跟当前 provider 一致
   const prov = String(c.webSearch?.provider || 'bing');
@@ -328,31 +296,6 @@ export function renderSearchSection(c) {
         <input type="number" id="cfg-search-chat-hourly" min="1" max="200" value="${esc(c.webSearch?.maxCallsPerChatPerHour ?? 20)}" /></div>
       <div class="field"><label>全部会话每天最多搜索次数</label>
         <input type="number" id="cfg-search-daily" min="1" max="5000" value="${esc(c.webSearch?.maxCallsPerDay ?? 200)}" /></div>
-    </div>
-
-    <h3>接口密钥（配了「请求结构」的收藏夹用）</h3>
-    <div class="hint">
-      填了「请求结构」的收藏夹（典型是 JSON 接口）如果要求鉴权，密钥填在这里。<br />
-      <b>为什么不填在请求结构里</b>：那一栏的内容会被回显、可能被复制分享，而密钥是长期凭据。
-      这里存的值<b>不回显</b>（只显示"已设置"），保存时也不会被空值覆盖。<br />
-      左边填<b>收藏夹的枚举值</b>（要和上面那张表的枚举值一致），右边填密钥原文（不用写 <code>Bearer</code>，
-      下面有单独的 scheme 输入框）。
-    </div>
-    <table class="bookmark-table" style="width:100%;border-collapse:collapse">
-      <thead>
-        <tr>
-          <th style="text-align:left;width:18%">收藏夹枚举值</th>
-          <th style="text-align:left;width:22%">请求头名</th>
-          <th style="text-align:left;width:14%">scheme</th>
-          <th style="text-align:left;width:46%">密钥</th>
-        </tr>
-      </thead>
-      <tbody id="search-credentials-body">
-        ${renderCredentialRows(c.webSearch?.credentials)}
-      </tbody>
-    </table>
-    <div style="margin-top:6px">
-      <button class="btn btn-small" id="add-search-credential-btn" type="button">＋ 添加一条密钥</button>
     </div>
 
     <h3>添加自定义搜索服务</h3>

@@ -10,8 +10,7 @@ import { clampInt, renderChatSection, sliderDesc, sliderToTierUI, sliderToTierUI
 import {
   renderAllowSection, renderApiSection, renderDesktopSection, renderMemorySettingsSection,
   renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderPythonSection,
-  renderSearchSection, renderTranscriptionSection, renderImageSourceSection, renderBookmarkRows,
-  renderCredentialRows
+  renderSearchSection, renderTranscriptionSection, renderImageSourceSection, renderBookmarkRows
 } from './sections.js';
 import { parseList, saveConfig } from './save.js';
 import { openBlocklistModal } from '../../parts/blocklist.js';
@@ -383,18 +382,7 @@ export function bindSettingsEvents(c) {
     if (!body.querySelector('tr[data-bm]')) body.insertAdjacentHTML('beforeend', renderBookmarkRows([]));
   });
 
-  // ── 接口密钥的增删（同样是事件委托 + DOM 操作，不重渲染整页）──
-  const credBody = $('#search-credentials-body');
-  $('#add-search-credential-btn')?.addEventListener('click', () => {
-    credBody?.insertAdjacentHTML('beforeend', renderCredentialRows({}));
-  });
-  credBody?.addEventListener('click', (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    const del = target.closest('[data-bmc-del]');
-    if (!del) return;
-    del.closest('tr')?.remove();
-  });
+
 
   // 搜索提供方切换
   const searchProviderSel = $('#cfg-searchprovider');

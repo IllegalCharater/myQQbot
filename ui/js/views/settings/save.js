@@ -160,41 +160,12 @@ export async function saveConfig({ quiet = false } = {}) {
       // （那是迁移来的老数据，丢掉等于删用户的收藏），所以这里不能按"三空就丢"卡掉它。
     }).filter((item) => item.key && item.url && (item.purpose || item.searchUrl || item.request));
 
-    // 接口密钥。
-    //
-    // **从 `c.webSearch.credentials` 起手、只覆盖用户真改了的键**，不能凭空造一份新的：
-    // 后端脱敏会把 `value` 删掉（只回显 `hasValue`），所以"读到的当前值"本来就不含真值。
-    // 于是规则是 —— **输入框非空才写**，空着表示"不改"（placeholder 也这么提示）。
-    // 如果这里按行整体重建，用户点一次保存就会把没动过的那些密钥全清掉。
-    const credentials = { ...(c.webSearch?.credentials && typeof c.webSearch.credentials === 'object' ? c.webSearch.credentials : {}) };
-    const seenCredKeys = new Set();
-    for (const row of $$('#search-credentials-body tr[data-bmc]')) {
-      const key = (row.querySelector('[data-bmc-key]')?.value || '').trim();
-      if (!key) continue;
-      seenCredKeys.add(key);
-      const typed = row.querySelector('[data-bmc-value]')?.value || '';
-      const header = (row.querySelector('[data-bmc-header]')?.value || '').trim() || 'Authorization';
-      const scheme = (row.querySelector('[data-bmc-scheme]')?.value || '').trim();
-      if (typed) {
-        // 用户这次输入了新密钥 → 覆盖（scheme 留空表示只发裸值）
-        credentials[key] = { header, scheme: scheme === '' ? '' : scheme, value: typed };
-      } else if (credentials[key]) {
-        // 没输入 → 保留真值，只更新头名与 scheme（这两个是回显出来的，可以安全改）
-        credentials[key] = { ...credentials[key], header, scheme: scheme === '' ? '' : scheme };
-      }
-    }
-    // 用户删掉的行要跟着消失，否则删了还留着（值在服务端，前端看不见）
-    for (const key of Object.keys(credentials)) {
-      if (!seenCredKeys.has(key)) delete credentials[key];
-    }
-
     patch.webSearch = {
       ...c.webSearch,
       enabled: chk('#cfg-websearch', c.webSearch?.enabled !== false),
       provider: val('#cfg-searchprovider', c.webSearch?.provider || 'bing'),
       searchUrl: val('#cfg-searchurl', c.webSearch?.searchUrl || 'https://cn.bing.com/search').trim() || 'https://cn.bing.com/search',
       bookmarks,
-      credentials,
       // 旧键 bookmarkFirst 不再写入：它会由后端 normalizeConfigShape 迁移成 bookmarkMode
       // 并删除，前端再写回一个废弃键只会让它永远留在 config.json 里。
       bookmarkMode: val('#cfg-search-bookmarkmode', c.webSearch?.bookmarkMode === 'web' ? 'web' : 'prefer') === 'web' ? 'web' : 'prefer',

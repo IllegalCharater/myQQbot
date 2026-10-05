@@ -77,9 +77,9 @@ export function openBookmarkRequestModal(current, onApply) {
       <div style="padding:10px 0">
         <div class="hint" style="margin-bottom:8px">
           <b>{q}</b> 是每次搜索的查询词，<b>必须出现</b>。<br />
-          其它 <b>{名字}</b> 是<b>静态参数</b>（如 <code>top_k</code>），在下面「静态参数」里各填一个值。<br />
-          <b>密钥不填在这里</b>：请求头里只写 <code>Authorization: Bearer</code>（值留空），
-          真值在设置页的「接口密钥」处填 —— 那里会脱敏，不会回显。
+          其它 <b>{名字}</b> 是<b>静态参数</b>（如 <code>{top_k}</code>），在下面「静态参数」里各填一个值。<br />
+          <b>接口密钥也是静态参数</b>：请求头里写 <code>Authorization: Bearer {API Key}</code>，
+          再到下面「静态参数」里加一行 <code>API Key: 你的密钥</code> 即可。
         </div>
         <div class="field-row">
           <div class="field" style="flex:0 0 110px"><label>方法</label>
@@ -94,11 +94,11 @@ export function openBookmarkRequestModal(current, onApply) {
         <div class="field">
           <label>请求头（每行一条：<code>名字: 值</code>）</label>
           <textarea id="bqr-headers" rows="3"
-            placeholder="Host: appbuilder.baidu.com&#10;Authorization: Bearer"></textarea>
+            placeholder="Host: appbuilder.baidu.com&#10;Authorization: Bearer {API Key}"></textarea>
         </div>
         <div class="field">
           <label>静态参数（每行一条：<code>名字: 值</code>）</label>
-          <textarea id="bqr-params" rows="2" placeholder="top_k: 5"></textarea>
+          <textarea id="bqr-params" rows="2" placeholder="top_k: 5&#10;API Key: bce-v3/ALTAK-..."></textarea>
         </div>
         <div class="hint" id="bqr-hint"></div>
       </div>

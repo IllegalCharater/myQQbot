@@ -132,15 +132,6 @@ export const DEFAULT_CONFIG = {
     //     留空时用**通用启发式**（见 media/web-search.ts 的 parseSiteSearch）——
     //     抓取解析天生易碎，这个字段是页面改版时的自救通路（同 yandex 那四个选择器）。
     bookmarks: [],
-    // 收藏夹的**凭据**（密钥）：`{ [收藏夹枚举值]: { header, scheme, value } }`。
-    //
-    // **为什么密钥必须单独放、不能写进请求结构正文**：那一栏的内容会进设置页回显、
-    // 可能进日志、也会被复制粘贴分享；而 `Authorization` 的密钥是一次配置长期有效的
-    // 凭据。与 `SauceNAO` 的 `apiKey` 只走 stdin 是同一条不变量。
-    //   · `header` 默认 `Authorization`（少数接口用 `X-API-Key` 之类）；
-    //   · `scheme` 默认 `Bearer`，最终拼成 `Bearer <value>`；留空则只发裸值。
-    // 回显时必须脱敏（见 http/console.ts 的配置脱敏），这是它单独成区的主要理由之一。
-    credentials: {},
     // 收藏夹的**默认行为**，只影响"模型没说搜哪个站点"时走哪条路：
     //   'prefer' —— 按关键字先问收藏夹、再补全网（收藏夹命中排最前）；
     //   'web'    —— 直接全网，**只有模型显式传 site 时才进收藏夹**。
@@ -480,16 +471,8 @@ const MAX_BOOKMARK_ENDPOINT = 2000;
 const MAX_BOOKMARK_HEADERS = 20;
 const MAX_BOOKMARK_HEADER_NAME = 100;
 const MAX_BOOKMARK_HEADER_VALUE = 1000;
-/** 静态参数值（`{top_k}` 这类）的上限。 */
+/** 静态参数值（`{top_k}` / `{API Key}` 这类）的上限。 */
 const MAX_BOOKMARK_PARAM_VALUE = 500;
-/**
- * 收藏夹凭据（密钥）长度上限。
- *
- * 给得比别处宽：千帆的 API Key 形如
- * `bce-v3/ALTAK-xxxxxxxxxxxx/yyyyyyyyyyyy…`，本身就有 60+ 字符，而各家格式不一。
- * 它不进提示词、不进日志，所以这里只需要防"粘错东西"，不需要防"太长影响预算"。
- */
-const MAX_BOOKMARK_CREDENTIAL = 500;
 
 /** 枚举值是否合法（形状见 BOOKMARK_KEY_RE 的注释）。 */
 function isBookmarkKey(value: unknown): boolean {
@@ -725,24 +708,13 @@ function normalizeConfigShape<T>(input: T): T {
     }
 
     // ── 收藏夹凭据（密钥）──
-    // 只清洗形状、保留 `value`（真值由脱敏层负责遮住）。**不校验 header 是不是合法
-    // HTTP 头名**：各家接口的自定义头五花八门，写一条自以为是的正则只会把用户手工
-    // 填对的值打回去（同 yandex 那四个选择器的判据）。
-    if (isPlainRecord(w.credentials)) {
-      const creds: Record<string, { header: string; scheme: string; value: string }> = {};
-      for (const [k, v] of Object.entries(w.credentials)) {
-        const key = String(k).trim();
-        if (!key || !isPlainRecord(v)) continue;
-        const value = String(v.value ?? '').trim().slice(0, MAX_BOOKMARK_CREDENTIAL);
-        if (!value) continue;
-        creds[key] = {
-          header: String(v.header ?? 'Authorization').trim().slice(0, MAX_BOOKMARK_HEADER_NAME) || 'Authorization',
-          scheme: String(v.scheme ?? 'Bearer').trim().slice(0, 40),
-          value
-        };
-      }
-      w.credentials = creds;
-    }
+    // **不再有 `credentials` 区**：接口密钥改用「静态参数」机制填 ——
+    // 在请求头里写 `Authorization: Bearer {API Key}`，然后在静态参数里给 `API Key` 填值。
+    // 一条机制覆盖"固定参数"与"密钥"，不必再有一套独立的凭据落盘/脱敏/回显规则。
+    // 这里**必须显式删除**旧键：`updateConfig` 走 `deepMerge`（只加键不删键），
+    // 不删的话旧的 `credentials` 会永远留在用户的 config.json 里，而且
+    // "删掉的那套逻辑"留下的数据会让下一个人以为它还在生效。
+    delete w.credentials;
 
     w.maxCallsPerChatPerHour = Math.round(clamp(w.maxCallsPerChatPerHour, 1, 200, 20));
     w.maxCallsPerDay = Math.round(clamp(w.maxCallsPerDay, 1, 5000, 200));

@@ -661,8 +661,9 @@ function splitByClass(html: string, className: string): string[] {
 async function siteSearch(site: BookmarkSite, clean: string, maxResults: number): Promise<SearchResponse> {
   // ── 形态 1：请求结构 ──
   if (site.request) {
-    const credential = bookmarkCredential(site.key);
-    const sent = await fetchBookmarkRequest(site.request, { q: clean, params: site.params, credential });
+    // 密钥不在这里单独取：它走**静态参数**（请求头里写 `Bearer {API Key}`，
+    // 参数里给 `API Key` 填值），与 `{top_k}` 是同一条替换链。
+    const sent = await fetchBookmarkRequest(site.request, { q: clean, params: site.params });
     if (!sent.ok) throw new Error(`请求结构调用失败（${site.key}）：${sent.error}`);
     const { response } = sent;
     if (response.kind === 'json') {
@@ -706,22 +707,6 @@ async function siteSearch(site: BookmarkSite, clean: string, maxResults: number)
     );
   }
   return { query: clean, results };
-}
-
-/**
- * 取某个收藏夹的凭据（`Authorization` 之类）。
- *
- * 真值存在配置的密钥区（`webSearch.credentials[key]`），**模板正文里只有占位**。
- * 单独抽出来是为了让"密钥从哪来"只有一个答案 —— 不要在这里顺手读别的字段。
- */
-function bookmarkCredential(bookmarkKey: string): { header: string; scheme: string; value: string } | undefined {
-  const store = getConfig().webSearch?.credentials;
-  if (!isRecord(store)) return undefined;
-  const entry = store[bookmarkKey];
-  if (!isRecord(entry)) return undefined;
-  const value = String(entry.value ?? '').trim();
-  if (!value) return undefined;
-  return { header: String(entry.header ?? 'Authorization'), scheme: String(entry.scheme ?? 'Bearer'), value };
 }
 
 /**

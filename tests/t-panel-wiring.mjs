@@ -9,7 +9,7 @@
 //   3. 过滤/分页的账本又跑回未过滤的 state.chatMessages（"还有 N 条"永远算不对）
 import fs from 'node:fs';
 import path from 'node:path';
-import { readUI, uiFile, stripComments } from './lib/src.mjs';
+import { readUI, uiFile, stripComments, readSrc } from './lib/src.mjs';
 
 const html = readUI('index.html');
 const jsRoot = uiFile('js');
@@ -149,15 +149,14 @@ for (const id of ['cfg-search-bookmarkmode', 'search-bookmarks-body', 'add-searc
   ok(`#${id} 可解析`, resolves(id));
 }
 const searchSave = seg("if (sec === 'search')", "if (sec === 'image-source')");
-// 收藏夹用 `data-bm-*` 标记每一格，密钥区用 `data-bmc-*`。
+// 收藏夹用 `data-bm-*` 标记每一格。
 // 这些属性名是 save.js 逐行取值的**唯一接口**：改名只改一端会静默读出 undefined，
 // 于是每一项都因"不全"被丢弃 —— 表现为"收藏夹存不进去"，而没有任何报错。
 //
 // ⚠️ `data-bm-searchurl` **已经不存在了**：它与 `data-bm-url` 合并成一栏（见下面那条）。
 // 收藏夹每一行还额外带 `data-bm-req-json` / `data-bm-params-json` 两个 dataset
 // （由「请求结构」弹窗写入，save.js 从这里读），它们是属性不是元素，所以单独断言。
-for (const attr of ['data-bm-key', 'data-bm-url', 'data-bm-purpose', 'data-bm-resultclass', 'data-bm-probe', 'data-bm-status', 'data-bm-req',
-  'data-bmc-key', 'data-bmc-header', 'data-bmc-scheme', 'data-bmc-value', 'data-bmc-del']) {
+for (const attr of ['data-bm-key', 'data-bm-url', 'data-bm-purpose', 'data-bm-resultclass', 'data-bm-probe', 'data-bm-status', 'data-bm-req']) {
   ok(`${attr} 在渲染里出现（save.js 与自动检测靠它取值）`, new RegExp(attr).test(js));
 }
 // 「网页地址」与「站内搜索地址」合并：**不能再有一个独立的 searchurl 输入框**，
@@ -166,12 +165,13 @@ ok('合并那一栏：没有独立的 searchUrl 输入框了（旧 data-bm-searc
   !/data-bm-searchurl/.test(js));
 ok('「请求结构」入口存在，且读数走 dataset（弹窗写、save.js 读）',
   /data-bm-req-json/.test(searchSave) && /dataset\.bmParamsJson/.test(searchSave));
-// 密钥：值不得回显。后端脱敏删掉 value 只留 hasValue，前端必须按"留空=不改"处理，
-// 否则用户点一次保存就把没动过的密钥全清掉。
-ok('密钥输入框是 password 且不回显真值（只提示"已设置"）',
-  /data-bmc-value value=""/.test(js) && /已设置（留空=不修改）/.test(js));
-ok('密钥保存规则：**非空才写**，空值保留服务端原值',
-  /if \(typed\) \{/.test(searchSave) && /else if \(credentials\[key\]\)/.test(searchSave));
+// **独立的密钥区已经删掉了**：密钥改走「静态参数」（请求头里写 `{API Key}`，参数里填值）。
+// 一条机制覆盖"固定参数"与"密钥"，不必再有一套独立的落盘/脱敏/回显规则。
+// 这条断言是防回潮的：那套 UI 一旦长回来，就会与静态参数形成两套实现。
+ok('不再有独立的接口密钥配置区（已并入静态参数）',
+  !/data-bmc|search-credentials-body|renderCredentialRows/.test(js) && !/credentials/.test(searchSave));
+ok('配置层也不再有 credentials 键（并有显式 delete 迁移，避免旧键永远留着）',
+  !/credentials:/.test(readSrc('core/config.js')) && /delete w\.credentials;/.test(readSrc('core/config.js')));
 
 // 自动检测按钮：必须有 try/finally 复位 disabled，否则一次失败就永久点不动
 ok('「检测」按钮绑了 click 且跑完会复位 disabled',

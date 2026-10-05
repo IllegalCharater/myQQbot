@@ -835,21 +835,27 @@ const bqsrv = http.createServer((req, res) => {
 await new Promise((r) => bqsrv.listen(0, '127.0.0.1', r));
 const bqBase = `http://127.0.0.1:${bqsrv.address().port}`;
 
-// ① 配置归一：请求结构 / 静态参数 / 凭据
+// ① 配置归一：请求结构 / 静态参数（**密钥也走静态参数**）
 updateConfig({
   webSearch: {
     ...baseSearch,
     bookmarks: [{
       key: 'baike', url: `${bqBase}/list?lemma_title={q}&top_k={top_k}`, purpose: '查百科',
-      request: { method: 'GET', endpoint: `${bqBase}/list?lemma_title={q}&top_k={top_k}`, headers: [{ name: 'X-Trace', value: 't1' }] },
-      params: { top_k: '5' }
-    }],
-    credentials: { baike: { header: 'Authorization', scheme: 'Bearer', value: 'SECRET-TOKEN' } }
+      request: {
+        method: 'GET',
+        endpoint: `${bqBase}/list?lemma_title={q}&top_k={top_k}`,
+        // 密钥的写法就是这个：请求头里留 `{API Key}` 占位，真值走静态参数。
+        // 占位符**允许空格**（用户是照文档写的，文档里就是 `{API Key}`）。
+        headers: [{ name: 'X-Trace', value: 't1' }, { name: 'Authorization', value: 'Bearer {API Key}' }]
+      },
+      params: { top_k: '5', 'API Key': 'SECRET-TOKEN' }
+    }]
   }
 });
 let bl = bookmarkList();
 ok('① 请求结构进了归一结果', !!bl[0]?.request && bl[0].request.endpoint.includes('{q}'), JSON.stringify(bl[0]?.request));
-ok('① 静态参数进了归一结果', bl[0]?.params?.top_k === '5', JSON.stringify(bl[0]?.params));
+ok('① 静态参数进了归一结果（含带空格的名字）',
+  bl[0]?.params?.top_k === '5' && bl[0]?.params?.['API Key'] === 'SECRET-TOKEN', JSON.stringify(bl[0]?.params));
 // 「网页地址」与「站内搜索地址」合并成一栏：填含 {q} 的地址时，url 退化成域名
 ok('① 合并那一栏：含 {q} 的输入同时给出域名与模板',
   bl[0]?.host === `127.0.0.1:${bqsrv.address().port}`.split(':')[0] || !!bl[0]?.host, `host=${bl[0]?.host}`);
@@ -863,11 +869,12 @@ ok('② 拿到接口返回的条目（不是走了搜索引擎）',
   bout.results.length >= 2 && bout.results.every((r) => !String(r.url).includes('bing')), JSON.stringify(bout.results.map((r) => r.title)));
 ok('② 静态参数 {top_k} 被替换进去（不是原样发 {top_k}）',
   bqHits.some((h) => h.includes('top_k=5')) && !bqHits.some((h) => h.includes('top_k=%7B')), JSON.stringify(bqHits));
-ok('② 凭据被拼成 Authorization: Bearer …', bqAuth === 'Bearer SECRET-TOKEN', JSON.stringify(bqAuth));
+ok('② 密钥（静态参数 `{API Key}`）被替换进请求头，拼成 Bearer',
+  bqAuth === 'Bearer SECRET-TOKEN', JSON.stringify(bqAuth));
 ok('② 自定义请求头也发出去了（X-Trace）', bqHits.length > 0, JSON.stringify(bqHits.slice(0, 2)));
 // 关键：`request` 单独存在时**必须**走请求结构，不能掉进 `site:` 分支
 bqHits.length = 0;
-updateConfig({ webSearch: { ...baseSearch, bookmarks: [{ key: 'b2', url: `${bqBase}/single`, purpose: '百科详情', request: { method: 'GET', endpoint: `${bqBase}/single?k={q}` } }], credentials: {} } });
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [{ key: 'b2', url: `${bqBase}/single`, purpose: '百科详情', request: { method: 'GET', endpoint: `${bqBase}/single?k={q}` } }] } });
 await webSearch('x', 'b2');
 ok('② 只配了 request（没有 searchUrl）也走请求结构，不会掉进 site: 分支',
   bqHits.some((h) => h.startsWith('/single')), JSON.stringify(bqHits));
@@ -883,7 +890,7 @@ ok('③ 正文没被 relations 顶掉（这是 findBestArray 只认带链接列�
 
 // ④ 缺静态参数的值 → 明确报错，且不发请求
 bqHits.length = 0;
-updateConfig({ webSearch: { ...baseSearch, bookmarks: [{ key: 'b3', url: `${bqBase}/list?x={q}`, purpose: '缺参', request: { method: 'GET', endpoint: `${bqBase}/list?q={q}&top_k={top_k}` } }], credentials: {} } });
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [{ key: 'b3', url: `${bqBase}/list?x={q}`, purpose: '缺参', request: { method: 'GET', endpoint: `${bqBase}/list?q={q}&top_k={top_k}` } }] } });
 let bErr = '';
 try { await webSearch('x', 'b3'); } catch (e) { bErr = e.message; }
 ok('④ 缺静态参数时报错并点名占位符', /top_k/.test(bErr), JSON.stringify(bErr.slice(0, 140)));
@@ -894,7 +901,7 @@ updateConfig({ webSearch: { ...baseSearch, bookmarks: [
   { key: 'ok1', url: 'https://a.example', purpose: 'p', request: { method: 'GET', endpoint: 'https://a.example/x?q={q}' } },
   { key: 'bad1', url: 'https://b.example', purpose: 'p', request: { method: 'DELETE', endpoint: 'https://b.example/x?q={q}' } },
   { key: 'bad2', url: 'https://c.example', purpose: 'p', request: { method: 'GET', endpoint: 'https://c.example/x' } }
-], credentials: {} } });
+] } });
 bl = bookmarkList();
 ok('⑤ 合法请求结构留下', !!bl.find((b) => b.key === 'ok1')?.request, JSON.stringify(bl.map((b) => b.key)));
 ok('⑤ 非白名单方法（DELETE）被丢弃', !bl.find((b) => b.key === 'bad1')?.request);

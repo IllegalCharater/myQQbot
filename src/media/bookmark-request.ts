@@ -18,8 +18,13 @@
  * | 其它 `{xxx}` | **静态参数**（如 `{top_k}`） | 设置页里给每个填一个固定值 |
  *
  * 这个区分是刻意的：`top_k` 这类参数配一次就不动，如果让它变成运行时变量，模型每次
- * 都要自己编一个值；而 `{q}` 必须每次变。凭据**两者都不是** —— 它走 `credential`，
- * 落地时从配置里取真值，模板正文里永远只有占位（见 `applyCredential`）。
+ * 都要自己编一个值；而 `{q}` 必须每次变。
+ *
+ * **接口密钥也走"静态参数"**：请求头里写 `Authorization: Bearer {API Key}`，
+ * 再在静态参数里给 `API Key` 填真值。之所以不为密钥单开一套机制（独立字段 + 脱敏 +
+ * 回显规则）：那是**同一件事的两套实现**，而两套必然漂移 —— 静态参数这条链已经
+ * 覆盖了"固定值替换"，密钥就是固定值。代价是密钥以明文存在 `config.json` 里，
+ * 与其它被引用的配置项同一层级（见文件末尾那条注释）。
  */
 
 /** 静态参数值的上限（够放 token 之外的一切），防止有人把整篇文档粘进来。 */
@@ -61,8 +66,14 @@ export interface BookmarkSite {
   resultClass?: string;
 }
 
-/** 占位符：`{q}` 或 `{名字}`。名字限 ASCII 标识符，避免把 JSON 正文里的 `{}` 误当占位符。 */
-const PLACEHOLDER_RE = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+/**
+ * 占位符：`{q}` 或 `{名字}`。
+ *
+ * 名字**允许空格与中文**，因为用户是照着接口文档写的，而文档里就是
+ * `{词条名}`、`{API Key}` 这种写法。限长 60 且不允许 `=`、`&`、`/`、`?`
+ * 这类 URL 结构字符，免得把 JSON 正文或查询串里的 `{}` 误当成占位符。
+ */
+const PLACEHOLDER_RE = /\{([^{}=&/?#\r\n]{1,60})\}/g;
 
 /** 取出模板里除 `{q}` 之外的占位符名字（去重，保持出现顺序）。 */
 export function staticPlaceholders(template: string): string[] {
@@ -99,24 +110,6 @@ export function fillRequestTemplate(
     return { ok: false, error: `这些占位符还没有填值：${names}。请在设置页的「静态参数」里给它们各填一个值（例如 top_k = 5）。` };
   }
   return { ok: true, value };
-}
-
-/**
- * 把 `Authorization: Bearer <API Key>` 这类凭据头拼上。
- *
- * 真值存在配置里，**模板正文里只有占位**（设置页显示为 `<API Key>`）。这一条与
- * `SauceNAO` 的 `apiKey` 只走 stdin 是同一条不变量：密钥不进模板文本、不进日志。
- */
-export function applyCredential(
-  headers: BookmarkHeader[],
-  credential: { header: string; scheme: string; value: string } | undefined
-): BookmarkHeader[] {
-  const out = headers.filter((h) => h.name.toLowerCase() !== 'authorization');
-  if (!credential || !credential.value) return out;
-  const header = String(credential.header || 'Authorization').trim();
-  if (!header) return out;
-  const scheme = String(credential.scheme || '').trim();
-  return [...out, { name: header, value: scheme ? `${scheme} ${credential.value}` : credential.value }];
 }
 
 /** 从请求结构里解析出最终要请求的 URL（处理"只给路径 + Host 头"的写法）。 */
@@ -162,7 +155,7 @@ export interface BookmarkFetchResult {
 
 export async function fetchBookmarkRequest(
   request: BookmarkRequest,
-  values: { q: string; params?: Record<string, string>; credential?: { header: string; scheme: string; value: string } },
+  values: { q: string; params?: Record<string, string> },
   options: { timeoutMs?: number } = {}
 ): Promise<{ ok: true; response: BookmarkFetchResult } | { ok: false; error: string }> {
   const filled = fillRequestTemplate(request.endpoint, values);
@@ -179,21 +172,23 @@ export async function fetchBookmarkRequest(
   //   · 不一致（同类配置行为不同，没人能预期）；
   //   · 管理员**无法**接内网/本机上的服务（自建百科服务、内网知识库都是正常用法）。
   //
-  // **代价是知情的**：凭据头会发往配置里写的那个主机，所以"谁能改配置"等于"谁能拿到
-  // 这个凭据"。这与 `POST /api/config` 本身是管理员权限接口是同一层级的前提。
+  // **代价是知情的**：请求头里的密钥会发往配置里写的那个主机，所以"谁能改配置"等于
+  // "谁能拿到这个密钥"。这与 `POST /api/config` 本身是管理员权限接口是同一层级的前提。
   // 要收紧的话，正确的做法是给**三条路径一起**加校验（那会牺牲内网用法），
   // 而不是只堵这一条。
 
-  const rawHeaders = (request.headers || []).filter((h) => h.name.trim().toLowerCase() !== 'host');
-  const withCred = applyCredential(rawHeaders, values.credential);
+  // 请求头里的占位符同样要替换 —— 密钥就是这么进去的：
+  // `Authorization: Bearer {API Key}` + 静态参数 `API Key = <真值>`。
   const headers: Record<string, string> = {
     'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
     'accept': 'application/json, text/plain, */*'
   };
-  for (const h of withCred) {
+  for (const h of (request.headers || []).filter((x) => x.name.trim().toLowerCase() !== 'host')) {
     const name = String(h.name || '').trim();
     if (!name) continue;
     const v = fillRequestTemplate(String(h.value ?? ''), values);
+    // 头部占位符缺值时**保留原文**（而不是报错）：头里的占位符可能是用户写着备忘的，
+    // 报错会让"只想改地址"的人被一句看不懂的话拦住。URL 里缺值才是硬错误（见上面那条）。
     headers[name] = v.ok ? v.value : String(h.value ?? '');
   }
 
