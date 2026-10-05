@@ -376,6 +376,30 @@ ok('新建的会话出现在**两个**列表接口里（列表是扫磁盘还原
   (await (await fetch(`http://127.0.0.1:${port}/api/chats`)).json()).chats.some((c) => c.key === NEWKEY)
   && (await (await fetch(`http://127.0.0.1:${port}/api/memory-files`)).json()).files.some((f) => f.chatKey === NEWKEY),
   '两个列表里至少有一个没出现');
+
+// ⑦b **白名单本身不等于"有记忆"**：私聊只挂在白名单里、从来没有过任何记忆时，
+// 记忆列表里**不许**出现它。
+//
+// 这是实测反馈的 bug：旧版 `/api/memory-files` 会把白名单里每个群/私聊都补一行
+// `{memberCount:0, impressionCount:0}` 进去（本意是"让管理员能提前手工记印象"），
+// 于是刚配好白名单，记忆页就列出一堆空条目 —— 用户看到的是"没有记录，却有个容器"。
+// 同一时刻 `/api/chats` 是老老实实按磁盘文件判存在的（返回空），两个页面对同一件事
+// 给出相反答案，这就是它像 bug 的原因。判据统一成：**列出来的，磁盘上一定真的有**。
+const PHANTOM = 'private:889901';
+await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'POST', body: JSON.stringify({ allow: { private: ['889901'] } }) });
+const phantomDir = path.join(DIR, 'memory', 'private_889901');
+ok('前置：这个私聊只在白名单里，磁盘上没有记忆目录', !fs.existsSync(phantomDir), `exists=${fs.existsSync(phantomDir)}`);
+const phantomList = (await (await fetch(`http://127.0.0.1:${port}/api/memory-files`)).json()).files;
+ok('白名单里的私聊、没有记忆时，**不**出现在记忆列表里（不许有幽灵条目）',
+  !phantomList.some((f) => f.chatKey === PHANTOM), JSON.stringify(phantomList.map((f) => f.chatKey)));
+ok('对照：/api/chats 对同一个私聊也不列它（两个页面的判据一致）',
+  !(await (await fetch(`http://127.0.0.1:${port}/api/chats`)).json()).chats.some((c) => c.key === PHANTOM));
+// 想要"先建出空记忆"是明确动作：走「新建会话」之后它就该出现在列表里
+const madePhantom = await (await fetch(`http://127.0.0.1:${port}/api/chats/private_889901`, { method: 'POST', body: '{}' })).json();
+ok('明确"新建"之后才出现在列表里（空记忆仍然可见，那是刻意的）',
+  madePhantom.memoryCreated === true
+  && (await (await fetch(`http://127.0.0.1:${port}/api/memory-files`)).json()).files.some((f) => f.chatKey === PHANTOM),
+  JSON.stringify(madePhantom));
 // 幂等：再建一次不覆盖已有内容
 store.appendIncoming(NEWKEY, { mid: 7201, ts: base, senderId: '556677', senderName: '甲', text: '我先加一条' });
 store.drainUnread(NEWKEY);

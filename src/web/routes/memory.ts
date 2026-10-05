@@ -7,13 +7,22 @@ const recordBody = (value: unknown): Record<string, unknown> => isRecord(value) 
 export const memoryRoutes: Route[] = [
   {
     method: 'GET', path: '/api/memory-files', async handle(ctx) {
+      // **只列磁盘上真实存在的记忆**（`MemoryStore.listChats()` 扫目录）。
+      //
+      // 这里**曾经**把白名单里每个群/私聊都补一行 `{memberCount:0, impressionCount:0}` 进来
+      // （标题叫"让管理员能提前手工记印象"），但那个补行的代价是记忆页上出现**从未有过任何
+      // 记忆的幽灵条目**：用户刚配置好白名单，记忆页就列出了所有私聊/群，点进去空空如也，
+      // 看起来像"没记录却有个容器"。实测：`memory/` 目录都还不存在时，接口已经返回了
+      // 白名单里的三个会话；而同一时刻 `/api/chats` 老老实实返回 `[]`（它按磁盘文件判存在）。
+      //
+      // 需要为某个会话"先建出空记忆"是**明确的动作**，走面板上的「＋ 新建会话」
+      // （`POST /api/chats/<key>` → `MemoryStore.create()` 落一个 `_meta.json`），
+      // 那样建出来的条目会由 `listChats()` 正常列出 —— 于是这条判据统一成一句话：
+      // **列出来的，一定是磁盘上真的有的**。
       const files: Array<{ chatKey: string; impressionCount: number; memberCount: number; updatedAt: number; consolidating: boolean }> =
         ctx.memory.listChats().map((rawChatKey) => { const chatKey = String(rawChatKey); const members = ctx.memory.members(chatKey); return { chatKey,
           impressionCount: members.reduce((count, member) => count + member.impressions.length, 0), memberCount: members.length,
           updatedAt: Math.max(0, ...members.map((member) => Number(member.updatedAt) || 0)), consolidating: false }; });
-      const seen = new Set(files.map((file) => file.chatKey));
-      for (const id of ctx.getConfig().allow?.groups || []) { const chatKey = `group:${String(id)}`; if (!seen.has(chatKey)) files.push({ chatKey, impressionCount: 0, memberCount: 0, updatedAt: 0, consolidating: false }); }
-      for (const id of ctx.getConfig().allow?.private || []) { const chatKey = `private:${String(id)}`; if (!seen.has(chatKey)) files.push({ chatKey, impressionCount: 0, memberCount: 0, updatedAt: 0, consolidating: false }); }
       for (const file of files) file.consolidating = ctx.orchestrator.consolidating.has(file.chatKey);
       files.sort((a, b) => b.updatedAt - a.updatedAt);
       return { status: 200, body: { files, consolidating: [...ctx.orchestrator.consolidating] } };
