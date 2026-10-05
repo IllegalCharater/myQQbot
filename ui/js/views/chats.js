@@ -10,6 +10,19 @@ export async function loadChats({ quiet = false } = {}) {
     const data = await api('/api/chats');
     state.chats = data.chats || [];
     renderChatList();
+    // 当前打开的会话已经不在列表里了（被清空、删到一条不剩、或整份被删）。
+    // 必须在这里清掉指针：否则详情区会一直显示一份已经不存在的内容，
+    // 而左侧列表里那一条早没了 —— 看起来就像"删了没反应"。
+    if (state.currentChatKey && !state.chats.some((c) => c.key === state.currentChatKey)) {
+      state.currentChatKey = null;
+      state.chatMessages = [];
+      state.chatMsgRendered = 0;
+      const detail = $('#chat-detail');
+      if (detail && state.tab === 'chats') {
+        detail.innerHTML = '<div class="empty-hint">← 选择会话查看消息存档</div>';
+      }
+      return;
+    }
     if (state.currentChatKey) {
       // 打开着某群详情时也刷新该群消息。
       // keepView=true：只更新内容，不动分页与滚动位置 ——
@@ -192,8 +205,10 @@ export function renderChatMessages() {
           + `${result.archiveRemoved ? '（含冷归档）' : ''}`
           + `${result.backup ? `，备份 ${result.backup}` : ''}`;
       }
-      loadChats();
-      loadChatMessages(key, { keepView: false });
+      // **列表与详情都重新拉**（用户明确要求）。删完只剩一个"看起来还在、点开全空"的
+      // 右侧面板是最容易让人以为没删掉的形态，所以详情一并重载；这个会话没了就清掉选中。
+      await loadChats({ quiet: true });
+      if (state.currentChatKey) await loadChatMessages(state.currentChatKey, { keepView: false });
     } catch (error) {
       if (status) status.textContent = `清空失败：${error.message}`;
       alert(`清空失败：${error.message}`);

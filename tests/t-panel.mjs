@@ -275,9 +275,10 @@ fs.writeFileSync(path.join(memDir, '10001.json'), JSON.stringify({ userId: '1000
 fs.writeFileSync(path.join(memDir, '10002.json'), JSON.stringify({ userId: '10002', name: '乙', impressions: [{ content: 'b', createdAt: base }] }), 'utf8');
 const memDel = await (await fetch(`http://127.0.0.1:${port}/api/memory-files/group_791`, { method: 'DELETE' })).json();
 ok('DELETE /api/memory-files/<key> 回报删掉的成员数', memDel.ok === true && memDel.removedMembers === 2, JSON.stringify(memDel));
-ok('整个会话的记忆文件都清掉了（不是只删第一个）',
-  fs.readdirSync(memDir).filter((f) => f.endsWith('.json') && f !== '_meta.json').length === 0,
-  JSON.stringify(fs.readdirSync(memDir)));
+// 整会话删除要连**目录**一起清掉：只清成员文件、留着空目录的话 `listChats()`（扫目录）
+// 会继续列出它，用户删完发现那条还在、以为没删干净。
+ok('整会话记忆删除把目录也清掉了（留空目录的话列表里那条会一直在）',
+  !fs.existsSync(memDir), `目录仍存在：${fs.existsSync(memDir)}`);
 // 成员级删除（既有能力）不能被整会话那条路由吞掉 —— 两条正则的区分就在这里
 const memDir2 = path.join(DIR, 'memory', 'group_792');
 fs.mkdirSync(memDir2, { recursive: true });
@@ -285,6 +286,70 @@ fs.writeFileSync(path.join(memDir2, '20001.json'), JSON.stringify({ userId: '200
 const oneDel = await (await fetch(`http://127.0.0.1:${port}/api/memory-files/group_792/members/20001`, { method: 'DELETE' })).json();
 ok('成员级删除仍然走它自己那条路由（没被整会话删除抢走）',
   oneDel.ok === true && !fs.existsSync(path.join(memDir2, '20001.json')), JSON.stringify(oneDel));
+
+// ⑥ 删到一条不剩 → 整份存档文件一起删掉（用户明确要求）
+//
+// 判据是"这个会话在磁盘上还在不在"，不是"messages 数组空不空" ——
+// 留个空文件的话 `listChats()`（扫文件名）会继续列出它，存档页上就多出一个
+// "看似有、点开全空"的条目。
+const DROPKEY = 'group:793';
+const dropFile = path.join(DIR, 'messages', 'group_793.json');
+store.appendIncoming(DROPKEY, { mid: 7001, ts: base, senderId: '555', senderName: '张三', text: '唯一一条' });
+store.drainUnread(DROPKEY);
+const oneMsg = store.recent(DROPKEY, { limit: 10 })[0];
+ok('前置：这个会话只有一条消息、文件在磁盘上', !!oneMsg && fs.existsSync(dropFile));
+const dropOne = await (await fetch(`http://127.0.0.1:${port}/api/chats/group_793/messages/${oneMsg.id}`, { method: 'DELETE' })).json();
+ok('删掉最后一条消息时，整份存档文件一起被删（不留空壳）',
+  dropOne.ok === true && !fs.existsSync(dropFile), JSON.stringify({ resp: dropOne, exists: fs.existsSync(dropFile) }));
+ok('响应里点明这次把整份存档删掉了（界面要能说清发生了什么）',
+  dropOne.chatDropped === true, JSON.stringify(dropOne));
+// **必须再列一次列表**（只验"文件没了"是不够的，本套件初版就漏了这条而放过一个真 bug）：
+// `#state()` 是"读不到就建个空对象放进缓存"的语义，所以删除之后任何一次碰这个会话
+// （`reloadWindow` 的播种、`getChatMeta`、`recentIncoming`……）都会在缓存里重建出一个
+// **没有文件**的对象；照着缓存列的话，删干净的会话会一直挂在存档列表里、点开却是空的。
+// 文件才是权威，`listChats()` 现在按它过滤。
+const chatsAfterDrop = (await (await fetch(`http://127.0.0.1:${port}/api/chats`)).json()).chats.map((c) => c.key);
+ok('删干净之后，存档列表里不再列出它（缓存里的空对象不算"存在"）',
+  !chatsAfterDrop.includes(DROPKEY), JSON.stringify(chatsAfterDrop));
+
+// 对照：还有别的消息时**不能**删文件 —— 否则删一条就等于清空整个会话
+const KEEPKEY = 'group:794';
+const keepFile = path.join(DIR, 'messages', 'group_794.json');
+for (let i = 1; i <= 3; i++) store.appendIncoming(KEEPKEY, { mid: 7100 + i, ts: base + i, senderId: '555', senderName: '张三', text: `留${i}` });
+store.drainUnread(KEEPKEY);
+const keepFirst = store.recent(KEEPKEY, { limit: 10 })[0];
+const keepOne = await (await fetch(`http://127.0.0.1:${port}/api/chats/group_794/messages/${keepFirst.id}`, { method: 'DELETE' })).json();
+// ⚠️ 这里必须**读盘**校验，不能查本套件那个 `store` 实例：管理端走的是 app 自己的
+// ChatStore（另一个实例，有自己的内存缓存），而本套件的实例还留着删之前的 3 条。
+// 查实例会拿到过期的 3（本套件初版就这么假红了一条）。
+const keepOnDisk = JSON.parse(fs.readFileSync(keepFile, 'utf8')).messages.length;
+ok('对照：还有别的消息时存档文件保留（删一条不等于清空整个会话）',
+  keepOne.ok === true && fs.existsSync(keepFile) && keepOnDisk === 2 && keepOne.remaining === 2,
+  JSON.stringify({ exists: fs.existsSync(keepFile), onDisk: keepOnDisk, remaining: keepOne.remaining }));
+
+// ⑦ 新建会话：一次建出空存档与空记忆，且能出现在两个列表里
+const NEWKEY = 'private:556677';
+const newArchive = path.join(DIR, 'messages', 'private_556677.json');
+const newMemDir = path.join(DIR, 'memory', 'private_556677');
+const made = await (await fetch(`http://127.0.0.1:${port}/api/chats/private_556677`, { method: 'POST', body: '{}' })).json();
+ok('POST /api/chats/<key> 同时建出空存档与空记忆（只建一份的话另一个页签里找不到它）',
+  made.ok === true && made.archiveCreated === true && made.memoryCreated === true, JSON.stringify(made));
+ok('空存档文件真的落到磁盘上了', fs.existsSync(newArchive), `exists=${fs.existsSync(newArchive)}`);
+ok('空记忆目录真的落到磁盘上了', fs.existsSync(newMemDir), `exists=${fs.existsSync(newMemDir)}`);
+ok('新建的会话出现在**两个**列表接口里（列表是扫磁盘还原的，没落盘就不可能出现）',
+  (await (await fetch(`http://127.0.0.1:${port}/api/chats`)).json()).chats.some((c) => c.key === NEWKEY)
+  && (await (await fetch(`http://127.0.0.1:${port}/api/memory-files`)).json()).files.some((f) => f.chatKey === NEWKEY),
+  '两个列表里至少有一个没出现');
+// 幂等：再建一次不覆盖已有内容
+store.appendIncoming(NEWKEY, { mid: 7201, ts: base, senderId: '556677', senderName: '甲', text: '我先加一条' });
+store.drainUnread(NEWKEY);
+const again = await (await fetch(`http://127.0.0.1:${port}/api/chats/private_556677`, { method: 'POST', body: '{}' })).json();
+ok('重复创建是幂等的：回报都没新建，且已有内容没被清掉',
+  again.archiveCreated === false && again.memoryCreated === false && store.getChatMeta(NEWKEY).total === 1,
+  JSON.stringify({ again, total: store.getChatMeta(NEWKEY).total }));
+// 非法键必须被拒：这个入口会把值拼进文件名，不能任由调用方决定路径
+const badKey = await (await fetch(`http://127.0.0.1:${port}/api/chats/group_abc`, { method: 'POST', body: '{}' })).json();
+ok('非数字号码被拒（路由正则本身就不匹配）', badKey.ok !== true, JSON.stringify(badKey));
 
 core.stop(); srv.close();
 fs.rmSync(DIR, { recursive: true, force: true });

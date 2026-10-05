@@ -478,6 +478,35 @@ console.log('\n═══ 三处手动删除与两处存储上限的接线 ══
   ok('清空记忆走 DELETE /api/memory-files/<key>（不是成员级那条）',
     /api\(`\/api\/memory-files\/\$\{chatKey\.replace\(':', '_'\)\}`, \{ method: 'DELETE' \}\)/.test(memory));
 
+  // ④ 删除后**列表与详情都刷新**（用户明确要求）。只刷列表的话右侧会继续显示
+  //    那个已经不存在的会话/存档/记忆，看起来就是"删了没反应"。
+  ok('清空存档后同时刷新列表与详情',
+    /await loadChats\(\{ quiet: true \}\)[\s\S]{0,200}await loadChatMessages\(state\.currentChatKey/.test(chats));
+  ok('删会话后列表刷新，并在仍有选中项时补刷详情',
+    /await loadSessions\(\{ quiet: true \}\)[\s\S]{0,300}loadSessionDetail\(state\.currentSessionId, \{ quiet: true \}\)/.test(sessions));
+  ok('删会话/清空存档后，若那个会话已不在列表里就清掉选中并复位详情面板',
+    /state\.currentSessionId = null[\s\S]{0,400}选择左侧会话查看完整过程/.test(sessions)
+    && /state\.currentChatKey = null[\s\S]{0,400}选择会话查看消息存档/.test(chats));
+  ok('清空记忆后同时刷新列表与详情',
+    /await loadMemoryView\(\)[\s\S]{0,200}loadMemoryDetail\(state\.currentMemoryChatKey\)/.test(memory));
+
+  // ⑤ 新建会话入口：两个页签各一个按钮，指向同一个弹窗与同一个接口
+  const newChat = read('ui/js/parts/new-chat.js');
+  const html = read('ui/index.html');
+  const main = read('ui/js/main.js');
+  ok('存档页与记忆页各有一个「新建会话」按钮',
+    /id="chat-new-btn"/.test(html) && /id="memory-new-btn"/.test(html));
+  ok('两个按钮都接到同一个弹窗（从哪一页进去结果一样）',
+    /for \(const id of \['#chat-new-btn', '#memory-new-btn'\]\)/.test(main) && /openNewChatModal/.test(main));
+  ok('弹窗走 POST /api/chats/<key> 且一次建出两份',
+    /api\(`\/api\/chats\/\$\{chatKey\.replace\(':', '_'\)\}`, \{ method: 'POST'/.test(newChat));
+  ok('弹窗里说明了会建出空存档与空记忆、且不覆盖已有内容',
+    /空存档/.test(newChat) && /空记忆/.test(newChat) && /已经存在的不会被覆盖/.test(newChat));
+  ok('号码在前端只做"纯数字"的提示性校验（唯一判据仍在服务端）',
+    /\^\\d\+\$\/\.test\(id\)/.test(newChat) && /服务端仍会独立校验/.test(newChat));
+  ok('拉群/好友列表失败时不阻塞创建（仍能手填号码）',
+    /也可以直接手填号码/.test(newChat));
+
   // ④ 两个存储上限的配置项：输入框与保存读取必须成对出现
   //    —— 只有 save 没有 input 的话，`val()` 取到 undefined 会**静默回退成当前值**，
   //    用户改了没反应却看不到任何报错。

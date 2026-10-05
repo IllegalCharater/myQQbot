@@ -52,8 +52,33 @@ export const chatRoutes: Route[] = [
       const chatKey = `${match?.[1]}:${match?.[2]}`; const localId = Number(match?.[3]); const result = ctx.store.deleteByLocalId(chatKey, localId);
       if (!result) return { status: 404, body: { ok: false, error: '找不到这条记录（可能已在别处删掉）' } };
       ctx.orchestrator.reloadWindow(chatKey); ctx.emit(EVENTS.chatUpdate, chatKey);
+      // ⚠️ `remaining` 取 `result.remaining`，**不要**在这里调 `ctx.store.getChatMeta(chatKey)`：
+      // 那个方法内部走 `#state()`，会把刚被删掉的会话在缓存里重新建出来（磁盘上已经没有文件），
+      // 于是 `listChats()` 又能列出它 —— 存档列表里那条会一直在、点开却是空的（实测踩到）。
       return { status: 200, body: { ok: true, removed: { id: result.removed.id, senderName: result.removed.senderName, ts: result.removed.ts },
-        backup: result.backup ? path.basename(result.backup) : '', remaining: ctx.store.getChatMeta(chatKey).total } };
+        backup: result.backup ? path.basename(result.backup) : '', remaining: result.remaining,
+        // 删到一条不剩时整份存档会被删掉，界面要能说清"这个会话已经没了"而不是只报个 0 条
+        chatDropped: result.chatDropped === true } };
+    },
+  },
+  {
+    /**
+     * 为一个群聊/私聊**建出空存档与空记忆**（面板"新建会话"）。
+     *
+     * 两份一起建是刻意的：它们各自都靠扫磁盘还原列表，所以只建一份的话，
+     * 另一个页面上这个会话仍然不存在 —— 用户点"新建"之后去记忆页却找不到它，
+     * 会以为没建成功。建出来的都是**空条目**，之后各自往里填（备注 / 印象）。
+     *
+     * 幂等：已存在就回报 `created: false`，绝不覆盖已有内容（`ensureChat`/`create` 各自保证）。
+     */
+    method: 'POST', path: /^\/api\/chats\/(group|private)_(\d+)$/, async handle(ctx, _req, match) {
+      const chatKey = `${match?.[1]}:${match?.[2]}`;
+      try {
+        const store = ctx.store.ensureChat(chatKey);
+        const memory = ctx.memory.create(chatKey);
+        ctx.emit(EVENTS.chatUpdate, chatKey);
+        return { status: 200, body: { ok: true, chatKey, archiveCreated: store.created, memoryCreated: memory.created } };
+      } catch (error) { return { status: 400, body: { ok: false, error: errorMessage(error) } }; }
     },
   },
   {
@@ -64,12 +89,13 @@ export const chatRoutes: Route[] = [
     // 已删的窗口状态，下一次唤醒会把幽灵消息当未读），并回报删掉的条数供界面确认。
     method: 'DELETE', path: /^\/api\/chats\/(group|private)_(\d+)$/, async handle(ctx, _req, match) {
       const chatKey = `${match?.[1]}:${match?.[2]}`;
-      const before = ctx.store.getChatMeta(chatKey).total;
       const result = ctx.store.removeChat(chatKey);
       ctx.orchestrator.reloadWindow(chatKey);
       ctx.emit(EVENTS.chatUpdate, chatKey);
-      return { status: 200, body: { ok: true, chatKey, removedMessages: before,
-        archiveRemoved: result.archiveRemoved, backup: result.backup ? path.basename(result.backup) : '', remaining: ctx.store.getChatMeta(chatKey).total } };
+      // 同上面单条删除那条：`remaining` 固定是 0，**不要**回头调 `getChatMeta` 去读 ——
+      // 那会把刚删掉的会话在缓存里重新建出来，`listChats()` 于是又列出它（磁盘上却没文件）。
+      return { status: 200, body: { ok: true, chatKey, removedMessages: result.removedMessages,
+        archiveRemoved: result.archiveRemoved, backup: result.backup ? path.basename(result.backup) : '', remaining: 0 } };
     },
   },
   {

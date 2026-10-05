@@ -487,13 +487,52 @@ export class MemoryStore {
     return removed;
   }
 
+  /**
+   * 建一个**空记忆条目**（面板"新建会话"用）：只写一个 `_meta.json`，没有任何成员文件。
+   *
+   * 为什么需要它：`listChats()` 是**扫目录**还原的，一个还没有任何印象的会话不会出现
+   * 在记忆列表里 —— 用户想先建出来、之后再往里加印象，就没有入口。
+   *
+   * 为什么写 `_meta.json` 而不是建空目录：空目录在某些同步/打包工具里会被丢掉，
+   * 而且"这个目录是故意建的"这件事需要留下痕迹。`_meta.json` 读的时候本来就有默认值，
+   * 不会影响整理冷却的判断。
+   *
+   * 幂等：目录已存在时返回 `created: false`，**不动**已有成员文件。
+   */
+  create(chatKey: string) {
+    if (!/^(group|private):\d+$/.test(chatKey)) throw new Error('会话必须是 group:<群号> 或 private:<QQ号>');
+    const dir = chatDir(chatKey);
+    if (fs.existsSync(dir)) return { created: false, chatKey };
+    // 旧版单文件也要先迁移掉，否则"新建"之后列表里会出现同一会话的两份来源
+    this.#migrateLegacy(chatKey);
+    if (fs.existsSync(dir)) return { created: false, chatKey };
+    writeJson(metaFile(chatKey), { lastConsolidatedAt: 0, createdAt: Date.now() });
+    this.cache.set(chatKey, new Map());
+    return { created: true, chatKey };
+  }
+
+  /**
+   * 删掉**整个会话的全部记忆**，并把**空目录一并清掉**。
+   *
+   * 只清内容、留着空目录的话，`listChats()` 会继续列出它 —— 用户删完发现那条还在，
+   * 会以为没删干净（同 `ChatStore` 那边"空存档也要删文件"是同一条判据）。
+   * `_meta.json` 与 `backups/` 子目录也跟着走：它们都属于这个会话。
+   */
   clear(chatKey: string) {
     const map = this.#ensureChat(chatKey);
     for (const m of map.values()) {
       try { fs.rmSync(memberFile(chatKey, m.userId, m.name), { force: true }); } catch { /* ignore */ }
     }
     map.clear();
-    writeJson(metaFile(chatKey), { lastConsolidatedAt: Date.now() });
+    this.cache.delete(chatKey);
+    try {
+      const dir = chatDir(chatKey);
+      if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+    } catch (error: unknown) {
+      console.warn(`[memory] 空记忆目录删除失败(${chatKey}):`, errorText(error));
+    }
+    // 旧版单文件形态也要一起清，否则列表里那条会由它继续撑着
+    try { fs.rmSync(legacyFile(chatKey), { force: true }); } catch { /* ignore */ }
   }
 
   /**

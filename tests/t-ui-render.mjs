@@ -579,5 +579,59 @@ await picker.openWhitelistPicker('groups').catch(() => {});
 ok('拉取失败时给出失败原因与排查方向',
   pickResult.textContent.includes('拉取失败') && pickResult.textContent.includes('OneBot 未连接'), pickResult.textContent);
 
+// ═══════════ F. 会话列表：当前会话消失后不许再拿着它去请求 ═══════════
+//
+// 这一段治的是一个实测踩到的缺陷：删掉"正在查看的那条会话"之后，列表刷新已经不含它了，
+// 但 `state.currentSessionId` 还指着它 —— 详情轮询于是每轮都拿这个失效 id 请求一次，
+// 每轮收获一个 404，界面上反复出现"加载失败：会话不存在"，而列表里那一行早就没了。
+// 判据不能只看"有没有报错"：**必须没有发出那个详情请求**。
+console.log('\n═══ F. 当前会话从列表消失后不再请求它的详情 ═══');
+{
+  $el('#session-detail').innerHTML = '旧内容';
+  state.tab = 'sessions';
+  state.currentSessionId = 'ghost-1';
+  state.sessionDetail = { id: 'ghost-1' };
+  const hits = routeFetch([[/\/api\/sessions\?/, { sessions: [{ id: 'alive-2', chatKey: 'group:1', status: 'done', startedAt: Date.now() }] }]]);
+  await sandbox.loadSessions({ quiet: true });
+  const detailHits = hits.filter((h) => /\/api\/sessions\/ghost-1$/.test(h.url));
+  ok('当前会话已不在列表里时，不再发出它的详情请求（否则每轮一个 404）',
+    detailHits.length === 0, JSON.stringify(hits.map((h) => h.url)));
+  // 上面那条对"running/waiting 的失效会话"才有真正的判别力：旧分支只在状态是
+  // running/waiting 时才发详情请求，所以拿一个 done 的会话去测，那条断言在改坏之后
+  // 照样是绿的（实测：把新分支禁用，这条不红）。补一条 running 的，让它能红。
+  state.currentSessionId = 'ghost-run';
+  const hitsRun = routeFetch([[/\/api\/sessions\?/, { sessions: [{ id: 'alive-2', chatKey: 'group:1', status: 'done', startedAt: Date.now() }] }]]);
+  await sandbox.loadSessions({ quiet: true });
+  ok('失效的 running/waiting 会话同样不再请求详情（旧分支恰恰会对它发请求）',
+    hitsRun.filter((h) => /\/api\/sessions\/ghost-run$/.test(h.url)).length === 0 && state.currentSessionId === null,
+    JSON.stringify(hitsRun.map((h) => h.url)));
+  ok('并且把指针清掉（不清的话下一轮还会再来一次）',
+    state.currentSessionId === null && state.sessionDetail === null, String(state.currentSessionId));
+  ok('详情面板回到"未选中"的提示，而不是留着一份已失效的会话',
+    $el('#session-detail').innerHTML.includes('选择左侧会话'), $el('#session-detail').innerHTML.slice(0, 80));
+
+  // 对照：会话还在列表里时，不该被误清 —— 否则"删一个"会连带清掉用户正在看的另一个
+  const hits2 = routeFetch([[/\/api\/sessions\?/, { sessions: [{ id: 'alive-2', chatKey: 'group:1', status: 'done', startedAt: Date.now() }] }]]);
+  state.currentSessionId = 'alive-2';
+  await sandbox.loadSessions({ quiet: true });
+  ok('对照：会话仍在列表里时指针保留（只清"真的没了"那个）',
+    state.currentSessionId === 'alive-2' && hits2.length === 1, String(state.currentSessionId));
+}
+
+// ═══════════ G. 网络层失败要说明白，而不是把 Failed to fetch 丢给用户 ═══════════
+{
+  const { api } = await import('../ui/js/api.js');
+  sandbox.fetch = async () => { throw new TypeError('Failed to fetch'); };
+  let message = '';
+  try { await api('/api/sessions/x', { method: 'DELETE' }); } catch (e) { message = e.message; }
+  ok('连不上管理端时给出人能看懂的原因（保留原始信息）',
+    message.includes('连不上管理端') && message.includes('Failed to fetch'), message);
+
+  // 关键：**不能把它当成成功**。调用方靠抛错来决定"这条到底删掉没有"。
+  let threw = false;
+  try { await api('/api/sessions/x', { method: 'DELETE' }); } catch { threw = true; }
+  ok('网络失败仍然抛错（吞掉的话删除会假装成功，而服务端可能根本没收到）', threw);
+}
+
 console.log(`\n════ 通过 ${pass} / 失败 ${fail} ════`);
 process.exit(fail === 0 ? 0 : 1);

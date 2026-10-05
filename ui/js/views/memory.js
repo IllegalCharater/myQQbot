@@ -410,7 +410,10 @@ export async function loadMemoryDetail(chatKey) {
       try {
         const r = await api(`/api/memory-files/${chatKey.replace(':', '_')}`, { method: 'DELETE' });
         if (status) status.textContent = `已清空（${r.removedMembers ?? count} 个群友）`;
-        loadMemoryDetail(chatKey);
+        // 列表与详情都重新拉：这个会话的记忆已经被删掉、目录也不再存在，
+        // 详情区继续显示原来那批印象就是"删了没反应"的观感。
+        await loadMemoryView();
+        if (state.currentMemoryChatKey) await loadMemoryDetail(state.currentMemoryChatKey).catch(() => {});
         renderMemoryList();
       } catch (error) {
         if (status) status.textContent = `清空失败：${error.message}`;

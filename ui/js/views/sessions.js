@@ -26,6 +26,18 @@ export async function loadSessions({ quiet = false } = {}) {
       const cur = state.sessions.find((s) => s.id === state.currentSessionId);
       if (cur && (cur.status === 'running' || cur.status === 'waiting')) {
         loadSessionDetail(state.currentSessionId, { quiet: true });
+      } else if (!cur) {
+        // **当前打开的会话已经不在列表里了**（被删掉、或被 keepSessionFiles 清掉）。
+        // 必须在这里把指针清掉，否则详情轮询会一直拿着这个已失效的 id 去请求，
+        // 每轮都收获一个 404 —— 界面上就是"加载失败：会话不存在"反复出现，
+        // 而列表里那一行早就没了（实测踩到：删掉正在查看的会话后出现这条 404）。
+        state.currentSessionId = null;
+        state.sessionDetail = null;
+        lastDetailFp = null;
+        const detail = $('#session-detail');
+        if (detail && state.tab === 'sessions') {
+          detail.innerHTML = '<div class="empty-hint">← 选择左侧会话查看完整过程</div>';
+        }
       }
     }
   } catch (e) { if (!quiet) console.error(e); }
@@ -145,8 +157,26 @@ export function startListPoller() {
 }
 startListPoller();
 
-export function renderSessionList() {
-  const box = $('#session-items');
+/**
+ * 删除失败后核一次事实：这条会话是不是真的已经没了？
+ *
+ * 存在的理由：`fetch` 在"请求已送达、响应在回来路上断了"时也会 reject，所以 catch 到错误
+ * **不等于**服务端没删。直接弹"失败"会让用户对着一条已经不存在的会话反复点。
+ * 刷新一次列表即可判定，顺带把界面同步到真实状态。
+ *
+ * 判定不出来（连列表都拉不到）时返回 `false` —— 宁可保守地报失败，也不要谎报成功。
+ */
+async function sessionMissingAfter(id) {
+  try {
+    const data = await api('/api/sessions?limit=1048576');
+    state.sessions = data.sessions || [];
+    return !state.sessions.some((s) => s.id === id);
+  } catch {
+    return false;
+  }
+}
+
+export function renderSessionList() {  const box = $('#session-items');
   state.seenSessionIds = state.seenSessionIds || new Set();
   // 分页：一次只渲染 sessionLimit 条，滚到底部再加载下一批（见 SESSION_PAGE 常量）。
   // 会话可能积累到几百条，全量渲染会让列表变卡。
@@ -219,9 +249,25 @@ export function renderSessionList() {
         }
         await loadSessions({ quiet: true });
         renderSessionList();
+        // 详情也重新拉（用户明确要求"刷新页面"）：删的不是当前那条时右侧保持原样，
+        // 删的正是当前那条时上面已经把面板复位了。这里只在仍有选中项时补一次刷新。
+        if (state.currentSessionId) await loadSessionDetail(state.currentSessionId, { quiet: true });
       } catch (error) {
-        alert(`删除失败：${error.message}`);
-        btn.disabled = false;
+        // **网络层失败 ≠ 服务端没删掉**。`fetch` 在"请求已经送达、响应在回来路上断了"时
+        // 同样会 reject，于是删除明明成功、界面却弹一句"失败"，用户会重复点。
+        // 所以这里先核一次事实（刷新列表看它还在不在），再决定报成功还是失败。
+        const gone = await sessionMissingAfter(id);
+        if (gone) {
+          if (state.currentSessionId === id) {
+            state.currentSessionId = null;
+            state.sessionDetail = null;
+            lastDetailFp = null;
+          }
+          renderSessionList();
+        } else {
+          alert(`删除失败：${error.message}\n\n（这条会话仍然存在，可以再试一次）`);
+          btn.disabled = false;
+        }
       }
     });
   });

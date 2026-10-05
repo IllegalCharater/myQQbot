@@ -135,7 +135,14 @@ export class ChatStore {
   }
 
   listChats() {
-    // 从磁盘文件名还原（group_123.json -> group:123），已加载的直接带上
+    // 从磁盘文件名还原（group_123.json -> group:123），已加载的直接带上。
+    //
+    // **只列磁盘上有文件的会话**（`.filter(hasChat)`）。这不是多余的一步：
+    // `#state()` 是"读不到就建个空对象放进缓存"的语义，所以任何人在删除之后碰一下这个
+    // 会话（`reloadWindow` 的播种、`getChatMeta`、`recentIncoming`……）都会在缓存里
+    // **重建出一个没有文件的对象**。照着缓存列的话，删干净的会话会一直挂在存档列表里、
+    // 点开却是空的（实测踩到：删到最后一条后列表里那条始终在）。
+    // 文件才是"这个会话存在"的唯一权威 —— 与 `DropIfEmpty` 是同一条判据。
     try {
       const files = fs.readdirSync(MESSAGES_DIR).filter((f) => /^(group|private)_\d+\.json$/.test(f));
       for (const f of files) {
@@ -143,7 +150,7 @@ export class ChatStore {
         if (m) this.#state(`${m[1]}:${m[2]}`);
       }
     } catch { /* 目录不存在 */ }
-    return [...this.chats.keys()];
+    return [...this.chats.keys()].filter((key) => this.hasChat(key));
   }
 
   getChatMeta(chatKey: string) {
@@ -497,8 +504,13 @@ export class ChatStore {
    * 唯一一个**一次操作抹掉一整段历史**的入口。
    */
   removeChat(chatKey: string) {
+    // **条数在删之前算好**，而且要**先加载**：这个会话可能还没进缓存（比如管理端刚重启、
+  // 或者读盘路径走的是另一个实例），`this.chats.has()` 为假时直接取 0 会谎报"删了 0 条"。
+    // 注意不能在删完之后再调 `getChatMeta` —— 那会走 `#state()` 把缓存条目重建出来，
+    // 于是 `listChats()` 又能列出这个已经没有文件的会话（同 `deleteByLocalId` 那条注释）。
+    const count = this.hasChat(chatKey) ? this.#state(chatKey).messages.length : 0;
     const backup = this.backupChatFileTo(chatKey, 'removed');
-    const removed = this.chats.delete(chatKey);
+    const wasCached = this.chats.delete(chatKey);
     let archiveRemoved = false;
     try {
       if (fs.existsSync(archiveFile(chatKey))) {
@@ -513,12 +525,65 @@ export class ChatStore {
     } catch (error: unknown) {
       console.warn(`[store] 存档删除失败(${chatKey}):`, errorText(error));
     }
-    return { removed: removed || archiveRemoved || !!backup, backup, archiveRemoved };
+    return { removed: wasCached || archiveRemoved || !!backup, removedMessages: count, backup, archiveRemoved };
+  }
+
+  /** 这个会话在磁盘上有没有存档（面板"新建会话"要先判重）。 */
+  hasChat(chatKey: string) {
+    try {
+      return fs.existsSync(chatFile(chatKey));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 建一份**空存档**（面板"新建会话"用），让它先出现在存档列表里，之后再往里加内容。
+   *
+   * 为什么需要它：`listChats()` 是**扫磁盘文件名**还原列表的，所以一个"还没有任何存档"
+   * 的会话根本不会出现在列表里 —— 用户想先给它建一条、或者只是把它纳入管理，就没有入口。
+   *
+   * 幂等：已存在时原样返回 `created: false`，**不覆盖**已有内容。
+   */
+  ensureChat(chatKey: string) {
+    if (!/^(group|private):\d+$/.test(chatKey)) throw new Error('会话必须是 group:<群号> 或 private:<QQ号>');
+    if (this.hasChat(chatKey)) return { created: false, chatKey };
+    const state = this.#state(chatKey);
+    saveChat(state);
+    return { created: true, chatKey };
+  }
+
+  /**
+   * 存档已经没有任何消息时，把整份文件删掉（`removeChat` 与 `deleteByLocalId` 都走这里）。
+   *
+   * 判据是**一条消息都不剩**（`messages.length === 0`）。留着空文件的话，存档页上会多出
+   * 一个"看似有、点开全空"的条目，而 `listChats()` 又按文件名列出它 —— 用户会以为删干净了、
+   * 却发现那条还在（实测就是这么反馈的）。同时把内存缓存摘掉，避免后续写入把它复活。
+   *
+   * 注意 `nextLocalId` 特意**不重置**：它只存在于即将被删掉的文件里，留着不影响，
+   * 也免得多一条"什么情况下该重置"的分支。
+   */
+  #dropIfEmpty(chatKey: string) {
+    const st = this.chats.get(chatKey);
+    if (!st || st.messages.length > 0) return false;
+    this.chats.delete(chatKey);
+    try {
+      fs.rmSync(chatFile(chatKey), { force: true });
+    } catch (error: unknown) {
+      console.warn(`[store] 空存档删除失败(${chatKey}):`, errorText(error));
+    }
+    return true;
   }
 
   /**
    * 按本地 id 真删一条存档。删掉的 id 不回收（nextLocalId 不动）。
-   * @returns {{removed:object, backup:string}|null}
+   *
+   * `remaining` 在**这里**算好返回，调用方**不许**再回头调 `getChatMeta()` 取条数 ——
+   * `getChatMeta` 内部走 `#state()`，对刚被 `#dropIfEmpty` 摘掉的会话来说那一步会
+   * **把缓存条目重新建出来**（磁盘上没有文件，`listChats()` 却又能列出它）。
+   * 这个坑实测踩到过：删到最后一条后，存档列表里那条一直在，点开却是空的。
+   *
+   * @returns {{removed:object, backup:string, chatDropped:boolean, remaining:number}|null}
    */
   deleteByLocalId(chatKey: string, localId: unknown) {
     const st = this.#state(chatKey);
@@ -526,8 +591,11 @@ export class ChatStore {
     if (idx < 0) return null;
     const backup = this.backupChatFileTo(chatKey, 'panel');   // 与下面之间不夹 await
     const [removed] = st.messages.splice(idx, 1);
-    saveChat(st);
-    return { removed, backup };
+    const remaining = st.messages.length;
+    // 删到一条不剩时整份删掉：留个空文件会让存档列表里多一个"点开全空"的条目。
+    const chatDropped = this.#dropIfEmpty(chatKey);
+    if (!chatDropped) saveChat(st);
+    return { removed, backup, chatDropped, remaining };
   }
 
   /**

@@ -18,6 +18,7 @@ import {
 } from './views/sessions.js';
 import { loadSettings } from './views/settings/index.js';
 import { closeModelModal, modelModalShell } from './parts/modal.js';
+import { openNewChatModal } from './parts/new-chat.js';
 
 
 
@@ -406,6 +407,16 @@ function initShellBindings() {
     // focusout 在切换焦点那一刻触发：等一拍再判断，避免"从 A 框点到 B 框"被当成离开
     setTimeout(() => { if (!memTyping()) refreshMemoryViewSoon(); }, 60);
   });
+  // 两个页签各有一个「新建会话」，都指向同一个弹窗与同一个接口 ——
+  // 一次建出空存档与空记忆，所以从哪一页进去结果都一样，只是建完刷新的侧重不同。
+  for (const id of ['#chat-new-btn', '#memory-new-btn']) {
+    $(id)?.addEventListener('click', () => {
+      void openNewChatModal(async () => {
+        await loadChats({ quiet: true });
+        await loadMemoryView();
+      });
+    });
+  }
 }
 
 // ── 启动 ──
