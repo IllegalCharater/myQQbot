@@ -536,8 +536,27 @@ function textOf(input: string): string {
  * 通用启发式会带上一些非结果链接（导航、页脚），所以**它只是兜底**：
  * 用它时后面的条目质量会差，配 `resultClass` 才准。
  */
+/**
+ * 取一个宿主名的"站点家族"（可注册域，近似 eTLD+1）：`a.b.c` → `b.c`。
+ *
+ * **为什么需要它**：站内搜索页与它搜出来的内容**经常不在同一个子域上**。实测 B 站：
+ * 搜索页是 `search.bilibili.com`，而**每一条结果都在 `www.bilibili.com`**。
+ * 原先那条"结果宿主必须等于搜索页宿主、或是它的子域"的过滤会把这些全部丢掉 ——
+ * 表现为"这个站的 HTML 里明明有 47 个结果，解析出来却是 0 条"。
+ *
+ * 对 `com.cn`/`co.jp` 这类二级后缀会略微放宽（`foo.com.cn` 与 `bar.com.cn` 会被当同一家族）。
+ * 这是**有意的取舍**：收藏夹的语义本来就是"限定在这个站点家族里"，而真正的把关在
+ * 探测那一步的基线差 + 乱串对照。
+ */
+function siteFamily(hostname: string): string {
+  const parts = String(hostname || '').toLowerCase().split('.').filter(Boolean);
+  if (parts.length <= 2) return parts.join('.');
+  return parts.slice(-2).join('.');
+}
+
 export function parseSiteSearch(html: string, pageUrl: string, resultClass?: string): SearchResult[] {
   const baseHost = (() => { try { return new URL(pageUrl).hostname; } catch { return ''; } })();
+  const baseFamily = siteFamily(baseHost);
   const results: SearchResult[] = [];
   const seen = new Set<string>();
 
@@ -554,9 +573,10 @@ export function parseSiteSearch(html: string, pageUrl: string, resultClass?: str
       return;
     }
     if (target.protocol !== 'http:' && target.protocol !== 'https:') return;
-    // **只收本站链接**：站内搜索页里跨站的通常是"相关站点/广告"之类的噪声，
-    // 而收藏夹的意义正是要这个站自己的内容。
-    if (baseHost && !(target.hostname === baseHost || target.hostname.endsWith(`.${baseHost}`))) return;
+    // **只收本站（同一站点家族）的链接**：站内搜索页里跨站的通常是"相关站点/广告"之类的噪声，
+    // 而收藏夹的意义正是要这个站自己的内容。判据用**站点家族**而不是"宿主或它的子域" ——
+    // 后者会丢掉 `search.bilibili.com` 搜出来的 `www.bilibili.com` 结果（实测：47 条全丢）。
+    if (baseFamily && siteFamily(target.hostname) !== baseFamily) return;
     const url = target.toString();
     const key = urlKey(url);
     if (key && seen.has(key)) return;
@@ -769,13 +789,19 @@ export function siteSearchCandidates(input: string): string[] {
   //     41KB 的 `mw-search-result` 结果页，而 `/search?q=` 它根本不认），只配 `search`
   //     这一个参数名 —— MediaWiki 的参数名恒为 `search`，配全套纯属浪费；
   //   · 站点根的参数名只在提示词场景下有用，用 hint 覆盖即可，不主动试。
+  // 站点根也要配几个参数名，不能只有一个 `?q=`：**有些站的搜索就在根路径上，而且用的是
+  // 别的参数名**。实测 B 站：`https://search.bilibili.com/?keyword=test` 返回 95 条真结果，
+  // 而 `/search?q=` 是 **404** —— 只配 `/?q=` 的话自动检测必然漏掉它（只能靠用户自己填 hint）。
+  // 这里只挑最可能的三个，控制请求量。
   const out: string[] = [];
   for (const p of ['q', 'query', 'search', 'keyword', 'wd', 'word']) {
     out.push(`${origin}/search?${p}={q}`);
   }
   out.push(`${origin}/w/index.php?search={q}`);
   out.push(`${origin}/index.php?search={q}`);
-  out.push(`${origin}/?q={q}`);
+  for (const p of ['q', 'keyword', 'search']) {
+    out.push(`${origin}/?${p}={q}`);
+  }
   return out;
 }
 
@@ -827,24 +853,40 @@ export async function probeSiteSearch(
   let budgetExceeded = false;
   const diagnostics: NonNullable<SiteSearchProbe['diagnostics']> = [];
 
-  /** 取一页 HTML。失败返回 null；超预算返回 'budget'。 */
+  /**
+   * 取一页 HTML。失败返回 null；超预算返回 'budget'。
+   *
+   * **带一次重试**：这是一串几十个请求的连续探测，任何一次网络抖动都会让该候选被判成
+   * "取页失败"、悄悄丢掉一个本来可用的地址。实测踩到过：GitHub 在十几秒内**每个** URL
+   * 都 `fetch failed`（含纯首页），而同一时刻别的站点一切正常 —— 这种抖动是常态，
+   * 不该让一次探测给出错误的"找不到"。重试只在**还来得及**时做（离死线太近就直接放弃），
+   * 且只重试一次，避免把预算耗在真的不可达的站点上。
+   */
   const fetchHtml = async (url: string): Promise<string | null | 'budget'> => {
+    const netTimeout = () => Math.min(timeoutMs, Math.max(1000, deadline - Date.now()));
+    const attempt = async (): Promise<string | null> => {
+      tried++;
+      try {
+        const res = await fetch(url, {
+          headers: {
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'accept-language': 'zh-CN,zh;q=0.9'
+          },
+          signal: AbortSignal.timeout(netTimeout()),
+          redirect: 'follow'
+        });
+        if (!res.ok) return null;
+        return await res.text();
+      } catch {
+        return null;
+      }
+    };
     if (Date.now() > deadline) { budgetExceeded = true; return 'budget'; }
-    tried++;
-    try {
-      const res = await fetch(url, {
-        headers: {
-          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-          'accept-language': 'zh-CN,zh;q=0.9'
-        },
-        signal: AbortSignal.timeout(Math.min(timeoutMs, Math.max(1000, deadline - Date.now()))),
-        redirect: 'follow'
-      });
-      if (!res.ok) return null;
-      return await res.text();
-    } catch {
-      return null;
-    }
+    const first = await attempt();
+    if (first !== null) return first;
+    // 重试需要「够一次最小超时」的剩余预算，否则只会把死线耗光却没有结果
+    if (Date.now() + 1000 > deadline) { budgetExceeded = true; return 'budget'; }
+    return await attempt();
   };
 
   // 站点自身的基线链接集合：拿站点根当对照，用来把导航、页脚、侧栏减掉。

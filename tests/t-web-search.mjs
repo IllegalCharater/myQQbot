@@ -258,6 +258,27 @@ const relParsed = parseSiteSearch(
 );
 ok('相对链接按结果页的源解析（不是拼成怪路径）',
   relParsed.length === 1 && relParsed[0].url === `${siteBase}/wiki/Rel`, JSON.stringify(relParsed));
+
+// **兄弟子域必须算同站**：站内搜索页与它搜出来的内容经常不在同一个子域上。
+// 实测 B 站：搜索页是 `search.bilibili.com`，而每一条结果都在 `www.bilibili.com`。
+// 旧判据是"结果宿主等于搜索页宿主、或是它的子域"，于是那 47~95 条结果**全部被丢掉**，
+// 表现为"页面上明明有结果、解析出来却是 0 条"。
+// 这里用保留域名模拟（`*.example.com` 不会真的联网，解析失败也不影响 —— 这条只测 URL 归属判定）。
+const siblingParsed = parseSiteSearch(
+  '<li><a href="https://content.example.com/wiki/Sib">兄弟子域条目</a>'
+  + '<div>这是一段足够长的摘要文本，用来通过最小长度门槛。</div></li>',
+  'https://search.example.com/search?q=x'
+);
+ok('兄弟子域的结果被收下（B 站那类站点靠这条才能解析出结果）',
+  siblingParsed.length === 1 && siblingParsed[0].url === 'https://content.example.com/wiki/Sib',
+  JSON.stringify(siblingParsed));
+// 但**不同站点家族**仍要丢掉，否则"只在这个站里搜"就名存实亡
+const foreignParsed = parseSiteSearch(
+  '<li><a href="https://other.example.net/wiki/X">站外条目</a>'
+  + '<div>这是一段足够长的摘要文本，用来通过最小长度门槛。</div></li>',
+  'https://search.example.com/search?q=x'
+);
+ok('站点家族不同的链接仍被丢掉', foreignParsed.length === 0, JSON.stringify(foreignParsed));
 ok('只收本站链接（站外那条被丢掉）',
   !out.results.some((r) => r.url.includes('other.example.com')), JSON.stringify(out.results.map((r) => r.url)));
 ok('重复 URL 只保留一条',
