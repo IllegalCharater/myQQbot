@@ -380,7 +380,30 @@ body {
 .collapsible { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 14px; background: var(--bg-2); }
 .collapsible > summary::before { content: '▸ '; }
 .collapsible[open] > summary::before { content: '▾ '; }
-.collapsible .coll-body { padding: 4px 14px 12px; white-space: pre-wrap; font-family: var(--mono); font-size: 11.5px; color: #aab3c5; line-height: 1.65; max-height: 300px; overflow-y: auto; }
+.collapsible .coll-body { padding: 4px 14px 12px; white-space: pre-wrap; font-family: var(--mono); font-size: 11.5px; color: #aab3c5; line-height: 1.65; max-height: 300px; overflow-y: auto; overflow-x: auto; }
+
+/* ── 会话日志的横向滚动 ──
+   这些块是 `pre-wrap`（软换行保留）**加**横向滚动，不是二选一：
+     · `pre-wrap` 让自然语言在空白处折行 —— 否则一段普通提示词会长到没法读；
+     · `overflow-x` 兜住**折不了的行**：JSON 里被 `\n` 转义成两字符的长串、URL、
+       没有空格的长 token。这类内容 `pre-wrap` 折不动，旧版会被 `.detail-pane`
+       （只有 `overflow-y:auto`，横向是 visible）截掉右边，**看不到后半截**（**实测反馈**）。
+   `pre` 会取消软换行、滚动条常驻，对普通文本反而更难读，所以不用它。 */
+.collapsible .coll-body,
+.tool-args,
+.tool-result {
+  overflow-x: auto;
+}
+/* 内容真的横向溢出时给个细滚动条，别用默认的粗条压住代码 */
+.collapsible .coll-body::-webkit-scrollbar,
+.tool-args::-webkit-scrollbar,
+.tool-result::-webkit-scrollbar { height: 8px; width: 8px; }
+.collapsible .coll-body::-webkit-scrollbar-thumb,
+.tool-args::-webkit-scrollbar-thumb,
+.tool-result::-webkit-scrollbar-thumb { background: #3a4152; border-radius: 4px; }
+.collapsible .coll-body::-webkit-scrollbar-track,
+.tool-args::-webkit-scrollbar-track,
+.tool-result::-webkit-scrollbar-track { background: transparent; }
 
 .msg-flow { display: flex; flex-direction: column; gap: 10px; }
 

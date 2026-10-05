@@ -372,6 +372,19 @@ ok('备注行有独立样式 .note-row', css.includes('.archive-table .note-row'
 ok('转写结果行有独立样式 .transcript-row', css.includes('.archive-table .transcript-row'));
 ok('漫画完成回调行有独立样式 .jmcomic-result-row', css.includes('.archive-table .jmcomic-result-row'));
 
+// ── 会话日志的横向滚动 ──
+// `.detail-pane` 只有 `overflow-y: auto`（横向是 visible），所以**折不了的长行**会被截掉
+// 右边、后半截根本看不到（**实测反馈**）。这几块是 `pre-wrap`（自然语言照常软换行）
+// **加** `overflow-x`，不是二选一 —— 覆盖不到的话这个 bug 会静默回来。
+// ⚠️ 这条只证明声明**存在**，证明不了它生效（被后续规则覆盖同样会红不了）。
+for (const sel of ['.collapsible .coll-body', '.tool-args', '.tool-result']) {
+  const esc2 = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  ok(`${sel} 有 overflow-x: auto（否则长行被截、看不到后半截）`,
+    new RegExp(`${esc2}[^{]*\\{[^}]*overflow-x:\\s*auto`, 's').test(css));
+}
+ok('横向滚动**没有**用 `white-space: pre` 换掉软换行（那会让普通文本长到没法读）',
+  /\.collapsible \.coll-body \{[^}]*white-space:\s*pre-wrap/.test(css));
+
 console.log('\n═══ 历史摘要：设置项 ↔ 接线 ↔ 保存分支 ═══');
 // 一、顶部块：刷新钩子挂对了地方
 ok('顶部块的刷新挂在 updateChatMessagesBody 末尾（轮询/SSE/查找/翻页都汇到这里）',
