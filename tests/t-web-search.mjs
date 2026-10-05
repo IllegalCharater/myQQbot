@@ -907,6 +907,38 @@ ok('⑤ 合法请求结构留下', !!bl.find((b) => b.key === 'ok1')?.request, J
 ok('⑤ 非白名单方法（DELETE）被丢弃', !bl.find((b) => b.key === 'bad1')?.request);
 ok('⑤ 缺 {q} 的请求地址被丢弃（拼不出查询词）', !bl.find((b) => b.key === 'bad2')?.request);
 
+// ⑥ **「网页地址」留空、只配了请求结构时，条目必须留下**（实测反馈的 bug）
+//
+// 旧判据先看 `!host` 就丢，于是 `url` 为空 = 整条丢掉（连请求结构一起没）：
+// 用户配好接口、保存、刷新 —— 那条就消失了。而请求结构里本来就写着完整接口地址，
+// 域名从那里取即可，没理由再要求用户把域名抄一遍。
+// 三种来源都要覆盖：endpoint 里的整条地址 / Host 头 / 用户填的那一栏优先。
+console.log('\n═══ 17. 只配请求结构（网页地址留空）不该被丢 ═══');
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [{
+  key: 'empty-url', url: '', purpose: '查百科',
+  request: { method: 'GET', endpoint: `https://appbuilder.baidu.com/v2/baike/lemma/get_list_by_title?lemma_title={q}&top_k={top_k}` }
+}] } });
+bl = bookmarkList();
+ok('⑥ 条目留下了（旧版这里会被整条丢掉 → 刷新后设置页里就没了）',
+  bl.length === 1 && bl[0]?.key === 'empty-url', JSON.stringify(bl.map((b) => b.key)));
+ok('⑥ 请求结构也留下了', !!bl[0]?.request, JSON.stringify(bl[0]?.request));
+ok('⑥ url 从请求结构的地址里推出来', bl[0]?.host === 'appbuilder.baidu.com', JSON.stringify(bl[0]?.host));
+// 只写路径 + Host 头（文档里那种写法）
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [{
+  key: 'host-only', url: '', purpose: 'p',
+  request: { method: 'GET', endpoint: '/v2/x?q={q}', headers: [{ name: 'Host', value: 'api.example.com' }] }
+}] } });
+ok('⑥ 只写路径时域名从 Host 头取', bookmarkList()[0]?.host === 'api.example.com', JSON.stringify(bookmarkList()[0]?.host));
+// 对照：用户填了那一栏时**以他填的为准**，不被请求结构覆盖
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [{
+  key: 'both', url: 'zh.wikipedia.org', purpose: 'p',
+  request: { method: 'GET', endpoint: 'https://other.example.com/x?q={q}' }
+}] } });
+ok('⑥ 对照：用户填的域名优先（不被请求结构覆盖）', bookmarkList()[0]?.host === 'zh.wikipedia.org', JSON.stringify(bookmarkList()[0]?.host));
+// 对照：两个来源都没有 → 仍然丢弃（没有站点就拼不出检索）
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [{ key: 'none', url: '', purpose: 'p' }] } });
+ok('⑥ 对照：没有任何站点来源时仍然丢弃', bookmarkList().length === 0, JSON.stringify(bookmarkList()));
+
 await new Promise((r) => bqsrv.close(r));
 
 await new Promise((r) => srv.close(r));

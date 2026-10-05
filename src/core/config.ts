@@ -637,36 +637,18 @@ function normalizeConfigShape<T>(input: T): T {
       // 这样"合并成一栏"不需要用户做任何选择：填什么形态，程序自己认。
       const rawInput = String(item.url ?? item.site ?? '').trim();
       const asTemplate = /^https?:\/\//i.test(rawInput) && rawInput.includes('{q}') ? rawInput : '';
-      const host = hostnameOf(rawInput);
+      let host = hostnameOf(rawInput);
       const rawKey = String(item.key ?? '').trim();
       const purpose = String(item.purpose ?? '').trim().slice(0, MAX_BOOKMARK_PURPOSE);
-      // 新形状三条硬约束：域名可解析、枚举值是合法 ASCII 标识符、**用途非空**。
-      // 例外：**只填了搜索模板、用途还空着**的条目仍然入库（那是迁移来的老数据，
-      // 丢掉就等于删了用户的收藏），但域名必须能解析出来 —— 没有域名就没有 `site:` 兜底。
-      if ((!host || !isBookmarkKey(rawKey) || !purpose) && !(asTemplate && host && isBookmarkKey(rawKey))) continue;
       if (usedKeys.has(rawKey)) continue;   // 重复枚举值：先到先得，否则模型传一个键会命中两条
-      usedKeys.add(rawKey);
-      const entry: typeof bookmarks[number] = { key: rawKey, url: host, purpose };
-      // `searchUrl` 模板：**只接受 http/https，且必须带 `{q}` 占位符**。
-      // 两条都是硬要求，理由各不同：
-      //   · 协议白名单 —— 这个地址会被直接请求，`file:`/`javascript:` 之类不该有机会；
-      //   · 必须带 `{q}` —— 没有占位符就拼不出查询词，请求会打到搜索页首页并返回
-      //     "什么都能搜"的页面，表现为"结果文不对题"而不是报错，比直接拒掉难查得多。
-      const searchUrl = (asTemplate || String(item.searchUrl ?? '').trim()).slice(0, MAX_BOOKMARK_SEARCH_URL);
-      if (searchUrl) {
-        if (/^https?:\/\//i.test(searchUrl) && searchUrl.includes('{q}')) entry.searchUrl = searchUrl;
-        else console.warn(`[config] 收藏夹「${rawKey}」的站内搜索地址被忽略：必须是 http(s) 且含 {q} 占位符。`);
-      }
-      const resultClass = String(item.resultClass ?? '').trim().slice(0, MAX_BOOKMARK_CLASS);
-      if (resultClass) entry.resultClass = resultClass;
 
-      // ── 请求结构（可选）──
-      // 这是"权威 JSON 接口"唯一的接入方式：站内搜索链只解析 HTML 链接，而接口没有结果页。
-      // 三条校验，与 `searchUrl` 同一个判据：
-      //   · 方法在白名单内（只 GET/POST —— 这是取数据的配置，不该有副作用）；
-      //   · 地址非空、且**必须含 `{q}`**（拼不出查询词的请求不如不配）；
-      //   · 请求头逐条 trim + 限长（防止整页文档被粘进来）。
+      // 先把**请求结构**解析出来：`url` 可以**从它的地址推出来**（见下）。
+      // 顺序很关键 —— 旧版先判 `!host` 就丢，于是"只配了请求结构、上面那一栏留空"的
+      // 条目被整条丢掉（连请求结构一起没），刷新后设置页就空了（**实测反馈**）。
+      // 「请求结构」里已经写着完整的接口地址，那个地址就是站点，没理由再要求用户抄一遍域名。
       const rawReq = isPlainRecord(item.request) ? item.request : null;
+      let parsedRequest: { method: string; endpoint: string; headers?: Array<{ name: string; value: string }> } | undefined;
+      let endpointHost = '';
       if (rawReq) {
         const method = String(rawReq.method ?? 'GET').trim().toUpperCase();
         const endpoint = String(rawReq.endpoint ?? rawReq.url ?? '').trim().slice(0, MAX_BOOKMARK_ENDPOINT);
@@ -685,9 +667,38 @@ function normalizeConfigShape<T>(input: T): T {
         } else if (!endpoint || !endpoint.includes('{q}')) {
           console.warn(`[config] 收藏夹「${rawKey}」的请求结构被忽略：请求地址必须含 {q} 占位符（查询词要能填进去）。`);
         } else {
-          entry.request = headers.length ? { method, endpoint, headers } : { method, endpoint };
+          parsedRequest = headers.length ? { method, endpoint, headers } : { method, endpoint };
+          // 只写路径（靠 Host 头补全）时，域名在 Host 头里 —— 与 `resolveEndpoint()` 同一判据
+          endpointHost = hostnameOf(/^https?:\/\//i.test(endpoint) ? endpoint : '')
+            || String(headers.find((h) => h.name.toLowerCase() === 'host')?.value ?? '').trim();
         }
       }
+      // `url` 的取值顺序：**用户填的那一栏** → **请求结构里的地址**。
+      // 后一条是必须的：只配了请求结构而上面留空是完全合理的用法。
+      if (!host) host = endpointHost;
+
+      // 硬约束：站点标识可解析、枚举值是合法 ASCII 标识符。
+      // **用途可以为空**（迁移来的老数据不能丢；新配的条目由前端提示补用途）。
+      const hasUsableSource = !!asTemplate || !!parsedRequest;
+      if ((!host || !isBookmarkKey(rawKey) || (!purpose && !hasUsableSource))) continue;
+      usedKeys.add(rawKey);
+      const entry: typeof bookmarks[number] = { key: rawKey, url: host, purpose };
+      // `searchUrl` 模板：**只接受 http/https，且必须带 `{q}` 占位符**。
+      // 两条都是硬要求，理由各不同：
+      //   · 协议白名单 —— 这个地址会被直接请求，`file:`/`javascript:` 之类不该有机会；
+      //   · 必须带 `{q}` —— 没有占位符就拼不出查询词，请求会打到搜索页首页并返回
+      //     "什么都能搜"的页面，表现为"结果文不对题"而不是报错，比直接拒掉难查得多。
+      const searchUrl = (asTemplate || String(item.searchUrl ?? '').trim()).slice(0, MAX_BOOKMARK_SEARCH_URL);
+      if (searchUrl) {
+        if (/^https?:\/\//i.test(searchUrl) && searchUrl.includes('{q}')) entry.searchUrl = searchUrl;
+        else console.warn(`[config] 收藏夹「${rawKey}」的站内搜索地址被忽略：必须是 http(s) 且含 {q} 占位符。`);
+      }
+      const resultClass = String(item.resultClass ?? '').trim().slice(0, MAX_BOOKMARK_CLASS);
+      if (resultClass) entry.resultClass = resultClass;
+      // 请求结构已经解析好了，直接接上（校验在上面做完了 —— 它必须排在 `url` 判定之前，
+      // 因为 `url` 可能是从它推出来的）
+      if (parsedRequest) entry.request = parsedRequest;
+
       // ── 静态参数（可选）──
       // 给 `{q}` 之外的占位符用（如 `{top_k}`）。`q` 被显式排除：它是运行时查询词，
       // 不许被一个静态值顶掉 —— 否则"查什么"就变成配置里写死的了。

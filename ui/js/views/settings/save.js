@@ -132,29 +132,36 @@ export async function saveConfig({ quiet = false } = {}) {
       // 站内搜索模板，否则当域名。**判据必须与后端 `normalizeConfigShape` 逐字同形** ——
       // 两端各写一套的话，设置页显示的和实际参与检索的会不是同一份（那种问题极难查）。
       const input = (row.querySelector('[data-bm-url]')?.value || '').trim();
-      // 输入可能是域名，也可能是整条地址（含 `{q}` 的搜索模板、或普通网址）。
-      // `url` 一律存**归一出来的域名** —— 它就是提示词里给模型看的"这个站在哪儿"，
-      // 也是没有模板时拼 `site:` 的依据。与后端 `hostnameOf()` 同一个结果。
-      let host = input;
-      try {
-        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(input)) host = new URL(input).hostname;
-        else host = input.split('/')[0].split('?')[0].split('#')[0];
-      } catch { host = input; }
-      const item = {
-        key: (row.querySelector('[data-bm-key]')?.value || '').trim(),
-        url: host,
-        purpose: (row.querySelector('[data-bm-purpose]')?.value || '').trim()
-      };
-      if (/^https?:\/\//i.test(input) && input.includes('{q}')) item.searchUrl = input;
-      const resultClass = (row.querySelector('[data-bm-resultclass]')?.value || '').trim();
-      if (resultClass) item.resultClass = resultClass;
       // 请求结构与静态参数由弹窗写进行上的隐藏字段（`data-bm-req-json` / `data-bm-params-json`）。
       // 用 JSON 存而不是拆成一堆 input：弹窗是唯一编辑入口，拆开只会让"哪个 input 属于
       // 哪条请求头"这种账在重渲染后对不上。
+      //
+      // ⚠️ **必须先解析请求结构，再算 `url`** —— 顺序反了就会踩这个坑（实测反馈）：
+      // 用户只配了「请求结构」、上面那一栏留空，`url` 就是空串，下面那条过滤
+      // （`item.key && item.url && …`）**把整条丢掉**，连请求结构一起没，
+      // 刷新后设置页里那条就消失了。请求结构里本来就写着完整接口地址，域名从那里取即可。
       const reqJson = row.dataset.bmReqJson || '';
-      if (reqJson) { try { item.request = JSON.parse(reqJson); } catch { /* 坏值当没配 */ } }
       const paramsJson = row.dataset.bmParamsJson || '';
+      const item = { key: (row.querySelector('[data-bm-key]')?.value || '').trim(), url: '', purpose: (row.querySelector('[data-bm-purpose]')?.value || '').trim() };
+      if (reqJson) { try { item.request = JSON.parse(reqJson); } catch { /* 坏值当没配 */ } }
       if (paramsJson) { try { const p = JSON.parse(paramsJson); if (p && Object.keys(p).length) item.params = p; } catch { /* 同上 */ } }
+
+      // 归一域名。与后端 `hostnameOf()` 同一个结果。
+      const hostOf = (value) => {
+        const text = String(value || '').trim();
+        if (!text) return '';
+        try {
+          if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return new URL(text).hostname;
+          return text.split('/')[0].split('?')[0].split('#')[0];
+        } catch { return text; }
+      };
+      // 「网页地址」留空时从请求结构里推 —— 只配接口地址、上面留空是合理用法
+      item.url = hostOf(input)
+        || hostOf(item.request?.endpoint)
+        || String((item.request?.headers || []).find((h) => String(h?.name || '').trim().toLowerCase() === 'host')?.value || '').trim();
+      if (/^https?:\/\//i.test(input) && input.includes('{q}')) item.searchUrl = input;
+      const resultClass = (row.querySelector('[data-bm-resultclass]')?.value || '').trim();
+      if (resultClass) item.resultClass = resultClass;
       return item;
       // 过滤判据与后端一致：**只配了请求结构/搜索模板而没填用途**的条目，后端也收
       // （那是迁移来的老数据，丢掉等于删用户的收藏），所以这里不能按"三空就丢"卡掉它。
