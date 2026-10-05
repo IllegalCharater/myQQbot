@@ -362,7 +362,35 @@ export class MemoryStore {
     };
   }
 
-  /** 删除某成员的印象文件。 */
+  /**
+   * 某个会话的成员记忆已经一个不剩时，把它的目录一起删掉。
+   *
+   * **为什么必须删目录**：`listChats()` 是**扫目录**还原记忆列表的，所以只删成员文件、
+   * 留着空目录的话，记忆页上会继续列出这个会话（显示"暂无群友印象"）—— 用户把成员一个个
+   * 删光之后仍然看到那条记录，以为没删掉（实测就是这么反馈的）。
+   *
+   * 这条不变量的完整形态是：**目录存在 ⇒ 要么里面有成员文件，要么是用户明确"新建"出来的**。
+   * 于是"删光成员"必须落到删目录，否则这个不变量就漏了一个口子。
+   *
+   * 不删 `backups/`：里面是迁移前的旧单文件（用户数据），与"这个会话还在不在"无关。
+   * 但它不会让空目录被列出来 —— `listChats()` 只认 `group_<id>` / `private_<id>` 这种名字。
+   */
+  #dropIfEmpty(chatKey: string) {
+    const dir = chatDir(chatKey);
+    try {
+      if (!fs.existsSync(dir)) return false;
+      const members = fs.readdirSync(dir).filter((f) => f.endsWith('.json') && f !== '_meta.json');
+      if (members.length) return false;
+      this.cache.delete(chatKey);
+      fs.rmSync(dir, { recursive: true, force: true });
+      return true;
+    } catch (error: unknown) {
+      console.warn(`[memory] 空记忆目录删除失败(${chatKey}):`, errorText(error));
+      return false;
+    }
+  }
+
+  /** 删除某成员的印象文件。删掉最后一个成员时，连目录一起清掉（见 `#dropIfEmpty`）。 */
   removeMember(chatKey: string, userId: unknown) {
     const uid = String(userId ?? '').trim();
     if (!/^\d{1,15}$/.test(uid)) return false;
@@ -370,6 +398,8 @@ export class MemoryStore {
     const m = map.get(uid) || loadMember(chatKey, uid);
     map.delete(uid);
     try { fs.rmSync(memberFile(chatKey, uid, m.name), { force: true }); } catch { /* ignore */ }
+    // 删完最后一个成员 → 目录也删掉，否则记忆列表里会一直挂着这条"没有群友"的记录
+    this.#dropIfEmpty(chatKey);
     return true;
   }
 

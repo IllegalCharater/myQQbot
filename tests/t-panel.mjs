@@ -287,6 +287,42 @@ const oneDel = await (await fetch(`http://127.0.0.1:${port}/api/memory-files/gro
 ok('成员级删除仍然走它自己那条路由（没被整会话删除抢走）',
   oneDel.ok === true && !fs.existsSync(path.join(memDir2, '20001.json')), JSON.stringify(oneDel));
 
+// ⑤b **逐个删光成员之后**，这个会话必须从记忆列表里消失
+//
+// 这是实测反馈的一个 bug：`listChats()` 是扫**目录**还原列表的，而 `removeMember` 只删成员
+// 文件、留着空目录 —— 于是用户把某会话的记忆一个个删光，列表里那条**仍然在**（显示
+// "暂无群友印象"），看起来就是"删不掉"。判据与存档那边同一条：内容空了就把容器也清掉。
+const memDir3 = path.join(DIR, 'memory', 'group_795');
+fs.mkdirSync(memDir3, { recursive: true });
+for (const qq of ['30001', '30002']) {
+  fs.writeFileSync(path.join(memDir3, `${qq}.json`),
+    JSON.stringify({ userId: qq, name: '丁', impressions: [{ content: 'x', createdAt: base }] }), 'utf8');
+}
+const memListBefore = (await (await fetch(`http://127.0.0.1:${port}/api/memory-files`)).json()).files;
+ok('前置：这个会话在记忆列表里且有两个成员',
+  memListBefore.some((f) => f.chatKey === 'group:795' && f.memberCount === 2),
+  JSON.stringify(memListBefore.find((f) => f.chatKey === 'group:795')));
+for (const qq of ['30001', '30002']) {
+  await fetch(`http://127.0.0.1:${port}/api/memory-files/group_795/members/${qq}`, { method: 'DELETE' });
+}
+const memListAfter = (await (await fetch(`http://127.0.0.1:${port}/api/memory-files`)).json()).files;
+ok('逐个删光成员后，记忆列表里不再列出它（留空目录的话那条会一直在）',
+  !memListAfter.some((f) => f.chatKey === 'group:795'),
+  JSON.stringify(memListAfter.filter((f) => f.chatKey === 'group:795')));
+ok('空记忆目录本身也被删掉了', !fs.existsSync(memDir3), `exists=${fs.existsSync(memDir3)}`);
+// 对照：**还剩成员时不能删目录** —— 否则删一个成员就等于清空整个会话的记忆
+const memDir4 = path.join(DIR, 'memory', 'group_796');
+fs.mkdirSync(memDir4, { recursive: true });
+for (const qq of ['40001', '40002']) {
+  fs.writeFileSync(path.join(memDir4, `${qq}.json`),
+    JSON.stringify({ userId: qq, name: '戊', impressions: [{ content: 'y', createdAt: base }] }), 'utf8');
+}
+await fetch(`http://127.0.0.1:${port}/api/memory-files/group_796/members/40001`, { method: 'DELETE' });
+const memListKeep = (await (await fetch(`http://127.0.0.1:${port}/api/memory-files`)).json()).files;
+ok('对照：还剩成员时目录保留、列表里仍在（删一个成员 ≠ 清空整个会话）',
+  fs.existsSync(memDir4) && memListKeep.some((f) => f.chatKey === 'group:796' && f.memberCount === 1),
+  JSON.stringify({ exists: fs.existsSync(memDir4), entry: memListKeep.find((f) => f.chatKey === 'group:796') }));
+
 // ⑥ 删到一条不剩 → 整份存档文件一起删掉（用户明确要求）
 //
 // 判据是"这个会话在磁盘上还在不在"，不是"messages 数组空不空" ——
