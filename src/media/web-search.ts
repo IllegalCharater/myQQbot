@@ -739,7 +739,10 @@ export function siteSearchCandidates(input: string): string[] {
   // WHATWG URL 的 punycode 接受（变成 `https://xn--ihqq6tnb086g`），于是探测会去打一个
   // 毫无意义的域名、白等一轮超时，用户却看不出是自己输错了。
   if (!hostname.includes('.') && !/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) return [];
-  const params = ['q', 'query', 'search', 'keyword', 'wd'];
+  // 参数名清单来自实测，不是穷举：`word` 是百度系站点的叫法（实测百度百科用 `?word=`），
+  // 其余几个是国际站常见的。**每多一个参数就多两个请求**（通用解析要跑真/乱两次），
+  // 所以只加有实测依据的，不要"顺手把能想到的都列上"。
+  const params = ['q', 'query', 'search', 'keyword', 'wd', 'word'];
   const paths = ['/search', '/'];
   const out: string[] = [];
   for (const path of paths) for (const p of params) out.push(`${origin}${path}?${p}={q}`);

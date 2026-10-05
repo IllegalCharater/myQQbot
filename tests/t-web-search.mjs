@@ -360,8 +360,8 @@ const pBase = `http://127.0.0.1:${psrv.address().port}`;
 
 // ① 模板生成：常见的参数名与路径都要有
 const cands = siteSearchCandidates(`${pBase}/`);
-ok('候选模板覆盖常见参数名（q/query/search/keyword/wd）',
-  ['q', 'query', 'search', 'keyword', 'wd'].every((p) => cands.some((c) => c.includes(`?${p}={q}`))),
+ok('候选模板覆盖常见参数名（q/query/search/keyword/wd/word）',
+  ['q', 'query', 'search', 'keyword', 'wd', 'word'].every((p) => cands.some((c) => c.includes(`?${p}={q}`))),
   JSON.stringify(cands.slice(0, 3)));
 ok('候选模板都指向同一个源', cands.every((c) => c.startsWith(pBase)), JSON.stringify(cands));
 ok('认不出的地址返回空数组（不抛错）', siteSearchCandidates('a b').length === 0);
