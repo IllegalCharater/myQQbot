@@ -1,5 +1,5 @@
 import { chatCompletion, resolveApiKey } from '../../llm/llm.js';
-import { customSearch, probeSiteSearch } from '../../media/web-search.js';
+import { customSearch, probeSiteSearch, normalizeSiteInput } from '../../media/web-search.js';
 import { validateFetchUrl } from '../../media/safe-fetch.js';
 import {
   addModelsToProvider, currentProviders, fetchModelsFrom, removeModelFromProvider,
@@ -231,7 +231,10 @@ export const providerRoutes: Route[] = [
     method: 'POST', path: '/api/search-bookmark/probe', async handle(_ctx, req) {
       const startedAt = Date.now();
       const body = bodyRecord(await readBody(req).catch(() => ({})));
-      const site = String(body.site ?? body.url ?? '').trim();
+      // 归一成带协议的 URL 再校验：设置页那一栏的标签是「网页地址」、占位符是裸域名
+      // （`zh.wikipedia.org`），所以用户填裸域名是最正常的填法。`validateFetchUrl`
+      // 直接吃 `new URL(...)`，裸域名会抛"URL 无效" —— 那会报成用户看不懂的错误。
+      const site = normalizeSiteInput(body.site ?? body.url ?? '');
       if (!site) return { status: 400, body: { ok: false, error: '缺少 site' } };
       // **先过 SSRF 校验**：这个端点会按用户给的域名去联网抓页面，是仓库里少数
       // "由请求内容决定目标地址"的出口之一。`validateFetchUrl` 会拒掉非 http/https、

@@ -720,6 +720,23 @@ function linkKeysIn(html: string, pageUrl: string): Set<string> {
 }
 
 /**
+ * 把用户填的站点地址归一成可解析的 URL 形态。
+ *
+ * **为什么需要它**：设置页那一栏的标签是「网页地址」、占位符是 `zh.wikipedia.org`（裸域名），
+ * 所以用户填裸域名是**最正常**的填法。而 `validateFetchUrl` 直接吃 `new URL(...)`，
+ * 裸域名会抛"URL 无效" —— 于是检测按钮报"站点地址不可用：URL 无效"，
+ * 用户完全不知道自己哪里填错了（实测就报了这个）。
+ *
+ * 只做"补协议"与去空白，**不做别的解释**：`siteSearchCandidates` 复用同一份归一逻辑，
+ * 两边口径必须一致，否则界面接受而路由拒绝（或反过来）。
+ */
+export function normalizeSiteInput(input: unknown): string {
+  const raw = String(input ?? '').trim();
+  if (!raw) return '';
+  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+}
+
+/**
  * 由一个站点首页/任意页面推出候选搜索地址模板。
  *
  * 只按**已经观察到的**参数名与路径组合，不穷举：五个通用查询参数 × 两个路径形态。
@@ -729,7 +746,7 @@ export function siteSearchCandidates(input: string): string[] {
   let origin = '';
   let hostname = '';
   try {
-    const url = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`);
+    const url = new URL(normalizeSiteInput(input));
     origin = url.origin;
     hostname = url.hostname;
   } catch {
@@ -820,8 +837,11 @@ export async function probeSiteSearch(
   // 站点自身的基线链接集合：拿"首页/普通页"当对照，用来把导航、页脚、侧栏减掉。
   // **这是整套探测的判据所在**：不与基线比，任何真实搜索页都会"解析出十几条结果"，
   // 而那十几条在乱串查询下一样存在（实测 Bing 16 vs 16、MDN 15 vs 15）。
-  const baseRaw = await fetchHtml(siteSearchCandidates(siteInput)[0]?.replace(/\/search\?q=\{q\}$/, '/') || siteInput);
-  const baseUrl = (() => { try { return new URL(siteInput).toString(); } catch { return siteInput; } })();
+  // 两个地址都走 `normalizeSiteInput`：调用方可能直接给裸域名（设置页就是这么提示的），
+  // 而 `new URL('baike.baidu.com')` 会抛错 —— 那样基线集合会退化成空、整条判据失效。
+  const normalizedInput = normalizeSiteInput(siteInput);
+  const baseRaw = await fetchHtml(siteSearchCandidates(siteInput)[0]?.replace(/\/search\?q=\{q\}$/, '/') || normalizedInput);
+  const baseUrl = (() => { try { return new URL(normalizedInput).toString(); } catch { return normalizedInput; } })();
   const baseline = baseRaw && baseRaw !== 'budget' ? linkKeysIn(baseRaw, baseUrl) : new Set<string>();
 
   /** 一个模板是否真的在出结果：把"基线里已有的链接"减掉，看还剩几条。 */

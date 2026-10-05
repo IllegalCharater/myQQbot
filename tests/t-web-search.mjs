@@ -15,7 +15,7 @@ import { load } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-websearch-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
 
-const { webSearch, sanitizeQuery, yandexSearch, bookmarkList, resolveBookmarkSite, parseSiteSearch, siteSearchCandidates, probeSiteSearch } = await load('media/web-search.js');
+const { webSearch, sanitizeQuery, yandexSearch, bookmarkList, resolveBookmarkSite, parseSiteSearch, siteSearchCandidates, probeSiteSearch, normalizeSiteInput } = await load('media/web-search.js');
 const { updateConfig, getConfig } = await load('core/config.js');
 const { buildSystemPrompt } = await load('agent/prompting/prompt-builder.js');
 
@@ -370,6 +370,23 @@ ok('认不出的地址返回空数组（不抛错）', siteSearchCandidates('a b
 ok('单标签宿主名被拒（不给 punycode 留机会）',
   siteSearchCandidates('不是地址').length === 0
   && siteSearchCandidates('localhost').length === 0, JSON.stringify(siteSearchCandidates('localhost').slice(0, 1)));
+
+// 裸域名（设置页那一栏的占位符就是 `zh.wikipedia.org`，用户这么填是最正常的）：
+// 必须能生成候选。这条曾经整条链路报「URL 无效」——`new URL('baike.baidu.com')` 会抛错，
+// 而路由的 validateFetchUrl 直接吃 `new URL`，于是界面接受、后端拒绝。
+ok('裸域名归一成带协议的 URL', normalizeSiteInput('baike.baidu.com') === 'https://baike.baidu.com');
+ok('已带协议的地址原样保留', normalizeSiteInput('https://github.com') === 'https://github.com');
+ok('两头空白被去掉', normalizeSiteInput('  example.com  ') === 'https://example.com');
+ok('裸域名能生成候选（这是用户实际会填的形态）',
+  siteSearchCandidates('baike.baidu.com').length > 0
+  && siteSearchCandidates('baike.baidu.com')[0].startsWith('https://baike.baidu.com/'),
+  JSON.stringify(siteSearchCandidates('baike.baidu.com').slice(0, 1)));
+// 裸域名跑探测必须走到真实判定，而不是在入口就报"URL 无效"
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [], bookmarkMode: 'prefer' } });
+const bareProbe = await probeSiteSearch(`${pBase.replace('http://', '')}`, { budgetMs: 8000 });
+ok('裸域名（无协议）能跑完探测并给出正常判定',
+  typeof bareProbe.ok === 'boolean' && !String(bareProbe.note || '').includes('URL 无效'),
+  JSON.stringify(bareProbe.note));
 
 // ② HTML 结果页：应被检出，且计数是**减掉导航后**的
 probeMode = 'html';
