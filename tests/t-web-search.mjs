@@ -1056,12 +1056,16 @@ ok('⑦ 对照：**旧行为**（前 20000 字符直接给模型）一个字正�
 const webToolsSrc = fs.readFileSync(path.join(ROOT, 'src/agent/tools/web-tools.ts'), 'utf8');
 ok('⑦ 工具里先 looksLikeHtml 判定、再 htmlToText 提取（并传 baseUrl 补全链接）',
   /looksLikeHtml\(body, contentType\)/.test(webToolsSrc) && /htmlToText\(body, String\(result\.url/.test(webToolsSrc));
-ok('⑦ 截断作用在剥完的 `text` 上（不是原始 body）',
-  /content: text\.slice\(0, FETCH_TEXT_MAX_CHARS\)/.test(webToolsSrc));
+// 截断必须作用在**剥完之后**的文本上；且 `content` 与 `truncated` 用**同一个** cap，
+// 否则会出现"截到 A 长度、却按 B 长度报截断"。cap 现在来自配置项（见 ㉒ 段）。
+ok('⑦ 截断作用在剥完的 `text` 上（不是原始 body），且与 truncated 同一个 cap',
+  /const cap = fetchTextMaxChars\(\);/.test(webToolsSrc)
+  && /truncated: text\.length > cap/.test(webToolsSrc)
+  && /content: text\.slice\(0, cap\)/.test(webToolsSrc));
 // `truncated` 的语义必须是"给模型看的正文被截断"：旧判据拿 `result.truncated`（原始响应
 // ≥50000 字符）来说事，剥完 HTML 之后那个数已经不代表模型看到的东西了（会误报）
-ok('⑦ `truncated` 按正文长度判，不再用 `result.truncated`',
-  /truncated: text\.length > FETCH_TEXT_MAX_CHARS/.test(webToolsSrc) && !/truncated: result\.truncated/.test(webToolsSrc));
+ok('⑦ `truncated` 不再用 `result.truncated`（那个数是原始响应大小，不代表正文）',
+  !/truncated: result\.truncated/.test(webToolsSrc));
 
 // ── ⑧ "HTTP 200 但被站点拦了"必须报失败，不能报"成功但内容为空" ──
 //
@@ -1120,7 +1124,37 @@ ok('⑨ 7036 字的正文能装进预算（按总预算截断，而不是被单�
 ok('⑨ 对照：不传参数时仍是 500 单行上限（「测试」按钮保持紧凑）',
   fj(longExtract, 2000).length <= 700, String(fj(longExtract, 2000).length));
 // 源级接线：检索那条路必须把这两个常量传下去
-ok('⑨ 检索那条路传了宽松的预算与单行上限', /flattenJson\(response\.body, BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS\)/.test(readSrc('media/web-search.js')));
+ok('⑨ 检索那条路传了宽松的预算与单行上限',
+  /const flattenCap = flattenMaxChars\(\);/.test(readSrc('media/web-search.js'))
+  && /flattenJson\(response\.body, flattenCap, flattenCap\)/.test(readSrc('media/web-search.js')));
+
+// ── ㉒ 抓取正文预算**是配置项**（2026-10 起），不再是写死的常量 ──
+//
+// 这两个数直接决定"模型一次能读到多少资料"，而**合适的值取决于用户怎么用**：
+// 群聊闲聊不需要长正文（越小越省上下文与钱）；拿它当资料检索就要长正文
+// （实测萌娘 `prop=extracts` 一篇正文 7036 字符）。写死一个数只能对一半人正确。
+console.log('\n═══ 22. 抓取正文预算是配置项 ═══');
+{
+  const { DEFAULT_CONFIG } = await load('core/config.js');
+  const d = DEFAULT_CONFIG.webSearch;
+  // 默认值必须**与旧常量同值**：升级不该悄悄改变行为
+  ok('㉒ fetchTextMaxChars 默认 20000（与旧写死值相同）', d.fetchTextMaxChars === 20000, String(d.fetchTextMaxChars));
+  ok('㉒ flattenMaxChars 默认 4000（与旧写死值相同）', d.flattenMaxChars === 4000, String(d.flattenMaxChars));
+  // 兜底常量只作文档，但它写着"默认 4000"，漂了就会骗下一个读代码的人
+  const { BOOKMARK_FLATTEN_MAX_CHARS } = await load('media/bookmark-request.js');
+  ok('㉒ 兜底常量与配置默认值一致（漂了就会误导读者）',
+    BOOKMARK_FLATTEN_MAX_CHARS === d.flattenMaxChars, String(BOOKMARK_FLATTEN_MAX_CHARS));
+  // 每次调用**现读**配置（与 takeWebBudget 同一写法），放模块级常量会让改动不生效
+  ok('㉒ web_fetch 现读配置（不是模块加载时定死）',
+    /getConfig\(\)\.webSearch\?\.fetchTextMaxChars/.test(webToolsSrc));
+  ok('㉒ 收藏夹压平现读配置', /getConfig\(\)\.webSearch\?\.flattenMaxChars/.test(readSrc('media/web-search.js')));
+  // 钳制：手改 config.json 写进荒唐值也不能让它失控
+  updateConfig({ webSearch: { ...getConfig().webSearch, fetchTextMaxChars: 999999, flattenMaxChars: 1 } });
+  const after = getConfig().webSearch;
+  ok('㉒ 过大被压到 200000、过小被抬到 500',
+    after.fetchTextMaxChars === 200000 && after.flattenMaxChars === 500,
+    JSON.stringify({ f: after.fetchTextMaxChars, l: after.flattenMaxChars }));
+}
 
 await new Promise((r) => bqsrv.close(r));
 

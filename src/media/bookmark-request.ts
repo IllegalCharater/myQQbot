@@ -44,19 +44,13 @@ export const MAX_HEADER_VALUE_CHARS = 1000;
 export const BOOKMARK_JSON_MAX_CHARS = 2000;
 
 /**
- * **真实检索**压平"整条正文"型接口时的预算与单行上限。
+ * **兜底**的单行上限，仅供 `flattenJson` 的默认参数语义参考。
  *
- * 为什么与上面那个 2000/500 分开：那组数是按"接口给一份**结构化资料**"（千帆
- * `get_content`：几行标题/摘要/关联词条）定的，单行 500 足够。
- *
- * 但接口给**整篇文章**时（实测萌娘百科 `action=query&prop=extracts&explaintext=1`
- * 的 `extract` 有 **7036 字符**），500 的单行上限会把文章砍成开头一段 —— 而模型看到的
- * 是一份"看起来完整"的摘要，**不会知道后面还有 6000 多字**，于是它会拿一段残缺信息
- * 去回答。这种"静默丢内容"比报错难查得多。
- *
- * 4000 的依据：它是**单次收藏夹检索**返回给模型的上限，与 `promptContextMaxChars`
- * 默认 32000 相比是个合理占比（一场对话里 web_search 通常只调 2~3 次）。
- * 单行上限设成同一个数，意思是"把整段正文都装进来、只在总预算处截断"。
+ * ⚠️ **真实检索不再用这两个常量**：抓取正文的预算已经**改成配置项**
+ * （`webSearch.flattenMaxChars`，设置页可改，见 `web-search.ts` 的 `flattenMaxChars()`）。
+ * 留在这里是因为它们把"默认值是多少、为什么是那个数"记在代码里 ——
+ * 改默认值时**两处要一起改**（这里是文档，配置 schema 才是权威），
+ * `t-web-search.mjs` 有一条断言钉住两边一致。
  */
 export const BOOKMARK_FLATTEN_MAX_CHARS = 4000;
 export const BOOKMARK_FLATTEN_LINE_CHARS = 4000;

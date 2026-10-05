@@ -313,6 +313,19 @@ export function renderSearchSection(c) {
       <div class="field"><label>全部会话每天最多搜索次数</label>
         <input type="number" id="cfg-search-daily" min="1" max="5000" value="${esc(c.webSearch?.maxCallsPerDay ?? 200)}" /></div>
     </div>
+    <h3>抓取正文长度</h3>
+    <div class="hint" style="margin-bottom:6px">
+      这两个数决定<b>模型一次能读到多少资料</b>。调大更完整但更费上下文与钱；
+      调小更省，但正文会被截断，模型可能拿残段去回答。<br />
+      参考：<code>store.promptContextMaxChars</code> 是整轮上下文的字符预算（默认 32000），
+      <b>别把下面两项加起来超过它</b>。
+    </div>
+    <div class="field-row">
+      <div class="field"><label>web_fetch 单次正文上限（字符）</label>
+        <input type="number" id="cfg-search-fetch-chars" min="500" max="200000" value="${esc(c.webSearch?.fetchTextMaxChars ?? 20000)}" /></div>
+      <div class="field"><label>收藏夹「整条资料」的上限（字符）</label>
+        <input type="number" id="cfg-search-flatten-chars" min="500" max="200000" value="${esc(c.webSearch?.flattenMaxChars ?? 4000)}" /></div>
+    </div>
 
     <h3>添加自定义搜索服务</h3>
     <div class="field-row">

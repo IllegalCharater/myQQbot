@@ -196,6 +196,10 @@ export async function saveConfig({ quiet = false } = {}) {
       // 前端钳一次是为了让用户当场看到被改成的值，后端那一次才是权威。
       maxCallsPerChatPerHour: clampInt($('#cfg-search-chat-hourly')?.value, 1, 200, 20),
       maxCallsPerDay: clampInt($('#cfg-search-daily')?.value, 1, 5000, 200),
+      // 抓取正文预算：与后端 normalizeConfigShape 同一口径（500–200000）。
+      // 这里钳一次是为了让用户**当场看到**被改成的值；后端那一次才是权威。
+      fetchTextMaxChars: clampInt($('#cfg-search-fetch-chars')?.value, 500, 200000, 20000),
+      flattenMaxChars: clampInt($('#cfg-search-flatten-chars')?.value, 500, 200000, 4000),
       deepseek: {
         ...(c.webSearch?.deepseek || {}),
         ...(enteredDsKey && enteredDsKey !== '******' ? { apiKey: enteredDsKey } : {}),

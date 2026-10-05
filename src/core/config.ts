@@ -144,7 +144,21 @@ export const DEFAULT_CONFIG = {
     // 所以这两项的作用不是"护住第三方配额"，而是**压住刷屏**：搜索是日常高频动作，
     // 阈值定得比搜图/转写宽松。换成按次计费的 provider（智谱/博查/百度）时请自行调小。
     maxCallsPerChatPerHour: 20,
-    maxCallsPerDay: 200
+    maxCallsPerDay: 200,
+    // ── 抓取正文的长度预算（可配置）──
+    //
+    // 为什么要可配：这两个数直接决定"模型能读到多少资料"，而**合适的值取决于用户怎么用**。
+    // 群聊闲聊不需要长正文（越小越省上下文、越省钱）；拿它当资料检索就要长正文
+    // （实测萌娘百科 `prop=extracts` 一篇正文就有 7036 字符）。写死一个数只能对一半人正确。
+    //
+    // `fetchTextMaxChars`：`web_fetch` 单次交给模型的**正文**上限（剥掉 HTML 之后的字符数）。
+    //   旧实现写死 20000。**上限是"整轮上下文预算"的一部分** ——
+    //   `store.promptContextMaxChars` 默认 32000，所以别把它调得比那个还大。
+    fetchTextMaxChars: 20000,
+    // `flattenMaxChars`：收藏夹返回**单个对象**（整条资料）时压平后的总上限。
+    //   旧实现写死 4000（更早是 2000，那对"整篇文章"型接口会把 7036 字的正文砍成 608 字，
+    //   而模型拿到一份"看起来完整"的摘要、**不知道后面还有内容** —— 静默丢内容最难查）。
+    flattenMaxChars: 4000
   },
   // 安全例外（默认全部关闭）
   security: {
@@ -729,6 +743,11 @@ function normalizeConfigShape<T>(input: T): T {
 
     w.maxCallsPerChatPerHour = Math.round(clamp(w.maxCallsPerChatPerHour, 1, 200, 20));
     w.maxCallsPerDay = Math.round(clamp(w.maxCallsPerDay, 1, 5000, 200));
+    // 抓取正文预算：下限 500（再小就没有可用信息了），上限 200000（防"把它当不限"，
+    // 那个量级会一次吃掉整轮上下文并拖慢请求）。**不跟随 promptContextMaxChars**：
+    // 它们是两个独立旋钮，绑在一起会让"我只想调搜索长度"变成"顺手改了提示词预算"。
+    w.fetchTextMaxChars = Math.round(clamp(w.fetchTextMaxChars, 500, 200000, 20000));
+    w.flattenMaxChars = Math.round(clamp(w.flattenMaxChars, 500, 200000, 4000));
     // Yandex 选择器：只做 trim + 长度上限，**不校验"是不是合法类名"**。
     // 类名规矩每个搜索引擎都不一样（Yandex 用 `OrganicTitle` 这种大驼峰），写一条
     // 自以为是的正则只会把用户手工救回来的值又打回去。长度上限防的是"整页 HTML

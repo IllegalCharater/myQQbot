@@ -1,16 +1,23 @@
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
+import { getConfig } from '../../core/config.js';
 import { webFetch, webSearch } from '../../media/web-search.js';
 import { htmlToText, looksLikeHtml, looksBlocked } from '../../media/html-to-text.js';
 import { err, errorMessage, ok, takeWebBudget } from './shared.js';
 import type { ToolDefinition } from '../shared/types.js';
 
 /**
- * `web_fetch` 交给模型的**可读正文**上限（字符）。
+ * `web_fetch` 交给模型的**可读正文**上限（字符）。**可配置**（`webSearch.fetchTextMaxChars`）。
  *
- * 与旧实现那个 20000 是同一个数，但**含义变了**：旧的是"原始 HTML 的前 20000 字符"
- * （绝大多数被 `<script>` 吃掉），现在是"剥掉 HTML 之后的正文前 20000 字"。
+ * 每次调用现读配置，所以改完设置即时生效（与 `takeWebBudget` 同一写法）。
+ * 兜底值 20000 只在配置缺失/非法时用 —— 配置层已经钳制过范围，这里的兜底是第二道。
+ *
+ * 含义与旧实现那个同名的 20000 不同：旧的是"原始 HTML 的前 20000 字符"
+ * （绝大多数被 `<script>` 吃掉），现在是"剥掉 HTML 之后的正文前 N 字"。
  */
-const FETCH_TEXT_MAX_CHARS = 20000;
+function fetchTextMaxChars(): number {
+  const n = Math.round(Number(getConfig().webSearch?.fetchTextMaxChars));
+  return Number.isFinite(n) && n >= 500 ? n : 20000;
+}
 
 /** 受统一成本闸门保护的联网检索工具。 */
 export function webTools(): ToolDefinition[] {
@@ -75,6 +82,7 @@ export function webTools(): ToolDefinition[] {
             text
           });
           if (verdict.blocked) return err(`抓取不到内容：${verdict.reason}`);
+          const cap = fetchTextMaxChars();
           return ok({
             url: result.url,
             statusCode: result.statusCode,
@@ -82,9 +90,9 @@ export function webTools(): ToolDefinition[] {
             // `truncated` 的语义：**给模型看的正文被截断了**（不是"原始响应很大"）。
             // 旧判据拿 `result.truncated`（原始响应 ≥50000 字符）来说事，而剥 HTML 之后
             // 那个数已经不代表模型看到的东西了 —— 会报出一个用户无法理解的"截断了"，
-            // 而正文其实完整。所以这里只按**剥完之后的文本**判。
-            truncated: text.length > FETCH_TEXT_MAX_CHARS,
-            content: text.slice(0, FETCH_TEXT_MAX_CHARS),
+            // 而正文其实完整。所以这里只按**剥完之后的文本**判，且与 `cap` 同一个数。
+            truncated: text.length > cap,
+            content: text.slice(0, cap),
             ...(isHtml ? { note: '（已从 HTML 中提取可读正文）' } : {})
           });
         } catch (error) {

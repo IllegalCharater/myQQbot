@@ -12,13 +12,20 @@ import { getConfig } from '../core/config.js';
 import { safeFetch } from './safe-fetch.js';
 import {
   fetchBookmarkRequest, flattenJson, jsonToResults,
-  BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS,
   type BookmarkSite, type BookmarkRequest, type BookmarkHeader
 } from './bookmark-request.js';
 
-// 压平预算那组常量定义在 `bookmark-request.ts`：设置页的「测试」按钮也用同一支压平逻辑
-// （`testBookmarkRequest`），两份字面量会漂移成"测试说 5000、实际 2000"。
-// 这里只 import —— 依赖方向本来就是 web-search → bookmark-request。
+/**
+ * 收藏夹压平"单个对象"（整条资料）时的字符预算，**可配置**（`webSearch.flattenMaxChars`）。
+ *
+ * 兜底 4000 只在配置缺失/非法时用（配置层已钳制过范围）。
+ * 为什么不直接用 `flattenJson` 的默认参数：那个默认值（500）是按"几行结构化资料"定的，
+ * 对"整篇文章"型接口会把正文砍成开头一段 —— 见 `bookmark-request.ts` 里那段注释。
+ */
+function flattenMaxChars(): number {
+  const n = Math.round(Number(getConfig().webSearch?.flattenMaxChars));
+  return Number.isFinite(n) && n >= 500 ? n : 4000;
+}
 
 interface SearchResult {
   title: string;
@@ -668,7 +675,12 @@ async function siteSearch(site: BookmarkSite, clean: string, maxResults: number)
       // 没有条目列表 → 接口给的是**单个对象的资料**（如 `get_content` 的整条词条）。
       // 这时"一段压平后的资料"本身就是答案，**不是失败**：把它包成一条结果返回，
       // 否则模型会得到"这个站没有内容"的错误归因。
-      const flat = flattenJson(response.body, BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS);
+      //
+      // 预算**每次现读配置**（`webSearch.flattenMaxChars`），改完设置即时生效。
+      // 单行上限就用同一个数：意思是"整段正文都装进来、只在总预算处截断"——
+      // 单行砍短会让"整篇文章"型接口只剩开头一段，而模型**不知道后面还有内容**。
+      const flattenCap = flattenMaxChars();
+      const flat = flattenJson(response.body, flattenCap, flattenCap);
       if (flat.trim()) {
         return { query: clean, results: [{ title: `${site.purpose || site.key}（接口返回）`, url: response.url, snippet: flat }] };
       }

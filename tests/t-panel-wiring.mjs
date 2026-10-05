@@ -234,6 +234,21 @@ ok('在查询词框里回车 = 点「测试」', /e\.key === 'Enter'[\s\S]{0,60}
     !!uiDefault && uiDefault === beDefault);
 }
 
+// ── 抓取正文长度是配置项：设置页 ↔ 保存 ↔ 后端钳制 三处口径必须一致 ──
+// 判据是三段的**数字**要对得上（500 下限 / 200000 上限 / 默认值）。任何一段漂了，
+// 表现都是"我填了 50000 却按别的数走"——用户不可能想到去比三处源码。
+for (const [id, key, dflt] of [
+  ['cfg-search-fetch-chars', 'fetchTextMaxChars', 20000],
+  ['cfg-search-flatten-chars', 'flattenMaxChars', 4000]
+]) {
+  ok(`设置页有 ${id} 输入框（默认 ${dflt}）`,
+    new RegExp(`id="${id}"[^>]*value="\\$\\{esc\\(c\\.webSearch\\?\\.${key} \\?\\? ${dflt}\\)\\}"`).test(sectionsSrc));
+  ok(`保存时按 ${key} 写回并钳制（500–200000，回落 ${dflt}）`,
+    new RegExp(`${key}: clampInt\\(\\$\\('#${id}'\\)\\?\\.value, 500, 200000, ${dflt}\\)`).test(js));
+  ok(`后端对 ${key} 用同一组钳制（500–200000，回落 ${dflt}）`,
+    new RegExp(`w\\.${key} = Math\\.round\\(clamp\\(w\\.${key}, 500, 200000, ${dflt}\\)\\)`).test(readSrc('core/config.js')));
+}
+
 // ⚠️ **渲染也必须把请求结构写进 dataset** —— 这是"刷新后还能看到已配的请求结构"的唯一途径。
 // 初版只有弹窗会写它、渲染从不写，于是刷新后行上没有该属性，弹窗一打开就是空的
 // （**实测反馈**）；更糟的是此时再点「保存设置」（哪怕只改了别的行），这一行的请求结构

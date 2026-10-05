@@ -27,7 +27,9 @@ fs.writeFileSync(path.join(DIR, 'config.json'), JSON.stringify({
       // 一条完全合法的
       { key: 'wiki-zh', url: 'https://zh.wikipedia.org/wiki/Main', purpose: '查百科条目与定义' }
     ],
-    maxCallsPerChatPerHour: 999, maxCallsPerDay: 0
+    maxCallsPerChatPerHour: 999, maxCallsPerDay: 0,
+    // 抓取正文预算：故意塞两个越界值，考钳制（过大→上限，过小→下限）
+    fetchTextMaxChars: 999999, flattenMaxChars: 1
   }
 }), 'utf8');
 process.env.QQ_AGENT_DATA_DIR = DIR;
@@ -61,4 +63,23 @@ console.log('枚举值非法 / 域名认不出 / 用途为空 三种都被丢掉
 console.log('重复枚举值只留先到的那条:',
   bms.filter((b) => b.key === 'dup').length === 1 && bms.find((b) => b.key === 'dup').url === 'd1.example.com');
 console.log('阀门上限钳制（999→200，0→1）:', c.webSearch.maxCallsPerChatPerHour === 200, c.webSearch.maxCallsPerDay === 1);
+// 抓取正文长度是**配置项**（2026-10 起）。两个数直接决定"模型一次能读到多少资料"：
+// 旧实现把它们写死在 `web-tools.ts`(20000) 与 `bookmark-request.ts`(4000) 里，
+// 而合适的值取决于用户怎么用（闲聊要省、资料检索要全）。钳制范围 500–200000。
+console.log('抓取正文上限钳制（999999→200000，1→500）:',
+  c.webSearch.fetchTextMaxChars === 200000, c.webSearch.flattenMaxChars === 500);
+console.log('抓取正文两个字段都有默认值（老配置里没有这两个键）:',
+  typeof c.webSearch.fetchTextMaxChars === 'number' && typeof c.webSearch.flattenMaxChars === 'number');
+// 缺字段时回落到**与旧常量同值**的默认值 —— 升级不该悄悄改变行为
+{
+  const { DEFAULT_CONFIG } = await load('core/config.js');
+  const d = DEFAULT_CONFIG.webSearch;
+  console.log('默认值与旧常量一致（升级不改行为）:',
+    d.fetchTextMaxChars === 20000, d.flattenMaxChars === 4000);
+  // 兜底常量与配置默认值不能漂移（`BOOKMARK_FLATTEN_MAX_CHARS` 只作文档，
+  // 但它写着"默认是 4000"，改了配置却忘了它就会骗下一个读代码的人）
+  const { BOOKMARK_FLATTEN_MAX_CHARS } = await load('media/bookmark-request.js');
+  console.log('兜底常量与配置默认值一致:', BOOKMARK_FLATTEN_MAX_CHARS === d.flattenMaxChars,
+    BOOKMARK_FLATTEN_MAX_CHARS, d.flattenMaxChars);
+}
 fs.rmSync(DIR, { recursive: true, force: true });
