@@ -355,6 +355,9 @@ export function bindSettingsEvents(c) {
     if (reqBtn) {
       const row = reqBtn.closest('tr');
       if (!row) return;
+      // 从**行上的 dataset** 读当前值 —— 渲染时就会写进去（`renderBookmarkRows`），
+      // 弹窗保存时也会更新它。刷新后能读回来全靠渲染那一步；这里不再另找数据源，
+      // 否则"弹窗看的是 A、保存写的是 B"会再次分叉。
       let request = null, params = null;
       try { request = row.dataset.bmReqJson ? JSON.parse(row.dataset.bmReqJson) : null; } catch { request = null; }
       try { params = row.dataset.bmParamsJson ? JSON.parse(row.dataset.bmParamsJson) : null; } catch { params = null; }

@@ -117,8 +117,23 @@ export function renderBookmarkRows(bookmarks) {
   // 「网页地址」与「站内搜索地址」**已合并成一栏**（`data-bm-url`）：填域名就是站点标识，
   // 填含 `{q}` 的完整地址就是站内搜索模板 —— 由后端按形态自己认，用户不用选。
   // 那一栏的值优先显示 `searchUrl`（更具体），没有才显示域名。
-  const row = (key, urlOrTemplate, purpose, resultClass, hasRequest) =>
-    '<tr data-bm>'
+  //
+  // ⚠️ **必须把请求结构写进 dataset**（`data-bm-req-json` / `data-bm-params-json`）：
+  // `save.js` 与「请求结构」弹窗都**只从 dataset 读**。初版只有弹窗会写它，渲染时从不写，
+  // 于是**刷新后行上没有那两个属性** —— 表现为"配好了、刷新再打开弹窗却是空的"，
+  // 而且更糟：此时再点一次「保存设置」（哪怕只是改了别的行），这一行的请求结构会被
+  // 当成"没配"而**从配置里删掉**（静默数据丢失）。**渲染是唯一的真相来源，回显必须由它给。**
+  const jsonAttr = (value) => {
+    if (value === undefined || value === null) return '';
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    // 用 `esc`（会把 `"` 转成 `&quot;`）—— dataset 属性里的引号不转义会把 HTML 撑坏
+    return esc(text);
+  };
+  const row = (key, urlOrTemplate, purpose, resultClass, request, params) =>
+    '<tr data-bm'
+    + ` data-bm-req-json="${jsonAttr(request)}"`
+    + ` data-bm-params-json="${jsonAttr(params)}"`
+    + '>'
     + `<td><input type="text" data-bm-key value="${esc(key)}" placeholder="wiki" /></td>`
     + `<td>`
     + `<input type="text" data-bm-url value="${esc(urlOrTemplate)}" placeholder="zh.wikipedia.org 或 https://…/search?q={q}" />`
@@ -131,18 +146,19 @@ export function renderBookmarkRows(bookmarks) {
     + `<td><input type="text" data-bm-purpose value="${esc(purpose)}" placeholder="查百科条目、定义、背景事实" /></td>`
     + `<td>`
     + `<button class="btn btn-small" data-bm-req type="button" title="按指定的方法/地址/请求头去取数据（JSON 接口用）">`
-    + `${hasRequest ? '已配置 ✓' : '配置…'}</button>`
+    + `${request && request.endpoint ? '已配置 ✓' : '配置…'}</button>`
     + `<input type="text" data-bm-resultclass value="${esc(resultClass)}" placeholder="容器类名（留空=通用）" style="margin-top:3px" />`
     + `</td>`
     + '<td><button class="btn btn-small btn-danger" data-bm-del type="button" title="删除这条">×</button></td>'
     + '</tr>';
-  if (!list.length) return row('', '', '', '', false);
+  if (!list.length) return row('', '', '', '', null, null);
   return list.map((item) => row(
     item?.key || '',
     item?.searchUrl || item?.url || '',
     item?.purpose || '',
     item?.resultClass || '',
-    !!(item?.request && item.request.endpoint)
+    item?.request || null,
+    item?.params || null
   )).join('');
 }
 

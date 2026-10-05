@@ -127,6 +127,13 @@ export async function saveConfig({ quiet = false } = {}) {
     // 后两项是**可选**：空值就整键不写（而不是写空串）。写空串会让后端拿到一个"存在但无意义"
     // 的值，而 `bookmarkList()` 又按"非空才带"处理——两处口径不同时，配置页显示有值、
     // 运行期当没有，正是那种查半天的问题。
+    // 服务端当前那一份，按枚举值索引：行上的 dataset 万一缺了请求结构，从这里兜底
+    // （否则"只改了别的行"会把这一行的请求结构静默删掉，见下面那条注释）。
+    const originalByKey = new Map(
+      (Array.isArray(c.webSearch?.bookmarks) ? c.webSearch.bookmarks : [])
+        .filter((b) => b && b.key)
+        .map((b) => [String(b.key), b])
+    );
     const bookmarks = $$('#search-bookmarks-body tr[data-bm]').map((row) => {
       // ⚠️ 这一栏**两用**（「网页地址」与「站内搜索地址」已合并）：含 `{q}` 就是
       // 站内搜索模板，否则当域名。**判据必须与后端 `normalizeConfigShape` 逐字同形** ——
@@ -145,6 +152,15 @@ export async function saveConfig({ quiet = false } = {}) {
       const item = { key: (row.querySelector('[data-bm-key]')?.value || '').trim(), url: '', purpose: (row.querySelector('[data-bm-purpose]')?.value || '').trim() };
       if (reqJson) { try { item.request = JSON.parse(reqJson); } catch { /* 坏值当没配 */ } }
       if (paramsJson) { try { const p = JSON.parse(paramsJson); if (p && Object.keys(p).length) item.params = p; } catch { /* 同上 */ } }
+
+      // **兜底：行上没有请求结构时，回退到服务端当前那一份**（按枚举值找）。
+      // 为什么必须有：`save.js` 读的是 dataset，而 dataset 由渲染写入 —— 一旦渲染漏了
+      // 这一步（初版就是这样），用户**只改了别的行**再保存，这一行的请求结构就会被当成
+      // "没配"而从配置里删掉，**静默丢数据**。回退到服务端的值，让"漏写 dataset"退化成
+      // "只是看不见"，而不是"被删掉"。判据是枚举值 —— 它在一份配置里唯一。
+      const prevItem = originalByKey.get(item.key);
+      if (!item.request && prevItem?.request) item.request = prevItem.request;
+      if (!item.params && prevItem?.params) item.params = prevItem.params;
 
       // 归一域名。与后端 `hostnameOf()` 同一个结果。
       const hostOf = (value) => {

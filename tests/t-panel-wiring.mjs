@@ -149,6 +149,9 @@ for (const id of ['cfg-search-bookmarkmode', 'search-bookmarks-body', 'add-searc
   ok(`#${id} 可解析`, resolves(id));
 }
 const searchSave = seg("if (sec === 'search')", "if (sec === 'image-source')");
+// 渲染那一段（`renderBookmarkRows`）在 sections.js 里，`js` 是全部 UI 文件拼起来的，
+// 单独读它才能断言"渲染有没有写 dataset"。
+const sectionsSrc = readUI('js/views/settings/sections.js');
 // 收藏夹用 `data-bm-*` 标记每一格。
 // 这些属性名是 save.js 逐行取值的**唯一接口**：改名只改一端会静默读出 undefined，
 // 于是每一项都因"不全"被丢弃 —— 表现为"收藏夹存不进去"，而没有任何报错。
@@ -165,6 +168,18 @@ ok('合并那一栏：没有独立的 searchUrl 输入框了（旧 data-bm-searc
   !/data-bm-searchurl/.test(js));
 ok('「请求结构」入口存在，且读数走 dataset（弹窗写、save.js 读）',
   /data-bm-req-json/.test(searchSave) && /dataset\.bmParamsJson/.test(searchSave));
+// ⚠️ **渲染也必须把请求结构写进 dataset** —— 这是"刷新后还能看到已配的请求结构"的唯一途径。
+// 初版只有弹窗会写它、渲染从不写，于是刷新后行上没有该属性，弹窗一打开就是空的
+// （**实测反馈**）；更糟的是此时再点「保存设置」（哪怕只改了别的行），这一行的请求结构
+// 会被当成"没配"而从配置里删除，**静默丢数据**。渲染是回显的唯一真相来源。
+ok('渲染把请求结构写进 dataset（否则刷新后弹窗为空 + 再保存会丢数据）',
+  /data-bm-req-json="\$\{jsonAttr\(request\)\}"/.test(sectionsSrc)
+  && /data-bm-params-json="\$\{jsonAttr\(params\)\}"/.test(sectionsSrc));
+ok('属性值经过 esc 转义（JSON 里的引号不转义会把 HTML 撑坏）',
+  /const jsonAttr = \(value\) => \{[\s\S]{0,400}return esc\(text\);/.test(sectionsSrc));
+// 第二道防线：dataset 万一缺了，回退到服务端当前那一份，别静默删掉用户的配置
+ok('save.js 有兜底：dataset 缺请求结构时回退到服务端当前值（防静默丢数据）',
+  /const originalByKey = new Map\(/.test(searchSave) && /prevItem\?\.request/.test(searchSave));
 // **独立的密钥区已经删掉了**：密钥改走「静态参数」（请求头里写 `{API Key}`，参数里填值）。
 // 一条机制覆盖"固定参数"与"密钥"，不必再有一套独立的落盘/脱敏/回显规则。
 // 这条断言是防回潮的：那套 UI 一旦长回来，就会与静态参数形成两套实现。
