@@ -158,8 +158,13 @@ for (const attr of ['data-bm-key', 'data-bm-url', 'data-bm-purpose', 'data-bm-se
 // 自动检测按钮：必须有 try/finally 复位 disabled，否则一次失败就永久点不动
 ok('「检测」按钮绑了 click 且跑完会复位 disabled',
   /closest\('\[data-bm-probe\]'\)/.test(js) && /\.finally\(\(\) => \{ probeBtn\.disabled = false; \}\)/.test(js));
-ok('检测请求打到 /api/search-bookmark/probe 且带上 hint',
-  /api\('\/api\/search-bookmark\/probe', \{ method: 'POST', body: JSON\.stringify\(\{ site, hint \}\) \}\)/.test(js));
+// 检测请求：**必须同时带上 searchUrl**，后端的"填了就只测这一个"全靠它。
+// 只发 hint 的话后端拿不到"用户已填"这个事实，会退化成"拿他的输入当线索去猜别的" ——
+// 那正是要修掉的旧行为（点完检测，框里的地址被悄悄换掉）。
+ok('检测请求打到 /api/search-bookmark/probe 且带上 searchUrl（区分"填了/没填"的唯一依据）',
+  /api\('\/api\/search-bookmark\/probe', \{ method: 'POST', body: JSON\.stringify\(\{ site, hint, searchUrl: filled \}\) \}\)/.test(js));
+ok('填了地址时提示语说的是"测试你填的"，空着时说的是"自动查找"（两种行为对用户可见）',
+  /测试你填的地址/.test(js) && /正在自动查找可用地址/.test(js));
 // 检测出的类名**只在有值时才覆盖**：检测不出类名不代表用户原来填的是错的
 ok('检测出的 resultClass 只在有值时才写入（不覆盖用户手填的值）',
   /if \(clsInput && res\.resultClass\) clsInput\.value = res\.resultClass;/.test(js));

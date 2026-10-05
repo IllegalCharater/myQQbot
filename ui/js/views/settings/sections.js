@@ -254,6 +254,12 @@ export function renderSearchSection(c) {
         · <code>https://zh.wikipedia.org/w/index.php?search={q}</code>（维基，<code>{q}</code> 是查询词占位符）<br />
         · <code>https://your-docs.example.com/search?q={q}</code><br />
         必须含 <code>{q}</code>，否则这一栏会被忽略。留空则退回 <code>site:</code> 行为（对自建 SearXNG 等有效）。<br />
+        <br />
+        <strong>「检测」按钮看这一栏空不空，自动决定做哪件事：</strong><br />
+        · <strong>这一栏是空的</strong> → 自动去这个站里<strong>查找</strong>可用的搜索地址，找到就填进来；<br />
+        · <strong>这一栏已经填了</strong> → <strong>只测试你填的这一条</strong>能不能用，不会换成别的地址。
+        不通过时会说清为什么（没有 <code>{q}</code> / 减掉导航后没剩几条 / 乱串查询也能拿到同样多的链接）。
+        想重新自动找，把这一栏清空再点。<br />
         <strong>结果容器类名</strong>留空时用通用解析，会带上一些导航链接；知道该站结果块的类名时填上更准
         （页面改版导致"解析不出结果"时，就改这一栏）。
       </div>

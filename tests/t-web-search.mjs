@@ -453,13 +453,49 @@ pr = await probeSiteSearch(pBase, { hint: `${pBase}/custom`, budgetMs: 15000 });
 ok('hint 缺 {q} 时被忽略，退回自动候选',
   pr.ok === true && !String(pr.searchUrl).includes('/custom'), JSON.stringify(pr.searchUrl));
 
-// ⑥ 时间预算：慢站不能把按钮挂死
+// ⑦ **填了地址 → 只测那一个；没填 → 自动查找**（用户明确要求的分工）
+//
+// 判据不能只看 `ok`：自动检测**也会**搜到同样的地址，于是"只测了一个"和"扫了一堆候选"
+// 给出一样的结论 —— 那正是假绿。所以这里用**请求数**来钉：只测一个时 `tried` 必须很小
+// （校验 + 真查询，最多再加基线/乱串两次），而自动检测要挨个试候选，次数明显更多。
 probeMode = 'html';
-const slowStart = Date.now();
-const slow = await probeSiteSearch('http://10.255.255.1', { timeoutMs: 3000, budgetMs: 5000 });
-const slowMs = Date.now() - slowStart;
-ok('不可达地址在预算内返回（不挂死）', slow.ok === false && slowMs < 20000, `${slowMs}ms`);
-await new Promise((r) => psrv.close(r));
+const fixedUrl = `${pBase}/custom?wd={q}`;
+probeHits = 0;
+const fixedProbe = await probeSiteSearch(pBase, { searchUrl: fixedUrl, budgetMs: 15000 });
+ok('填了地址 → 用它测，且原样保留（不会被换成别的）',
+  fixedProbe.ok === true && fixedProbe.searchUrl === fixedUrl,
+  `searchUrl=${JSON.stringify(fixedProbe.searchUrl)} note=${JSON.stringify(fixedProbe.note)}`);
+ok('填了地址时只测这一个（请求数少 —— 自动检测要挨个试候选）',
+  Number(fixedProbe.tried) <= 5, `tried=${fixedProbe.tried} hits=${probeHits}`);
+ok('结论说的是"你填的地址"，不是"已找到"（两种行为对用户可分辨）',
+  /你填的地址/.test(String(fixedProbe.note)), JSON.stringify(fixedProbe.note));
+
+// 对照：同样能搜到结果，但**没填** → 走自动检测，请求数明显更多
+probeHits = 0;
+const autoProbe = await probeSiteSearch(pBase, { budgetMs: 15000 });
+ok('对照：没填地址 → 自动检测，请求数比"只测一个"多',
+  autoProbe.ok === true && Number(autoProbe.tried) > Number(fixedProbe.tried),
+  `auto=${autoProbe.tried} fixed=${fixedProbe.tried}`);
+
+// 填了地址但该地址**不能用** → 报它不能用，且**不许**偷偷换成自动找到的那个
+probeMode = 'js';   // 结果由 JS 渲染：任何地址都解析不出结果
+const fixedFail = await probeSiteSearch(pBase, { searchUrl: `${pBase}/search?q={q}`, budgetMs: 15000 });
+ok('填的地址不可用时如实报失败，不悄悄换成别的地址',
+  fixedFail.ok === false && !fixedFail.searchUrl?.includes('/custom'),
+  JSON.stringify({ ok: fixedFail.ok, searchUrl: fixedFail.searchUrl, note: fixedFail.note }));
+ok('失败原因里点明可以用清空这一栏来改走自动检测',
+  /清空这一栏/.test(String(fixedFail.note)), JSON.stringify(fixedFail.note));
+
+// 填了地址但**没有 {q}** → 直接说清怎么办，且一次请求都不该发
+probeMode = 'html';
+const beforeNoQ = probeHits;
+const fixedNoQ = await probeSiteSearch(pBase, { searchUrl: `${pBase}/custom`, budgetMs: 15000 });
+ok('填的地址缺 {q} → 明确报"没法替换查询词"（而不是含糊的检测失败）',
+  fixedNoQ.ok === false && /\{q\}/.test(String(fixedNoQ.note)), JSON.stringify(fixedNoQ.note));
+ok('缺 {q} 时一次请求都不发（省掉无意义的联网）',
+  probeHits === beforeNoQ, `before=${beforeNoQ} after=${probeHits}`);
+
+
 
 console.log('\n═══ 9. bookmarkMode=web：名单保留，但不传 site 时完全不理会它 ═══');
 updateConfig({ webSearch: { ...baseSearch, bookmarks: [bm('book', 'book.mark')], bookmarkMode: 'web' } });

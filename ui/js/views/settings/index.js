@@ -312,13 +312,20 @@ export function bindSettingsEvents(c) {
       const row = probeBtn.closest('tr');
       const status = row?.querySelector('[data-bm-status]');
       const site = (row?.querySelector('[data-bm-url]')?.value || '').trim();
-      // 用户已经填了一半的地址当 hint 发过去：这是唯一能覆盖"参数名不在这几个里"
-      // 与"结果在另一个主机上"（如 cn.bing.com 的搜索其实由 www.bing.com 出结果）的办法。
-      const hint = (row?.querySelector('[data-bm-searchurl]')?.value || '').trim();
+      // 这一栏**空着 = 让它自动去找**（自动检测）；**填了 = 只测这一个**（不当线索去猜别的）。
+      // 判据只由"这栏空不空"决定，所以同一个按钮能表达两件事，用户不必选模式。
+      // 旧行为把填写值当 hint（优先试、试不通继续自动找），点完检测框里的值会被悄悄换成
+      // 另一个地址 —— 看起来像"检测把我的配置改了"。
+      const filled = (row?.querySelector('[data-bm-searchurl]')?.value || '').trim();
+      const hint = filled;
       if (!site) { if (status) status.textContent = '请先填「网页地址」，检测要靠它找搜索入口'; return; }
       probeBtn.disabled = true;
-      if (status) status.textContent = '检测中…（最多约 12 秒）';
-      api('/api/search-bookmark/probe', { method: 'POST', body: JSON.stringify({ site, hint }) })
+      if (status) {
+        status.textContent = filled
+          ? '测试你填的地址…（最多约 12 秒）'
+          : '这一栏是空的，正在自动查找可用地址…（最多约 12 秒）';
+      }
+      api('/api/search-bookmark/probe', { method: 'POST', body: JSON.stringify({ site, hint, searchUrl: filled }) })
         .then((r) => {
           const res = r?.result || {};
           if (res.ok) {
@@ -327,7 +334,10 @@ export function bindSettingsEvents(c) {
             const clsInput = row?.querySelector('[data-bm-resultclass]');
             // 只在检测出类名时才覆盖：检测不出类名不代表用户原来填的是错的
             if (clsInput && res.resultClass) clsInput.value = res.resultClass;
-            if (status) status.textContent = `✓ 已填入。${res.note || ''}（请自己搜一次确认结果对不对）`;
+            if (status) {
+              status.textContent = (filled ? `✓ 你填的地址可用，已保留。` : `✓ 已找到并填入。`)
+                + `${res.note || ''}（请自己搜一次确认结果对不对）`;
+            }
           } else {
             if (status) status.textContent = `✗ ${res.note || '检测失败'}`;
           }

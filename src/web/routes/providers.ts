@@ -247,7 +247,12 @@ export const providerRoutes: Route[] = [
       } catch (error) {
         return { status: 400, body: { ok: false, error: `站点地址不可用：${errorMessage(error)}` } };
       }
-      const result = await probeSiteSearch(site, { hint: String(body.hint ?? '').trim() });
+      // 「站内搜索地址」这一栏**已填**时只测他填的那个；留空则自动检测（见 probeSiteSearch 头注释）。
+      // 两者是**同一个端点**：对用户来说都是"点检测"，区别只由"那一栏空不空"决定。
+      const result = await probeSiteSearch(site, {
+        searchUrl: String(body.searchUrl ?? '').trim(),
+        hint: String(body.hint ?? '').trim()
+      });
       return { status: 200, body: { ok: true, result: { ...result, latencyMs: Date.now() - startedAt } } };
     },
   },

@@ -822,15 +822,21 @@ export interface SiteSearchProbe {
 /**
  * 探测某个站点的站内搜索地址。
  *
- * `hint` 是用户**自己填的候选模板**（他在站内搜过一次、从地址栏抄下来的），优先级最高 ——
- * 它是唯一能覆盖"参数名不在这几个里"或"结果在另一个主机上"（如 Bing 的
- * `cn.bing.com` 出结果的是 `www.bing.com`）的办法。自动生成的候选只是兜底。
+ * 两种模式，由**用户填没填**「站内搜索地址」决定（`options.searchUrl`）：
+ *   · **没填**（默认）：自动检测 —— 按 `siteSearchCandidates` 生成的候选逐个试，找到可用的就返回。
+ *     这是用户点「检测」想要的东西：他不知道地址长什么样，让程序去找。
+ *   · **填了**：只测他填的那一个，**不去猜别的**。填了地址就说明他知道这一栏怎么用，
+ *     "测试"该回答的是"我填的这个能不能用"；拿他的输入当线索去自动找别的，会把框里的值
+ *     悄悄换成另一个地址 —— 观感就是"检测自己把我的配置改了"。
+ *
+ * `hint` 是旧的"候选线索"入口，保留兼容：它只影响**自动检测**模式的候选顺序，
+ * 不再是"用户已填地址"的表达方式（那个语义现在由 `searchUrl` 承担）。
  *
  * 需要联网，所以调用方（HTTP 路由）负责先做 URL 校验与网络例外判断。
  */
 export async function probeSiteSearch(
   siteInput: string,
-  options: { hint?: string; timeoutMs?: number; budgetMs?: number } = {}
+  options: { hint?: string; searchUrl?: string; timeoutMs?: number; budgetMs?: number } = {}
 ): Promise<SiteSearchProbe> {
   const timeoutMs = Math.max(3000, Math.min(20000, Number(options.timeoutMs) || 6000));
   // 总预算：**必须有**。候选是 10 个通用 + 10×4 个类名组合，每个都可能在慢站上耗到超时，
@@ -839,8 +845,11 @@ export async function probeSiteSearch(
   const deadline = Date.now() + budgetMs;
 
   const hintTemplate = String(options.hint ?? '').trim();
+  // 用户**明确填了**「站内搜索地址」时走"只测这一个"模式（见函数头注释）。
+  // 留空/只有空白 = 没填 = 自动检测。
+  const fixedTemplate = String(options.searchUrl ?? '').trim();
   const generated = siteSearchCandidates(siteInput);
-  if (!generated.length && !hintTemplate) {
+  if (!generated.length && !hintTemplate && !fixedTemplate) {
     return { ok: false, note: '站点地址无法解析成 URL（形如 `https://example.com` 或 `example.com`）' };
   }
   // 用户给的候选排在第一位；它若不含 `{q}` 则整条丢弃（理由同配置层那条校验）
@@ -918,7 +927,84 @@ export async function probeSiteSearch(
     return { html, url };
   };
 
-  // ── 每个候选当场走完「类名 → 基线差 → 乱串对照」，找到就返回 ──
+  /**
+   * 判定**一个**模板可不可用（类名 → 基线差 → 乱串对照）。
+   *
+   * 抽出来是因为有两条调用路径，而它们必须用**同一套判据**：
+   *   · 自动检测：对每个生成的候选跑一遍，挑最好的；
+   *   · 用户已填地址时的"测试"：只跑他填的那一个。
+   * 判据分两份写必然漂移 —— 那正是"检测说可以、真用起来不对"的来源。
+   *
+   * `baseline()` / `fetchHtml` 都带缓存或预算检查，所以重复调用是安全的。
+   */
+  const judgeTemplate = async (
+    template: string
+  ): Promise<{ template: string; accepted: boolean; classHit?: { cls: string; n: number }; kept?: number; junkKept?: number; note?: string }> => {
+    const real = await fetchRealHtml(template);
+    if (real === 'budget') return { template, accepted: false, note: '预算用尽' };
+    if (real === null) return { template, accepted: false, note: '取页失败' };
+
+    // ① 结果容器类名：命中 ≥2 条即可接受（`mw-search-result`/`b_algo` 都不是导航会用到的类名）
+    for (const cls of PROBE_CLASS_CANDIDATES) {
+      const n = parseSiteSearch(real.html, real.url, cls).length;
+      if (n >= 2) return { template, accepted: true, classHit: { cls, n } };
+    }
+
+    // ② 通用解析：真查询 → 基线差 → 乱串对照，三者都过才算数
+    const genericReal = parseSiteSearch(real.html, real.url).length;
+    if (genericReal < 3) return { template, accepted: false, note: `通用解析只拿到 ${genericReal} 条` };
+
+    const base = await baseline();
+    if (budgetExceeded) return { template, accepted: false, note: '预算用尽' };
+    const kept = parseSiteSearch(real.html, real.url).filter((r) => !base.has(linkKey(r.url))).length;
+    diagnostics.push({ template, kept, raw: genericReal });
+    if (kept < 3) return { template, accepted: false, kept, note: `减掉导航后只剩 ${kept} 条` };
+
+    // 乱串对照：确认这些"多出来的链接"确实是因为查询词才出现的
+    const junkHtml = await fetchHtml(fillProbe(template, PROBE_JUNK_QUERY));
+    if (junkHtml === 'budget') return { template, accepted: false, kept, note: '预算用尽' };
+    if (junkHtml === null) return { template, accepted: false, kept, note: '乱串对照取页失败' };
+    const junkKept = parseSiteSearch(junkHtml, fillProbe(template, PROBE_JUNK_QUERY))
+      .filter((r) => !base.has(linkKey(r.url))).length;
+    if (kept < junkKept + 3) {
+      return { template, accepted: false, kept, junkKept, note: `乱串查询也拿到 ${junkKept} 条，区分不开` };
+    }
+    return { template, accepted: true, kept, junkKept };
+  };
+
+  // ── 用户**已经填了**站内搜索地址 → 只测他填的那一个 ──
+  //
+  // 这条分支是刻意的：填了地址就说明他知道这一栏是干什么的，"测试"该回答的是
+  // **"我填的这个能不能用"**，而不是拿他的输入当线索去猜别的地址。
+  // 旧行为把填写值当 `hint`（优先试、试不通再自动找别的），结果是点「检测」之后
+  // 那个框里的值被**悄悄换成另一个地址** —— 看起来像"检测自己把我的配置改了"。
+  if (fixedTemplate) {
+    if (!fixedTemplate.includes('{q}')) {
+      return {
+        ok: false, tried, searchUrl: fixedTemplate,
+        note: '你填的这个地址里没有 {q} 占位符，没法把查询词替换进去。'
+          + '做法：在站内搜一次，把地址栏里的 URL 贴进来，并把查询词所在的位置改成 {q}'
+          + '（例：https://example.com/search?q={q}）。'
+          + '想让我自己找，请先清空这一栏再点检测。'
+      };
+    }
+    const verdict = await judgeTemplate(fixedTemplate);
+    if (verdict.accepted) {
+      return {
+        ok: true, tried, searchUrl: fixedTemplate, resultClass: verdict.classHit?.cls, diagnostics,
+        note: verdict.classHit
+          ? `你填的地址可用：按容器类名「${verdict.classHit.cls}」命中 ${verdict.classHit.n} 条`
+          : `你填的地址可用：减掉导航后剩 ${verdict.kept} 条（乱串对照 ${verdict.junkKept} 条）`
+      };
+    }
+    return {
+      ok: false, tried, searchUrl: fixedTemplate, diagnostics,
+      note: `你填的地址没通过检测：${verdict.note || '判定不通过'}。`
+        + '（清空这一栏再点检测，我可以自动去这个站里找。）'
+    };
+  }
+
+  // ── 没填地址 → 自动检测：逐个候选试，找到就返回 ──
   //
   // 三条教训写在结构里：
   //   · **一次请求，本地试多个类名**。初版对每个类名各发一次请求（4 倍请求量），
@@ -931,42 +1017,21 @@ export async function probeSiteSearch(
   //     永远等不到确认（Gentoo 的 `?search=` 是第 3 个候选，就这么被跳过了）。
   let best: { url: string; kept: number; junkKept: number } | null = null;
   for (const template of candidates) {
-    const real = await fetchRealHtml(template);
-    if (real === 'budget') break;
-    if (real === null) continue;
-
-    // ① 结果容器类名：命中 ≥2 条即可接受（`mw-search-result`/`b_algo` 都不是导航会用到的类名）
-    let classHit: { cls: string; n: number } | null = null;
-    for (const cls of PROBE_CLASS_CANDIDATES) {
-      const n = parseSiteSearch(real.html, real.url, cls).length;
-      if (n >= 2) { classHit = { cls, n }; break; }
+    const verdict = await judgeTemplate(template);
+    if (verdict.note === '预算用尽') break;
+    if (verdict.accepted) {
+      if (verdict.classHit) {
+        return {
+          ok: true, searchUrl: template, resultClass: verdict.classHit.cls, tried, diagnostics,
+          note: `按容器类名「${verdict.classHit.cls}」命中 ${verdict.classHit.n} 条`
+        };
+      }
+      if (!best || (verdict.kept ?? 0) - (verdict.junkKept ?? 0) > best.kept - best.junkKept) {
+        best = { url: template, kept: verdict.kept ?? 0, junkKept: verdict.junkKept ?? 0 };
+      }
+      // 已经拿到一个可信候选：信噪比足够好就直接用，不再花预算试剩下的
+      if ((verdict.kept ?? 0) - (verdict.junkKept ?? 0) >= 10) break;
     }
-    if (classHit) {
-      return {
-        ok: true, searchUrl: template, resultClass: classHit.cls, tried, diagnostics,
-        note: `按容器类名「${classHit.cls}」命中 ${classHit.n} 条`
-      };
-    }
-
-    // ② 通用解析：真查询 → 基线差 → 乱串对照，三者都过才算数
-    const genericReal = parseSiteSearch(real.html, real.url).length;
-    if (genericReal < 3) continue;
-
-    const base = await baseline();
-    if (budgetExceeded) break;
-    const kept = parseSiteSearch(real.html, real.url).filter((r) => !base.has(linkKey(r.url))).length;
-    diagnostics.push({ template, kept, raw: genericReal });
-    if (kept < 3) continue;
-    // 乱串对照：确认这些"多出来的链接"确实是因为查询词才出现的
-    const junkHtml = await fetchHtml(fillProbe(template, PROBE_JUNK_QUERY));
-    if (junkHtml === 'budget') break;
-    if (junkHtml === null) continue;
-    const junkKept = parseSiteSearch(junkHtml, fillProbe(template, PROBE_JUNK_QUERY))
-      .filter((r) => !base.has(linkKey(r.url))).length;
-    if (kept < junkKept + 3) continue;
-    if (!best || kept - junkKept > best.kept - best.junkKept) best = { url: template, kept, junkKept };
-    // 已经拿到一个可信候选：信噪比足够好就直接用，不再花预算试剩下的
-    if (kept - junkKept >= 10) break;
   }
   if (best) {
     return {
