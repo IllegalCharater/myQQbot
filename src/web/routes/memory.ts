@@ -39,6 +39,20 @@ export const memoryRoutes: Route[] = [
       return { status: 200, body: { ok: true } };
     },
   },
+  {
+    // 删掉**整个会话的全部记忆**（记忆页的"清空这个群/私聊的记忆"）。
+    //
+    // 放在 `/members/<id>` 那条**之前**：两条路径都能被 `DELETE .../members/123` 命中吗？
+    // 不会 —— 这条要求 `123` 位置没有别的段，正则结尾是 `$`。顺序在这里不影响匹配，
+    // 但把它放前面是为了让"整会话删除"在读代码时先出现（它是破坏性更大的那个）。
+    method: 'DELETE', path: /^\/api\/memory-files\/(group|private)_(\d+)$/, async handle(ctx, _req, match) {
+      const chatKey = `${match?.[1]}:${match?.[2]}`;
+      const before = ctx.memory.members(chatKey).length;
+      ctx.memory.clear(chatKey);
+      ctx.emit(EVENTS.memoryUpdate, { chatKey });
+      return { status: 200, body: { ok: true, chatKey, removedMembers: before } };
+    },
+  },
   ...(['POST', 'PATCH', 'PUT', 'DELETE'] as const).map((method): Route => ({
     method, path: /^\/api\/memory-files\/(group|private)_(\d+)\/impressions$/,
     async handle(ctx, req, match) {

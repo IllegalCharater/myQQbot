@@ -326,6 +326,13 @@ export async function saveConfig({ quiet = false } = {}) {
       // 运行时动态上下文窗口（条）；0 = 不限。与 maxMessagesPerChat（存档留多少条）无关。
       maxContextMessages: clampInt(val('#cfg-maxctx', c.store?.maxContextMessages), 0, 5000, 0),
       promptContextMaxChars: clampInt(val('#cfg-prompt-context-maxchars', c.store?.promptContextMaxChars), 0, 1000000, 32000),
+      // ── 存储上限（两项都是 0 = 不限制，与原行为一致）──
+      // 这两个是**已存在**的配置项（store 的 #trim 与 sessions 的 keepFiles 各自在用），
+      // 此前只能手改 config.json；这里补上界面。
+      // 注意 maxMessagesPerChat 与上面的 maxContextMessages 是**两件事**：
+      // 这个管"存档留多少条"（磁盘），那个管"一次运行读多少条"（token）。改错地方的症状完全不同。
+      maxMessagesPerChat: clampInt(val('#cfg-maxmsgs-perchat', c.store?.maxMessagesPerChat), 0, 1000000, 0),
+      keepSessionFiles: clampInt(val('#cfg-keepsessionfiles', c.store?.keepSessionFiles), 0, 100000, 0),
       // 统一开关 + 分群滑条表（__replace__：删掉的群设置要真删，深合并做不到）
       unifiedTier: chk('#cfg-unifiedtier', c.store?.unifiedTier !== false),
       groupSliderPos: {

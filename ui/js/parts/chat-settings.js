@@ -238,6 +238,21 @@ export function renderChatSection(c) {
         <label>单次提示词统一字符预算：<input type="number" id="cfg-prompt-context-maxchars" min="0" max="1000000" value="${esc(st.promptContextMaxChars ?? 32000)}" /> 字（0 = 不限）</label>
         <div class="hint">预算覆盖完整 user prompt；【本次唤醒】和本轮决策不会被裁剪。超出时依次收缩表情目录、历史摘要、长期记忆和窗口外的已读历史。</div>
       </div>
+      <div class="tier-param">
+        <label>单个会话最多保留 <input type="number" id="cfg-maxmsgs-perchat" min="0" max="1000000" value="${esc(st.maxMessagesPerChat ?? 0)}" /> 条存档（0 = 不限）</label>
+        <div class="hint">
+          这是<b>磁盘上的存档上限</b>，与上面那个"动态上下文窗口"是两件事：那个管<b>一次运行读多少条</b>（token），这个管<b>存档留多少条</b>（占多少磁盘）。
+          超限时每次写入都会丢掉最老的那几条，<b>丢掉的不可恢复</b>；机器人自己的发言、摘要和人工备注都算在里面。
+          长期运行的群存档只增不减，留着 0 会一直涨；要清理已有的存量，去「消息存档」页用「清空本会话存档」。
+        </div>
+      </div>
+      <div class="tier-param">
+        <label>最多保留 <input type="number" id="cfg-keepsessionfiles" min="0" max="100000" value="${esc(st.keepSessionFiles ?? 0)}" /> 个会话记录文件（0 = 不限）</label>
+        <div class="hint">
+          会话记录是每次运行的过程留档（请求/响应），在「会话」页看。超过这个数量时自动删掉最老的。
+          <b>它不影响消息存档和记忆</b>——删掉的只是"那次运行的过程"。想立刻清某一条，去「会话」页点那一行的 ×。
+        </div>
+      </div>
     </div>
 
     <h3>历史摘要</h3>

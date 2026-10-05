@@ -197,6 +197,46 @@ export class SessionRegistry {
     return this.index.length < before;
   }
 
+  /**
+   * 手动删除**单个会话记录**（会话页的删除按钮）。
+   *
+   * 与 `discard()` 的分工：`discard` 是给编排层用的"这次唤醒没跑起来、把占位会话撤掉"，
+   * 所以它**只允许删 `waiting` 的占位**；而这里是用户在管理端明确点的一次删除，
+   * 已结束的会话（done/noreply/error/aborted）都在允许范围内 —— 那才是用户真正想清理的东西。
+   *
+   * 两条边界是有意的：
+   *   · **`running` 的会话拒绝删除**。它还在跑，删掉文件之后收尾的 `#persist` 会把文件
+   *     原样写回来（还会有 `#bumpTodayUsage` 继续累加），用户看到的是"删了又出现"；
+   *   · **删记录不影响今日用量**。已结束会话的 token 在 `finish()` 时就累加进
+   *     `usage-today.json` 这个**独立聚合**了，`todayUsage()` 读的是那个文件 + 运行中的内存态，
+   *     不再读单条会话文件 —— 所以删掉历史会话不会把账弄对不上。
+   *
+   * 不写备份：会话记录是**过程**数据（每轮请求/响应），对它的删除意图很明确；
+   * 要留凭据的是存档（那边 `removeChat` 会备份）。
+   */
+  remove(id: string, { force = false }: { force?: boolean } = {}) {
+    if (!id) return { ok: false, reason: '缺少会话 id' };
+    const live = this.current.get(id);
+    if (live && live.status === 'running' && !force) {
+      return { ok: false, reason: '这个会话正在运行，等它结束后再删' };
+    }
+    this.current.delete(id);
+    this._lastPersistAt?.delete(id);
+    const before = this.index.length;
+    this.index = this.index.filter((entry) => entry.id !== id);
+    let fileRemoved = false;
+    try {
+      const file = path.join(SESSIONS_DIR, `${id}.json`);
+      if (fs.existsSync(file)) {
+        fs.rmSync(file, { force: true });
+        fileRemoved = true;
+      }
+    } catch (error: unknown) {
+      return { ok: false, reason: `会话文件删除失败：${error instanceof Error ? error.message : error}` };
+    }
+    return { ok: true, indexRemoved: this.index.length < before, fileRemoved };
+  }
+
   listSummaries(limit = 100) {
     return this.index.slice(0, limit);
   }

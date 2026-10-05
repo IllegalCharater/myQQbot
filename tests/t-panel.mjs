@@ -174,6 +174,118 @@ ok('对照：上限 0 = 不限，又压一轮、又多一条纪要，旧的仍�
   r3.ok === true && r3.droppedDigests === 0 && store.digests(GCKEY).length === 2, JSON.stringify({ ok: r3.ok, dropped: r3.droppedDigests, n: store.digests(GCKEY).length }));
 ok('对照的回执里没有"丢弃"字样', !r3.note.includes('丢弃'), r3.note);
 
+// ── 管理端的三处删除 + 两处存储上限 ──
+//
+// 这四项都是"删数据"的入口，所以断言的重点不只是"删掉了"，还有两条容易漏的：
+//   · **删干净**：存档的冷归档（archive/）也必须一起没 —— 只删主文件的话，历史压缩后的
+//     原文还在磁盘上，而界面上看不到它，用户会以为删干净了；
+//   · **删得掉是因为真的落盘了**：内存里那份缓存不摘掉的话，下一次写入会把文件原样写回来。
+console.log('\n管理端删除与存储上限：');
+
+// ① ChatStore.removeChat：存档 + 冷归档一起走，且留备份
+const DELKEY = 'group:789';
+const delBase = path.join(DIR, 'messages', 'group_789.json');
+const delArchive = path.join(DIR, 'messages', 'archive', 'group_789.jsonl');
+for (let i = 1; i <= 5; i++) {
+  store.appendIncoming(DELKEY, { mid: 900 + i, ts: base + i * 1000, senderId: '555', senderName: '张三', text: `待删${i}` });
+}
+// 冷归档是压缩产出的；这里直接造一个，验的就是"删存档时它会不会被漏掉"
+fs.mkdirSync(path.dirname(delArchive), { recursive: true });
+fs.writeFileSync(delArchive, '{"kind":"archive"}\n', 'utf8');
+ok('前置：存档与冷归档都真的在磁盘上', fs.existsSync(delBase) && fs.existsSync(delArchive));
+const delResult = store.removeChat(DELKEY);
+ok('removeChat 把主存档删掉了', !fs.existsSync(delBase), `still=${fs.existsSync(delBase)}`);
+ok('removeChat 把**冷归档**也删掉了（只删主文件的话原文会留在磁盘上）',
+  !fs.existsSync(delArchive), `archive still=${fs.existsSync(delArchive)}`);
+ok('删除前留了备份（这是唯一一个一次抹掉整段历史的入口）',
+  !!delResult.backup && fs.existsSync(delResult.backup), JSON.stringify(delResult));
+ok('删完内存里的缓存也摘了（不摘的话下一次写入会把文件原样写回来）',
+  !store.chats.has(DELKEY) && store.getChatMeta(DELKEY).total === 0,
+  `cached=${store.chats.has(DELKEY)} total=${store.getChatMeta(DELKEY).total}`);
+
+// ② DELETE /api/chats/<key>：HTTP 那一条
+const HTTPDEL = 'group:790';
+for (let i = 1; i <= 3; i++) {
+  store.appendIncoming(HTTPDEL, { mid: 800 + i, ts: base + i * 1000, senderId: '555', senderName: '张三', text: `HTTP待删${i}` });
+}
+const httpDelFile = path.join(DIR, 'messages', 'group_790.json');
+ok('前置：HTTP 删除目标的存档在磁盘上', fs.existsSync(httpDelFile));
+const httpDel = await (await fetch(`http://127.0.0.1:${port}/api/chats/group_790`, { method: 'DELETE' })).json();
+ok('DELETE /api/chats/<key> 回报删掉的条数与剩余 0',
+  httpDel.ok === true && httpDel.removedMessages >= 3 && httpDel.remaining === 0, JSON.stringify(httpDel));
+ok('DELETE /api/chats/<key> 真的把文件删了', !fs.existsSync(httpDelFile));
+
+// ③ 会话记录：单条删除 + keepFiles 上限
+const { SessionRegistry: SR } = await load('chat/sessions.js');
+const sdir = path.join(DIR, 'sessions');
+fs.mkdirSync(sdir, { recursive: true });
+// 文件名前缀是 base36 时间戳，sort() 即时间序 —— 上限逻辑按它丢最老的，这里照同一约定造。
+for (const [id, label] of [['aaa-1', '最老'], ['bbb-2', '中间'], ['ccc-3', '最新']]) {
+  fs.writeFileSync(path.join(sdir, `${id}.json`),
+    JSON.stringify({ id, chatKey: 'group:123', startedAt: base, endedAt: base, status: 'done', usage: {} }), 'utf8');
+  void label;
+}
+const srDel = new SR(0);
+srDel.index = [{ id: 'aaa-1' }, { id: 'bbb-2' }, { id: 'ccc-3' }];
+const removed = srDel.remove('bbb-2');
+ok('SessionsRegistry.remove 删掉了指定会话（文件 + 索引都掉了）',
+  removed.ok === true && !fs.existsSync(path.join(sdir, 'bbb-2.json')) && !srDel.index.some((e) => e.id === 'bbb-2'),
+  JSON.stringify({ removed, files: fs.readdirSync(sdir) }));
+ok('remove 不动别的会话', fs.existsSync(path.join(sdir, 'aaa-1.json')) && fs.existsSync(path.join(sdir, 'ccc-3.json')));
+// 运行中的会话必须拒绝：它还在写这个文件，删掉会被收尾时的持久化原样写回来
+const srRun = new SR(0);
+srRun.current.set('run-1', { id: 'run-1', status: 'running', usage: {} });
+fs.writeFileSync(path.join(sdir, 'run-1.json'), '{}', 'utf8');
+const refused = srRun.remove('run-1');
+ok('运行中的会话拒绝删除，并说明原因（否而删了会立刻被收尾写回来）',
+  refused.ok === false && String(refused.reason).includes('正在运行') && fs.existsSync(path.join(sdir, 'run-1.json')),
+  JSON.stringify(refused));
+
+const srCap = new SR(2);
+// ⚠️ 上限的清理**只发生在 finish() 里**（`get()` 只裁内存索引，不动磁盘）——
+// 所以这里必须把会话跑一遍 create→finish，而不是直接摆几个文件再 get()：
+// 后者验的是"我以为的清理时机"，不是代码里那个时机（本套件初版就这么假红了一条）。
+// 也不自己改 id：`#persist` 按 `s.id` 落盘，改了 id 就与索引对不上。
+// 真 id 是 `<base36 时间戳>-<随机>`，连续 create 即时间序，正好是清理逻辑依赖的顺序。
+const capIds = [];
+for (let i = 0; i < 3; i++) {
+  const s = srCap.create({ chatKey: 'group:999', trigger: 'probe', triggerSummary: 'x' });
+  capIds.push(s.id);
+  srCap.finish(s.id, 'done');
+}
+const left = fs.readdirSync(sdir).filter((f) => f.endsWith('.json')).sort();
+ok('keepFiles=2 时 finish 会把最老的会话文件清掉、只留最新 2 个',
+  left.length === 2 && !left.includes(`${capIds[0]}.json`) && left.includes(`${capIds[2]}.json`),
+  `left=${JSON.stringify(left)} 期望保留 ${capIds[2]}、删掉 ${capIds[0]}`);
+
+// ④ DELETE /api/sessions/<id>
+const httpSessionId = 'ddd-4';
+fs.writeFileSync(path.join(sdir, `${httpSessionId}.json`),
+  JSON.stringify({ id: httpSessionId, chatKey: 'group:123', startedAt: base, endedAt: base, status: 'done', usage: {} }), 'utf8');
+const sDel = await (await fetch(`http://127.0.0.1:${port}/api/sessions/${httpSessionId}`, { method: 'DELETE' })).json();
+ok('DELETE /api/sessions/<id> 删掉了会话文件', sDel.ok === true && !fs.existsSync(path.join(sdir, `${httpSessionId}.json`)), JSON.stringify(sDel));
+ok('删不存在的会话不会报错（重复点两次不该红）',
+  (await fetch(`http://127.0.0.1:${port}/api/sessions/no-such-id`, { method: 'DELETE' })).status === 200);
+
+// ⑤ DELETE /api/memory-files/<key>：整个会话的记忆
+const MEMKEY = 'group:791';
+const memDir = path.join(DIR, 'memory', 'group_791');
+fs.mkdirSync(memDir, { recursive: true });
+fs.writeFileSync(path.join(memDir, '10001.json'), JSON.stringify({ userId: '10001', name: '甲', impressions: [{ content: 'a', createdAt: base }] }), 'utf8');
+fs.writeFileSync(path.join(memDir, '10002.json'), JSON.stringify({ userId: '10002', name: '乙', impressions: [{ content: 'b', createdAt: base }] }), 'utf8');
+const memDel = await (await fetch(`http://127.0.0.1:${port}/api/memory-files/group_791`, { method: 'DELETE' })).json();
+ok('DELETE /api/memory-files/<key> 回报删掉的成员数', memDel.ok === true && memDel.removedMembers === 2, JSON.stringify(memDel));
+ok('整个会话的记忆文件都清掉了（不是只删第一个）',
+  fs.readdirSync(memDir).filter((f) => f.endsWith('.json') && f !== '_meta.json').length === 0,
+  JSON.stringify(fs.readdirSync(memDir)));
+// 成员级删除（既有能力）不能被整会话那条路由吞掉 —— 两条正则的区分就在这里
+const memDir2 = path.join(DIR, 'memory', 'group_792');
+fs.mkdirSync(memDir2, { recursive: true });
+fs.writeFileSync(path.join(memDir2, '20001.json'), JSON.stringify({ userId: '20001', name: '丙', impressions: [{ content: 'c', createdAt: base }] }), 'utf8');
+const oneDel = await (await fetch(`http://127.0.0.1:${port}/api/memory-files/group_792/members/20001`, { method: 'DELETE' })).json();
+ok('成员级删除仍然走它自己那条路由（没被整会话删除抢走）',
+  oneDel.ok === true && !fs.existsSync(path.join(memDir2, '20001.json')), JSON.stringify(oneDel));
+
 core.stop(); srv.close();
 fs.rmSync(DIR, { recursive: true, force: true });
 console.log(`\n════ 新增断言：通过 ${gFail === 0 ? '全部' : '有失败'} / 失败 ${gFail} ════`);

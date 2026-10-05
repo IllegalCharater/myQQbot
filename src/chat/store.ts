@@ -483,6 +483,40 @@ export class ChatStore {
   }
 
   /**
+   * 删掉**整个会话的存档**（面板"清空这个群/私聊的存档"用）。
+   *
+   * 三件事都要做，缺一件就会留下"看着删了、其实还在"的残留：
+   *   1. 删主存档文件（`data/messages/group_123.json`）；
+   *   2. 删**冷归档**（`data/messages/archive/group_123.jsonl`，历史压缩后的原文）——
+   *      只删主文件的话，那些原文还在磁盘上，而这个页面上看不到它，用户会以为删干净了；
+   *   3. 把内存里那份从 `chats` 拿掉。**留着的话下一次 `#state` 会把旧对象还给调用方、
+   *      并在任何一次写入时 `saveChat` 把刚删掉的文件原样写回磁盘** —— 于是"删除成功"
+   *      在下一次有人说话时被静默撤销。
+   *
+   * 删之前备份一份（沿用 `backupChatFileTo` 的"只保留最近一次"约定），因为这是面板上
+   * 唯一一个**一次操作抹掉一整段历史**的入口。
+   */
+  removeChat(chatKey: string) {
+    const backup = this.backupChatFileTo(chatKey, 'removed');
+    const removed = this.chats.delete(chatKey);
+    let archiveRemoved = false;
+    try {
+      if (fs.existsSync(archiveFile(chatKey))) {
+        fs.rmSync(archiveFile(chatKey), { force: true });
+        archiveRemoved = true;
+      }
+    } catch (error: unknown) {
+      console.warn(`[store] 冷归档删除失败(${chatKey}):`, errorText(error));
+    }
+    try {
+      fs.rmSync(chatFile(chatKey), { force: true });
+    } catch (error: unknown) {
+      console.warn(`[store] 存档删除失败(${chatKey}):`, errorText(error));
+    }
+    return { removed: removed || archiveRemoved || !!backup, backup, archiveRemoved };
+  }
+
+  /**
    * 按本地 id 真删一条存档。删掉的 id 不回收（nextLocalId 不动）。
    * @returns {{removed:object, backup:string}|null}
    */

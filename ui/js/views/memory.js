@@ -177,6 +177,7 @@ export async function loadMemoryDetail(chatKey) {
           <input type="text" id="mem-search" placeholder="查找群友 / 印象内容" />
           <button class="btn btn-small" id="mem-add-imp-btn">＋ 添加印象</button>
           <button class="btn btn-small" id="mem-consolidate-btn" ${busy ? 'disabled' : ''}>${busy ? '整理中…' : '整理本群记忆'}</button>
+          <button class="btn btn-small btn-danger" id="mem-clear-all-btn" title="删掉这个会话下所有群友的全部印象文件">清空本会话记忆</button>
           ${consolidateStatusHtml}
         </div>
       </div>
@@ -390,6 +391,31 @@ export async function loadMemoryDetail(chatKey) {
         if (status) status.textContent = `失败：${e.message}`;
         if (btn) { btn.disabled = false; btn.textContent = '整理本群记忆'; }
         renderMemoryList();
+      }
+    });
+    // 清空本会话记忆：删掉这个 chatKey 下**所有群友**的印象文件。
+    // 与"删除此人"（成员级）是两个粒度，所以确认文案要写清是"全部群友"，避免误点。
+    $('#mem-clear-all-btn')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      if (btn.disabled) return;
+      const label = formatChatTitle(chatKey, chatNameOf(chatKey));
+      const count = members.length;
+      const total = members.reduce((n, m) => n + (m.impressions?.length || 0), 0);
+      if (!confirm(`确定清空「${label}」的**全部记忆**？\n\n`
+        + `这会删掉 ${count} 个群友的 ${total} 条印象（整个 data/memory/${chatKey.replace(':', '_')}/ 目录）。\n`
+        + '每个群友的印象是机器人对这个人的长期认知，删掉后无法从界面恢复。\n\n'
+        + '只想去掉某个人，用那个人那一行的「删」按钮。')) return;
+      btn.disabled = true;
+      const status = $('#mem-consolidate-status');
+      try {
+        const r = await api(`/api/memory-files/${chatKey.replace(':', '_')}`, { method: 'DELETE' });
+        if (status) status.textContent = `已清空（${r.removedMembers ?? count} 个群友）`;
+        loadMemoryDetail(chatKey);
+        renderMemoryList();
+      } catch (error) {
+        if (status) status.textContent = `清空失败：${error.message}`;
+        alert(`清空失败：${error.message}`);
+        btn.disabled = false;
       }
     });
     // 若本群正在整理，启动计时刷新（切回来时也能接着走）

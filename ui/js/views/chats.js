@@ -151,6 +151,7 @@ export function renderChatMessages() {
       <button class="btn btn-small" id="chat-note-btn" title="插一条人工备注。它不是任何人说的话，会以【人工备注】出现在提示词里，供机器人下一轮参考。">加备注</button>
       <input type="text" id="test-send-text" placeholder="手动发一条测试消息" style="flex:1" />
       <button class="btn btn-small" id="chat-testsend-btn">发送</button>
+      <button class="btn btn-small btn-danger" id="chat-clear-btn" title="删掉这个会话的全部消息存档与冷归档（会先留一份备份）">清空本会话存档</button>
     </div>
     <div class="hint" id="chat-compact-status" style="margin:-4px 0 10px"></div>
     <table class="archive-table"><tbody id="chat-msg-body"></tbody></table>
@@ -171,6 +172,36 @@ export function renderChatMessages() {
   // 这是唯一不用等巡检间隔就能验证压缩是否正常的手段，所以结果要明确写出来。
   // 反馈写进工具栏下方的 #chat-compact-status（跟 SnowLuma 页的 #sl-hint 同一套做法），
   // 不用 alert：轮询刷新只重建 tbody，这行文字不会被冲掉。
+  // 清空本会话存档：**一次操作抹掉整段历史**，所以必须确认，且文案要说清删的是什么。
+  // 摘要（digest）也在这个会话文件里，所以顺带提醒 —— 只删消息不动摘要是不可能的：
+  // 它们同存一份 JSON，分开删等于把这个文件撕成两半。
+  $('#chat-clear-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (btn.disabled) return;
+    const label = formatChatTitle(key, chatNameOf(key));
+    if (!confirm(`确定清空「${label}」的全部消息存档？\n\n`
+      + '这会删掉这个会话的存档文件、历史摘要，以及压缩后的冷归档（archive）。\n'
+      + '删除前会自动留一份最近一次的备份。\n\n这个操作不能从界面撤销。')) return;
+    const status = $('#chat-compact-status');
+    btn.disabled = true;
+    btn.textContent = '清空中…';
+    try {
+      const result = await api(`/api/chats/${key.replace(':', '_')}`, { method: 'DELETE' });
+      if (status) {
+        status.textContent = `已清空：删掉 ${result.removedMessages ?? 0} 条存档`
+          + `${result.archiveRemoved ? '（含冷归档）' : ''}`
+          + `${result.backup ? `，备份 ${result.backup}` : ''}`;
+      }
+      loadChats();
+      loadChatMessages(key, { keepView: false });
+    } catch (error) {
+      if (status) status.textContent = `清空失败：${error.message}`;
+      alert(`清空失败：${error.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '清空本会话存档';
+    }
+  });
   $('#chat-compact-btn').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     if (btn.disabled) return;

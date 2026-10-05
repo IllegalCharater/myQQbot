@@ -440,6 +440,58 @@ ok('QQ 收藏的删除按钮是禁用的并写明原因', /QQ 收藏不能在这
 ok('表情编辑弹窗说明 desc 不可编辑', js.includes('每次同步都会被源数据盖回来'));
 ok('说明了改动只影响下一轮运行', js.includes('下一轮'));
 
+console.log('\n═══ 三处手动删除与两处存储上限的接线 ═══');
+// 三个按钮分别落在三个视图里，且都必须**先确认再删** —— 它们都是不可撤销的数据删除。
+{
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+  const root = pathMod.resolve(import.meta.dirname, '..');
+  const read = (p) => fsMod.readFileSync(pathMod.join(root, p), 'utf8');
+  const sessions = read('ui/js/views/sessions.js');
+  const chats = read('ui/js/views/chats.js');
+  const memory = read('ui/js/views/memory.js');
+  const chatSettings = read('ui/js/parts/chat-settings.js');
+  const save = read('ui/js/views/settings/save.js');
+
+  // ① 会话页：单条删除
+  ok('会话列表每行有删除按钮', /data-del-session="\$\{s\.id\}"/.test(sessions));
+  ok('删除按钮 stopPropagation（不做就会被同行的"选中"事件抢走，看起来点了没反应）',
+    /event\.stopPropagation\(\)/.test(sessions));
+  ok('删会话前先 confirm，并说清只删这次运行的记录、不动存档与记忆',
+    /确定删除这条会话记录/.test(sessions) && /不影响消息存档和记忆/.test(sessions));
+  ok('删的是当前正在看的那条时，右侧详情也一起清掉（否则留着一份已不存在的会话）',
+    /state\.currentSessionId === id/.test(sessions));
+
+  // ② 存档页：整个会话的存档
+  ok('存档页有"清空本会话存档"按钮', /id="chat-clear-btn"/.test(chats));
+  ok('清空存档的确认里点名会删掉冷归档（archive）——只删主文件的话原文会留在磁盘上',
+    /冷归档（archive）/.test(chats));
+  ok('清空存档的确认里说明会留一份备份', /自动留一份最近一次的备份/.test(chats));
+  ok('清空存档走 DELETE /api/chats/<key>', /api\(`\/api\/chats\/\$\{key\.replace\(':', '_'\)\}`, \{ method: 'DELETE' \}\)/.test(chats));
+
+  // ③ 记忆页：整个会话的记忆
+  ok('记忆页有"清空本会话记忆"按钮', /id="mem-clear-all-btn"/.test(memory));
+  ok('清空记忆的确认里给出群友数与印象数（让人知道自己要删掉多少）',
+    /个群友的 \$\{total\} 条印象/.test(memory));
+  ok('清空记忆的确认里点明粒度区别、并指向成员级的「删」',
+    /全部记忆/.test(memory) && /用那个人那一行的「删」按钮/.test(memory));
+  ok('清空记忆走 DELETE /api/memory-files/<key>（不是成员级那条）',
+    /api\(`\/api\/memory-files\/\$\{chatKey\.replace\(':', '_'\)\}`, \{ method: 'DELETE' \}\)/.test(memory));
+
+  // ④ 两个存储上限的配置项：输入框与保存读取必须成对出现
+  //    —— 只有 save 没有 input 的话，`val()` 取到 undefined 会**静默回退成当前值**，
+  //    用户改了没反应却看不到任何报错。
+  for (const [id, key] of [['cfg-maxmsgs-perchat', 'maxMessagesPerChat'], ['cfg-keepsessionfiles', 'keepSessionFiles']]) {
+    ok(`存储上限 ${key}：输入框与保存读取都在`,
+      chatSettings.includes(`id="${id}"`) && save.includes(`val('#${id}'`),
+      `input=${chatSettings.includes(`id="${id}"`)} save=${save.includes(`val('#${id}'`)}`);
+  }
+  ok('存档上限的 hint 说清它与"动态上下文窗口"的区别（磁盘 vs token）',
+    /磁盘上的存档上限/.test(chatSettings) && /一次运行读多少条/.test(chatSettings));
+  ok('会话记录上限的 hint 说清它不影响存档与记忆',
+    /不影响消息存档和记忆/.test(chatSettings));
+}
+
 console.log('\n═══ SSE 事件名：发射端与订阅端必须同名 ═══');
 // 两边分居两层两种写法（`src/core/events.ts` 是 TS 常量表，`ui/js` 是裸字符串），
 // 改名时最容易只改一边：帧照发、面板却再也不刷新，而且**不会报任何错**。

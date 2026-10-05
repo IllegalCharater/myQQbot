@@ -57,6 +57,22 @@ export const chatRoutes: Route[] = [
     },
   },
   {
+    // 删掉**整个会话的存档**（消息存档页的"清空这个会话的存档"）。
+    //
+    // 路径与上面 `.../messages/<id>` 不冲突（这条结尾是会话键）。动作比单条删除重得多：
+    // 整份存档 + 冷归档一起删，所以额外做两件事 —— 让编排层重载窗口（否则它手里还留着
+    // 已删的窗口状态，下一次唤醒会把幽灵消息当未读），并回报删掉的条数供界面确认。
+    method: 'DELETE', path: /^\/api\/chats\/(group|private)_(\d+)$/, async handle(ctx, _req, match) {
+      const chatKey = `${match?.[1]}:${match?.[2]}`;
+      const before = ctx.store.getChatMeta(chatKey).total;
+      const result = ctx.store.removeChat(chatKey);
+      ctx.orchestrator.reloadWindow(chatKey);
+      ctx.emit(EVENTS.chatUpdate, chatKey);
+      return { status: 200, body: { ok: true, chatKey, removedMessages: before,
+        archiveRemoved: result.archiveRemoved, backup: result.backup ? path.basename(result.backup) : '', remaining: ctx.store.getChatMeta(chatKey).total } };
+    },
+  },
+  {
     method: 'POST', path: /^\/api\/chats\/(group|private)_(\d+)\/notes$/, async handle(ctx, req, match) {
       const chatKey = `${match?.[1]}:${match?.[2]}`; const body = await readBody(req).catch(() => ({})); const record = isRecord(body) ? body : {};
       const text = String(record.text ?? '').trim(); if (!text) return { status: 400, body: { ok: false, error: '备注内容不能为空' } };

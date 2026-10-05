@@ -258,6 +258,17 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - 设置页的两个按钮（**测试解释器** / **跑一遍依赖自检**）对应 `POST /api/system/python-probe` 与 `POST /api/system/python-selfcheck`（`src/web/routes/system.ts`），逻辑在 `src/core/python-probe.ts`。三条边界：① 两个端点**只读已保存的配置、刻意忽略请求体**——接受请求体里的可执行路径等于凭空开一个"用 HTTP 启动任意本机程序"的一步接口，唯一的写入口仍是鉴权过的 `POST /api/config`（所以 UI 必须先 `saveConfig` 再探测，`t-panel-wiring.mjs` 有断言钉着这个顺序）；② 它们是**请求作用域**的短命子进程，**不进 `LONG_TERM_TASKS`**，也不碰常驻的搜图 worker 客户端单例；③ argv 里**不含任何密钥**（自检不拿 `apiKey`/`engineOptions`），与"SauceNAO 的 apiKey 绝不进 argv"是同一条不变量。自检的 409 忙等分支（`pythonSelfCheck.running`，照 `providers.ts` 的 `visionScan`）**没有行为断言**——触发它需要一次真的耗时 spawn，而测试约定不许启动真解释器，别以为它被管着。
 - 守护分布：脚本路径锚点与"两个脚本真的在同一个目录里"在 `tests/t-paths.mjs` 第 5 段（改名会红），解释器优先级/来源层级/探测与自检模块在 `tests/t-jmcomic.mjs` 第 1、1b、1c 段，端点在 `tests/t-admin.mjs` 的 D 段（把 `python.path` 配成不存在路径 → 200 + `ok:false` + 请求体里的路径被忽略），UI 接线在 `tests/t-panel-wiring.mjs`。`.gitignore` 已挡 `__pycache__/` 与 `*.pyc`——`python-tools/` 是要提交的源码，跑一次脚本就会在它旁边生成字节码缓存。
 
+**存储上限与手动清理**（`store.maxMessagesPerChat` / `store.keepSessionFiles` + 三条 DELETE 路由）：
+
+- **两个上限都早已存在，缺的一直是界面**。`maxMessagesPerChat` 由 `ChatStore.#trim` 在每次写入时执行（`<=0` 直接跳过）；`keepSessionFiles` 由 `SessionRegistry.finish()` 在会话结束时清理。加 UI 时**别顺手改语义**：两者都是 **0 = 不限**（= 原行为），且 `keepSessionFiles` **不能用 `x || 300` 兜底**——0 是 falsy，会把"取消上限"变回 300，构造函数里那句注释就是为这个写的。
+- **`keepSessionFiles` 的清理只在 `finish()` 里，不在 `get()` 里**（`get()` 只裁内存索引、不动磁盘）。写测试时别摆几个文件再 `get()` 就断言——那验的是"我以为的清理时机"（本套件初版就这么假红了一条）。要真跑 `create`→`finish`。
+- **`ChatStore.removeChat` 必须同时删冷归档**（`data/messages/archive/<会话>.jsonl`）。只删主文件的话，历史压缩后的原文还在磁盘上，而这个页面上看不到它——用户会以为删干净了。另外**必须把内存 `chats` 里那份摘掉**：留着的话下一次 `#state` 会把旧对象还回去，并在任何一次写入时 `saveChat` 把刚删掉的文件原样写回，"删除成功"被静默撤销。
+- **删存档前留备份**（`backupChatFileTo(..., 'removed')`，只保留最近一次）：这是面板上唯一一个一次抹掉整段历史的入口。删除*会话记录*则**不备份**——那是过程数据，删除意图明确。两者取舍不同是有意的。
+- **`SessionsRegistry.remove` 与 `discard()` 分工不同**：`discard` 是编排层的"占位会话没跑起来、撤掉"，只允许删 `waiting`；`remove` 是管理端用户明确点的删除，已结束的（done/noreply/error/aborted）都允许。**`running` 必须拒绝**：它还在写该文件，删掉之后收尾的 `#persist` 会把文件原样写回来（看起来"删了又出现"），并继续 `#bumpTodayUsage`。
+- **删会话记录不影响今日用量**：已结束会话的 token 在 `finish()` 时就累加进 `usage-today.json` 这个**独立聚合**了，`todayUsage()` 读的是它 + 运行中的内存态，不再读单条会话文件。改这条链前先确认这一点，否则会以为"删记录会毁账"。
+- **整会话记忆删除（`DELETE /api/memory-files/<key>`）与成员级（`.../members/<id>`）是两条路由**，靠正则结尾区分。加路由时注意别让前者吞掉后者 —— `t-panel.mjs` 有一条断言专门验成员级删除没被抢走。`ctx.memory.clear(chatKey)` 早就是"删这个会话全部成员文件"的现成实现，不必自己遍历。
+- **测试落点**：`t-panel.mjs`（真起 app + 真 HTTP + 真磁盘文件，验"删干净"与"上限真的生效"）、`t-panel-wiring.mjs`（三个按钮都先 `confirm`、文案说清删的是什么、两个上限的 input 与 save **成对**存在）。最后一条尤其重要：只有 `save.js` 没有 `input` 时，`val()` 取到 `undefined` 会**静默回退成当前值**——用户改了没反应，且没有任何报错。
+
 **「是不是在叫我」由模型判断，代码只提供证据**（`qqSceneRules` 的【判断"是不是在叫我"】那段 + `user.groupState`）：
 
 - **提示词必须同时给正反两侧判据**。只给"别抢话"（引用场景）是不够的——它没回答"什么才算在说你"，而模型手里有名字和"我"的标记，缺判据时**默认把指代别人的第三人称当成自己**（"他/这人/那家伙"）。正面：@你 / 引用你的消息 / 单独叫你的显示名或人设名 / 明显在接你的上一句话。反面：第三人称、别人昵称里恰好含你的名字（你叫「小鱼」而对方叫「小鱼干」）、"我的/我养的"这类顺带提到、两人互相 @。并给出默认动作：**拿不准先沉默**（误接一句比少说一句难堪），同时钉住反面——明确 @ 你 / 直接问你 / 接着你说时**必须**回应，别过头成装死。

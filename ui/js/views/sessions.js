@@ -171,6 +171,7 @@ export function renderSessionList() {
         <div class="session-title">
           <span class="session-chat">${esc(chatName)}</span>
           <span class="session-time">${fmtTime(s.startedAt)}</span>
+          <button class="btn btn-small btn-danger" data-del-session="${s.id}" title="删除这条会话记录">×</button>
         </div>
         <div class="session-trigger">${esc(s.trigger || '')}</div>
         <div class="session-meta">
@@ -196,6 +197,33 @@ export function renderSessionList() {
   for (const s of state.sessions) state.seenSessionIds.add(s.id);
   $$('.session-item', box).forEach((el) => {
     el.addEventListener('click', () => selectSession(el.dataset.id));
+  });
+  // 删除按钮：必须 `stopPropagation`，否则点它会先触发上面那个选中事件
+  // （选中会重建列表，于是这次删除被自己打断、看起来"点了没反应"）。
+  $$('[data-del-session]', box).forEach((btn) => {
+    btn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const id = btn.dataset.delSession;
+      if (!id) return;
+      if (!confirm('确定删除这条会话记录？\n\n只删这一次运行的记录（请求/响应过程），不影响消息存档和记忆。')) return;
+      btn.disabled = true;
+      try {
+        await api(`/api/sessions/${id}`, { method: 'DELETE' });
+        // 删掉的是当前正在看的那条时，右边详情也要清掉 —— 否则会留着一份已经不存在的会话。
+        if (state.currentSessionId === id) {
+          state.currentSessionId = null;
+          state.sessionDetail = null;
+          lastDetailFp = null;
+          const detail = $('#session-detail');
+          if (detail) detail.innerHTML = '<div class="empty-hint">← 选择左侧会话查看完整过程</div>';
+        }
+        await loadSessions({ quiet: true });
+        renderSessionList();
+      } catch (error) {
+        alert(`删除失败：${error.message}`);
+        btn.disabled = false;
+      }
+    });
   });
   // 等待中会话的剩余时间按 0.1s 本地刷新（不重新拉列表）
   if ($$('.session-wait[data-until]', box).length) startWaitTicker();
