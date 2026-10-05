@@ -144,18 +144,36 @@ console.log('\n═══ 联网搜索：网页收藏夹与调用阀门 ═══
 // 这一段的四个 id 此前一个都不存在，而它们在 save.js 里全是 `$('#…')?.value` 的形式：
 // id 写错**不会报错**，只会让收藏夹静默保存成空数组（`?.` 兜住 undefined），
 // 表现为"填了收藏夹但搜索完全不理会它"—— 与"功能本身没生效"长得一模一样。
-for (const id of ['cfg-search-bookmarks', 'cfg-search-bookmarkmode', 'cfg-search-chat-hourly', 'cfg-search-daily']) {
+for (const id of ['cfg-search-bookmarkmode', 'search-bookmarks-body', 'add-search-bookmark-btn', 'cfg-search-chat-hourly', 'cfg-search-daily']) {
   ok(`#${id} 已加入设置模板`, new RegExp(`id="${id}"`).test(js));
   ok(`#${id} 可解析`, resolves(id));
 }
+const searchSave = seg("if (sec === 'search')", "if (sec === 'image-source')");
+// 收藏夹现在是「枚举值 + 网页地址 + 用途」三列，用 `data-bm-*` 标记每一格。
+// 这三个属性名是 save.js 逐行取值的**唯一接口**：改名只改一端会静默读出 undefined，
+// 于是每一项都因"三项不全"被丢弃 —— 表现为"收藏夹存不进去"，而没有任何报错。
+for (const attr of ['data-bm-key', 'data-bm-url', 'data-bm-purpose']) {
+  ok(`${attr} 在渲染里出现（save.js 靠它取值）`, new RegExp(attr).test(js));
+}
+ok('保存分支按行读三列（缺一列那一条就丢）',
+  /querySelector\('\[data-bm-key\]'\)/.test(searchSave)
+  && /querySelector\('\[data-bm-url\]'\)/.test(searchSave)
+  && /querySelector\('\[data-bm-purpose\]'\)/.test(searchSave));
+ok('三项不全的条目在保存时被丢掉（后端也会丢，前端先丢让用户当场看见）',
+  /\.filter\(\(item\) => item\.key && item\.url && item\.purpose\)/.test(searchSave));
+// 前端不做域名归一化、也不校验枚举值：两件事的唯一实现都在 core/config.ts
+// （hostnameOf / isBookmarkKey）。前端再写一份必然漂移。
+ok('前端不重复实现域名归一化与枚举值校验',
+  !/hostname/.test(stripComments(searchSave)) && !/replace\(\/\^https\?/.test(stripComments(searchSave)));
+ok('收藏夹增删走 DOM 操作 + 事件委托（不重渲染整页，否则会冲掉未保存的其它输入）',
+  /add-search-bookmark-btn'\)\?\.addEventListener\('click'/.test(js)
+  && /search-bookmarks-body'\)\?\.addEventListener\('click'/.test(js)
+  && /closest\('\[data-bm-del\]'\)/.test(js));
 // 废弃的旧键**不得**再出现在面板里：它会由后端迁移成 bookmarkMode，前端若还写回一个
 // 废弃键，那个键就会永远留在用户的 config.json 里当一个没人读的旋钮。
 ok('废弃的 bookmarkFirst 复选框已从面板移除',
   !/cfg-search-bookmarkfirst/.test(js), '面板里仍有旧键控件');
-const searchSave = seg("if (sec === 'search')", "if (sec === 'image-source')");
 ok('搜索保存分支生成 patch.webSearch', /patch\.webSearch = \{/.test(searchSave));
-ok('收藏夹按行拆分并丢掉空行',
-  /const bookmarks = String\(\$\('#cfg-search-bookmarks'\)\?\.value \|\| ''\)\s*\n\s*\.split\('\\n'\)\s*\n\s*\.map\(\(line\) => line\.trim\(\)\)\s*\n\s*\.filter\(Boolean\)/.test(searchSave));
 // 前端**不做**域名归一化：唯一实现在 core/config.ts 的 hostnameOf。前端再写一份必然漂移，
 // 而两边规则不一致时"用户看到的名单"与"实际参与检索的名单"会不一样。
 // ⚠️ 必须 stripComments 后再扫：这条断言的靶子是**注释里那个词**（上面几行就写着

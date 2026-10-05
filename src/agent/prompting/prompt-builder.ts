@@ -27,29 +27,16 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /** 组装系统提示。 */
 export function buildSystemPrompt({ persona, capabilities = {}, bookmarkSites = [] }: {
   persona?: AppConfig['persona'];
   capabilities?: { vision?: boolean; search?: boolean };
   /**
-   * 管理员配置的收藏夹站点名单，注入 system prompt 供模型在 `web_search` 的 `site`
+   * 管理员配置的收藏夹站点，注入 system prompt 供模型在 `web_search` 的 `site`
    * 参数里选（同 stickers 的做法：**动态数据由调用方递进来**，Catalog 只放固定指令）。
+   * 三项都要：枚举值给模型回传、域名让它知道实际在哪个站搜、用途是选站依据。
    */
-  bookmarkSites?: string[];
+  bookmarkSites?: Array<{ key: string; host: string; purpose: string }>;
 } = {}): string {
   const cfg = persona ?? getConfig().persona;
   const appCfg = getConfig();

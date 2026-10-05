@@ -8,6 +8,7 @@ import { chatCompletionWithRetry, addUsage } from '../../llm/llm.js';
 import { toOpenAiTools, executeTool } from '../tools/index.js';
 import { modelImageVerdict } from '../../llm/vision-scan.js';
 import { resolveTranscriptionConfig } from '../../media/video-transcription.js';
+import { bookmarkList } from '../../media/web-search.js';
 import { parseInlineToolCalls } from '../shared/inline-tool-parser.js';
 import { isRecord, safeParse } from '../shared/json-parse.js';
 import type { ChatMessage, SessionRecord } from '../../chat/types.js';
@@ -98,8 +99,9 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       persona: cfg.persona,
       capabilities: { vision: visionEnabled, search: searchEnabled },
       // 收藏夹站点名单进 system prompt：模型要靠它才知道 `web_search.site` 能填什么。
-      // 读的是**已归一**的配置（core/config.ts 的 hostnameOf 收口），所以这里直接给模型。
-      bookmarkSites: cfg.webSearch?.bookmarks
+      // 用 bookmarkList() 而不是裸配置：它把 `{key,url,purpose}` 投影成 `{key,host,purpose}`
+      // （域名已从 URL 归一出来），提示词里要展示的是**实际参与检索的域名**。
+      bookmarkSites: bookmarkList()
     });
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,

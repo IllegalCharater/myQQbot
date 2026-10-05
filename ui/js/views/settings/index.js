@@ -10,7 +10,7 @@ import { clampInt, renderChatSection, sliderDesc, sliderToTierUI, sliderToTierUI
 import {
   renderAllowSection, renderApiSection, renderDesktopSection, renderMemorySettingsSection,
   renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderPythonSection,
-  renderSearchSection, renderTranscriptionSection, renderImageSourceSection
+  renderSearchSection, renderTranscriptionSection, renderImageSourceSection, renderBookmarkRows
 } from './sections.js';
 import { parseList, saveConfig } from './save.js';
 import { openBlocklistModal } from '../../parts/blocklist.js';
@@ -289,6 +289,27 @@ export function bindSettingsEvents(c) {
       await renderHotStatus();
     });
   }
+
+  // ── 网页收藏夹：加一行 / 删一行 ──
+  //
+  // 只动 DOM、不重渲染整页：重渲染会把用户在同一页其他输入框里**还没保存的**改动冲掉
+  // （设置页的重渲染读的是 `state.config`，不是当前 DOM 值）。复用 `renderBookmarkRows()`
+  // 是为了让新增行与首次渲染**同一份模板** —— 各写一份必然漂移。
+  $('#add-search-bookmark-btn')?.addEventListener('click', () => {
+    const body = $('#search-bookmarks-body');
+    if (!body) return;
+    body.insertAdjacentHTML('beforeend', renderBookmarkRows([]));
+  });
+  // 删除走事件委托：新增行是后插进来的，绑到具体按钮上会漏掉它们。
+  $('#search-bookmarks-body')?.addEventListener('click', (event) => {
+    const btn = event.target instanceof Element ? event.target.closest('[data-bm-del]') : null;
+    if (!btn) return;
+    const body = $('#search-bookmarks-body');
+    if (!body) return;
+    btn.closest('tr')?.remove();
+    // 删空了就补一个空行，否则用户没有可填的输入框（得先点"添加一条"才能开始填）
+    if (!body.querySelector('tr[data-bm]')) body.insertAdjacentHTML('beforeend', renderBookmarkRows([]));
+  });
 
   // 搜索提供方切换
   const searchProviderSel = $('#cfg-searchprovider');

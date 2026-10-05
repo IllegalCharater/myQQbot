@@ -104,6 +104,16 @@ const baseSearch = {
   maxCallsPerChatPerHour: 20, maxCallsPerDay: 200
 };
 
+/**
+ * 造一条收藏夹条目（新形状：枚举值 + 网页地址 + 用途）。
+ *
+ * ⚠️ 必须走这个 helper 而不是手写字符串：`updateConfig` 走 `deepMerge`，
+ * **不会**经过 `normalizeConfigShape`（迁移只发生在 `loadConfig` 读盘那一步）。
+ * 所以夹具里塞旧形状的字符串数组不会被迁移，只会让 `bookmarkList()` 过滤成空 ——
+ * 表现为"收藏夹配了却完全不生效"，而套件报错指向别处（本套件初版就是这么红的）。
+ */
+const bm = (key, url, purpose = '测试用途') => ({ key, url, purpose });
+
 console.log('\n═══ 1. 没有收藏夹时不发第二发（行为与从前逐字相同） ═══');
 updateConfig({ webSearch: { ...baseSearch, bookmarks: [], bookmarkMode: 'prefer' } });
 scopedHits = 0; generalHits = 0;
@@ -115,7 +125,7 @@ ok('查询词原样带进请求（没被拼上 site: 子句）',
   out.query === '测试查询' && out.results[0].url === 'https://other.com/a');
 
 console.log('\n═══ 2. 模型没点名 + prefer 模式：两发并发 + 收藏夹命中排最前 + 去重 ═══');
-updateConfig({ webSearch: { ...baseSearch, bookmarks: ['book.mark'], bookmarkMode: 'prefer' } });
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [bm('book', 'book.mark')], bookmarkMode: 'prefer' } });
 scopedHits = 0; generalHits = 0;
 out = await webSearch('测试查询');
 ok('两发都发出去了', scopedHits === 1 && generalHits === 1, `scoped=${scopedHits} general=${generalHits}`);
@@ -137,7 +147,7 @@ console.log('\n═══ 3. 域名边界：收藏 example.com 只该命中它自
 // 用 `book.mark` vs `other.com` 之类的域名测不出这个区别（两种实现结果相同，
 // 那种断言是假的绿 —— 本轮证伪探针亲自撞出来过）。
 generalMode = 'substring-trap';
-updateConfig({ webSearch: { ...baseSearch, bookmarks: ['example.com'], bookmarkMode: 'prefer' } });
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [bm('example', 'example.com')], bookmarkMode: 'prefer' } });
 out = await webSearch('测试');
 const bookmarked = out.results.filter((r) => r.fromBookmark).map((r) => r.url);
 ok('子域 m.example.com 命中收藏的 example.com',
@@ -148,11 +158,12 @@ ok('无关站点不命中', !bookmarked.includes('https://other.com/3'), JSON.st
 ok('恰好只有一条被标记', bookmarked.length === 1, JSON.stringify(bookmarked));
 generalMode = 'normal';
 
-console.log('\n═══ 4. 模型显式传 site：只按它点的那个站点优先 ═══');
+console.log('\n═══ 4. 模型显式传 site（枚举值）：只按它点的那条优先 ═══');
 // 这是本轮改动的核心：站点由**模型**决定，照 reverse_image_source 的 intent 那一套。
-updateConfig({ webSearch: { ...baseSearch, bookmarks: ['book.mark', 'example.com'], bookmarkMode: 'web' } });
+// 它传的是**枚举值**（`book`），不是域名（`book.mark`）—— 域名由服务端查表得出。
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [bm('book', 'book.mark'), bm('example', 'example.com')], bookmarkMode: 'web' } });
 scopedHits = 0; generalHits = 0;
-out = await webSearch('测试查询', 'book.mark');
+out = await webSearch('测试查询', 'book');
 ok('传了 site 就发两发（站内 + 全网）', scopedHits === 1 && generalHits === 1, `scoped=${scopedHits} general=${generalHits}`);
 ok('站内命中排最前', out.results[0].url === 'https://book.mark/only', `首条是 ${out.results[0]?.url}`);
 ok('站内命中带 fromBookmark 标记', out.results[0].fromBookmark === true);
@@ -160,26 +171,36 @@ ok('全网结果仍作补充（不是只搜收藏夹）', out.results.some((r) =
 // bookmarkMode=web 只管"模型没点名"时；点了名就必须生效 —— 否则这个下拉会悄悄废掉新功能
 ok('bookmarkMode=web 不阻止模型显式指定站点（两者管的是不同的事）', scopedHits === 1);
 
-console.log('\n═══ 5. site 校验：不在名单里的站点必须报错并给出可选值 ═══');
-// 为什么必须校验而不是直接拼进 site: —— 一个凭空写出的域名会**静默**搜出空结果，
+console.log('\n═══ 5. site 校验：不在名单里的枚举值必须报错并给出可选值 ═══');
+// 为什么必须校验而不是直接拼进 site: —— 一个凭空写出的值会**静默**搜出空结果，
 // 看起来像"这个站没有内容"，实际是"它从来不在名单里"。报错要把名单带回去让模型改对。
 let badSite = '';
-try { await webSearch('测试查询', 'evil.example.net'); } catch (error) { badSite = String(error?.message || error); }
-ok('不在收藏夹里的 site 被拒绝', badSite.length > 0, JSON.stringify(badSite));
-ok('报错带回可选名单，模型下一轮能改对',
-  badSite.includes('book.mark') && badSite.includes('example.com'), JSON.stringify(badSite));
-// 收藏了 example.com 时，模型把子域写全也该认（它在那个站点范围内）
-ok('子域写法被接受（收藏 example.com，模型写 m.example.com）',
-  resolveBookmarkSite('m.example.com') === 'm.example.com');
-ok('带 scheme 的写法被归一后接受', resolveBookmarkSite('https://book.mark/x') === 'book.mark');
+try { await webSearch('测试查询', 'evil'); } catch (error) { badSite = String(error?.message || error); }
+ok('不在收藏夹里的枚举值被拒绝', badSite.length > 0, JSON.stringify(badSite));
+ok('报错带回可选**枚举值**（不是域名），模型下一轮能改对',
+  badSite.includes('book') && badSite.includes('example'), JSON.stringify(badSite));
+// 用途要一起带回去：模型靠它才知道每个枚举值是什么，而不是只剩两个生造的词
+ok('报错里带上了用途，模型能据此选对',
+  badSite.includes('测试用途'), JSON.stringify(badSite));
+// 传**域名**而不是枚举值时必须被拒：两者的取值空间不同，宽容接受会让"模型传错了"
+// 永远不被发现，而它传错的依据（以为能传域名）会一直错下去。
+let wrongKind = '';
+try { await webSearch('测试查询', 'book.mark'); } catch (error) { wrongKind = String(error?.message || error); }
+ok('传域名（而不是枚举值）被拒 —— 两者取值空间不同，不能宽容接受',
+  wrongKind.length > 0, JSON.stringify(wrongKind));
+// 返回值是**条目**（含解析出的域名与用途），不只是那个枚举值
+const resolved = resolveBookmarkSite('book');
+ok('resolveBookmarkSite 返回解析后的条目（枚举值→域名）',
+  resolved.key === 'book' && resolved.host === 'book.mark' && resolved.purpose === '测试用途',
+  JSON.stringify(resolved));
 // 名单为空时点名 → 要说清"管理员还没配"，而不是一个含糊的失败
 updateConfig({ webSearch: { ...baseSearch, bookmarks: [], bookmarkMode: 'prefer' } });
 let noList = '';
-try { await webSearch('测试查询', 'book.mark'); } catch (error) { noList = String(error?.message || error); }
+try { await webSearch('测试查询', 'book'); } catch (error) { noList = String(error?.message || error); }
 ok('名单为空时传 site 报"还没配置收藏夹"', noList.includes('收藏夹'), JSON.stringify(noList));
 
 console.log('\n═══ 6. bookmarkMode=web：名单保留，但不传 site 时完全不理会它 ═══');
-updateConfig({ webSearch: { ...baseSearch, bookmarks: ['book.mark'], bookmarkMode: 'web' } });
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [bm('book', 'book.mark')], bookmarkMode: 'web' } });
 scopedHits = 0; generalHits = 0;
 out = await webSearch('测试查询');
 ok('关掉后只发一发（不传 site 就不为收藏夹多付一次往返）',
@@ -189,7 +210,7 @@ ok('配置里的名单没被清掉（只是默认不生效，方便临时关）'
   Array.isArray(getConfig().webSearch.bookmarks) && getConfig().webSearch.bookmarks.length === 1);
 
 console.log('\n═══ 7. 受限那一发失败：不拖垮普通结果 ═══');
-updateConfig({ webSearch: { ...baseSearch, bookmarks: ['book.mark'], bookmarkMode: 'prefer' } });
+updateConfig({ webSearch: { ...baseSearch, bookmarks: [bm('book', 'book.mark')], bookmarkMode: 'prefer' } });
 scopedMode = 'fail';
 // 这一节的假引擎让**普通那一发也不返回 book.mark**：否则"没有收藏夹标记"会因为
 // 普通结果里本来就有这个站而假绿 —— 断言的靶子是"受限那一发没给出东西"，
@@ -215,7 +236,7 @@ console.log('\n═══ 8. 两发都失败：抛的是**用户真正请求的�
 const dead = http.createServer((_req, res) => { res.writeHead(500); res.end('search down'); });
 await new Promise((r) => dead.listen(0, '127.0.0.1', r));
 const deadUrl = `http://127.0.0.1:${dead.address().port}/search`;
-updateConfig({ webSearch: { ...baseSearch, searchUrl: deadUrl, bookmarks: ['book.mark'], bookmarkMode: 'prefer' } });
+updateConfig({ webSearch: { ...baseSearch, searchUrl: deadUrl, bookmarks: [bm('book', 'book.mark')], bookmarkMode: 'prefer' } });
 let threw = '';
 try { await webSearch('测试查询'); } catch (error) { threw = String(error?.message || error); }
 await new Promise((r) => dead.close(r));
@@ -231,14 +252,22 @@ ok('截断到 120 字', sanitizeQuery('x'.repeat(300)).length === 120);
 ok('非字符串输入不炸', sanitizeQuery(undefined) === '' && sanitizeQuery(null) === '' && sanitizeQuery(12345) === '12345');
 
 console.log('\n═══ 10. 收藏夹名单注入 system prompt（模型要看得见才能选） ═══');
-// 名单必须由 system prompt 承载而不是写进 tool schema：域名是用户配置的**动态数据**，
-// 而 Catalog 里放的是固定指令（同 stickers 的做法）。不注入的话模型根本不知道 site 能填什么，
-// 只会瞎猜域名 —— 而瞎猜会被校验拦掉，表现为"这个功能从没成功过"。
-updateConfig({ webSearch: { ...baseSearch, bookmarks: ['zh.wikipedia.org', 'news.ycombinator.com'], bookmarkMode: 'prefer' } });
+// 名单必须由 system prompt 承载而不是写进 tool schema：**枚举值与用途是用户配置的动态
+// 数据**，而 Catalog 里放的是固定指令（同 stickers 的做法）。不注入的话模型根本不知道
+// site 能填什么，只会瞎猜 —— 而瞎猜会被校验拦掉，表现为"这个功能从没成功过"。
+// 每行三样都要进：枚举值（回传用）、域名（知道实际在哪搜）、用途（选站依据）。
 updateConfig({ persona: { botName: '小鲸鱼', roleText: '' } });
-let sys = buildSystemPrompt({ bookmarkSites: ['zh.wikipedia.org', 'news.ycombinator.com'] });
-ok('system prompt 里列出了收藏夹站点', sys.includes('zh.wikipedia.org') && sys.includes('news.ycombinator.com'));
-ok('说明了 site 的取值必须来自名单', sys.includes('site') && sys.includes('之一'));
+const sysSites = [
+  { key: 'wiki-zh', host: 'zh.wikipedia.org', purpose: '查百科条目、定义、背景事实' },
+  { key: 'news-yc', host: 'news.ycombinator.com', purpose: '查技术圈讨论与创业动态' }
+];
+const sys = buildSystemPrompt({ bookmarkSites: sysSites });
+ok('system prompt 里列出了枚举值', sys.includes('wiki-zh') && sys.includes('news-yc'));
+ok('同时列出了它解析出的域名（模型要知道实际在哪个站搜）',
+  sys.includes('zh.wikipedia.org') && sys.includes('news.ycombinator.com'));
+ok('同时列出了用途（模型据此判断该选哪一条）',
+  sys.includes('查百科条目、定义、背景事实') && sys.includes('查技术圈讨论与创业动态'));
+ok('说明了 site 的取值是"枚举值"而不是域名', sys.includes('枚举值'));
 ok('提醒了不确定时不要传 site（避免把搜索无谓地收窄）', sys.includes('不要传 site'));
 const sysEmpty = buildSystemPrompt({ bookmarkSites: [] });
 // 判据要盯**名单注入那一句**，不能扫"收藏夹站点"这个泛词：另有一条无条件的行为规则也含它
@@ -246,16 +275,23 @@ const sysEmpty = buildSystemPrompt({ bookmarkSites: [] });
 ok('名单为空时**不注入**名单那两行（没有可选项就别占提示词预算）',
   !sysEmpty.includes('管理员配置了这些收藏夹站点'), '空名单时仍注入了名单行');
 
-console.log('\n═══ 11. 配置兼容：旧键 bookmarkFirst 迁移成 bookmarkMode ═══');
-// 旧键有两个值、新键有两个档，映射必须是 false→web / true→prefer，且**旧键要删掉**：
-// `updateConfig` 只加键不删键，不显式 delete 就会让一个没人读的旋钮永远留在 config.json 里。
+console.log('\n═══ 11. 配置迁移：旧形状（宿主名数组）与旧键 bookmarkFirst ═══');
+// 两条迁移都在 `normalizeConfigShape` 里，且都必须**在独立进程里验**：
+// 本进程前面调过 `updateConfig`，内存里的 config 已带着一个非迁移来的 `bookmarkMode`，
+// 再 `loadConfig()` 会被 `updateConfig` 的 deepMerge 结果盖掉（第一版就是这么假红的）。
 //
-// ⚠️ 必须在**独立进程**里做：本进程前面调过 `updateConfig`，内存里的 config 已经带着
-// 一个非迁移来的 `bookmarkMode`，再 `loadConfig()` 会被 `updateConfig` 的 deepMerge 结果
-// 盖掉 —— 第一版就是这么假红的（迁移明明生效，断言读到的却是上一节的 'prefer'）。
+// 旧收藏夹是**纯宿主名数组**，新形状是三元组对象，两者不能共存：
+//   ① 宿主名要 slug 化成枚举值（`news.ycombinator.com` → `news-ycombinator-com`）；
+//   ② 用途留空（它是迁移来的，丢掉就等于删了用户的收藏）；
+//   ③ 旧键 bookmarkFirst 翻成 bookmarkMode 并删除。
 const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-legacy-'));
 fs.writeFileSync(path.join(legacyDir, 'config.json'),
-  JSON.stringify({ webSearch: { bookmarks: ['a.example.com'], bookmarkFirst: false } }), 'utf8');
+  JSON.stringify({ webSearch: {
+    // 混着写：两条旧形状 + 一条新形状 + 一条重复枚举值
+    bookmarks: ['a.example.com', 'news.ycombinator.com', { key: 'ok', url: 'ok.example.com', purpose: '合法的新条目' },
+      { key: 'ok', url: 'dup.example.com', purpose: '重复枚举值，应被丢弃' }],
+    bookmarkFirst: false
+  } }), 'utf8');
 // 输出写到文件而不是管道：沙箱下子进程的 stdout 管道可能拿不到（项目已知的 EPERM 边界）
 const probeOut = path.join(legacyDir, 'out.json');
 const configUrl = new URL('../dist/core/config.js', import.meta.url).href;
@@ -269,10 +305,23 @@ fs.writeFileSync(${JSON.stringify(probeOut)}, JSON.stringify(c.webSearch));
 const { execFileSync } = await import('node:child_process');
 execFileSync(process.execPath, [probeFile], { env: { ...process.env, QQ_AGENT_DATA_DIR: legacyDir }, stdio: 'inherit' });
 const legacyWs = JSON.parse(fs.readFileSync(probeOut, 'utf8'));
-ok('bookmarkFirst=false 迁移成 bookmarkMode=web（独立进程里跑，避免内存态干扰）',
-  legacyWs.bookmarkMode === 'web', JSON.stringify(legacyWs.bookmarkMode));
+ok('bookmarkFirst=false 迁移成 bookmarkMode=web', legacyWs.bookmarkMode === 'web',
+  JSON.stringify(legacyWs.bookmarkMode));
 ok('旧键已从配置里删除（不留死旋钮）', !('bookmarkFirst' in legacyWs),
   JSON.stringify(Object.keys(legacyWs)));
+const lb = legacyWs.bookmarks || [];
+ok('旧形状（宿主名）迁移成三元组条目', lb.length === 3, JSON.stringify(lb));
+ok('宿主名被 slug 化成合法枚举值',
+  lb.some((b) => b.key === 'a-example-com' && b.url === 'a.example.com')
+  && lb.some((b) => b.key === 'news-ycombinator-com' && b.url === 'news.ycombinator.com'),
+  JSON.stringify(lb.map((b) => b.key)));
+ok('新形状条目原样保留（枚举值与用途都不动）',
+  lb.some((b) => b.key === 'ok' && b.url === 'ok.example.com' && b.purpose === '合法的新条目'),
+  JSON.stringify(lb));
+ok('重复枚举值被丢弃（否则模型传一个键会命中两条）',
+  lb.filter((b) => b.key === 'ok').length === 1, JSON.stringify(lb.map((b) => b.key)));
+ok('迁移来的条目用途为空（不编造用途，留给用户补）',
+  lb.filter((b) => b.key !== 'ok').every((b) => b.purpose === ''), JSON.stringify(lb));
 fs.rmSync(legacyDir, { recursive: true, force: true });
 
 // ── Yandex 段 ──────────────────────────────────────────────────────────

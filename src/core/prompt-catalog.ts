@@ -168,7 +168,7 @@ export const TOOL_PROMPT_TEXT = {
   web_search: {
     description: '联网搜索，返回标题/URL/摘要列表。适用：实时信息、新闻热点、网络用语/梗的含义、自己不确定的事实。可以换关键词连续搜 2~3 次；对最相关的 1~2 个结果用 web_fetch 读正文，不要只看摘要。',
     query: '搜索词',
-    site: '（可选）只在某个收藏夹站点里搜。取值必须是系统提示词里列出的收藏夹站点之一；不传就是全网搜索。当你知道答案最可能出现在某个已收藏的站点时传它。',
+    site: '（可选）只在某个收藏夹站点里搜。取值是系统提示词里列出的收藏夹**枚举值**（不是域名）；不传就是全网搜索。当你知道答案最可能出现在某个已收藏的站点时传它。',
   },
   web_fetch: {
     description: '只读抓取网页正文（≤2 万字符）。群友发来链接问"写了什么"时直接抓；配合 web_search 阅读搜索结果的详细内容。禁止访问内网/本机地址。',
@@ -292,7 +292,7 @@ function stickerRules(strategy: string) {
   ].join('\n');
 }
 
-function qqSceneRules({ vision, search, bookmarkSites }: { vision: boolean; search: boolean; bookmarkSites?: string[] }) {
+function qqSceneRules({ vision, search, bookmarkSites }: { vision: boolean; search: boolean; bookmarkSites?: Array<{ key: string; host: string; purpose: string }> }) {
   const lines = [
     '【QQ 场景规则】',
     '- 回复保持简短，符合群友语感；不要使用 Markdown 格式（**、#、代码块在 QQ 上会显示成乱码）。',
@@ -313,11 +313,20 @@ function qqSceneRules({ vision, search, bookmarkSites }: { vision: boolean; sear
       '- 搜索结果里带 fromBookmark 标记的条目来自管理员配置的收藏夹站点，它们被排在最前面只是因为该站点被收藏，**不代表它更权威**；涉及事实时仍要与其他来源交叉验证。'
     );
     // 站点名单**只在非空时注入**（与表情目录同一条：没有可选项就不该占提示词预算）。
-    // 它必须由 system prompt 承载而不是写进 tool schema：域名是用户配置的**动态数据**，
-    // 而 Catalog 里的是固定指令（同 stickers 的做法，见 prompt-builder 的 stickerRules）。
+    // 它必须由 system prompt 承载而不是写进 tool schema：枚举值与用途是用户配置的
+    // **动态数据**，而 Catalog 里的是固定指令（同 stickers 的做法）。
+    //
+    // 每行给三样东西，缺一不可：
+    //   · 枚举值 —— 模型要原样回传的那个字面量，**不写它就无从调用**；
+    //   · 域名   —— 让模型知道"这个枚举值实际在哪个站搜"。只给 `wiki` 而不给域名时，
+    //              模型无法判断它是不是自己以为的那个站（枚举值是我们起的别名）；
+    //   · 用途   —— 选站依据。只给枚举值而不说它是什么，等于给了个猜谜题。
     if (bookmarkSites?.length) {
+      const rows = bookmarkSites
+        .map((item) => `  · ${item.key} — ${item.host}${item.purpose ? `（适合：${item.purpose}）` : ''}`)
+        .join('\n');
       lines.push(
-        `- 管理员配置了这些收藏夹站点，**你可以决定只在其中一个里搜索**（知道答案最可能出现在某个站点时，用 web_search 的 site 参数，取值必须是下列之一）：${bookmarkSites.join('、')}。`,
+        `- 管理员配置了这些收藏夹站点，**你可以决定只在其中一个里搜索**（知道答案最可能出现在某个站点时，用 web_search 的 site 参数，取值是每行开头的那个枚举值）：\n${rows}`,
         '- site 只在明确判断"这个站的答案更好"时才用；不确定、或该站可能没有这个内容时，**不要传 site**，直接全网搜索更稳。指定的站点里没有时结果里仍会附上全网结果，如实说明即可。'
       );
     }

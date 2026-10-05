@@ -273,9 +273,15 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 三条不变量：
 
-- **"搜哪个站点"由模型决定，代码只路由与校验**（照 reverse-image-source 的 `intent` 那一套）。`web_search` 有可选参数 `site`，取值必须来自管理员配置的收藏夹名单；**校验不能省**——模型凭空写一个域名会拼进 `site:` 并**静默**搜出空结果，看起来像"这个站没有内容"，实际是"它从来不在名单里"。`resolveBookmarkSite()` 拒绝时把**可选名单**一起回给模型，它下一轮就能改对（证伪探针实测：跳过校验会打红 2 条）。名单为空时点名也走同一条拒绝路径，文案说明"管理员还没配置"。
-- **名单必须由 system prompt 注入**（`qqSceneRules` 的 `bookmarkSites`，经 `buildSystemPrompt` 递入，来源是**已归一**的 `cfg.webSearch.bookmarks`）。不注入模型就不知道 `site` 能填什么，只会瞎猜域名 —— 而瞎猜会被校验拦掉，表现为"这个功能从没成功过"。它**只在非空时注入**（没有可选项就不占提示词预算），且**不写进 tool schema**：域名是用户配置的动态数据，Catalog 里放的是固定指令（同 stickers 那条）。
+- **收藏夹是「枚举值 + 网页URL + 用途」三元组，三项都必须非空**（`webSearch.bookmarks: [{key,url,purpose}]`）。三项各有各的用处，缺一条就整条丢弃（半残条目比没有更坏：模型会拿到一个没有用途的枚举值，于是要么不用要么乱用，而配置页看起来"配了"）：
+  - `key` 枚举值，**模型在 `site` 里回传的就是它**。限 ASCII 标识符（`^[A-Za-z0-9_-]{1,32}$`，`isBookmarkKey`）—— 与代码里的枚举同形，也最不容易在 JSON 参数传输里被改写。**中文被有意排除**（需要中文说明时那是 `purpose` 的事）。**不做大小写归一**：枚举值是配置里逐字写明的标识符，宽容匹配会让"模型传 wiki、配置里是 Wiki"这类不一致被掩盖。
+  - `url` 归一出宿主名（`hostnameOf`），只有它参与 `site:` 检索 —— `site:` 只认站点不认页面，所以填整条网址是允许的、路径会被丢掉。
+  - `purpose` **注入 system prompt 给模型当选站依据**。上限 60 字（`MAX_BOOKMARK_PURPOSE`）：这条文本每轮都进提示词，20 条不设限能吃掉大块预算。
+- **"搜哪个站点"由模型决定，代码只查表与校验**（照 reverse-image-source 的 `intent` 那一套）。模型传**枚举值**，服务端 `resolveBookmarkSite()` 查出域名。**校验不能省**——一个凭空写出的值会拼进 `site:` 并**静默**搜出空结果，看起来像"这个站没有内容"，实际是"它从来不在名单里"。拒绝时把**可选枚举值连同用途**一起回给模型（只给枚举值它还是不知道选哪个），它下一轮就能改对。名单为空时点名也走同一条拒绝路径。**传域名而不是枚举值必须被拒**：两者取值空间不同，宽容接受会让"模型传错了"永远不被发现。
+- **名单必须由 system prompt 注入**（`qqSceneRules` 的 `bookmarkSites`，经 `buildSystemPrompt` 递入，来源是 `bookmarkList()` 的 `{key,host,purpose}`）。**每行三样都要进**：枚举值（回传用）、域名（让模型知道实际在哪个站搜 —— 枚举值是我们起的别名，只给 `wiki` 它无法判断是不是自己以为的那个站）、用途（选站依据）。**只在非空时注入**，且**不写进 tool schema**：枚举值与用途是用户配置的动态数据，Catalog 里放的是固定指令（同 stickers 那条）。
 - **`bookmarkMode` 只管"模型没点名"时走哪条路**，`prefer` = 先问收藏夹再补全网，`web` = 直接全网。它与 `site` 是**正交**的：`web` 不阻止模型显式指定站点（有断言钉着）。这个正交性容易在重构里被抹掉（"既然 web 模式就是不用收藏夹，那把 site 也忽略掉吧"），而症状是"模型选了站点却什么都没变"。
+- **旧形状（纯宿主名数组）自动迁移**：hostname 经 `slugifyKey` 变成枚举值（`news.ycombinator.com` → `news-ycombinator-com`，冲突补 `-2`），**用途留空**并打一条 `[config]` 日志提示用户去补。迁移而不是丢弃是刻意的——那份名单是用户一条条敲的，静默清空等于毁数据（同 `jmcomic.pythonPath`）。**去重只针对枚举值、不针对域名**：同一个站配两条不同用途是合法的，拿域名去重会删掉正当配置。
+- **前端与后端的分工**：前端只做"按 `data-bm-*` 逐行读三列 + 三项不全就丢"，**不做域名归一化、不校验枚举值字符集**（唯一实现在 `core/config.ts` 的 `hostnameOf` / `isBookmarkKey`）。前端再写一份必然漂移，而漂移的表现是"设置页看到的"与"实际参与检索的"不是同一份。设置页的增删行走 **DOM 操作 + 事件委托**，不重渲染整页 —— 重渲染会把用户在同一页其他输入框里**还没保存的**改动冲掉（重渲染读的是 `state.config`，不是当前 DOM）。
 
 ★ **旧键 `bookmarkFirst` 已废弃并被迁移**（`normalizeConfigShape`：`false`→`web`、其余→`prefer`），迁移里那个 `delete` 是**必须的**（`updateConfig` 只加不删，同 `jmcomic.pythonPath` 的教训），且它已从 `DEFAULT_CONFIG` 与设置页移除——**别再把 `bookmarkFirst` 加回默认值**，那会让 `deepMerge` 每轮都带回来一个没人读的旋钮。迁移的测试**必须在独立进程里跑**：本进程前面调过 `updateConfig`，内存里的 config 已带着一个非迁移来的 `bookmarkMode`，`loadConfig()` 的结果会被它盖掉（第一版就是这么假红的；子进程输出写文件而不是管道，避开沙箱的 EPERM 边界）。
 - **域名匹配必须用点边界后缀，不能用 `includes`**：收藏 `example.com` 要命中 `m.example.com`，但**不能**命中 `notexample.com`。这条是**探针实测出来的**——第一版夹具用的是 `book.mark` vs `other.com`，两者无共享子串，`includes` 与后缀匹配结果完全相同，于是那条断言是**假的绿**（改成 `includes` 后 29 条里只红 0 条）；换成 `example.com` / `m.example.com` / `notexample.com` 这组才有判别力（改成 `includes` 会红 2 条）。写域名类断言时注意夹具必须让两种实现**可分**。

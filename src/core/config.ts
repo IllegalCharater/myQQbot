@@ -111,13 +111,15 @@ export const DEFAULT_CONFIG = {
       titleClass: 'OrganicTitle',
       textClass: 'OrganicText'
     },
-    // ── 网页收藏夹（域名优先检索）──
-    // 用户配置的"常用站点"名单。作用**不是**把搜索锁死在这些站点里：命中即停式的
-    // "只搜收藏夹"会在站内没有对应内容时让整次搜索彻底落空，而模型无从知道为什么
-    // 什么都没搜到。做法改为**先限定查一轮、再补一轮不限定的并集**，收藏夹命中排在
-    // 前面并带 fromBookmark 标记（见 media/web-search.ts 的 webSearch）。
-    // 门控在配置层完成：列表为空时**一次额外的搜索都不发**，所以没用这个功能的部署
-    // 行为与从前逐字相同。
+    // ── 网页收藏夹（枚举值 + 网页 URL + 用途）──
+    // 每条三项，三项都必须非空：
+    //   · `key`   枚举值，**模型在 web_search 的 site 参数里传的就是它**。限 ASCII 标识符
+    //             （字母/数字/`-`/`_`），与代码里的枚举同形；中文会被丢弃并打日志。
+    //   · `url`   网页地址。只取它的**域名**参与检索（`site:` 只认站点，不认页面），
+    //             所以填整条网址是允许的，只是路径会被丢掉。
+    //   · `purpose` 用途。**注入 system prompt 给模型当"该选哪一条"的依据** —— 这是枚举值
+    //             能被真正用起来的关键：只给模型一个 `wiki` 而不说它是什么，等于没给。
+    // 三项都限长：这条文本每轮都要进 system prompt，不设上限时 20 条能吃掉大块预算。
     bookmarks: [],
     // 收藏夹的**默认行为**，只影响"模型没说搜哪个站点"时走哪条路：
     //   'prefer' —— 按关键字先问收藏夹、再补全网（收藏夹命中排最前）；
@@ -432,6 +434,44 @@ export function loadConfig(): AppConfig {
 const MAX_BOOKMARK_SITES = 20;
 
 /**
+ * 枚举值（`bookmarks[].key`）的长度与字符上限。
+ *
+ * **限 ASCII 标识符**（字母/数字/`-`/`_`）是与代码里的枚举同形的选择：模型要把它原样
+ * 放进 tool 参数，`wiki-zh` 这种形状最不容易在传输里被改写（空格、冒号、引号都可能在
+ * JSON 参数里制造歧义）。中文枚举值被有意排除 —— 需要中文说明时那是**用途**字段的事。
+ */
+const MAX_BOOKMARK_KEY = 32;
+const BOOKMARK_KEY_RE = /^[A-Za-z0-9_-]+$/;
+
+/** 用途字段的长度上限。它每轮都进 system prompt，20 条不设限能吃掉大块预算。 */
+const MAX_BOOKMARK_PURPOSE = 60;
+
+/** 枚举值是否合法（形状见 BOOKMARK_KEY_RE 的注释）。 */
+function isBookmarkKey(value: unknown): boolean {
+  const key = String(value ?? '').trim();
+  return key.length > 0 && key.length <= MAX_BOOKMARK_KEY && BOOKMARK_KEY_RE.test(key);
+}
+
+/**
+ * 把任意串压成合法枚举值（小写、非字母数字换成 `-`、折叠重复、去首尾）。
+ *
+ * 只给**旧配置迁移**用（宿主名 → 枚举值）。新配的条目走 `isBookmarkKey` 校验，
+ * 不做"帮你改好"——用户敲的值与模型看到的值必须逐字一致。
+ */
+function slugifyKey(input: string): string {
+  return String(input ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, MAX_BOOKMARK_KEY);
+}
+
+/** 普通对象（非 null、非数组）——读配置条目时的守卫。 */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
  * 把用户填的一条收藏夹条目归一成宿主名；认不出返回空串（由调用方丢弃）。
  *
  * 设计决定：**只接受宿主名或完整 URL，不接受带路径的任意串，也不接受裸词**。
@@ -504,50 +544,79 @@ function normalizeConfigShape<T>(input: T): T {
   }
   // ── 网页收藏夹 + 搜索调用阀门 ──
   //
-  // **收藏夹为什么必须在配置层清洗，而不是在搜索时顺手兜住**：宿主名会被拼进发给
-  // 搜索引擎的查询串（`site:a.com OR site:b.com`），脏值不会报错、只会让整条查询
-  // 静默作废；而 400 个站点的名单拼出来是一个长度失控的 URL。所以在这里一次性
-  // 收口成"合法宿主名 + 去重 + 限量"，运行期只做拼接。
-  //
-  // 这里**不**用 `delete c.bookmarks` 之类的迁移写法：这些键是新加的，老配置里不存在，
-  // 不存在"旧值要删"的场景（同款判断见 python.path 那段）。
+  // **收藏夹为什么必须在配置层清洗，而不是在搜索时顺手兜住**：枚举值会被模型原样回传
+  // （服务端据它选站点），域名会被拼进发给搜索引擎的查询串（`site:a.com OR site:b.com`），
+  // 脏值不会报错、只会让整条查询静默作废。所以在这里一次性收口成
+  // 「合法枚举值 + 合法宿主名 + 非空用途 + 去重 + 限量」，运行期只做查表与拼接。
   const webSearch = root.webSearch;
   if (webSearch && typeof webSearch === 'object' && !Array.isArray(webSearch)) {
     const w = webSearch as Record<string, unknown>;
     const clamp = (value: unknown, min: number, max: number, fallback: number) => {
       const n = Number(value); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
     };
-    w.bookmarkFirst = w.bookmarkFirst !== false;
-    const rawList = Array.isArray(w.bookmarks) ? w.bookmarks : [];
-    const seen = new Set<string>();
-    const cleaned: string[] = [];
-    for (const entry of rawList) {
-      const host = hostnameOf(entry);
-      // 去重按小写比较：`Example.com` 与 `example.com` 是同一个站点，留着两条会让
-      // 查询串里出现两个等价条件，白占一个位置。
-      if (!host || seen.has(host)) continue;
-      seen.add(host);
-      cleaned.push(host);
-      if (cleaned.length >= MAX_BOOKMARK_SITES) break;
-    }
-    w.bookmarks = cleaned;
     // ── 旧键迁移：bookmarkFirst → bookmarkMode ──
     //
     // 语义变了：从前 `bookmarkFirst: true` 的含义是"每次搜索都自动优先收藏夹"，现在收藏夹
     // 改由**模型显式传 site** 决定，"自动优先"只是「模型没点名」时的默认行为。所以旧键
     // 不能原样留用——`true` 与 `false` 现在分别对应 `prefer`（保持旧观感）与 `web`。
     //
-    // 这个 `delete` 是**必须的**：`updateConfig` 走 `deepMerge(getConfig(), patch)`，
-    // 只加键不删键，不显式删就会让旧键永远留在用户的 config.json 里当一个没人读的旋钮
-    // （同 `jmcomic.pythonPath` 那次的教训）。而 `bookmarkFirst` 在用户存过一次设置后
-    // 就不会再被 `deepMerge` 带回来，因为它已不在 DEFAULT_CONFIG 里。
-    if (w.bookmarkMode === undefined && w.bookmarkFirst !== undefined) {
-      w.bookmarkMode = w.bookmarkFirst === false ? 'web' : 'prefer';
-    }
+    // 先把它读出来再删：这个 `delete` 是**必须的**（`updateConfig` 走 `deepMerge`，只加键
+    // 不删键，不显式删就会让旧键永远留在用户的 config.json 里当一个没人读的旋钮，同
+    // `jmcomic.pythonPath` 那次的教训）。
+    const legacyBookmarkFirst = w.bookmarkFirst;
     delete w.bookmarkFirst;
+    if (w.bookmarkMode === undefined && legacyBookmarkFirst !== undefined) {
+      w.bookmarkMode = legacyBookmarkFirst === false ? 'web' : 'prefer';
+    }
     // 归一成两档之一：写别的值（含拼错的）一律回落到默认的 'prefer'，避免运行期拿到
     // 一个既不是 prefer 也不是 web 的字符串后**两条路都不走**。
     if (w.bookmarkMode !== 'web') w.bookmarkMode = 'prefer';
+
+    // ── 网页收藏夹：归一成 [{ key, url, purpose }] ──
+    //
+    // 旧形状是**纯宿主名数组**（`['a.com','b.com']`），与新形状不能共存，所以凡见到
+    // 数组元素是字符串就整份走迁移：宿主名 slug 化当枚举值（`news.ycombinator.com` →
+    // `news-ycombinator-com`），**用途留空**（下面会打一条日志提示用户去补）。
+    // 迁移而不是丢弃是刻意的：那份名单是用户一条条敲进去的，静默清空等于毁他的数据
+    // （同 `jmcomic.pythonPath` 那次的判据）。
+    const rawBookmarks = Array.isArray(w.bookmarks) ? w.bookmarks : [];
+    const legacyShape = rawBookmarks.some((item) => typeof item === 'string');
+    const usedKeys = new Set<string>();
+    const uniqueKey = (base: string): string => {
+      const slug = slugifyKey(base) || 'site';
+      let candidate = slug;
+      let n = 2;
+      while (usedKeys.has(candidate)) candidate = `${slug}-${n++}`.slice(0, MAX_BOOKMARK_KEY);
+      usedKeys.add(candidate);
+      return candidate;
+    };
+    const bookmarks: Array<{ key: string; url: string; purpose: string }> = [];
+    for (const item of rawBookmarks) {
+      if (bookmarks.length >= MAX_BOOKMARK_SITES) break;
+      // 旧形状：字符串 → 造一个枚举值，用途留空（用途空条目**仍然入库**，因为它是迁移来的，
+      // 丢掉就等于删了用户的收藏；新配的条目则要求用途非空，见下）
+      if (typeof item === 'string') {
+        const host = hostnameOf(item);
+        if (host) bookmarks.push({ key: uniqueKey(host), url: host, purpose: '' });
+        continue;
+      }
+      if (!isPlainRecord(item)) continue;
+      const host = hostnameOf(item.url ?? item.site ?? '');
+      const rawKey = String(item.key ?? '').trim();
+      const purpose = String(item.purpose ?? '').trim().slice(0, MAX_BOOKMARK_PURPOSE);
+      // 新形状三条硬约束：域名可解析、枚举值是合法 ASCII 标识符、**用途非空**。
+      // 任一不满足就丢掉这一条：半残的条目比没有更坏 —— 模型会拿到一个没有用途的枚举值，
+      // 于是要么不用、要么乱用，而配置页看起来"配了"。
+      if (!host || !isBookmarkKey(rawKey) || !purpose) continue;
+      if (usedKeys.has(rawKey)) continue;   // 重复枚举值：先到先得，否则模型传一个键会命中两条
+      usedKeys.add(rawKey);
+      bookmarks.push({ key: rawKey, url: host, purpose });
+    }
+    w.bookmarks = bookmarks;
+    if (legacyShape && bookmarks.length) {
+      console.warn(`[config] 网页收藏夹已迁移为「枚举值 + 网页URL + 用途」共 ${bookmarks.length} 条；用途为空，请在设置页补上——模型要靠用途判断该选哪一条。`);
+    }
+
     w.maxCallsPerChatPerHour = Math.round(clamp(w.maxCallsPerChatPerHour, 1, 200, 20));
     w.maxCallsPerDay = Math.round(clamp(w.maxCallsPerDay, 1, 5000, 200));
     // Yandex 选择器：只做 trim + 长度上限，**不校验"是不是合法类名"**。

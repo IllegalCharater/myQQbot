@@ -131,13 +131,8 @@ const MAX_SITES_PER_QUERY = 5;
 
 /** 收藏夹站点命中判定用的纯宿主名集合。 */
 function bookmarkSiteSet(): Set<string> {
-  const list = getConfig().webSearch?.bookmarks;
   const set = new Set<string>();
-  if (!Array.isArray(list)) return set;
-  for (const item of list) {
-    const host = String(item ?? '').toLowerCase().trim().replace(/\.$/, '');
-    if (host) set.add(host);
-  }
+  for (const item of bookmarkList()) set.add(item.host);
   return set;
 }
 
@@ -436,52 +431,70 @@ function bookmarkPreference(): BookmarkMode {
   return cfg?.bookmarkFirst === false ? 'web' : 'prefer';
 }
 
+/** 收藏夹站点（已归一）。三项都在：枚举值、宿主名、用途。 */
+export interface BookmarkSite {
+  /** 枚举值，**模型在 `web_search.site` 里传的就是它**。 */
+  key: string;
+  /** 从 URL 归一出来的宿主名，实际参与 `site:` 检索。 */
+  host: string;
+  /** 用途，给模型判断"该选哪一条"用。 */
+  purpose: string;
+}
+
 /**
- * 收藏夹站点的**展示用**名单（顺序稳定、已归一），给提示词与工具报错用。
+ * 读收藏夹名单（顺序稳定）。
  *
- * 与 `bookmarkSiteSet()` 的区别：那个是给匹配用的 Set，这个是给人/模型看的数组。
- * 两处都从同一份配置推导，所以不会漂移。
+ * 归一只在配置层做（`core/config.ts` 的 `normalizeConfigShape`），这里**不再清洗**——
+ * 两边各写一份规则必然漂移，而漂移的表现是"设置页看到的"与"实际参与检索的"不是同一份。
+ * 这里只做一次防御性的形状过滤（配置可能来自夹具或未过 `loadConfig` 的路径）。
  */
-export function bookmarkList(): string[] {
+export function bookmarkList(): BookmarkSite[] {
   const list = getConfig().webSearch?.bookmarks;
   if (!Array.isArray(list)) return [];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const item of list) {
-    const host = String(item ?? '').toLowerCase().trim().replace(/\.$/, '');
-    if (host && !seen.has(host)) { seen.add(host); out.push(host); }
+  const out: BookmarkSite[] = [];
+  // 循环变量显式标成 unknown：配置的静态类型已经保证这里是对象数组，直接用 `isRecord`
+  // 会被 TS 收窄成 `never`（"已确定是对象，再判一次必然是假"）。而这道守卫仍有价值——
+  // 配置可能来自测试夹具或任何未过 `loadConfig` 的路径。
+  for (const raw of list as unknown[]) {
+    if (!isRecord(raw)) continue;
+    const key = String(raw.key ?? '').trim();
+    const host = String(raw.url ?? '').trim().toLowerCase();
+    if (!key || !host) continue;
+    out.push({ key, host, purpose: String(raw.purpose ?? '').trim() });
   }
   return out;
 }
 
 /**
- * 模型显式指定的站点是否在收藏夹里；不在就抛一句可执行的话。
+ * 模型给的枚举值 → 收藏夹条目；不在名单里就抛一句可执行的话。
  *
- * **为什么必须校验而不是直接拼进查询串**：`site:` 的值会进搜索引擎，一个模型凭空写出的
- * 域名会静默地搜出一个空结果 —— 看起来像"这个站没有内容"，实际是"它从来不在名单里"。
- * 报错把**可选名单**一起带回去，模型下一轮就能改对（这就是本仓库说的"把真实原因返回给
- * 模型，而不是替它编一个结果"）。
+ * **为什么必须校验而不是直接把值拼进查询串**：`site:` 的值会进搜索引擎，一个模型凭空
+ * 写出的值会静默地搜出一个空结果 —— 看起来像"这个站没有内容"，实际是"它从来不在名单里"。
+ * 报错把**可选枚举值连同用途**一起带回去，模型下一轮就能改对（本仓库那条"把真实原因
+ * 返回给模型，而不是替它编一个结果"）。
  */
-export function resolveBookmarkSite(raw: unknown): string {
-  const asked = String(raw ?? '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/\.$/, '');
+export function resolveBookmarkSite(raw: unknown): BookmarkSite {
+  const asked = String(raw ?? '').trim();
   if (!asked) throw new Error('site 为空');
   const list = bookmarkList();
   if (!list.length) {
     throw new Error('管理员还没有配置任何网页收藏夹站点，无法指定 site；请不带 site 直接做全网搜索');
   }
-  // 精确匹配，另外允许模型把子域写全（收藏 example.com、它写 m.example.com 时也认）
-  if (list.includes(asked)) return asked;
-  const parent = list.find((site) => asked.endsWith(`.${site}`));
-  if (parent) return asked;
-  throw new Error(`站点「${asked}」不在管理员的网页收藏夹里。可选的只有：${list.join('、')}。请改用其中之一，或不要传 site 直接做全网搜索`);
+  // 精确匹配枚举值。**不做大小写归一**：枚举值是配置里逐字写明的标识符，
+  // 宽容匹配会让"模型传了 wiki、配置里是 Wiki"这类不一致被掩盖过去。
+  const hit = list.find((item) => item.key === asked);
+  if (hit) return hit;
+  const options = list.map((item) => (item.purpose ? `${item.key}（${item.purpose}）` : item.key)).join('、');
+  throw new Error(`收藏夹里没有枚举值「${asked}」。可选的只有：${options}。请改用其中之一，或不要传 site 直接做全网搜索`);
 }
 
 /**
  * 给工具用的统一入口。
  *
- * `site` 由**模型**给出（照 reverse-image-source 的 `intent` 那一套：模型判断该用哪条路，
- * 代码只负责路由与校验，不替模型做默认决定）。三种形态：
- *   · `site` 有值   → 在该站点内检索，外部结果只作补充，该站命中排最前；
+ * `site` 由**模型**给出，值是收藏夹里的**枚举值**（不是域名）。照 reverse-image-source 的
+ * `intent` 那一套：模型判断该用哪条路，代码只负责查表、校验与路由，不替模型做默认决定。
+ * 三种形态：
+ *   · `site` 有值   → 查表得到站点，在该站点内检索，外部结果只作补充、该站命中排最前；
  *   · `site` 无值   → 走全网；若管理员仍是"收藏夹优先"模式，则按关键字先问收藏夹再补全网
  *                     （旧行为，`bookmarkMode: 'web'` 可关掉）；
  *   · 名单为空      → 一次额外请求都不发，行为与没有这个功能时逐字相同。
@@ -490,17 +503,17 @@ export async function webSearch(query: unknown, site?: unknown): Promise<SearchR
   const clean = sanitizeQuery(query);
   if (!clean) throw new Error('查询词为空');
   const all = bookmarkList();
-  const sites = new Set(all);
+  const sites = new Set(all.map((item) => item.host));
 
   // ── 模型点了名：只按它说的那个站点优先 ──
   if (site !== undefined && site !== null && String(site).trim() !== '') {
     const picked = resolveBookmarkSite(site);
-    return mergeScoped(clean, [picked], sites);
+    return mergeScoped(clean, [picked.host], sites);
   }
 
   // ── 模型没点名 ──
   if (!sites.size || bookmarkPreference() === 'web') return searchOnce(clean);
-  return mergeScoped(clean, all, sites);
+  return mergeScoped(clean, all.map((item) => item.host), sites);
 }
 
 /**

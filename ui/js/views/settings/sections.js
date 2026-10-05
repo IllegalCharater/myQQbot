@@ -104,6 +104,33 @@ export function renderApiSection(c) {
 }
 
 
+/**
+ * 渲染收藏夹的三元组行（枚举值 / 网页地址 / 用途）。
+ *
+ * 每条用 `data-bm` 标记成一行，保存时由 `save.js` 逐行读取（见那里的 readBookmarks）。
+ * 值走 `esc()`：这三项都会进模型可见的提示词，未转义的引号能在 schema 里制造歧义。
+ * 用途为空是**合法回显**（旧配置迁移来的条目就是这样），所以不给它兜一个假默认值 ——
+ * 那会让用户以为"已经填过了"，而模型实际拿到的是一条没有依据的枚举值。
+ */
+export function renderBookmarkRows(bookmarks) {
+  const list = Array.isArray(bookmarks) ? bookmarks : [];
+  if (!list.length) {
+    return '<tr data-bm><td><input type="text" data-bm-key placeholder="wiki" /></td>'
+      + '<td><input type="text" data-bm-url placeholder="zh.wikipedia.org" /></td>'
+      + '<td><input type="text" data-bm-purpose placeholder="查百科条目、定义、背景事实" /></td>'
+      + '<td><button class="btn btn-small btn-danger" data-bm-del type="button" title="删除这条">×</button></td></tr>';
+  }
+  return list.map((item) => {
+    const key = esc(item?.key || '');
+    const url = esc(item?.url || '');
+    const purpose = esc(item?.purpose || '');
+    return `<tr data-bm><td><input type="text" data-bm-key value="${key}" placeholder="wiki" /></td>`
+      + `<td><input type="text" data-bm-url value="${url}" placeholder="zh.wikipedia.org" /></td>`
+      + `<td><input type="text" data-bm-purpose value="${purpose}" placeholder="查百科条目、定义、背景事实" /></td>`
+      + '<td><button class="btn btn-small btn-danger" data-bm-del type="button" title="删除这条">×</button></td></tr>';
+  }).join('');
+}
+
 export function renderSearchSection(c) {
   // 每个提供方区块的初始显隐都要跟当前 provider 一致
   const prov = String(c.webSearch?.provider || 'bing');
@@ -208,11 +235,29 @@ export function renderSearchSection(c) {
       </div>
     </div>
     <div class="field">
-      <label>收藏的站点（每行一个域名或网址；最多 20 个）</label>
-      <textarea id="cfg-search-bookmarks" rows="4" placeholder="zh.wikipedia.org&#10;https://www.example.com/some/page&#10;news.ycombinator.com">${esc((Array.isArray(c.webSearch?.bookmarks) ? c.webSearch.bookmarks : []).join('\n'))}</textarea>
-      <div class="muted" style="font-size:12px;margin-top:4px">
-        这份名单会随每轮提示词交给模型，它据此决定要不要限定在某个站点里搜。填整条网址只会取它的
-        <strong>域名</strong>——收藏的是整个站点，不是那一个页面。
+      <label>收藏的站点（枚举值 + 网页地址 + 用途；最多 20 条）</label>
+      <div class="muted" style="font-size:12px;margin-bottom:6px">
+        三项都要填，缺一条这一条就不生效：<br />
+        · <strong>枚举值</strong>：模型在 <code>web_search</code> 的 <code>site</code> 参数里传的就是它。
+        只能是字母/数字/<code>-</code>/<code>_</code>（如 <code>wiki</code>、<code>news-yc</code>），中文会被丢弃。<br />
+        · <strong>网页地址</strong>：只取它的<strong>域名</strong>参与检索（填整条网址也行，路径会被丢掉）。<br />
+        · <strong>用途</strong>：<strong>会随每轮提示词交给模型</strong>，是它判断"该选哪一条"的依据。写得越具体，模型越选得准。
+      </div>
+      <table class="bookmark-table" style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr>
+            <th style="text-align:left;width:22%">枚举值</th>
+            <th style="text-align:left;width:33%">网页地址</th>
+            <th style="text-align:left">用途</th>
+            <th style="width:36px"></th>
+          </tr>
+        </thead>
+        <tbody id="search-bookmarks-body">
+          ${renderBookmarkRows(c.webSearch?.bookmarks)}
+        </tbody>
+      </table>
+      <div style="margin-top:6px">
+        <button class="btn btn-small" id="add-search-bookmark-btn" type="button">＋ 添加一条</button>
       </div>
     </div>
     <div class="field-row">

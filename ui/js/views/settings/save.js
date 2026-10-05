@@ -1,6 +1,6 @@
 import { actions } from '../../actions.js';
 import { api } from '../../api.js';
-import { $, esc } from '../../dom.js';
+import { $, $$, esc } from '../../dom.js';
 import { state } from '../../state.js';
 import { getThemePref } from '../../theme.js';
 import { clampInt } from '../../parts/chat-settings.js';
@@ -113,15 +113,21 @@ export async function saveConfig({ quiet = false } = {}) {
     const enteredBochaKey = val('#cfg-bocha-key', '').trim();
     const enteredBaiduKey = val('#cfg-baidu-key', '').trim();
     const enteredMetasoKey = val('#cfg-metaso-key', '').trim();
-    // 网页收藏夹：每行一个，前端只做"按行拆分 + 去空行"，**不做域名归一化**。
-    // 归一化（剥 scheme/路径、去重、限量）的唯一实现在 core/config.ts 的 hostnameOf /
-    // normalizeConfigShape —— 前端再写一份必然漂移，而两边规则不一致时，用户看到的名单
-    // 与实际参与检索的名单会不一样（先例见 prompt-catalog 与 chats.js 的 replyPrefixHtml：
-    // 够不着 src/ 的那份必须与 src 同形，同形就得两处一起改）。
-    const bookmarks = String($('#cfg-search-bookmarks')?.value || '')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
+    // 网页收藏夹：逐行读「枚举值 / 网页地址 / 用途」。
+    //
+    // 前端**只做去空行与 trim**，不做域名归一化、不做枚举值合法性校验——那两件事的唯一
+    // 实现都在 `core/config.ts`（`hostnameOf` / `isBookmarkKey`）。前端再写一份必然漂移，
+    // 而两边规则不一致时"用户看到的名单"与"实际参与检索的名单"会不一样（先例见
+    // `prompt-catalog` 与 `chats.js` 的 replyPrefixHtml：够不着 src/ 的那份必须与 src 同形，
+    // 同形就得两处一起改）。
+    //
+    // 三项有一项为空就**整条丢掉**：后端也会丢（半残条目比没有更坏），但前端先丢能让用户
+    // 当场看见"这条没保存进去"，而不是保存后回来发现少了一条却不知为何。
+    const bookmarks = $$('#search-bookmarks-body tr[data-bm]').map((row) => ({
+      key: (row.querySelector('[data-bm-key]')?.value || '').trim(),
+      url: (row.querySelector('[data-bm-url]')?.value || '').trim(),
+      purpose: (row.querySelector('[data-bm-purpose]')?.value || '').trim()
+    })).filter((item) => item.key && item.url && item.purpose);
     patch.webSearch = {
       ...c.webSearch,
       enabled: chk('#cfg-websearch', c.webSearch?.enabled !== false),
