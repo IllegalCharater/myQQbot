@@ -383,6 +383,13 @@ function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
   const noteName = notes[String(entry?.senderId || '')];
   const noteLower = String(noteName || '').toLowerCase();
   if (text.startsWith('@') || text.includes(`@${ctx.selfNickname}`) || (nick && text.includes(`@${nick}`))) labels.push('@我');
+  // ⚠️ **标签保留，但语义是"出现了你的名字"，不是"有人在叫你"** —— 这个区分是刻意的。
+  // 这里是子串匹配：中文没有分词，`小鲸鱼酱`、`我养的小鲸鱼` 都会命中。所以：
+  //   · **不要**把它升级成断言（别再写 `提到我` 这种替模型下结论的措辞），
+  //     也不要据此在 response-policy 里提高响应档位 —— 那正是"误判别人在叫自己"的病根；
+  //   · **也不要**把标签删掉：名字出现对模型仍是有用信号（它可能是在议论你）。
+  // 判断"到底是不是在叫你"由 system prompt 那条判据承载（`qqSceneRules` 的
+  // 【判断"是不是在叫我"】），**结论留给模型**，代码只如实提供证据。
   if ((botName && lower.includes(botName)) || (nick && lower.includes(nick))) labels.push('提到我');
   if (noteName && lower.includes(noteLower)) labels.push('提到我（备注名）');
   if (/[?？]$/.test(text.trim()) || /[吗呢]/.test(text)) labels.push('提问');
@@ -488,7 +495,13 @@ export function buildUserPrompt(ctx: PromptContext): string {
   // 此刻状态
   const stateLines: string[] = [];
   if (ctx.kind === 'group') {
-    stateLines.push(PROMPT_CATALOG.user.groupState(String(ctx.chatName || ctx.chatId), ctx.selfNickname || cfg.persona.botName));
+    // 两个名字都递进去：显示名（`selfNickname`，群友 @ 你用的）与人设名（`persona.botName`）。
+    // 只给一个时模型无从判断"这个名字是不是指我"，而实测这两个经常不一样（一个是中文名、
+    // 一个是英文 ID），于是有人叫群名片它不应答、有人顺口提人设名它却抢着接。
+    // 回退成 `botName` 是刻意的：群名片取不到时至少还有个名字可用。
+    stateLines.push(PROMPT_CATALOG.user.groupState(
+      String(ctx.chatName || ctx.chatId), ctx.selfNickname || cfg.persona.botName, cfg.persona.botName
+    ));
   } else {
     stateLines.push(PROMPT_CATALOG.user.privateState);
   }

@@ -86,8 +86,57 @@ ok('引用防错规则只在系统提示保留一份，用户提示不再重复�
 ok('【过去状态】表头说明已与新规则一致', /最近的消息和带图的消息前有 #消息id/.test(up));
 ok('旧表头那句（只有带图才有 id）已不复存在', !/带图的消息前有 #消息id，看图/.test(up));
 
-console.log('\n=== 4. 独立历史与当前消息窗口彻底分离 ===');
-const resident = store.recent(KEY, { limit: 100 }).find((m) => m.text === '为什么这么关注这个申必表情');
+// ── 3b. "是不是在叫我"：两个名字都要给，结论由模型下 ──
+//
+// 这一节钉的是两条**互补**的改动，缺一条就会出现一类误判：
+//   · 只给一个名字 → 有人叫群名片它不应答、有人顺口提人设名它抢着接（信息缺口）；
+//   · 只给名字不给判据 → 模型默认把"指代别人"的第三人称当成自己（判据缺口）。
+// 同时**反面**钉住"不许再由代码下结论"：那种子串匹配（`text.includes(名字)` → 断言有人在叫我）
+// 恰好是本次要修的病，中文没有分词，`小鲸鱼酱`、`我养的小鲸鱼` 都会命中。
+{
+  const base = buildUserPrompt({
+    chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
+    triggerEntries: [store.recent(KEY, { limit: 1 })[0]], store, memory: { formatForPrompt: () => '' },
+    selfNickname: '灰灰', historyLimit: 5, recentCount: 5, lastMessageAt: Date.now()
+  });
+  updateConfig({ persona: { botName: '大肥鱼', selfNickname: '灰灰' } });
+  const both = buildUserPrompt({
+    chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
+    triggerEntries: [store.recent(KEY, { limit: 1 })[0]], store, memory: { formatForPrompt: () => '' },
+    selfNickname: '灰灰', historyLimit: 5, recentCount: 5, lastMessageAt: Date.now()
+  });
+  ok('两个名字不同时，显示名与人设名都进提示词（缺一个就会有双向误判）',
+    both.includes('「灰灰」') && both.includes('「大肥鱼」'), both.slice(0, 200));
+  ok('并说明哪个是 @ 用的显示名、哪个是人设名',
+    both.includes('群友 @ 你时用的是它') && both.includes('人设名'), both.slice(0, 220));
+
+  // 同名时不该啰嗦地重复一遍（省 token，也避免"我到底有几个名字"的困惑）
+  updateConfig({ persona: { botName: '灰灰', selfNickname: '灰灰' } });
+  const same = buildUserPrompt({
+    chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
+    triggerEntries: [store.recent(KEY, { limit: 1 })[0]], store, memory: { formatForPrompt: () => '' },
+    selfNickname: '灰灰', historyLimit: 5, recentCount: 5, lastMessageAt: Date.now()
+  });
+  ok('两个名字相同时只报一次（不重复、不出现"人设名"那句）',
+    same.includes('「灰灰」') && !same.includes('人设名'), same.slice(0, 200));
+  updateConfig({ persona: { botName: '大肥鱼', selfNickname: '灰灰' } });
+  void base;
+
+  // 判据必须在**系统提示**里，且要同时给出"算"与"不算"两侧
+  const selfSp = buildSystemPrompt();
+  ok('系统提示给出正向判据：@你/引用你的消息/单独叫你的名字/接着你的话',
+    /明确 @ 了你/.test(selfSp) && /引用\/回复了你的消息/.test(selfSp) && /在接你的上一句话/.test(selfSp));
+  ok('系统提示给出反面清单：第三人称、别人昵称里含你的名字、顺带提到',
+    /第三人称/.test(selfSp) && /别人的昵称里恰好包含你的名字/.test(selfSp) && /顺带提到/.test(selfSp));
+  ok('明确"名字出现 ≠ 在叫你"，并给出拿不准时的默认动作（先沉默）',
+    /名字出现\*\*只说明有人提到了这几个字，不代表在叫你\*\*/.test(selfSp) && /拿不准时\*\*先沉默\*\*/.test(selfSp));
+  ok('反向也别过头：明确 @/直接问/接着你说时必须回应',
+    /明确 @ 你、直接问你、或接着你的话往下说时\*\*必须回应\*\*/.test(selfSp));
+  ok('名字判定规则只在系统提示里，不重复灌进用户提示',
+    !/名字出现\*\*只说明有人提到了这几个字/.test(both));
+}
+
+console.log('\n=== 4. 独立历史与当前消息窗口彻底分离 ===');const resident = store.recent(KEY, { limit: 100 }).find((m) => m.text === '为什么这么关注这个申必表情');
 store.appendIncoming(KEY, { mid: 'after-boundary', ts: Date.now(), senderId: '10086', senderName: '后来者', text: '边界之后的新消息不应伪装成历史' });
 const separated = buildUserPrompt({
   chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
