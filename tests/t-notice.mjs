@@ -117,6 +117,30 @@ await new Promise((r) => srv.listen(0, '127.0.0.1', r));
 const PORT = srv.address().port;
 
 const onebot = new OneBotClient({ wsUrl: 'ws://127.0.0.1:1', httpUrl: `http://127.0.0.1:${PORT}`, accessToken: '', onEvent: () => {} });
+
+console.log('\n=== 6a. 拍一拍的兼容回退 ===');
+const originalCall = onebot.call.bind(onebot);
+let pokeCalls = [];
+onebot.call = async (action) => {
+  pokeCalls.push(action);
+  if (action === 'group_poke') throw new Error('OneBot group_poke 失败: retcode=100 OIDB error 1002 on 0xed3_1: Process_Nudge failed');
+  return {};
+};
+let pokeError = '';
+try { await onebot.sendPoke('group', '123', '456'); } catch (error) { pokeError = error.message; }
+eq('QQ 服务端拒绝拍一拍时不再调用旧接口重试', pokeCalls, ['group_poke']);
+truthy('保留服务端的原始拒绝原因', pokeError.includes('Process_Nudge failed'));
+
+pokeCalls = [];
+onebot.call = async (action) => {
+  pokeCalls.push(action);
+  if (action === 'group_poke') throw new Error('OneBot group_poke 失败: retcode=1404 unsupported action: group_poke');
+  return {};
+};
+await onebot.sendPoke('group', '123', '456');
+eq('仅动作不受支持时才回退到 send_poke', pokeCalls, ['group_poke', 'send_poke']);
+onebot.call = originalCall;
+
 const store = new ChatStore(0);
 store.appendIncoming('group:123', { mid: 1, ts: Date.now(), senderId: '888', senderName: '李四', text: 'hi' });
 const tool = buildToolDefs().find((t) => t.name === 'read_group_notice');

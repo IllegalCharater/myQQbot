@@ -1374,7 +1374,6 @@ body {
   background: var(--bg-3); border: 1px solid var(--border);
   border-radius: 8px; padding: 10px 12px;
 }
-.tier-param.dim { opacity: .42; }
 .tier-param label { display: block; font-size: 12.5px; margin-bottom: 4px; }
 .tier-param input[type=number] {
   width: 68px; padding: 3px 6px; font-family: var(--mono);

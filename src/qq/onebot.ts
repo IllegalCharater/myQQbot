@@ -11,6 +11,17 @@ type SendOptions = { replyToMessageId?: unknown; atUserId?: unknown };
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
+/**
+ * `send_poke` 是旧 OneBot 实现的兼容动作。只有服务端明确不认识较新的
+ * `group_poke` / `friend_poke` 时才值得换用它；把业务拒绝（例如 QQ 服务端
+ * 拒绝本次拍一拍）也重试一遍，只会造成一次无意义的第二次外部请求，并掩盖
+ * 实际失败动作。
+ */
+function isUnsupportedActionError(error: unknown): boolean {
+  const message = errorText(error);
+  return /\bHTTP 404\b|\bretcode=1404\b|unsupported action|action not found/i.test(message);
+}
+
 const RECONNECT_MIN_MS = 3000;
 // RECONNECT_MAX_MS = 30000 曾在这里，零引用（设计稿附录 C），S11b 删除。
 // 不做指数退避是有意的：本机回环、3s 常量足够，退避会改掉重连的可观察行为。
@@ -299,11 +310,20 @@ export class OneBotClient {
 
   async sendPoke(kind: MessageKind, id: unknown, targetUserId: unknown) {
     if (kind === 'private') {
-      return this.call('friend_poke', { user_id: Number(id) }).catch(() =>
-        this.call('send_poke', { user_id: Number(id) }));
+      try {
+        return await this.call('friend_poke', { user_id: Number(id) });
+      } catch (error) {
+        if (!isUnsupportedActionError(error)) throw error;
+        return this.call('send_poke', { user_id: Number(id) });
+      }
     }
-    return this.call('group_poke', { group_id: Number(id), user_id: Number(targetUserId || id) }).catch(() =>
-      this.call('send_poke', { group_id: Number(id), user_id: Number(targetUserId || id) }));
+    const params = { group_id: Number(id), user_id: Number(targetUserId || id) };
+    try {
+      return await this.call('group_poke', params);
+    } catch (error) {
+      if (!isUnsupportedActionError(error)) throw error;
+      return this.call('send_poke', params);
+    }
   }
 
   async getMsg(messageId: unknown) {

@@ -442,7 +442,7 @@ export function bindSettingsEvents(c) {
     }
   });
 
-  // ── 响应档位滑条：拖动时即时反馈（档位 + 概率 + 参数高亮）──
+  // ── 响应档位滑条：拖动时即时反馈（档位 + 概率）────────────────────
   // ⚠️ 档位的唯一真相是滑条的 value（DOM 实时值），不用全局变量记录 ——
   //   曾经用过 window.__ctxTier，结果每次重渲染重新绑定事件时被"未保存的旧配置"
   //   无条件覆盖（选了 2 档，切走再切回就变回 4 档），还踩了 `|| 4` 的 falsy 陷阱。
@@ -454,13 +454,6 @@ export function bindSettingsEvents(c) {
       // 提示行：显示当前档位与概率
       const note = $('#ctx-tier-note');
       if (note) note.innerHTML = sliderDesc(pos);
-      // 参数区高亮：只点亮"当前真正会用到的那一档"
-      // 1档→只亮①；2档→亮②；3档→亮③；4档→亮④（且①②③失效）
-      const params = document.querySelectorAll('.tier-param');
-      params.forEach((el, idx) => {
-        const n = idx + 1;
-        el.classList.toggle('dim', n !== t);
-      });
       // 刻度段高亮：滑到哪一档，那一档的标签 + 上边线一起变色。
       // ⚠️ 之前这段完全没做，颜色全靠 CSS 写死（.s1 永远亮、.s4 永远橙），
       //    所以拖动滑条时刻度毫无反应 —— 看起来就像"没生效"。
