@@ -168,6 +168,7 @@ export const TOOL_PROMPT_TEXT = {
   web_search: {
     description: '联网搜索，返回标题/URL/摘要列表。适用：实时信息、新闻热点、网络用语/梗的含义、自己不确定的事实。可以换关键词连续搜 2~3 次；对最相关的 1~2 个结果用 web_fetch 读正文，不要只看摘要。',
     query: '搜索词',
+    site: '（可选）只在某个收藏夹站点里搜。取值必须是系统提示词里列出的收藏夹站点之一；不传就是全网搜索。当你知道答案最可能出现在某个已收藏的站点时传它。',
   },
   web_fetch: {
     description: '只读抓取网页正文（≤2 万字符）。群友发来链接问"写了什么"时直接抓；配合 web_search 阅读搜索结果的详细内容。禁止访问内网/本机地址。',
@@ -291,7 +292,7 @@ function stickerRules(strategy: string) {
   ].join('\n');
 }
 
-function qqSceneRules({ vision, search }: { vision: boolean; search: boolean }) {
+function qqSceneRules({ vision, search, bookmarkSites }: { vision: boolean; search: boolean; bookmarkSites?: string[] }) {
   const lines = [
     '【QQ 场景规则】',
     '- 回复保持简短，符合群友语感；不要使用 Markdown 格式（**、#、代码块在 QQ 上会显示成乱码）。',
@@ -307,11 +308,19 @@ function qqSceneRules({ vision, search }: { vision: boolean; search: boolean }) 
       '- 群友直接发来 URL 并问能不能看到/写了什么时，直接用 web_fetch 抓取该 URL 读正文，不要凭记忆猜。',
       '- 需要搜索时允许多走几步：连续 web_search / web_fetch 2~3 步，换关键词、打开页面、交叉验证后再回复；搜索过程中不需要先回复，拿到结果再回。事实性问题可以比闲聊稍微多写一点，但仍要简洁。',
       // 收藏夹是**管理员**配置的常用站点，不是权威性排序。模型看不到这个区别时会把
-      // "排第一"读成"最可信" —— 而它其实只代表"这个群常看这个站"。所以规则要说明标记
-      // 的含义，并明确它不改变事实判断。这条**不按收藏夹是否为空分支**：配置随时可改，
-      // 而 system prompt 每轮重建，分支只会让两边措辞漂移（与 toolProtocol 那条同款理由）。
+      // "来自收藏夹/排在前"读成"最可信" —— 而它其实只代表"这个群常看这个站"。所以规则
+      // 要说明标记的含义，并明确它不改变事实判断。
       '- 搜索结果里带 fromBookmark 标记的条目来自管理员配置的收藏夹站点，它们被排在最前面只是因为该站点被收藏，**不代表它更权威**；涉及事实时仍要与其他来源交叉验证。'
     );
+    // 站点名单**只在非空时注入**（与表情目录同一条：没有可选项就不该占提示词预算）。
+    // 它必须由 system prompt 承载而不是写进 tool schema：域名是用户配置的**动态数据**，
+    // 而 Catalog 里的是固定指令（同 stickers 的做法，见 prompt-builder 的 stickerRules）。
+    if (bookmarkSites?.length) {
+      lines.push(
+        `- 管理员配置了这些收藏夹站点，**你可以决定只在其中一个里搜索**（知道答案最可能出现在某个站点时，用 web_search 的 site 参数，取值必须是下列之一）：${bookmarkSites.join('、')}。`,
+        '- site 只在明确判断"这个站的答案更好"时才用；不确定、或该站可能没有这个内容时，**不要传 site**，直接全网搜索更稳。指定的站点里没有时结果里仍会附上全网结果，如实说明即可。'
+      );
+    }
   } else {
     lines.push('- 你没有联网能力：遇到不了解的新梗/实时话题，坦白说不知道或含糊带过，不要编造。');
   }

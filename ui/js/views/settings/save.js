@@ -128,7 +128,9 @@ export async function saveConfig({ quiet = false } = {}) {
       provider: val('#cfg-searchprovider', c.webSearch?.provider || 'bing'),
       searchUrl: val('#cfg-searchurl', c.webSearch?.searchUrl || 'https://cn.bing.com/search').trim() || 'https://cn.bing.com/search',
       bookmarks,
-      bookmarkFirst: chk('#cfg-search-bookmarkfirst', c.webSearch?.bookmarkFirst !== false),
+      // 旧键 bookmarkFirst 不再写入：它会由后端 normalizeConfigShape 迁移成 bookmarkMode
+      // 并删除，前端再写回一个废弃键只会让它永远留在 config.json 里。
+      bookmarkMode: val('#cfg-search-bookmarkmode', c.webSearch?.bookmarkMode === 'web' ? 'web' : 'prefer') === 'web' ? 'web' : 'prefer',
       // 与后端 normalizeConfigShape 的钳制口径保持一致（1–200 / 1–5000）：
       // 前端钳一次是为了让用户当场看到被改成的值，后端那一次才是权威。
       maxCallsPerChatPerHour: clampInt($('#cfg-search-chat-hourly')?.value, 1, 200, 20),
@@ -154,6 +156,17 @@ export async function saveConfig({ quiet = false } = {}) {
       metaso: {
         ...(c.webSearch?.metaso || {}),
         ...(enteredMetasoKey && enteredMetasoKey !== '******' ? { apiKey: enteredMetasoKey } : {})
+      },
+      // Yandex 抓公开页面：没有 Key，只有地址与四个选择器。兜底值与 core/config.ts 的
+      // DEFAULT_CONFIG 同源 —— 这里再写一份是因为空输入框必须回落到可用值，否则一次
+      // 误清空就会让 `new URL('')` 抛错、这条路静默不可用。
+      yandex: {
+        ...(c.webSearch?.yandex || {}),
+        baseUrl: val('#cfg-yandex-baseurl', c.webSearch?.yandex?.baseUrl || 'https://yandex.com/search/').trim() || 'https://yandex.com/search/',
+        serpClass: val('#cfg-yandex-serp', c.webSearch?.yandex?.serpClass || 'serp-item').trim() || 'serp-item',
+        urlClass: val('#cfg-yandex-url', c.webSearch?.yandex?.urlClass || 'organic__url').trim() || 'organic__url',
+        titleClass: val('#cfg-yandex-title', c.webSearch?.yandex?.titleClass || 'OrganicTitle').trim() || 'OrganicTitle',
+        textClass: val('#cfg-yandex-text', c.webSearch?.yandex?.textClass || 'OrganicText').trim() || 'OrganicText'
       },
       // 自定义搜索服务走 webSearch.providers 数组（由「添加自定义搜索服务」按钮维护），
       // 不在这里随表单提交 —— 避免每次保存都把动态列表覆盖掉。

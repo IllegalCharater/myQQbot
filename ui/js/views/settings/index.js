@@ -300,12 +300,18 @@ export function bindSettingsEvents(c) {
       zhipu: '#zhipu-search-fields',
       bocha: '#bocha-search-fields',
       baidu: '#baidu-search-fields',
-      metaso: '#metaso-search-fields'
+      metaso: '#metaso-search-fields',
+      yandex: '#yandex-search-fields'
     };
     for (const [provider, sel] of Object.entries(fields)) {
       const el = $(sel);
       // 自定义项形如 'custom:<id>'，统一按 custom 前缀匹配
       if (el) el.style.display = provider === v ? '' : 'none';
+    }
+    // Yandex 的两组选择器各自成行（field-row），要跟主体一起显隐
+    for (const sel of ['#yandex-selector-fields', '#yandex-selector-fields2']) {
+      const el = $(sel);
+      if (el) el.style.display = v === 'yandex' ? '' : 'none';
     }
     const manage = $('#custom-provider-manage');
     if (manage) manage.style.display = v.startsWith('custom:') ? '' : 'none';

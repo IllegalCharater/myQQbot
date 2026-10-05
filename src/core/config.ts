@@ -98,6 +98,19 @@ export const DEFAULT_CONFIG = {
       count: 6,
       timeoutMs: 20000
     },
+    // ── Yandex 网页解析 ──
+    // **这是抓公开 HTML 页，不是官方付费 API**（后者是 searchapi.api.cloud.yandex.net/v2/web/search，
+    // 响应为 base64 包着的 XML，需要 folderId 且没有结构化 JSON 出口）。
+    // 抓取天生易碎：Yandex 类名混淆且会变（SearXNG 的 yandex 引擎 2021 年因此被删除），
+    // 所以**选择器是配置项**，改版时用户能自己在设置页救回来，不必等发版。
+    // 默认值取自可考证的两代标记的交集，未在真机验证过；对不上时工具会报出容器类名。
+    yandex: {
+      baseUrl: 'https://yandex.com/search/',
+      serpClass: 'serp-item',
+      urlClass: 'organic__url',
+      titleClass: 'OrganicTitle',
+      textClass: 'OrganicText'
+    },
     // ── 网页收藏夹（域名优先检索）──
     // 用户配置的"常用站点"名单。作用**不是**把搜索锁死在这些站点里：命中即停式的
     // "只搜收藏夹"会在站内没有对应内容时让整次搜索彻底落空，而模型无从知道为什么
@@ -106,8 +119,12 @@ export const DEFAULT_CONFIG = {
     // 门控在配置层完成：列表为空时**一次额外的搜索都不发**，所以没用这个功能的部署
     // 行为与从前逐字相同。
     bookmarks: [],
-    // 收藏夹总开关。false = 忽略 bookmarks 名单（名单留着，方便临时关掉而不丢数据）。
-    bookmarkFirst: true,
+    // 收藏夹的**默认行为**，只影响"模型没说搜哪个站点"时走哪条路：
+    //   'prefer' —— 按关键字先问收藏夹、再补全网（收藏夹命中排最前）；
+    //   'web'    —— 直接全网，**只有模型显式传 site 时才进收藏夹**。
+    // 模型显式指定站点时这个开关不起作用（那是模型的判断，不该被一个全局档位覆盖）。
+    // 旧键 `bookmarkFirst` 会被 normalizeConfigShape 迁移成这里的 'web' 并删除。
+    bookmarkMode: 'prefer',
     // 调用阀门（与 imageSource / transcription 同形，实现见 media/call-budget.ts）。
     //
     // ⚠️ 与那两个能力不同，web_search 在默认的 Bing 页面解析下**不直接产生费用**，
@@ -514,8 +531,35 @@ function normalizeConfigShape<T>(input: T): T {
       if (cleaned.length >= MAX_BOOKMARK_SITES) break;
     }
     w.bookmarks = cleaned;
+    // ── 旧键迁移：bookmarkFirst → bookmarkMode ──
+    //
+    // 语义变了：从前 `bookmarkFirst: true` 的含义是"每次搜索都自动优先收藏夹"，现在收藏夹
+    // 改由**模型显式传 site** 决定，"自动优先"只是「模型没点名」时的默认行为。所以旧键
+    // 不能原样留用——`true` 与 `false` 现在分别对应 `prefer`（保持旧观感）与 `web`。
+    //
+    // 这个 `delete` 是**必须的**：`updateConfig` 走 `deepMerge(getConfig(), patch)`，
+    // 只加键不删键，不显式删就会让旧键永远留在用户的 config.json 里当一个没人读的旋钮
+    // （同 `jmcomic.pythonPath` 那次的教训）。而 `bookmarkFirst` 在用户存过一次设置后
+    // 就不会再被 `deepMerge` 带回来，因为它已不在 DEFAULT_CONFIG 里。
+    if (w.bookmarkMode === undefined && w.bookmarkFirst !== undefined) {
+      w.bookmarkMode = w.bookmarkFirst === false ? 'web' : 'prefer';
+    }
+    delete w.bookmarkFirst;
+    // 归一成两档之一：写别的值（含拼错的）一律回落到默认的 'prefer'，避免运行期拿到
+    // 一个既不是 prefer 也不是 web 的字符串后**两条路都不走**。
+    if (w.bookmarkMode !== 'web') w.bookmarkMode = 'prefer';
     w.maxCallsPerChatPerHour = Math.round(clamp(w.maxCallsPerChatPerHour, 1, 200, 20));
     w.maxCallsPerDay = Math.round(clamp(w.maxCallsPerDay, 1, 5000, 200));
+    // Yandex 选择器：只做 trim + 长度上限，**不校验"是不是合法类名"**。
+    // 类名规矩每个搜索引擎都不一样（Yandex 用 `OrganicTitle` 这种大驼峰），写一条
+    // 自以为是的正则只会把用户手工救回来的值又打回去。长度上限防的是"整页 HTML
+    // 被粘进输入框"，那种值会让 `findClassBlock` 的正则构造得很慢。
+    if (w.yandex && typeof w.yandex === 'object' && !Array.isArray(w.yandex)) {
+      const y = w.yandex as Record<string, unknown>;
+      for (const key of ['baseUrl', 'serpClass', 'urlClass', 'titleClass', 'textClass']) {
+        y[key] = String(y[key] ?? '').trim().slice(0, 200);
+      }
+    }
   }
   const store = root.store;
   if (store && typeof store === 'object' && !Array.isArray(store)) {

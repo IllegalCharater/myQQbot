@@ -725,7 +725,12 @@ export function buildAllToolDefs(): ToolDefinition[] {
       description: TOOL_PROMPT_TEXT.web_search.description,
       parameters: {
         type: 'object',
-        properties: { query: { type: 'string', description: TOOL_PROMPT_TEXT.web_search.query } },
+        properties: {
+          query: { type: 'string', description: TOOL_PROMPT_TEXT.web_search.query },
+          // 由**模型**决定搜哪个站点（照 reverse_image_source 的 intent 那一套）。
+          // 可选：不传就是全网搜索。取值必须来自提示词里那份收藏夹名单，服务端会校验。
+          site: { type: 'string', description: TOOL_PROMPT_TEXT.web_search.site }
+        },
         required: ['query']
       },
       async execute(ctx, args) {
@@ -733,7 +738,7 @@ export function buildAllToolDefs(): ToolDefinition[] {
         const limited = takeWebBudget(ctx.chatKey);
         if (limited) return err(limited);
         try {
-          const result = await webSearch(String(args.query ?? ''));
+          const result = await webSearch(String(args.query ?? ''), args.site);
           if (!result.results.length) {
             return ok({ query: result.query, results: [], note: '没有搜到结果，试试换关键词或更具体的说法。' });
           }

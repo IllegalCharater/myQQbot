@@ -67,6 +67,26 @@ function decodeHtml(s: unknown): string {
     .trim();
 }
 
+/**
+ * 数字实体解码（`&#39;` / `&#x27;`）—— 只给 Yandex 的 HTML 用。
+ *
+ * 为什么不并进 `decodeHtml`：那个是 Bing 路径在用的，改它等于改一条**已有行为**的解析
+ * （Bing 的摘要里出现字面量 `&#x27;` 的概率不为零），而这次没有要修 Bing 的需求。
+ * Yandex 的 HTML 里数字实体很常见（标题与摘要都过一遍转义），不解会把 `&#x27;`
+ * 原样喂给模型。保持两条路径各自独立，先不动既有的那条。
+ */
+function decodeNumericEntities(s: string): string {
+  return s
+    .replace(/&#x([0-9a-f]+);/gi, (_m, hex: string) => {
+      const code = parseInt(hex, 16);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : _m;
+    })
+    .replace(/&#(\d+);/g, (_m, dec: string) => {
+      const code = Number(dec);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : _m;
+    });
+}
+
 /** Bing 搜索（解析 b_algo 结果块）。searchUrl 可在配置中替换（测试/换引擎）。 */
 export async function bingSearch(query: string): Promise<SearchResponse> {
   const cfg = getConfig().webSearch ?? {};
@@ -185,38 +205,328 @@ function siteClause(sites: string[]): string {
   return picks.length ? `(${picks.join(' OR ')})` : '';
 }
 
-/** 给工具用的统一入口：搜索 + 紧凑序列化。 */
-export async function webSearch(query: unknown): Promise<SearchResponse> {
+// ── Yandex 网页解析 ──────────────────────────────────────────────────────
+//
+// ⚠️ **这条路是"抓公开 HTML 页"，与官方付费 API 无关**，而抓取天生易碎：
+//   · Yandex 的类名是压缩混淆过的，且会变。SearXNG 的 yandex 引擎就是这么烂掉的
+//     ——它 2021 年被整个**删除**（删除前已在 settings.yml 里 `disabled: True`），
+//     留下的选择器是更早一代的 `b-serp-item__*` 标记。所以**不要**把选择器当成
+//     可信常量：它们做成配置项（`webSearch.yandex.serpClass/urlClass/titleClass/
+//     textClass`），改版时用户能自己在设置页救回来，而不必等一次发版。
+//   · 被拦是常态而非异常。`/showcaptcha` 是**可机检**的信号（SearXNG 同样是靠
+//     `resp.url.path.startswith('/showcaptcha')` 判的），命中时我们抛一句能读懂的话，
+//     而不是返回空列表 —— 后者会让模型说"没搜到"，把"被拦了"误导成"这个事实不存在"。
+//
+// 默认值取自可考证的两代标记，取**交集**里最稳的那部分：
+//   容器 `serp-item` —— 2016 一代与 2021 一代都用它，是唯一贯穿两代的锚点；
+//   标题 `OrganicTitle` —— 新版的标题锚点，配 `organic__url` 的兜底；
+//   正文 `OrganicText` / `organic__text` —— 新版摘要，配旧版 `text-container`。
+// **这些默认值没有在真机上验证过**（本机无法访问 yandex.com），夹具用的是按上述
+// 形状手写的 HTML。首次真机运行若报"没有解析到结果"，就是选择器对不上当前页面。
+
+const YANDEX_DEFAULTS = {
+  baseUrl: 'https://yandex.com/search/',
+  serpClass: 'serp-item',
+  urlClass: 'organic__url',
+  titleClass: 'OrganicTitle',
+  textClass: 'OrganicText'
+} as const;
+
+/** 读 Yandex 配置；缺项回落默认值，空白串也当缺项。 */
+function yandexConfig(): Record<string, string> {
+  const raw = (getConfig().webSearch as Record<string, unknown> | undefined)?.yandex;
+  const cfg = isRecord(raw) ? raw : {};
+  const pick = (key: keyof typeof YANDEX_DEFAULTS): string =>
+    String(cfg[key] ?? '').trim() || YANDEX_DEFAULTS[key];
+  return {
+    baseUrl: pick('baseUrl'),
+    serpClass: pick('serpClass'),
+    urlClass: pick('urlClass'),
+    titleClass: pick('titleClass'),
+    textClass: pick('textClass')
+  };
+}
+
+/** 把 HTML 里的属性值/元素内容解出可读文本（实体 → 文本、标签剥掉、空白折叠）。 */
+function htmlToText(input: string): string {
+  return decodeHtml(decodeNumericEntities(input));
+}
+
+/**
+ * 从 Yandex 的跳转包装里取真实 URL。
+ *
+ * Yandex 的标题链接通常不是目标地址本身，而是 `…/redir?url=<编码后的地址>` 或
+ * `yabs.yandex.ru/count/…` 这类计费跳转。**不解析它就没有可用的链接**（模型会拿到
+ * 一个 yandex.ru 的跳转地址，`web_fetch` 抓到的是跳转页而不是正文）。
+ * 解不出来时**宁可丢掉这条**也不把跳转地址当结果 —— 那会让模型读到错的内容。
+ */
+function resolveYandexUrl(href: string): string {
+  const raw = decodeNumericEntities(href).replace(/&amp;/g, '&').trim();
+  if (!raw) return '';
+  const candidates: string[] = [];
+  // 1) 包在查询参数里的目标地址（redir / count / clck 都用 url= 或 text=）
+  for (const key of ['url', 'text', 'target']) {
+    const m = raw.match(new RegExp(`[?&]${key}=([^&]+)`, 'i'));
+    if (m) candidates.push(m[1]);
+  }
+  // 2) 本身就是绝对地址
+  if (/^https?:\/\//i.test(raw)) candidates.push(raw);
+  for (const candidate of candidates) {
+    let decoded = candidate;
+    try { decoded = decodeURIComponent(candidate); } catch { /* 保持原样 */ }
+    if (/^https?:\/\//i.test(decoded)) return decoded;
+  }
+  return '';
+}
+
+/**
+ * 从一段 HTML 里按类名取第一个元素的**属性值**或**文本**。
+ *
+ * 这是一个刻意写窄的提取器（不是通用 HTML 解析器）：只支持"按 class 找元素、
+ * 取某个属性或取innerHtml"，够用即可，不引入依赖。**已知边界**：不处理同名类出现在
+ * 属性串中间（如 `class="x serp-item y"` 能认，`data-serp-item=` 不认，因为要求
+ * `class` 字样紧邻），也不做嵌套配对 —— 所以调用方都只取第一个匹配。
+ */
+function findClassBlock(html: string, className: string): string | null {
+  if (!className) return null;
+  const escaped = className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // class 属性里含这个名字（允许前后有别的类名），且停在标签结束
+  const re = new RegExp(`<([a-z0-9]+)\\b[^>]*\\bclass="[^"]*\\b${escaped}\\b[^"]*"[^>]*>`, 'i');
+  const m = re.exec(html);
+  return m ? m[0] : null;
+}
+
+/** 取某个类名元素的某个属性值。 */
+function attrOfClass(html: string, className: string, attr: string): string {
+  const tag = findClassBlock(html, className);
+  if (!tag) return '';
+  const escaped = attr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = tag.match(new RegExp(`\\b${escaped}="([^"]*)"`, 'i'));
+  return m ? m[1] : '';
+}
+
+/**
+ * 扫描 HTML，按类名收集"一组同构块"（每个元素从它的开始标签起、到同标签名的下一个
+ * 元素或文本上限为止）。用于把整页切成一条条结果。
+ */
+function splitBlocks(html: string, className: string): string[] {
+  if (!className) return [];
+  const escaped = className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`<li\\b[^>]*\\bclass="[^"]*\\b${escaped}\\b[^"]*"[^>]*>`, 'gi');
+  const starts: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) starts.push(m.index);
+  return starts.map((start, i) => html.slice(start, i + 1 < starts.length ? starts[i + 1] : html.length));
+}
+
+/**
+ * 这条解析出来的地址是不是 Yandex 自家站点。
+ *
+ * 搜索结果里混着大量站内入口（图片/视频/地图/服务导航），它们**不是检索结果**：
+ * 交给模型只会让它拿一个 yandex.com 的页面当"来源"。判据用 `yandex.<tld>` 与
+ * `*.yandex.<tld>`，外加 yandex 自有的跳转域名。刻意只认 `yandex.` 前缀而不是
+ * 整个 `*.ru`，避免顺手误杀正常的俄语站点。
+ */
+function isYandexHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return /(^|\.)yandex\.[a-z]{2,}$/.test(h) || /(^|\.)yastatic\.net$/.test(h) || /(^|\.)yandex\.net$/.test(h);
+}
+
+/**
+ * 取某个类名元素**标签内**的文本（元素自己的文字，不含子元素）。
+ *
+ * ⚠️ 两条边界，都是实测踩出来的（写成 `block.indexOf(tag)` 时 tag 为空串会退化成
+ * `indexOf('') === 0`，于是从块首开始找第一个闭合标签、切出一个空串 —— 表现为
+ * "某条结果静默消失"而不是报错）：
+ *   ① `tag` 为空（类名没找到）时**直接返回空串**，让调用方走兜底；
+ *   ② 找不到闭合标签时返回空串，不要把整块剩余内容当成标题。
+ */
+function textOfTag(block: string, tag: string | null): string {
+  if (!tag) return '';
+  const at = block.indexOf(tag);
+  if (at < 0) return '';
+  const after = block.slice(at + tag.length);
+  const close = after.search(/<\/[a-z0-9]+>/i);
+  return close >= 0 ? htmlToText(after.slice(0, close)) : '';
+}
+
+/** 抓取并解析 Yandex 结果页（`baseUrl` 可换 yandex.ru 等镜像）。 */
+export async function yandexSearch(query: string): Promise<SearchResponse> {
+  const cfg = yandexConfig();
+  const maxResults = Math.max(1, Math.min(10, Number(getConfig().webSearch?.maxResults) || 6));
+  const url = new URL(cfg.baseUrl);
+  url.searchParams.set('text', query);
+
+  const res = await fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'accept-language': 'ru-RU,ru;q=0.9,en;q=0.8'
+    },
+    signal: AbortSignal.timeout(15000),
+    // Yandex 会按重定向把人送去 /showcaptcha，必须能看到最终落点才判得了"被拦"
+    redirect: 'follow'
+  });
+  if (!res.ok) throw new Error(`Yandex 搜索 HTTP ${res.status}`);
+
+  const finalPath = (() => { try { return new URL(res.url).pathname; } catch { return ''; } })();
+  const html = await res.text();
+  // 被拦的两种形态都要认：重定向到 /showcaptcha，或 200 但正文就是验证码页
+  if (finalPath.startsWith('/showcaptcha') || /class="[^"]*\bcaptcha\b/i.test(html)) {
+    throw new Error('Yandex 要求人机验证（CAPTCHA），这次抓取被拦截。换个搜索提供方，或稍后重试。');
+  }
+
+  const results: SearchResult[] = [];
+  for (const block of splitBlocks(html, cfg.serpClass)) {
+    // 标题锚点的 href：优先 organic__url，退回块内第一个外链锚点
+    let href = attrOfClass(block, cfg.urlClass, 'href');
+    if (!href) {
+      const anyLink = block.match(/<a\b[^>]*\bhref="([^"]+)"/i);
+      href = anyLink ? anyLink[1] : '';
+    }
+    const target = resolveYandexUrl(href);
+    if (!target) continue;
+    // 站内入口不是检索结果：过滤掉，只留外部站点
+    try { if (isYandexHost(new URL(target).hostname)) continue; } catch { continue; }
+
+    // 标题文本：先按标题类名取，取不到时退回链接类名元素的文本，再退回块内第一个
+    // 锚点的文本。**逐级兜底而不是取了就算**：标题类名对不上时，若直接放弃这一条，
+    // 表现就是"结果静默变少"——比报错更难发现（实测：三条只剩一条）。
+    const titleTag = findClassBlock(block, cfg.titleClass) || findClassBlock(block, cfg.urlClass);
+    let title = textOfTag(block, titleTag);
+    if (!title) {
+      const anchor = block.match(/<a\b[^>]*>([\s\S]*?)<\/a>/i);
+      if (anchor) title = htmlToText(anchor[1]);
+    }
+    if (!title) continue;
+
+    // 摘要：新版 OrganicText，旧版回退 organic__text；都没有就留空（摘要不是必需的）
+    const snippet = textOfTag(block, findClassBlock(block, cfg.textClass) || findClassBlock(block, 'organic__text'));
+
+    results.push({ title, url: target, snippet });
+    if (results.length >= maxResults) break;
+  }
+
+  if (!results.length) {
+    // 两条"没解析到"的成因不同，文案必须分开，否则用户不知道该改哪一栏：
+    //   · 容器一个都没命中 → 页面结构整个变了（或搜索页地址填错）；
+    //   · 容器命中了但一条都没凑齐链接/标题 → 是**标题锚点类名**对不上。
+    // 合并成一句"没解析到"会把后一种说成前一种，用户就会去改容器类名（改也没用）。
+    const containerFound = splitBlocks(html, cfg.serpClass).length > 0;
+    if (containerFound) {
+      throw new Error(
+        `Yandex 找到了结果容器「${cfg.serpClass}」，但没有一条能解析出链接与标题。` +
+        `多半是「标题锚点类名」（当前「${cfg.titleClass}」）或「链接类名」（当前「${cfg.urlClass}」）对不上，可在设置页调整。`
+      );
+    }
+    throw new Error(
+      `Yandex 没有解析到结果（容器类名「${cfg.serpClass}」一条都没命中）。` +
+      '多半是 Yandex 改了页面结构，可在设置页调整「结果容器类名」等选择器。'
+    );
+  }
+  return { query, results };
+}
+
+/** 收藏夹优先模式（只影响"模型没说搜哪个站点"时的默认行为）。 */
+export type BookmarkMode = 'prefer' | 'web';
+
+/** 读收藏夹优先模式。`bookmarkFirst === false` 视为 'web'，缺省视为 'prefer'（兼容迁移）。 */
+function bookmarkPreference(): BookmarkMode {
+  const cfg = getConfig().webSearch as Record<string, unknown> | undefined;
+  if (cfg?.bookmarkMode === 'web') return 'web';
+  return cfg?.bookmarkFirst === false ? 'web' : 'prefer';
+}
+
+/**
+ * 收藏夹站点的**展示用**名单（顺序稳定、已归一），给提示词与工具报错用。
+ *
+ * 与 `bookmarkSiteSet()` 的区别：那个是给匹配用的 Set，这个是给人/模型看的数组。
+ * 两处都从同一份配置推导，所以不会漂移。
+ */
+export function bookmarkList(): string[] {
+  const list = getConfig().webSearch?.bookmarks;
+  if (!Array.isArray(list)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    const host = String(item ?? '').toLowerCase().trim().replace(/\.$/, '');
+    if (host && !seen.has(host)) { seen.add(host); out.push(host); }
+  }
+  return out;
+}
+
+/**
+ * 模型显式指定的站点是否在收藏夹里；不在就抛一句可执行的话。
+ *
+ * **为什么必须校验而不是直接拼进查询串**：`site:` 的值会进搜索引擎，一个模型凭空写出的
+ * 域名会静默地搜出一个空结果 —— 看起来像"这个站没有内容"，实际是"它从来不在名单里"。
+ * 报错把**可选名单**一起带回去，模型下一轮就能改对（这就是本仓库说的"把真实原因返回给
+ * 模型，而不是替它编一个结果"）。
+ */
+export function resolveBookmarkSite(raw: unknown): string {
+  const asked = String(raw ?? '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/\.$/, '');
+  if (!asked) throw new Error('site 为空');
+  const list = bookmarkList();
+  if (!list.length) {
+    throw new Error('管理员还没有配置任何网页收藏夹站点，无法指定 site；请不带 site 直接做全网搜索');
+  }
+  // 精确匹配，另外允许模型把子域写全（收藏 example.com、它写 m.example.com 时也认）
+  if (list.includes(asked)) return asked;
+  const parent = list.find((site) => asked.endsWith(`.${site}`));
+  if (parent) return asked;
+  throw new Error(`站点「${asked}」不在管理员的网页收藏夹里。可选的只有：${list.join('、')}。请改用其中之一，或不要传 site 直接做全网搜索`);
+}
+
+/**
+ * 给工具用的统一入口。
+ *
+ * `site` 由**模型**给出（照 reverse-image-source 的 `intent` 那一套：模型判断该用哪条路，
+ * 代码只负责路由与校验，不替模型做默认决定）。三种形态：
+ *   · `site` 有值   → 在该站点内检索，外部结果只作补充，该站命中排最前；
+ *   · `site` 无值   → 走全网；若管理员仍是"收藏夹优先"模式，则按关键字先问收藏夹再补全网
+ *                     （旧行为，`bookmarkMode: 'web'` 可关掉）；
+ *   · 名单为空      → 一次额外请求都不发，行为与没有这个功能时逐字相同。
+ */
+export async function webSearch(query: unknown, site?: unknown): Promise<SearchResponse> {
   const clean = sanitizeQuery(query);
   if (!clean) throw new Error('查询词为空');
-  const cfg = getConfig().webSearch ?? {};
-  const sites = cfg.bookmarkFirst === false ? new Set<string>() : bookmarkSiteSet();
-  if (!sites.size) return searchOnce(clean);
+  const all = bookmarkList();
+  const sites = new Set(all);
 
-  // ── 收藏夹优先检索（"域名优先"而不是"只搜收藏夹"）──
-  //
-  // 结构与 reverse-image-source 的 ORDER 那条链是同一种判据：**专属来源先答，答不上再
-  // 问一般向兜底**。区别在于这里不能"命中即停"——收藏夹里没有对应内容时，只搜收藏夹会
-  // 让整次搜索彻底落空，而模型无从知道"是站内没有"还是"搜索引擎坏了"。
-  //
-  // 两发**并行**：串行会让每次带收藏夹的搜索都多付一个完整往返；而"命中即停"在这里
-  // 本来就不成立（我们必须拿到普通结果才能知道收藏夹有没有答上）。
-  // `allSettled` 而不是 `all`：受限那一发失败（provider 不认 site: 语法等）不该把
-  // 已经拿到手的普通结果一起丢掉。
+  // ── 模型点了名：只按它说的那个站点优先 ──
+  if (site !== undefined && site !== null && String(site).trim() !== '') {
+    const picked = resolveBookmarkSite(site);
+    return mergeScoped(clean, [picked], sites);
+  }
+
+  // ── 模型没点名 ──
+  if (!sites.size || bookmarkPreference() === 'web') return searchOnce(clean);
+  return mergeScoped(clean, all, sites);
+}
+
+/**
+ * 「受限那一发 + 全网那一发」的并集，收藏夹命中排最前。
+ *
+ * 结构与 reverse-image-source 的 ORDER 那条链是同一种判据（专属来源先答、一般向兜底），
+ * 但**不能命中即停**：站内没有对应内容时，只搜站内会让整次搜索彻底落空，而模型无从分辨
+ * "站内没有"与"搜索引擎坏了"。两发**并行**：串行会让每次多付一个完整往返，而"命中即停"
+ * 在这里本来就不成立（必须拿到两边才知道站内有没有答上）。
+ * `allSettled` 而不是 `all`：受限那发失败（provider 不认 site: 语法等）不该把已经拿到手的
+ * 普通结果一起丢掉；两发都失败时抛**普通那一发**的原因 —— 受限查询是我们额外加的，
+ * 报错该对应调用方真正请求的那件事。
+ */
+async function mergeScoped(clean: string, scopedSites: string[], allSites: Set<string>): Promise<SearchResponse> {
   const [scoped, general] = await Promise.allSettled([
-    searchOnce(`${clean} ${siteClause([...sites])}`),
+    searchOnce(`${clean} ${siteClause(scopedSites)}`),
     searchOnce(clean)
   ]);
-
   const merged: SearchResult[] = [];
   if (scoped.status === 'fulfilled') merged.push(...scoped.value.results);
   if (general.status === 'fulfilled') merged.push(...general.value.results);
-  // 两发都失败时，把**普通那一发**的真实原因抛出去：受限查询是我们额外加的，
-  // 用户/模型看到的原因该对应他们真正请求的那件事。
   if (!merged.length && scoped.status === 'rejected' && general.status === 'rejected') {
     throw general.reason;
   }
-  return { query: clean, results: annotateBookmarks(merged, sites) };
+  // 标注用**整份**名单：模型点了 A 站、结果里出现 B 站（收藏夹里的另一个）时也该标出来。
+  return { query: clean, results: annotateBookmarks(merged, allSites) };
 }
 
 /** 按配置分发到具体 provider。收藏夹逻辑在外层，这里只认"一个查询词"。 */
@@ -228,6 +538,7 @@ async function searchOnce(clean: string): Promise<SearchResponse> {
   if (provider === 'bocha') return bochaSearch(clean);
   if (provider === 'baidu') return baiduSearch(clean);
   if (provider === 'metaso') return metasoSearch(clean);
+  if (provider === 'yandex') return yandexSearch(clean);
   // 自定义：'custom'（旧单槽位）或 'custom:<id>'（设置页添加的多个之一）
   if (provider === 'custom' || provider.startsWith('custom:')) {
     return customSearch(clean, provider);

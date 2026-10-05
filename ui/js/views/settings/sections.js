@@ -121,6 +121,7 @@ export function renderSearchSection(c) {
         <option value="bocha" ${prov === 'bocha' ? 'selected' : ''}>博查 AI Search</option>
         <option value="baidu" ${prov === 'baidu' ? 'selected' : ''}>百度千帆 AI Search</option>
         <option value="metaso" ${prov === 'metaso' ? 'selected' : ''}>秘塔 AI 搜索</option>
+        <option value="yandex" ${prov === 'yandex' ? 'selected' : ''}>Yandex 网页解析</option>
         ${customProvs.map((p) => `<option value="custom:${esc(p.id)}" ${prov === `custom:${p.id}` ? 'selected' : ''}>${esc(p.name || p.baseUrl)}（自定义 · ${p.type === 'bing' ? '网页解析' : 'JSON 接口'}）</option>`).join('')}
       </select></div>
     <div class="field" id="custom-provider-manage" style="${prov.startsWith('custom:') ? '' : 'display:none'}">
@@ -172,14 +173,46 @@ export function renderSearchSection(c) {
         <button class="btn btn-small" id="cfg-metaso-key-toggle" type="button">显示</button>
       </div></div>
 
+    <div class="field" id="yandex-search-fields" style="${prov === 'yandex' ? '' : 'display:none'}">
+      <label>搜索页地址</label>
+      <input type="text" id="cfg-yandex-baseurl" value="${esc(c.webSearch?.yandex?.baseUrl || 'https://yandex.com/search/')}" />
+      <div class="muted" style="font-size:12px;margin-top:4px">
+        抓的是公开结果页（不需要 Key）。被 CAPTCHA 拦时会明确报"要求人机验证"，而不是假装没搜到。
+        <strong>Yandex 会改页面结构</strong>，工具报"没有解析到结果"时，用下面几个类名把选择器改回当前页面即可。
+      </div>
+    </div>
+    <div class="field-row" id="yandex-selector-fields" style="${prov === 'yandex' ? '' : 'display:none'}">
+      <div class="field"><label>结果容器类名</label>
+        <input type="text" id="cfg-yandex-serp" value="${esc(c.webSearch?.yandex?.serpClass || 'serp-item')}" /></div>
+      <div class="field"><label>标题锚点类名</label>
+        <input type="text" id="cfg-yandex-title" value="${esc(c.webSearch?.yandex?.titleClass || 'OrganicTitle')}" /></div>
+    </div>
+    <div class="field-row" id="yandex-selector-fields2" style="${prov === 'yandex' ? '' : 'display:none'}">
+      <div class="field"><label>链接类名（取 href）</label>
+        <input type="text" id="cfg-yandex-url" value="${esc(c.webSearch?.yandex?.urlClass || 'organic__url')}" /></div>
+      <div class="field"><label>摘要类名</label>
+        <input type="text" id="cfg-yandex-text" value="${esc(c.webSearch?.yandex?.textClass || 'OrganicText')}" /></div>
+    </div>
+
     <h3>网页收藏夹</h3>
+    <div class="field" id="bookmark-mode-field">
+      <label>收藏夹的默认行为（只影响模型<strong>没有</strong>指定站点时走哪条路）</label>
+      <select id="cfg-search-bookmarkmode">
+        <option value="prefer" ${c.webSearch?.bookmarkMode !== 'web' ? 'selected' : ''}>优先在收藏夹里查，再补全网</option>
+        <option value="web" ${c.webSearch?.bookmarkMode === 'web' ? 'selected' : ''}>直接全网，只在模型指定站点时才查收藏夹</option>
+      </select>
+      <div class="muted" style="font-size:12px;margin-top:4px">
+        模型每次搜索都可以自己决定"只在这个站点里搜"（<code>web_search</code> 的 <code>site</code> 参数，
+        可选值是下面这份名单）。这个下拉只管它<strong>没说</strong>的时候：默认先问收藏夹、再补全网，所以收藏夹
+        永远不会让搜索变窄到搜不到。
+      </div>
+    </div>
     <div class="field">
       <label>收藏的站点（每行一个域名或网址；最多 20 个）</label>
       <textarea id="cfg-search-bookmarks" rows="4" placeholder="zh.wikipedia.org&#10;https://www.example.com/some/page&#10;news.ycombinator.com">${esc((Array.isArray(c.webSearch?.bookmarks) ? c.webSearch.bookmarks : []).join('\n'))}</textarea>
       <div class="muted" style="font-size:12px;margin-top:4px">
-        搜索时先在这些站点里查一轮，命中的结果排在最前面（并带 <code>fromBookmark</code> 标记）；
-        站内没有对应内容时，会自动补上全网搜索结果，所以收藏夹不会让搜索"变窄到搜不到"。
-        填整条网址只会取它的<strong>域名</strong>——收藏的是整个站点，不是那一个页面。
+        这份名单会随每轮提示词交给模型，它据此决定要不要限定在某个站点里搜。填整条网址只会取它的
+        <strong>域名</strong>——收藏的是整个站点，不是那一个页面。
       </div>
     </div>
     <div class="field-row">
@@ -187,10 +220,6 @@ export function renderSearchSection(c) {
         <input type="number" id="cfg-search-chat-hourly" min="1" max="200" value="${esc(c.webSearch?.maxCallsPerChatPerHour ?? 20)}" /></div>
       <div class="field"><label>全部会话每天最多搜索次数</label>
         <input type="number" id="cfg-search-daily" min="1" max="5000" value="${esc(c.webSearch?.maxCallsPerDay ?? 200)}" /></div>
-    </div>
-    <div class="field">
-      <div class="checkbox-row"><input type="checkbox" id="cfg-search-bookmarkfirst" ${c.webSearch?.bookmarkFirst !== false ? 'checked' : ''} />
-        <label for="cfg-search-bookmarkfirst">启用收藏夹优先（关掉后名单保留，但搜索不再理会它）</label></div>
     </div>
 
     <h3>添加自定义搜索服务</h3>

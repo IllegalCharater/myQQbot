@@ -96,7 +96,10 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     // 组装提示词（无 LLM 历史）
     const systemPrompt = buildSystemPrompt({
       persona: cfg.persona,
-      capabilities: { vision: visionEnabled, search: searchEnabled }
+      capabilities: { vision: visionEnabled, search: searchEnabled },
+      // 收藏夹站点名单进 system prompt：模型要靠它才知道 `web_search.site` 能填什么。
+      // 读的是**已归一**的配置（core/config.ts 的 hostnameOf 收口），所以这里直接给模型。
+      bookmarkSites: cfg.webSearch?.bookmarks
     });
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,

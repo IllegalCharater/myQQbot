@@ -42,9 +42,14 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 
 /** 组装系统提示。 */
-export function buildSystemPrompt({ persona, capabilities = {} }: {
+export function buildSystemPrompt({ persona, capabilities = {}, bookmarkSites = [] }: {
   persona?: AppConfig['persona'];
   capabilities?: { vision?: boolean; search?: boolean };
+  /**
+   * 管理员配置的收藏夹站点名单，注入 system prompt 供模型在 `web_search` 的 `site`
+   * 参数里选（同 stickers 的做法：**动态数据由调用方递进来**，Catalog 只放固定指令）。
+   */
+  bookmarkSites?: string[];
 } = {}): string {
   const cfg = persona ?? getConfig().persona;
   const appCfg = getConfig();
@@ -73,7 +78,7 @@ export function buildSystemPrompt({ persona, capabilities = {} }: {
     '',
     PROMPT_CATALOG.system.stickerRules(buildStickerStrategyHint(stickerLevel)),
     '',
-    PROMPT_CATALOG.system.qqSceneRules({ vision, search }),
+    PROMPT_CATALOG.system.qqSceneRules({ vision, search, bookmarkSites }),
     '',
     PROMPT_CATALOG.system.reportBan()
   ];

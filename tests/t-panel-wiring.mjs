@@ -144,10 +144,14 @@ console.log('\n═══ 联网搜索：网页收藏夹与调用阀门 ═══
 // 这一段的四个 id 此前一个都不存在，而它们在 save.js 里全是 `$('#…')?.value` 的形式：
 // id 写错**不会报错**，只会让收藏夹静默保存成空数组（`?.` 兜住 undefined），
 // 表现为"填了收藏夹但搜索完全不理会它"—— 与"功能本身没生效"长得一模一样。
-for (const id of ['cfg-search-bookmarks', 'cfg-search-bookmarkfirst', 'cfg-search-chat-hourly', 'cfg-search-daily']) {
+for (const id of ['cfg-search-bookmarks', 'cfg-search-bookmarkmode', 'cfg-search-chat-hourly', 'cfg-search-daily']) {
   ok(`#${id} 已加入设置模板`, new RegExp(`id="${id}"`).test(js));
   ok(`#${id} 可解析`, resolves(id));
 }
+// 废弃的旧键**不得**再出现在面板里：它会由后端迁移成 bookmarkMode，前端若还写回一个
+// 废弃键，那个键就会永远留在用户的 config.json 里当一个没人读的旋钮。
+ok('废弃的 bookmarkFirst 复选框已从面板移除',
+  !/cfg-search-bookmarkfirst/.test(js), '面板里仍有旧键控件');
 const searchSave = seg("if (sec === 'search')", "if (sec === 'image-source')");
 ok('搜索保存分支生成 patch.webSearch', /patch\.webSearch = \{/.test(searchSave));
 ok('收藏夹按行拆分并丢掉空行',
@@ -163,10 +167,37 @@ ok('前端不重复实现域名归一化（剥 scheme/路径只由后端做）',
 ok('阀门两个数值都走 clampInt，且与后端钳制口径一致（1-200 / 1-5000）',
   /maxCallsPerChatPerHour: clampInt\([^\n]+, 1, 200, 20\)/.test(searchSave)
   && /maxCallsPerDay: clampInt\([^\n]+, 1, 5000, 200\)/.test(searchSave));
-ok('bookmarkFirst 的兜底是 true（未配置时等于开启）',
-  /bookmarkFirst: chk\('#cfg-search-bookmarkfirst', c\.webSearch\?\.bookmarkFirst !== false\)/.test(searchSave));
+ok('收藏夹默认行为由下拉框决定，且只接受两个档位之一',
+  /bookmarkMode: val\('#cfg-search-bookmarkmode'[^\n]*===\s*'web'\s*\?\s*'web'\s*:\s*'prefer'/.test(searchSave),
+  '脏值会被钳成 prefer，不能让运行期拿到一个两条路都不走的字符串');
+// 只在**代码**里查：上面那行注释刻意解释了"旧键不再写入"，不剥注释会永远假红
+ok('保存分支不再写废弃的 bookmarkFirst', !/bookmarkFirst/.test(stripComments(searchSave)));
 // 动态列表不能随表单提交被覆盖（这条是既有的有意设计，本次新增字段不得把它挤掉）
 ok('自定义搜索服务列表仍不被表单覆盖', /providers: c\.webSearch\?\.providers \|\| \[\]/.test(searchSave));
+
+// Yandex 抓公开页面：没有 Key，只有地址与四个选择器。**四个选择器都必须能在设置页改** ——
+// 这是这条链唯一的自救通路（Yandex 会改页面结构，SearXNG 的同名引擎 2021 年因此被删除）。
+// 任何一栏漏出模板，用户在页面改版时就没有恢复手段，而症状是"搜索永远没结果"。
+for (const id of ['cfg-yandex-baseurl', 'cfg-yandex-serp', 'cfg-yandex-url', 'cfg-yandex-title', 'cfg-yandex-text']) {
+  ok(`#${id} 已加入设置模板`, new RegExp(`id="${id}"`).test(js));
+  ok(`#${id} 可解析`, resolves(id));
+}
+ok('搜索提供方下拉里有 yandex 选项', /<option value="yandex"/.test(js));
+// Yandex 的选择器有两组（各自成 field-row），显隐必须把两组都覆盖到。
+// 判据写成"两个 id 都出现在同一个遍历数组里"，而不是各查一次 `$('#…')` ——
+// 实现是 `for (const sel of [...]) $(sel)` 的数组驱动写法，按字面查两次会假红。
+ok('Yandex 的两组选择器都纳入了显隐切换',
+  /for \(const sel of \['#yandex-selector-fields', '#yandex-selector-fields2'\]\)/.test(js));
+ok('Yandex 保存分支生成 patch.webSearch.yandex 且五个字段齐全',
+  /yandex: \{/.test(searchSave)
+  && /baseUrl: val\('#cfg-yandex-baseurl'/.test(searchSave)
+  && /serpClass: val\('#cfg-yandex-serp'/.test(searchSave)
+  && /urlClass: val\('#cfg-yandex-url'/.test(searchSave)
+  && /titleClass: val\('#cfg-yandex-title'/.test(searchSave)
+  && /textClass: val\('#cfg-yandex-text'/.test(searchSave));
+// 空输入框必须回落到可用值：留空会让 `new URL('')` 抛错、这条路静默不可用
+ok('Yandex 每个字段都有非空兜底（清空输入框不会把这条路弄坏）',
+  !/val\('#cfg-yandex-\w+',\s*c\.webSearch\?\.yandex\?\.[\w]+\)/.test(searchSave));
 
 const REGIONS = {
   '表情包页': stickerJs,

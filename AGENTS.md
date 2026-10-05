@@ -266,16 +266,20 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 唯一不走它的是 `applyTokens`（401 轮换路径上必须先写 token 再无条件重连，刻意保留）。守护在 `tests/t-timers.mjs` 第 5 段。
 
-**联网搜索的两层入口与网页收藏夹（域名优先检索）**：`media/web-search.ts` 有**两个**导出层次，改这条链之前先分清职责：
+**联网搜索的两层入口与网页收藏夹（模型选站点）**：`media/web-search.ts` 有**两个**导出层次，改这条链之前先分清职责：
 
-- `webSearch()` —— 对工具的唯一入口，负责收藏夹逻辑；
-- `searchOnce()` —— 按 `webSearch.provider` 分发到六路 provider，**不认识收藏夹**。新增 provider 只接进这张分发表即可，不必重复实现优先逻辑（这与 image-source "引擎知识在 Python、映射唯一实现在客户端"是同一种"把易变的部分收进一层"的取舍）。
+- `webSearch(query, site?)` —— 对工具的唯一入口，负责站点选择、校验与合并；
+- `searchOnce()` —— 按 `webSearch.provider` 分发到七路 provider，**不认识收藏夹**。新增 provider 只接进这张分发表即可，不必重复实现优先逻辑（这与 image-source "引擎知识在 Python、映射唯一实现在客户端"是同一种"把易变的部分收进一层"的取舍）。
 
 三条不变量：
 
-- **是"域名优先"而不是"只搜收藏夹"**。结构上照 reverse-image-source 的 `ORDER`（专属来源先答、一般向兜底），但**不能命中即停**：收藏夹里没有对应内容时，只搜收藏夹会让整次搜索彻底落空，而模型无从分辨"站内没有"与"搜索引擎坏了"。所以做法是**两发并发 + 取并集**，收藏夹命中排最前并打 `fromBookmark` 标记。用 `Promise.allSettled` 而不是 `all`：受限那一发失败（provider 不认 `site:` 语法等）不该把已经拿到手的普通结果一起丢掉；两发都失败时抛的是**普通那一发**的原因（受限查询是我们额外加的，报错该对应模型真正请求的那件事）。
+- **"搜哪个站点"由模型决定，代码只路由与校验**（照 reverse-image-source 的 `intent` 那一套）。`web_search` 有可选参数 `site`，取值必须来自管理员配置的收藏夹名单；**校验不能省**——模型凭空写一个域名会拼进 `site:` 并**静默**搜出空结果，看起来像"这个站没有内容"，实际是"它从来不在名单里"。`resolveBookmarkSite()` 拒绝时把**可选名单**一起回给模型，它下一轮就能改对（证伪探针实测：跳过校验会打红 2 条）。名单为空时点名也走同一条拒绝路径，文案说明"管理员还没配置"。
+- **名单必须由 system prompt 注入**（`qqSceneRules` 的 `bookmarkSites`，经 `buildSystemPrompt` 递入，来源是**已归一**的 `cfg.webSearch.bookmarks`）。不注入模型就不知道 `site` 能填什么，只会瞎猜域名 —— 而瞎猜会被校验拦掉，表现为"这个功能从没成功过"。它**只在非空时注入**（没有可选项就不占提示词预算），且**不写进 tool schema**：域名是用户配置的动态数据，Catalog 里放的是固定指令（同 stickers 那条）。
+- **`bookmarkMode` 只管"模型没点名"时走哪条路**，`prefer` = 先问收藏夹再补全网，`web` = 直接全网。它与 `site` 是**正交**的：`web` 不阻止模型显式指定站点（有断言钉着）。这个正交性容易在重构里被抹掉（"既然 web 模式就是不用收藏夹，那把 site 也忽略掉吧"），而症状是"模型选了站点却什么都没变"。
+
+★ **旧键 `bookmarkFirst` 已废弃并被迁移**（`normalizeConfigShape`：`false`→`web`、其余→`prefer`），迁移里那个 `delete` 是**必须的**（`updateConfig` 只加不删，同 `jmcomic.pythonPath` 的教训），且它已从 `DEFAULT_CONFIG` 与设置页移除——**别再把 `bookmarkFirst` 加回默认值**，那会让 `deepMerge` 每轮都带回来一个没人读的旋钮。迁移的测试**必须在独立进程里跑**：本进程前面调过 `updateConfig`，内存里的 config 已带着一个非迁移来的 `bookmarkMode`，`loadConfig()` 的结果会被它盖掉（第一版就是这么假红的；子进程输出写文件而不是管道，避开沙箱的 EPERM 边界）。
 - **域名匹配必须用点边界后缀，不能用 `includes`**：收藏 `example.com` 要命中 `m.example.com`，但**不能**命中 `notexample.com`。这条是**探针实测出来的**——第一版夹具用的是 `book.mark` vs `other.com`，两者无共享子串，`includes` 与后缀匹配结果完全相同，于是那条断言是**假的绿**（改成 `includes` 后 29 条里只红 0 条）；换成 `example.com` / `m.example.com` / `notexample.com` 这组才有判别力（改成 `includes` 会红 2 条）。写域名类断言时注意夹具必须让两种实现**可分**。
-- **归一化只在 `core/config.ts` 的 `hostnameOf` + `normalizeConfigShape` 里做一次**（剥 scheme 与路径、只留宿主名、小写去重、上限 20）。运行期只做拼接，前端只做"按行拆分 + 去空行"。前端再写一份必然漂移，而两边规则不一致时"用户看到的名单"与"实际参与检索的名单"会不一样。**上限与"单次查询塞几个"是两个不同的数**：`MAX_BOOKMARK_SITES`（20，管名单长度）在 config，`MAX_SITES_PER_QUERY`（5，管查询串长度）在 web-search —— 二者的正确值由不同约束决定，合并成一个会让另一侧失守。名单为空或 `bookmarkFirst === false` 时**一次额外请求都不发**，行为与没有这个功能时逐字相同。
+- **归一化只在 `core/config.ts` 的 `hostnameOf` + `normalizeConfigShape` 里做一次**（剥 scheme 与路径、只留宿主名、小写去重、上限 20）。运行期只做拼接，前端只做"按行拆分 + 去空行"。前端再写一份必然漂移，而两边规则不一致时"用户看到的名单"与"实际参与检索的名单"会不一样。**上限与"单次查询塞几个"是两个不同的数**：`MAX_BOOKMARK_SITES`（20，管名单长度）在 config，`MAX_SITES_PER_QUERY`（5，管查询串长度）在 web-search —— 二者的正确值由不同约束决定，合并成一个会让另一侧失守。名单为空、或 `bookmarkMode === 'web'` 且模型没传 `site` 时，**一次额外请求都不发**，行为与没有这个功能时逐字相同。
 
 `fromBookmark` 由**字段的缺席**表示"不是收藏夹结果"（不写 `false`，同 `ImageSourceResult.similarity` 与 `time` 的规矩）。它的语义说明写在 `prompt-catalog.ts` 的 `qqSceneRules` 里（"标记只代表被收藏，不代表更权威"），**不按收藏夹是否为空分支**——配置随时可改而 system prompt 每轮重建，分支只会让两边措辞漂移；也不再往 `web_search.description` 里塞（那个字段每轮都进模型上下文，别把它当文档）。
 
@@ -285,7 +289,17 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - 模块级单例（`agent/tools/shared.ts` 的 `webBudget`）是**有意的**：滑动窗口状态必须跨调用累积，放进 `execute` 里每次新建就等于没有闸门。限额每次现读配置（`getLimits` 是回调），改完设置即时生效。
 - 默认值 **20/时·200/日**，比搜图（5/30）与转写（3/10）宽松——默认的 Bing 页面解析**不直接产生费用**，这两项的用途是**压住刷屏**而不是护第三方配额；换到按次计费的 provider 时应由用户调小。**这条不对称是有意的，别为了"看起来整齐"把它们调成一样。**
 
-守护：行为套件 `tests/t-web-search.mjs`（29 条，起本地假搜索引擎真跑两次请求，覆盖并集/去重/排序/标记/两发失败/清洗），前端接线在 `tests/t-panel-wiring.mjs` 的「联网搜索」段（含一条"前端不重复实现域名归一化"的**剥注释**扫描——不剥注释会因为它自己那句 `hostnameOf` 注释永远假红），配置归一化在 `tests/t-cfg.mjs`（DIAG，只打印）。**改这条链要跑 `t-web-search.mjs`**：它对"优先级反了"与"匹配放宽成 includes"两个变异都真的会红（本轮各跑过一次）。
+守护：行为套件 `tests/t-web-search.mjs`（67 条，起本地假搜索引擎真跑请求，覆盖站点校验/合并/去重/排序/标记/两发失败/清洗 + system prompt 名单注入 + 旧键迁移 + Yandex 全段），前端接线在 `tests/t-panel-wiring.mjs` 的「联网搜索」段（含一条"前端不重复实现域名归一化"的**剥注释**扫描——不剥注释会因为它自己那句 `hostnameOf` 注释永远假红），配置归一化在 `tests/t-cfg.mjs`（DIAG，只打印）。**改这条链要跑 `t-web-search.mjs`**：本轮证伪探针实测它至少对"优先级反了"、"匹配放宽成 includes"、"site 校验被跳过"三个变异会红。
+
+**Yandex 那一路是"抓公开 HTML 页"，与官方付费 API 无关**，这条边界必须先记清，否则会按错误的前提去改它：
+
+- **官方接口是另一件事，而且我们没接**：Yandex Cloud Search API v2（`POST https://searchapi.api.cloud.yandex.net/v2/web/search`，`Authorization: Api-Key <key>` + 必填 `folderId`，响应是 `{"rawData":"<base64>"}` 包着的 **XML**，`<doc>` 下有 `url`/`title`/`headline`）。它**没有结构化 JSON 出口**，所以现有的"自定义搜索服务"（`customSearch` 找 `results/data/sources/references/webPages.value` 数组）**填不进去** —— 别以为加个自定义 provider 就能接官方 API。
+- **抓取天生易碎，且这是已知代价而非缺陷**：Yandex 类名混淆且会变。SearXNG 的同名引擎**2021 年被整个删除**（删除前已在 `settings.yml` 里 `disabled: True`），留下的选择器是更早一代的 `b-serp-item__*`。所以四个选择器是配置项（`webSearch.yandex.serpClass/urlClass/titleClass/textClass`）+ 可换 `baseUrl`：**页面改版时用户能在设置页自救，不必等发版**。默认值取自两代标记的交集（`serp-item` 是唯一贯穿两代的锚点），**未在真机验证过**。
+- **被拦必须归因到"被拦"，不能退化成"没搜到"**：`/showcaptcha` 既可来自重定向（`res.url` 的 pathname）也可来自 200 响应正文里的验证码页，两条都要认（SearXNG 只判前者）。返回空列表会让模型说"这个事实不存在"，这是**归因错误**，与本仓库在图片链路里纠正过的那类错误同型。
+- **"没解析到"的两种成因文案必须分开**，否则用户会去改错的那一栏：容器一个都没命中 → 让改「结果容器类名」；容器命中了但一条都凑不出链接/标题 → 让改「标题锚点类名」。合并成一句会让后一种被引导去改容器（改也没用）。
+- **两条容易静默变坏的地方，都有断言**：① 标题锚点常是 `…/redir?url=<编码过的地址>` 或 `yabs.yandex.ru` 计费跳转，**不解析就没有可用链接**（模型会拿到跳转页）；解不出来时**宁可丢掉这条**也不把跳转地址当结果。② 站内入口（`yandex.<tld>` / `yastatic.net`）不是检索结果，必须过滤，否则模型会把 yandex.com 的页面当成"来源"。
+- **`textOfTag()` 的存在理由是一条实测 bug**：初版用 `block.indexOf(tag)` 直接切片，而 `tag` 为 `null` 时写作 `indexOf('') === 0`，于是**从块首**开始找第一个闭合标签、切出一个空串 —— 表现为"结果静默变少"（实测三条只剩一条），比抛错难发现得多。现在类名找不到就逐级兜底（标题类名 → 链接类名 → 块内第一个锚点），**兜底是逐级的而不是取了就算**。
+- 夹具里那几条断言的价值各有不同，**别把 `includes` 那条当通用结论**：`hreflang` 不会被当成 `href`（取属性要求 `\bhref=`，`hrefLang` 的 `L` 前没有词边界）；实体解码要同时覆盖数字实体与命名实体。这一段的 HTML 是**手写夹具**，它证明"解析器按既定假设工作"，**不证明"假设等于 Yandex 当前的页面"** —— 真机首次跑若报"没有解析到结果"，就是假设过期了，这是这套设计预期内的维护动作。
 
 ## 测试约定
 
