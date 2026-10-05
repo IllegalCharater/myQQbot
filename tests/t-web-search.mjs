@@ -340,9 +340,19 @@ const psrv = http.createServer((req, res) => {
   // 参数名要覆盖 hint 用的那个（`wd`），否则夹具对 hint 返回空页、把 hint 判成不可用 ——
   // 那是夹具的漏洞，不是被测逻辑的问题（本节初版就这么假红了一条）
   const q = u.searchParams.get('q') || u.searchParams.get('wd') || '';
-  if (!q) return res.end(`<html><body>${probeNav}</body></html>`);
+  const isSearchPath = u.pathname.startsWith('/search') || u.pathname === '/custom';
+  if (!isSearchPath || !q) return res.end(`<html><body>${probeNav}</body></html>`);
+  // 搜索**无结果**要说无结果，而不是回退成首页导航：这既是真实搜索页的行为，也是探测
+  // 「乱串对照」那一步的前提。初版夹具对任何词都吐同一批导航，于是乱串查询也"多出 8 条"，
+  // 把正确候选判成了噪声（红了一条）。放在 js/classed 分支之前：那些模式模拟的是别的形态。
+  if (q === 'zzqxvbnmklpoiuytrewqqzxcv') {
+    return res.end(`<html><body>${probeNav}<p>没有找到相关结果</p></body></html>`);
+  }
+  if (probeMode === 'js') {
+    // JS 渲染：搜不搜都是同一个空壳（导航与首页完全一致）
+    return res.end(`<html><body>${probeNav}<div id="root"></div></body></html>`);
+  }
   if (probeMode === 'classed') {
-    // 结果容器带类名，但通用解析收不到（类名元素里没有 <a> 之外的可解析结构时也一样）
     return res.end(`<html><body>${probeNav}`
       + `<li class="mw-search-result"><a href="/wiki/${encodeURIComponent(q)}-1">条目 ${q} 一</a><div>关于 ${q} 的足够长的摘要文本。</div></li>`
       + `<li class="mw-search-result"><a href="/wiki/${encodeURIComponent(q)}-2">条目 ${q} 二</a><div>另一条足够长的摘要文本内容。</div></li>`

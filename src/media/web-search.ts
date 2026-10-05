@@ -756,13 +756,26 @@ export function siteSearchCandidates(input: string): string[] {
   // WHATWG URL 的 punycode 接受（变成 `https://xn--ihqq6tnb086g`），于是探测会去打一个
   // 毫无意义的域名、白等一轮超时，用户却看不出是自己输错了。
   if (!hostname.includes('.') && !/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) return [];
-  // 参数名清单来自实测，不是穷举：`word` 是百度系站点的叫法（实测百度百科用 `?word=`），
-  // 其余几个是国际站常见的。**每多一个参数就多两个请求**（通用解析要跑真/乱两次），
-  // 所以只加有实测依据的，不要"顺手把能想到的都列上"。
-  const params = ['q', 'query', 'search', 'keyword', 'wd', 'word'];
-  const paths = ['/search', '/'];
+  // 候选清单：**刻意不做全笛卡尔积**。每个候选至少要发一个请求，而这条探测是串行的，
+  // 所以候选数量直接决定耗时与"能不能在预算内跑完"。
+  //
+  // 实测教训：初版按「4 路径 × 6 参数 = 24 个候选」全跑，预算在**筛选阶段**就耗尽，
+  // 而真正可用的那个（Gentoo Wiki 的 `?search=`）排在后面、还没被确认就整体放弃了 ——
+  // 症状是"本来能检测出来的站点变成找不到"。
+  //
+  // 现在的配比按"实际出现频率"给：
+  //   · `/search` 是最常见的入口，配全部参数名；
+  //   · `/w/index.php` 与 `/index.php` 是 MediaWiki 的标准入口（实测 Gentoo 用它返回
+  //     41KB 的 `mw-search-result` 结果页，而 `/search?q=` 它根本不认），只配 `search`
+  //     这一个参数名 —— MediaWiki 的参数名恒为 `search`，配全套纯属浪费；
+  //   · 站点根的参数名只在提示词场景下有用，用 hint 覆盖即可，不主动试。
   const out: string[] = [];
-  for (const path of paths) for (const p of params) out.push(`${origin}${path}?${p}={q}`);
+  for (const p of ['q', 'query', 'search', 'keyword', 'wd', 'word']) {
+    out.push(`${origin}/search?${p}={q}`);
+  }
+  out.push(`${origin}/w/index.php?search={q}`);
+  out.push(`${origin}/index.php?search={q}`);
+  out.push(`${origin}/?q={q}`);
   return out;
 }
 
@@ -834,58 +847,90 @@ export async function probeSiteSearch(
     }
   };
 
-  // 站点自身的基线链接集合：拿"首页/普通页"当对照，用来把导航、页脚、侧栏减掉。
+  // 站点自身的基线链接集合：拿站点根当对照，用来把导航、页脚、侧栏减掉。
   // **这是整套探测的判据所在**：不与基线比，任何真实搜索页都会"解析出十几条结果"，
   // 而那十几条在乱串查询下一样存在（实测 Bing 16 vs 16、MDN 15 vs 15）。
-  // 两个地址都走 `normalizeSiteInput`：调用方可能直接给裸域名（设置页就是这么提示的），
-  // 而 `new URL('baike.baidu.com')` 会抛错 —— 那样基线集合会退化成空、整条判据失效。
-  const normalizedInput = normalizeSiteInput(siteInput);
-  const baseRaw = await fetchHtml(siteSearchCandidates(siteInput)[0]?.replace(/\/search\?q=\{q\}$/, '/') || normalizedInput);
-  const baseUrl = (() => { try { return new URL(normalizedInput).toString(); } catch { return normalizedInput; } })();
-  const baseline = baseRaw && baseRaw !== 'budget' ? linkKeysIn(baseRaw, baseUrl) : new Set<string>();
-
-  /** 一个模板是否真的在出结果：把"基线里已有的链接"减掉，看还剩几条。 */
-  const scoreTemplate = async (template: string, cls?: string): Promise<{ kept: number; raw: number } | null | 'budget'> => {
-    const html = await fetchHtml(fillProbe(template, PROBE_QUERY));
-    if (html === 'budget') return 'budget';
-    if (html === null) return null;
-    const raw = parseSiteSearch(html, fillProbe(template, PROBE_QUERY), cls).length;
-    // 按类名命中时不再减基线：类名本身已经把范围收到结果块上（Bing 的 b_algo、
-    // MediaWiki 的 mw-search-result 都不是导航用的类名）。
-    if (cls) return { kept: raw, raw };
-    const kept = parseSiteSearch(html, fillProbe(template, PROBE_QUERY), cls)
-      .filter((r) => !baseline.has(linkKey(r.url))).length;
-    return { kept, raw };
+  //
+  // 三个细节都是有意的：
+  //   · **惰性取**：只有真有模板"命中一批链接"时才去取基线 —— JS 渲染的站点每一发都零命中，
+  //     不该为它们白发一次基线请求；
+  //   · 走 `normalizeSiteInput`：调用方可能给裸域名（设置页就是这么提示的），
+  //     而 `new URL('baike.baidu.com')` 会抛错 → 基线退化成空集 → 整条判据失效；
+  //   · 基线取**站点根**（`origin + '/'`），不是某个带查询串的页面。
+  let baselineCache: Set<string> | null = null;
+  const baseline = async (): Promise<Set<string>> => {
+    if (baselineCache) return baselineCache;
+    const normalized = normalizeSiteInput(siteInput);
+    const root = (() => { try { return `${new URL(normalized).origin}/`; } catch { return normalized; } })();
+    const html = await fetchHtml(root);
+    baselineCache = html && html !== 'budget' ? linkKeysIn(html, root) : new Set<string>();
+    return baselineCache;
   };
 
-  // ① 通用解析：只认"减掉基线后还剩 ≥3 条"的模板
-  let best: { url: string; kept: number; raw: number } | null = null;
+  /** 取一页 HTML（真查询），供"类名试解析"与"通用解析"共用。 */
+  const fetchRealHtml = async (template: string): Promise<{ html: string; url: string } | null | 'budget'> => {
+    const url = fillProbe(template, PROBE_QUERY);
+    const html = await fetchHtml(url);
+    if (html === 'budget') return 'budget';
+    if (html === null) return null;
+    return { html, url };
+  };
+
+  // ── 每个候选当场走完「类名 → 基线差 → 乱串对照」，找到就返回 ──
+  //
+  // 三条教训写在结构里：
+  //   · **一次请求，本地试多个类名**。初版对每个类名各发一次请求（4 倍请求量），
+  //     在慢站上几个候选就把预算烧光，把本来能检出的站点（Gentoo Wiki）变成"找不到"。
+  //   · **类名检查排在通用解析之前**，不能挂在"通用解析命中数"的门槛后面 —— 那个门槛比的是
+  //     **原始**条数（含导航，动辄十几），而类名命中的是**结果块**（可能只有 2~3 条）。
+  //     初版写成 `if (genericReal < 3)`，于是"通用解析出 10 条、类名命中 2 条"的页面
+  //     （典型：结果少但结构清晰的 wiki）两边都不落地，被直接放弃。
+  //   · **不要写成"先全部筛选、再统一确认"两趟**：预算会在第一趟耗尽，排在后面的可用候选
+  //     永远等不到确认（Gentoo 的 `?search=` 是第 3 个候选，就这么被跳过了）。
+  let best: { url: string; kept: number; junkKept: number } | null = null;
   for (const template of candidates) {
-    const s = await scoreTemplate(template);
-    if (s === 'budget') break;
-    if (!s) { diagnostics.push({ template, error: '取页失败' }); continue; }
-    diagnostics.push({ template, kept: s.kept, raw: s.raw });
-    if (s.kept < 3) continue;
-    if (!best || s.kept > best.kept) best = { url: template, kept: s.kept, raw: s.raw };
+    const real = await fetchRealHtml(template);
+    if (real === 'budget') break;
+    if (real === null) continue;
+
+    // ① 结果容器类名：命中 ≥2 条即可接受（`mw-search-result`/`b_algo` 都不是导航会用到的类名）
+    let classHit: { cls: string; n: number } | null = null;
+    for (const cls of PROBE_CLASS_CANDIDATES) {
+      const n = parseSiteSearch(real.html, real.url, cls).length;
+      if (n >= 2) { classHit = { cls, n }; break; }
+    }
+    if (classHit) {
+      return {
+        ok: true, searchUrl: template, resultClass: classHit.cls, tried, diagnostics,
+        note: `按容器类名「${classHit.cls}」命中 ${classHit.n} 条`
+      };
+    }
+
+    // ② 通用解析：真查询 → 基线差 → 乱串对照，三者都过才算数
+    const genericReal = parseSiteSearch(real.html, real.url).length;
+    if (genericReal < 3) continue;
+
+    const base = await baseline();
+    if (budgetExceeded) break;
+    const kept = parseSiteSearch(real.html, real.url).filter((r) => !base.has(linkKey(r.url))).length;
+    diagnostics.push({ template, kept, raw: genericReal });
+    if (kept < 3) continue;
+    // 乱串对照：确认这些"多出来的链接"确实是因为查询词才出现的
+    const junkHtml = await fetchHtml(fillProbe(template, PROBE_JUNK_QUERY));
+    if (junkHtml === 'budget') break;
+    if (junkHtml === null) continue;
+    const junkKept = parseSiteSearch(junkHtml, fillProbe(template, PROBE_JUNK_QUERY))
+      .filter((r) => !base.has(linkKey(r.url))).length;
+    if (kept < junkKept + 3) continue;
+    if (!best || kept - junkKept > best.kept - best.junkKept) best = { url: template, kept, junkKept };
+    // 已经拿到一个可信候选：信噪比足够好就直接用，不再花预算试剩下的
+    if (kept - junkKept >= 10) break;
   }
   if (best) {
     return {
       ok: true, searchUrl: best.url, tried, diagnostics,
-      note: `通用解析：减掉导航后剩 ${best.kept} 条（原始 ${best.raw} 条）`
+      note: `通用解析：减掉导航后剩 ${best.kept} 条（乱串对照 ${best.junkKept} 条）`
     };
-  }
-
-  // ② 结果容器类名：类名把范围收窄到结果块，所以只看命中数（≥2 条）
-  for (const template of candidates) {
-    for (const cls of PROBE_CLASS_CANDIDATES) {
-      const s = await scoreTemplate(template, cls);
-      if (s === 'budget') break;
-      if (!s) { diagnostics.push({ template, resultClass: cls, error: '取页失败' }); continue; }
-      diagnostics.push({ template, resultClass: cls, kept: s.kept, raw: s.raw });
-      if (s.kept < 2) continue;
-      return { ok: true, searchUrl: template, resultClass: cls, tried, diagnostics, note: `按容器类名「${cls}」命中 ${s.kept} 条` };
-    }
-    if (budgetExceeded) break;
   }
 
   const tail = budgetExceeded ? `（已发 ${tried} 次请求后到时间上限，探测未跑完）` : '';
@@ -894,7 +939,7 @@ export async function probeSiteSearch(
     tried,
     diagnostics,
     note: '没找到可用的站内搜索地址。常见原因：① 该站结果由 JavaScript 动态渲染（抓到的 HTML 里没有结果）；' +
-      '② 查询参数名不在这几个里（q/query/search/keyword/wd），或结果在别的主机上；' +
+      '② 查询参数名不在已试的这几个里（q/query/search/keyword/wd/word），或结果在别的主机上；' +
       '③ 该站需要登录或被反爬拦截（反爬时连结果标记都会被去掉）。' +
       '最可靠的做法：自己在站内搜一次，把地址栏里的 URL 贴到「站内搜索地址」栏，再把查询词换成 {q}。' + tail
   };
