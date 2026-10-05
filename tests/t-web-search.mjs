@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { load } from './lib/src.mjs';
+import { load, ROOT } from './lib/src.mjs';
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-websearch-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
@@ -1002,6 +1002,66 @@ ok('⑥ 对照：用户填的域名优先（不被请求结构覆盖）', bookma
 // 对照：两个来源都没有 → 仍然丢弃（没有站点就拼不出检索）
 updateConfig({ webSearch: { ...baseSearch, bookmarks: [{ key: 'none', url: '', purpose: 'p' }] } });
 ok('⑥ 对照：没有任何站点来源时仍然丢弃', bookmarkList().length === 0, JSON.stringify(bookmarkList()));
+
+// ═══ 19. web_fetch 的正文提取（HTML → 可读文本）═══
+//
+// **实测反馈的 bug**：旧实现是 `content: body.slice(0, 20000)` —— 直接把原始 HTML 的
+// 前 20000 字符给模型。现代站点的 `<head>` 塞满 `<script>`（MediaWiki 的 `RLCONF={…}`
+// 动辄几十 KB），于是那 20000 字符几乎全被脚本吃掉，**正文一个字都进不去**。
+// 实测萌娘百科初音未来词条：20000 字符里只有 **206** 字可读文本，正文第一个 `<p>` 在
+// 23306 处。模型拿到一串看不懂的脚本，就以为"抓取失败/被限流"并反复重试。
+console.log('\n═══ 19. web_fetch 的正文提取 ═══');
+const { htmlToText, looksLikeHtml } = await load('media/html-to-text.js');
+
+ok('⑦ 脚本内容被丢掉（RLCONF 不该出现在正文里）',
+  !/RLCONF/.test(htmlToText('<script>RLCONF={"a":1}</script><p>正文</p>')));
+ok('⑦ style 内容被丢掉', !/\.cls\{\}/.test(htmlToText('<style>.cls{}</style><p>正文</p>')));
+// ⚠️ 这两条是本轮修掉的**真 bug**：初版对 script/template 写了"没有闭合标签就贪到结尾"，
+// 而实测萌娘页面上有个**不闭合的 `<template>`**，于是整篇文章被吞（28648 → 6348 字符）。
+// "没有闭合标签"最常见是因为**响应被截断**，那时保留原文远比丢掉好。
+ok('⑦ **不闭合的 `<script>` 不吞掉正文**（截断响应里这是常态）',
+  /正文/.test(htmlToText('<script>var a=1;<p>正文</p>')), JSON.stringify(htmlToText('<script>var a=1;<p>正文</p>')));
+ok('⑦ **不闭合的 `<template>` 不吞掉正文**（实测萌娘页面上就有一个）',
+  /正文/.test(htmlToText('<template><p>模板</p><p>正文</p>')), JSON.stringify(htmlToText('<template><p>模板</p><p>正文</p>')));
+ok('⑦ 块级标签产生换行（段落结构要保住，不能压成一行）',
+  htmlToText('<p>甲</p><p>乙</p>') === '甲\n乙', JSON.stringify(htmlToText('<p>甲</p><p>乙</p>')));
+ok('⑦ 实体解码（含数字实体）',
+  htmlToText('<p>a &amp; b &lt;c&gt; &nbsp;d &#65;</p>') === 'a & b <c> d A',
+  JSON.stringify(htmlToText('<p>a &amp; b &lt;c&gt; &nbsp;d &#65;</p>')));
+ok('⑦ `&amp;lt;` 不被解成 `<`（&amp; 必须最后解）',
+  htmlToText('<p>&amp;lt;script&amp;gt;</p>') === '&lt;script&gt;',
+  JSON.stringify(htmlToText('<p>&amp;lt;script&amp;gt;</p>')));
+// 相对链接不补全的话模型看到的是 `[/%E5%88%9D...]` 这种没法用的片段
+ok('⑦ 相对链接补成绝对地址', /\[https:\/\/h\.test\/x\]/.test(htmlToText('<a href="/x">y</a>', 'https://h.test/')),
+  htmlToText('<a href="/x">y</a>', 'https://h.test/'));
+ok('⑦ 锚点 / javascript: 链接丢掉（不是可引用的地址）',
+  !/javascript/.test(htmlToText('<a href="javascript:void(0)">y</a>', 'https://h.test/')));
+ok('⑦ img 的 alt 保留（常是图片的唯一说明）', /\[立绘\]/.test(htmlToText('<img alt="立绘" src="a.jpg">')));
+ok('⑦ 空输入不抛错', htmlToText('') === '');
+ok('⑦ 截断在标签中间的输入不抛错', typeof htmlToText('<div><p>半截') === 'string');
+ok('⑦ `looksLikeHtml`：content-type 就够', looksLikeHtml('随便', 'text/html; charset=utf-8'));
+ok('⑦ `looksLikeHtml`：看开头标签', looksLikeHtml('<!DOCTYPE html><html>', ''));
+ok('⑦ `looksLikeHtml`：纯文本不误判', !looksLikeHtml('这是纯文本，没有任何标签。', 'text/plain'));
+ok('⑦ `looksLikeHtml`：正文里偶然出现 `<` 不误判（只看开头 2000 字）', !looksLikeHtml('价格 a < b', 'text/plain'));
+
+// **顺序**才是关键：先 slice 再剥 = 白剥。用"前 60000 字符全是脚本"的夹具钉住这个顺序。
+const headHeavy = '<!DOCTYPE html><html><head><script>RLCONF=' + 'x'.repeat(60000) + '</script></head>'
+  + '<body><p>' + '正文内容ABC。'.repeat(5000) + '</p></body></html>';
+const extracted = htmlToText(headHeavy, 'https://h.test/');
+ok('⑦ 头 60000 字符全是脚本时，剥完仍能拿到正文', /正文内容ABC/.test(extracted));
+ok('⑦ 剥完不含脚本', !/RLCONF/.test(extracted));
+ok('⑦ 对照：**旧行为**（前 20000 字符直接给模型）一个字正文都没有',
+  !/正文内容ABC/.test(headHeavy.slice(0, 20000)));
+// 源级接线：截断必须作用在**剥完之后**的文本上，且 truncated 按正文长度判
+const webToolsSrc = fs.readFileSync(path.join(ROOT, 'src/agent/tools/web-tools.ts'), 'utf8');
+ok('⑦ 工具里先 looksLikeHtml 判定、再 htmlToText 提取（并传 baseUrl 补全链接）',
+  /looksLikeHtml\(body, contentType\)/.test(webToolsSrc) && /htmlToText\(body, String\(result\.url/.test(webToolsSrc));
+ok('⑦ 截断作用在剥完的 `text` 上（不是原始 body）',
+  /content: text\.slice\(0, FETCH_TEXT_MAX_CHARS\)/.test(webToolsSrc));
+// `truncated` 的语义必须是"给模型看的正文被截断"：旧判据拿 `result.truncated`（原始响应
+// ≥50000 字符）来说事，剥完 HTML 之后那个数已经不代表模型看到的东西了（会误报）
+ok('⑦ `truncated` 按正文长度判，不再用 `result.truncated`',
+  /truncated: text\.length > FETCH_TEXT_MAX_CHARS/.test(webToolsSrc) && !/truncated: result\.truncated/.test(webToolsSrc));
 
 await new Promise((r) => bqsrv.close(r));
 

@@ -302,11 +302,27 @@ export async function openSafeStream(urlString: unknown, {
 
 const MAX_REDIRECTS = 5;
 
-/** 抓取网页文本（≤50000 字符），SSRF 全防护（不做内网例外）。 */
+/**
+ * 抓取网页文本返回的**原始字节**上限。
+ *
+ * 为什么从 50000 提到 250000：这个上限是"防内存爆炸"，不是"省模型上下文"——
+ * 后者由调用方（`web_fetch` 的 `FETCH_TEXT_MAX_CHARS`）负责。旧值对**现代网页**实在太小：
+ * 实测萌娘百科一个词条整页 486K 字节，前 50000 字节**几乎全是 `<head>` 里的 `<script>`**
+ * （MediaWiki 的 `RLCONF={…}`），剥掉脚本后只剩不到 6K 字可读文本，而**正文根本还没开始**
+ * （第一个 `<p>` 在 23306 字符处）。提上来之后 `web_fetch` 能拿到**完整正文**再按
+ * 20000 字符给模型 —— 同一页从 206 字变到 20000 字。
+ *
+ * 250000 的依据：它够装下 `web_fetch` 20000 字符上限对应的**全部** HTML（含标签与实体，
+ * 实测萌娘初音未来词条 555K 字节里去掉脚本后 446K，20000 字正文对应的 HTML 约 20 万字节），
+ * 同时仍是个有界的内存承诺（单次抓取最多 250KB 字符串）。
+ */
+const TEXT_MAX_BYTES = 250000;
+
+/** 抓取网页文本（≤250000 字节），SSRF 全防护（不做内网例外）。 */
 export async function safeFetch(urlString: unknown) {
   let { url, ip } = await validateFetchUrl(urlString);
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnce(url, ip, { asBinary: false, maxBytes: 50000 });
+    const result = await requestOnce(url, ip, { asBinary: false, maxBytes: TEXT_MAX_BYTES });
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
@@ -314,7 +330,15 @@ export async function safeFetch(urlString: unknown) {
       continue;
     }
     const body = typeof result.body === 'string' ? result.body : '';
-    return { url: url.toString(), statusCode: result.statusCode, truncated: body.length >= 50000, body };
+    // `contentType` 要一起带出去：`web_fetch` 靠它决定"要不要按 HTML 剥正文"
+    // （见 `media/html-to-text.ts` 开头那个 bug）。少了它只能猜正文形态。
+    return {
+      url: url.toString(),
+      statusCode: result.statusCode,
+      truncated: body.length >= TEXT_MAX_BYTES,
+      body,
+      contentType: result.contentType || ''
+    };
   }
   throw new Error('重定向次数过多，已停止');
 }
