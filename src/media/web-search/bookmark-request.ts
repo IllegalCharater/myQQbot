@@ -1,7 +1,7 @@
 /**
  * 收藏夹的「请求结构」：按一段**结构化请求**去取数据，并把它转成搜索结果。
  *
- * 与同目录 `web-search.ts` 的「站内搜索地址」是两种不同的取数方式：
+ * 与同目录 `web-search/site-search.ts` 的「站内搜索地址」是两种不同的取数方式：
  *   · **站内搜索地址** —— 去一个**网页搜索页**抓 HTML，从链接里解析候选；
  *   · **请求结构**（本模块）—— 按指定的**方法 / 地址 / 请求头**发一次请求，把响应
  *     （通常是 JSON，如百度千帆的百科接口）转成候选。
@@ -27,19 +27,15 @@
  * 与其它被引用的配置项同一层级（见文件末尾那条注释）。
  */
 
-/** 静态参数值的上限（够放 token 之外的一切），防止有人把整篇文档粘进来。 */
-const MAX_PARAM_VALUE = 500;
-/** 请求头条数上限：正常接口几个到十几个，给足但不至于让配置无限膨胀。 */
-const MAX_HEADERS = 20;
 export const MAX_ENDPOINT_CHARS = 2000;
 export const MAX_HEADER_NAME_CHARS = 100;
 export const MAX_HEADER_VALUE_CHARS = 1000;
 /**
  * 单对象 JSON 响应压平成一段资料时的**字符上限**。
  *
- * 定义在这里而不是 `web-search.ts`：真实检索与设置页的「测试」都要用它，
+ * 定义在这里而不是 `web-search/` 里：真实检索与设置页的「测试」都要用它，
  * 拿两份字面量的话两边会漂移 —— 那种漂移的表现是"测试说压了 5000 字、实际只给 2000"，
- * 谁也不会去核对。（`web-search.ts` 从本文件 import，方向本来就是它依赖这里。）
+ * 谁也不会去核对。（`web-search/site-search.ts` 从本文件 import，方向本来就是它依赖这里。）
  */
 export const BOOKMARK_JSON_MAX_CHARS = 2000;
 
@@ -47,7 +43,7 @@ export const BOOKMARK_JSON_MAX_CHARS = 2000;
  * **兜底**的单行上限，仅供 `flattenJson` 的默认参数语义参考。
  *
  * ⚠️ **真实检索不再用这两个常量**：抓取正文的预算已经**改成配置项**
- * （`webSearch.flattenMaxChars`，设置页可改，见 `web-search.ts` 的 `flattenMaxChars()`）。
+ * （`webSearch.flattenMaxChars`，设置页可改，见 `web-search/site-search.ts` 的 `flattenMaxChars()`）。
  * 留在这里是因为它们把"默认值是多少、为什么是那个数"记在代码里 ——
  * 改默认值时**两处要一起改**（这里是文档，配置 schema 才是权威），
  * `t-web-search.mjs` 有一条断言钉住两边一致。
@@ -175,7 +171,7 @@ export interface ExecutedBookmarkRequest {
  * 响应形态分两路：
  *   · **JSON** → `jsonToResults()` 通用转换（找对象数组 / 用已知字段名）或
  *     `flattenJson()` 压平成一段资料；
- *   · **HTML** → 交给调用方（`web-search.ts`）用现成的链接解析器处理。
+ *   · **HTML** → 交给调用方（`web-search/site-search.ts`）用现成的链接解析器处理。
  *     本函数只在拿到 HTML 时把正文回传，不重复实现一遍解析。
  */
 export interface BookmarkFetchResult {

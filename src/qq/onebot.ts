@@ -719,6 +719,22 @@ export function extractMediaFromSegments(segments: unknown): Array<Record<string
       media.push({ kind: 'image', file: String(d.file ?? ''), url: String(d.url ?? ''), summary: String(d.summary ?? '') });
     } else if (seg.type === 'face') {
       media.push({ kind: 'face', faceId: String(d.id ?? '') });
+    } else if (seg.type === 'record') {
+      // 语音。**与 image 同形**（`file` / `url` 两栏），但它多一栏 `text`：有些协议端会
+      // 自带服务端语音转文字的结果，那一栏是白拿的信息，存下来省一次识别（与 image 存
+      // `summary` 同一个理由）。按 OneBot v11 规范 `url` 可能不存在或会过期，所以
+      // **没有 url 时不产出条目** —— 一条没有地址的 `kind:'audio'` 只会让下游白找一轮。
+      const url = String(d.url ?? '').trim();
+      if (url) {
+        media.push({
+          kind: 'audio',
+          file: String(d.file ?? ''),
+          url,
+          ...(String(d.magic ?? '') ? { magic: String(d.magic) } : {}),
+          // 协议端自带的转写文本（可能为空）。**不参与任何判据**，只是可用的补充信息。
+          ...(String(d.text ?? '').trim() ? { text: String(d.text).trim() } : {})
+        });
+      }
     } else if (seg.type === 'forward') {
       // 存下 res_id：get_forward_msg 认它、不认 message_id（见 getForwardNodes），
       // 存了就不必再花一次 get_msg 去取；顺带让这条消息在提示词里带上 #id，

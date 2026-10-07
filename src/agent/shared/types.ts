@@ -9,7 +9,7 @@ import type { OneBotClient } from '../../qq/onebot.js';
 import type { SessionRegistry } from '../../chat/sessions.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
 import type { AppEmit } from '../../core/events.js';
-import type { VideoTranscriptionQueue } from '../../media/video-transcription.js';
+import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
 import type { HotSearchScheduler } from '../../media/hot-search/scheduler.js';
 
 export type ToolArguments = Record<string, unknown>;

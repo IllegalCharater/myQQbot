@@ -17,7 +17,7 @@ import type { SendQueue } from '../../qq/sender.js';
 import type { SessionRegistry } from '../../chat/sessions.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
-import type { VideoTranscriptionQueue } from '../../media/video-transcription.js';
+import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
 import type { HotSearchScheduler } from '../../media/hot-search/scheduler.js';
 import type { ChatRuntimeState, HistoryPolicyResult, ResponseDecision, ToolDefinition } from '../shared/types.js';
 

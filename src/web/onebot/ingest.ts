@@ -21,9 +21,13 @@ import {
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { OneBotEvent } from '../../qq/types.js';
 import type { SendQueue } from '../../qq/sender.js';
-import { parseTranscriptionCommand } from '../../media/video-transcription.js';
-import type { VideoTranscriptionQueue } from '../../media/video-transcription.js';
-import { isBilibiliUrl, bilibiliUrlFromCardData, bilibiliUrlFromXml } from '../../media/bilibili.js';
+import { parseTranscriptionCommand } from '../../media/transcription/index.js';
+import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
+// ⚠️ 别名不是洁癖：`qq/onebot.js` 已经导出一个同名的 `extractMediaFromSegments`（那是
+// **通用 OneBot 协议解析**：图片、表情、视频段本身），而这里要的是**平台卡片识别**
+// （某某站的小程序卡片/分享卡里那个链接）。两者是不同的事、都由本文件调用，
+// 直接同名 import 会撞车（实测 TS2300）。
+import { mediaCandidateFromUrl, extractMediaFromSegments as extractCardMediaFromSegments } from '../../media/media-source/index.js';
 import { errorMessage, isRecord } from '../http/http.js';
 
 // ── 白名单判断（移植自原版 allowed()） ───────────────────────────────────
@@ -37,44 +41,47 @@ function allowed(kind: 'group' | 'private', id: unknown, cfg: AppConfig) {
   return cfg.allowAllWhenEmpty === true;
 }
 
-/** 在接入层把 B 站卡片补成可定位的视频媒体；通用 OneBot 协议解析保持平台无关。 */
-function addBilibiliVideoAliases(media: MediaEntry[]): void {
+/**
+ * 把已解析的 card 媒体补成可定位的视频媒体。
+ *
+ * **通用实现**：平台知识全在 `media/media-source/` 的 provider 清单里，这里只做
+ * "拿 media 里已有的 card url 去问一遍 provider"。加平台不用改这个文件。
+ *
+ * 为什么非补不可：`/转写` 与 `transcribe_video` 都靠 media 里的 `kind:'video'` 定位目标，
+ * 只认通用卡片解析的 `jumpUrl` 时，B 站小程序卡片看着有链接、存档里却没有，
+ * 两边都会报"没有视频链接"。
+ *
+ * 与 `addCardMediaFromSegments` 的分工：那个从**原始段报文**里补（覆盖通用解析认不出的
+ * `qqdocurl` 与 `xml`），这个从**已解析的 media** 里补别名。两个都调、按 url 去重，顺序无关。
+ */
+function addVideoAliases(media: MediaEntry[]): void {
   const existing = new Set(media
     .filter((item) => item.kind === 'video' && typeof item.url === 'string')
     .map((item) => String(item.url)));
   for (const item of [...media]) {
-    if (item.kind !== 'card' || typeof item.url !== 'string' || !isBilibiliUrl(item.url) || existing.has(item.url)) continue;
-    media.push({ kind: 'video', url: item.url, source: 'bilibili-card' });
-    existing.add(item.url);
+    if (item.kind !== 'card' || typeof item.url !== 'string' || existing.has(item.url)) continue;
+    const hit = mediaCandidateFromUrl(item.url);
+    if (!hit) continue;
+    media.push({ kind: hit.kind, url: hit.url, source: hit.source });
+    existing.add(hit.url);
   }
 }
 
 /**
- * 直接从原始消息段里补卡片链接。
+ * 直接从原始消息段里补媒体链接（**平台无关**）。
  *
- * 与 `addBilibiliVideoAliases` 的分工：那个从**已解析的** card 媒体里补别名，只能覆盖
- * 通用卡片解析认得的字段；这个不经过那一层，覆盖它认不出的形态——
- * **B 站 App 分享出来的小程序卡片（链接在 `meta.detail_1.qqdocurl`，没有 `jumpUrl`）**
- * 和部分协议端下发成 `xml` 段的分享卡。两者都调，按 url 去重，顺序无关。
- *
- * 为什么非补不可：`/转写` 与 `transcribe_video` 都靠 media 里的 `kind:'video'` 定位目标，
- * 只认 jumpUrl 时卡片看着有链接、存档里却没有，两边都会报"没有视频链接"。
+ * 不经过通用卡片解析那一层，覆盖它认不出的形态：小程序卡片的链接在
+ * `meta.detail_1.qqdocurl`（没有 `jumpUrl`）、部分协议端把分享卡下发成 `xml` 段。
+ * 两者都由 provider 自己认领（见 `media/media-source/index.ts`）。
  */
-function addBilibiliCardLinks(media: MediaEntry[], segments: unknown): void {
+function addCardMediaFromSegments(media: MediaEntry[], segments: unknown): void {
   const existing = new Set(media
     .filter((item) => item.kind === 'video' && typeof item.url === 'string')
     .map((item) => String(item.url)));
-  for (const value of Array.isArray(segments) ? segments : []) {
-    if (!isRecord(value)) continue;
-    const type = value.type;
-    if (type !== 'json' && type !== 'xml') continue;
-    const data = isRecord(value.data) ? value.data : {};
-    const url = type === 'json'
-      ? bilibiliUrlFromCardData(data)
-      : bilibiliUrlFromXml(data.data ?? data.string);
-    if (!url || existing.has(url)) continue;
-    media.push({ kind: 'video', url, source: 'bilibili-card' });
-    existing.add(url);
+  for (const hit of extractCardMediaFromSegments(segments)) {
+    if (existing.has(hit.url)) continue;
+    media.push({ kind: hit.kind, url: hit.url, source: hit.source });
+    existing.add(hit.url);
   }
 }
 
@@ -159,8 +166,8 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
         media = extractMediaFromSegments(msg.message)
           .filter((item): item is Record<string, unknown> & { kind: string } => typeof item.kind === 'string')
           .map((item) => ({ ...item, kind: item.kind }));
-        addBilibiliVideoAliases(media);
-        addBilibiliCardLinks(media, msg.message);
+        addVideoAliases(media);
+        addCardMediaFromSegments(media, msg.message);
       } else if (isRecord(msg) && typeof msg.message === 'string') {
         text = msg.message;
       }
@@ -195,8 +202,8 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       const candidate = String(segment.data.url || segment.data.file || '').trim();
       media.push({ kind: 'video', ...(candidate ? { url: candidate } : {}), file: String(segment.data.file || '') });
     }
-    addBilibiliVideoAliases(media);
-    addBilibiliCardLinks(media, segments);
+    addVideoAliases(media);
+    addCardMediaFromSegments(media, segments);
 
     let text;
     let commandText;
@@ -261,7 +268,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     const isTranscriptionCommand = /^\/转写(?:\s|\[视频\]|$)/u.test(String(commandText || '').trim());
     if (isTranscriptionCommand && repliedMedia.length) {
       media.push(...repliedMedia);
-      addBilibiliVideoAliases(media);
+      addVideoAliases(media);
     }
     // 条目要**当面交给**编排器（onIncoming 的第二个参数）：上下文窗口的入窗入口
     // 只有它一个，少传一次窗口与存档就会静默分叉。确定性命令是唯一例外：它通过

@@ -14,7 +14,7 @@ import { Orchestrator } from '../agent/runtime/orchestrator.js';
 import { initPriceFeed, stopPriceFeed } from '../llm/price-feed.js';
 import { initJmcomicQueue, stopJmcomicQueue } from '../media/jmcomic.js';
 import type { JmcomicCompletion } from '../media/jmcomic.js';
-import { VideoTranscriptionQueue } from '../media/video-transcription.js';
+import { VideoTranscriptionQueue } from '../media/transcription/index.js';
 import { createEventBus } from '../core/util.js';
 import { projectSse, writeSse } from './http/event-projector.js';
 import { startLifecycle, stopLifecycle } from './runtime/lifecycle.js';

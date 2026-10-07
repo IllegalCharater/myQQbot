@@ -1,6 +1,6 @@
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
 import { getConfig } from '../../core/config.js';
-import { webFetch, webSearch } from '../../media/web-search.js';
+import { webFetch, webSearch } from '../../media/web-search/index.js';
 import { htmlToText, looksLikeHtml, looksBlocked } from '../../media/html-to-text.js';
 import { err, errorMessage, ok, takeWebBudget } from './shared.js';
 import type { ToolDefinition } from '../shared/types.js';

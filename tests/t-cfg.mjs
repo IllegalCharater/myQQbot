@@ -78,7 +78,11 @@ console.log('抓取正文两个字段都有默认值（老配置里没有这两�
     d.fetchTextMaxChars === 20000, d.flattenMaxChars === 4000);
   // 兜底常量与配置默认值不能漂移（`BOOKMARK_FLATTEN_MAX_CHARS` 只作文档，
   // 但它写着"默认是 4000"，改了配置却忘了它就会骗下一个读代码的人）
-  const { BOOKMARK_FLATTEN_MAX_CHARS } = await load('media/bookmark-request.js');
+  //
+  // ⚠️ 路径跟着实现走：它已搬进 `media/web-search/`（请求结构与站内搜索是同一个能力）。
+  // 写旧路径在**陈 dist** 下仍解析得到，搬家当场不红 —— 只有清空 dist 重建才炸，
+  // 而报错看起来像"文件被删了"。
+  const { BOOKMARK_FLATTEN_MAX_CHARS } = await load('media/web-search/bookmark-request.js');
   console.log('兜底常量与配置默认值一致:', BOOKMARK_FLATTEN_MAX_CHARS === d.flattenMaxChars,
     BOOKMARK_FLATTEN_MAX_CHARS, d.flattenMaxChars);
 }

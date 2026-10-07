@@ -194,7 +194,9 @@ export const LONG_TERM_TASKS: LongTermTask[] = [
   },
   {
     id: 'transcription.worker',
-    owner: 'src/media/video-transcription.ts',
+    // owner 是**实际持有那个 setTimeout 的文件**（`t-tasks.mjs` 会读它、要求里面有调度调用），
+    // 所以拆模块后这里指 `transcription/queue.ts` 而不是桶文件 —— 桶文件里没有调度。
+    owner: 'src/media/transcription/queue.ts',
     label: '视频 URL 转写单并发 worker（FFmpeg → 腾讯云录音文件识别极速版）',
     enabledBy: null,
     configRefresh: 'not-applicable',

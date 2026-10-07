@@ -1,6 +1,6 @@
 // 验证：联网搜索的「网页收藏夹（模型选站点）」、查询词清洗，以及 Yandex 网页解析。
 //
-// 为什么要有这个套件：`media/web-search.ts` 在这之前**整条链零行为覆盖** —— provider 的解析、
+// 为什么要有这个套件：`media/web-search/` 在这之前**整条链零行为覆盖** —— provider 的解析、
 // 查询词清洗、收藏夹的合并与校验逻辑，全都只能靠读代码确认。合并逻辑尤其需要真跑：它的正确性
 // 全在"两次请求各自的返回如何被拼成一个列表"上，用文本断言只能钉住"写过某一行"。
 //
@@ -15,7 +15,13 @@ import { load, readSrc, ROOT } from './lib/src.mjs';
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-websearch-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
 
-const { webSearch, sanitizeQuery, yandexSearch, bookmarkList, resolveBookmarkSite, parseSiteSearch, siteSearchCandidates, probeSiteSearch, normalizeSiteInput } = await load('media/web-search.js');
+// ⚠️ 写**全路径** `web-search/index.js`，别写 `media/web-search.js` ——
+// 后者恰好也能解析（Node 把 `web-search` 当目录、取其 index.js），但那是**巧合**：
+// 一旦桶文件改名或目录里多出别的入口，它就会以 ERR_MODULE_NOT_FOUND 炸掉整个套件，
+// 而报错信息（`dist/media/web-search.js 不存在`）会让人以为文件被删了。
+// 拆分时这条**没能在拆分当场红**（因为巧合成立），是**清空 dist 重建**才暴露的 ——
+// 这正是"改了模块路径之后要 `rm -rf dist && npm run build` 再跑"的价值。
+const { webSearch, sanitizeQuery, yandexSearch, bookmarkList, resolveBookmarkSite, parseSiteSearch, siteSearchCandidates, probeSiteSearch, normalizeSiteInput } = await load('media/web-search/index.js');
 const { updateConfig, getConfig } = await load('core/config.js');
 const { buildSystemPrompt } = await load('agent/prompting/prompt-builder.js');
 
@@ -942,7 +948,9 @@ ok('③ 正文没被 relations 顶掉（这是 findBestArray 只认带链接列�
 // 萌娘百科的 `action=query&list=search` 被官方关了（`action-notallowed`），
 // 而 `action=opensearch` **放行**，所以这一支是接入它的唯一途径。
 console.log('\n═══ 18 MediaWiki OpenSearch 格式 ═══');
-const { jsonToResults: j2r } = await load('media/bookmark-request.js');
+// ⚠️ 三处路径都跟着实现走：`bookmark-request.ts` 已搬进 `media/web-search/`。
+// 写旧路径在陈 dist 下仍解析得到，于是搬家当场不红 —— 这正是那个"清空 dist 重建"教训的现场。
+const { jsonToResults: j2r } = await load('media/web-search/bookmark-request.js');
 const osXml = JSON.stringify(['初音未来', ['初音未来', '初音未来的消失'], ['', ''], ['https://m.example/A', 'https://m.example/B']]);
 let osRes = j2r(osXml, 5);
 ok('③b OpenSearch 解析出 2 条（不是退回压平）', osRes.length === 2, JSON.stringify(osRes));
@@ -1123,7 +1131,7 @@ ok('⑧ 工具把拦截判成错误（`err`）而不是 ok',
 // 压完只剩 **608** —— 模型拿到一份"看起来完整"的摘要，**不知道后面还有 6000 多字**。
 // 这种静默丢内容比报错难查得多。
 console.log('\n═══ 21. 压平"整条正文"的预算 ═══');
-const { flattenJson: fj, BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS } = await load('media/bookmark-request.js');
+const { flattenJson: fj, BOOKMARK_FLATTEN_MAX_CHARS, BOOKMARK_FLATTEN_LINE_CHARS } = await load('media/web-search/bookmark-request.js');
 const longExtract = JSON.stringify({ query: { pages: { 1: { pageid: 1, title: '洛天依', extract: '正'.repeat(7036) } } } });
 ok('⑨ 检索用的单行上限远大于 500（否则整篇文章只剩开头）',
   BOOKMARK_FLATTEN_LINE_CHARS > 2000, String(BOOKMARK_FLATTEN_LINE_CHARS));
@@ -1134,10 +1142,14 @@ ok('⑨ 7036 字的正文能装进预算（按总预算截断，而不是被单�
 // 对照：默认参数（设置页「测试」用紧凑值）仍应是原来那个小值，别顺手把测试也放大
 ok('⑨ 对照：不传参数时仍是 500 单行上限（「测试」按钮保持紧凑）',
   fj(longExtract, 2000).length <= 700, String(fj(longExtract, 2000).length));
-// 源级接线：检索那条路必须把这两个常量传下去
+// 源级接线：检索那条路必须把这两个常量传下去。
+// ⚠️ 这两条断言**必须指向拆分后的那个文件**（`media/web-search/site-search.js`），
+// 不能改指 `index.js`：那条链的实现在拆分后已经不在桶文件里了，指着桶文件会**永远假绿**
+// （桶里没有这段代码，正则不匹配 → 但反过来写 `!test` 才是假绿；这里 `test` 会真红，
+// 所以拆分时它当场就报了出来）。
 ok('⑨ 检索那条路传了宽松的预算与单行上限',
-  /const flattenCap = flattenMaxChars\(\);/.test(readSrc('media/web-search.js'))
-  && /flattenJson\(response\.body, flattenCap, flattenCap\)/.test(readSrc('media/web-search.js')));
+  /const flattenCap = flattenMaxChars\(\);/.test(readSrc('media/web-search/site-search.js'))
+  && /flattenJson\(response\.body, flattenCap, flattenCap\)/.test(readSrc('media/web-search/site-search.js')));
 
 // ── ㉒ 抓取正文预算**是配置项**（2026-10 起），不再是写死的常量 ──
 //
@@ -1152,13 +1164,13 @@ console.log('\n═══ 22. 抓取正文预算是配置项 ═══');
   ok('㉒ fetchTextMaxChars 默认 20000（与旧写死值相同）', d.fetchTextMaxChars === 20000, String(d.fetchTextMaxChars));
   ok('㉒ flattenMaxChars 默认 4000（与旧写死值相同）', d.flattenMaxChars === 4000, String(d.flattenMaxChars));
   // 兜底常量只作文档，但它写着"默认 4000"，漂了就会骗下一个读代码的人
-  const { BOOKMARK_FLATTEN_MAX_CHARS } = await load('media/bookmark-request.js');
+  const { BOOKMARK_FLATTEN_MAX_CHARS } = await load('media/web-search/bookmark-request.js');
   ok('㉒ 兜底常量与配置默认值一致（漂了就会误导读者）',
     BOOKMARK_FLATTEN_MAX_CHARS === d.flattenMaxChars, String(BOOKMARK_FLATTEN_MAX_CHARS));
   // 每次调用**现读**配置（与 takeWebBudget 同一写法），放模块级常量会让改动不生效
   ok('㉒ web_fetch 现读配置（不是模块加载时定死）',
     /getConfig\(\)\.webSearch\?\.fetchTextMaxChars/.test(webToolsSrc));
-  ok('㉒ 收藏夹压平现读配置', /getConfig\(\)\.webSearch\?\.flattenMaxChars/.test(readSrc('media/web-search.js')));
+  ok('㉒ 收藏夹压平现读配置', /getConfig\(\)\.webSearch\?\.flattenMaxChars/.test(readSrc('media/web-search/site-search.js')));
   // 钳制：手改 config.json 写进荒唐值也不能让它失控
   updateConfig({ webSearch: { ...getConfig().webSearch, fetchTextMaxChars: 999999, flattenMaxChars: 1 } });
   const after = getConfig().webSearch;

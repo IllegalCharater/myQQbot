@@ -11,8 +11,9 @@ const { ok, done } = checker();
 const {
   VideoTranscriptionQueue, buildFlashRecognitionRequest, normalizeTranscriptionUrl,
   parseTranscriptionCommand, resolveTranscriptionConfig
-} = await load('media/video-transcription.js');
-const { isBilibiliUrl, bilibiliUrlFromCardData, bilibiliUrlFromXml } = await load('media/bilibili.js');
+} = await load('media/transcription/index.js');
+const { isBilibiliUrl, bilibiliUrlFromCandidates } = await load('media/media-source/parsers/bilibili.js');
+const { cardPayloadCandidates, xmlPayloadCandidates } = await load('media/media-source/providers/card-payload.js');
 const { DEFAULT_CONFIG, updateConfig } = await load('core/config.js');
 
 const rejected = [
@@ -41,46 +42,66 @@ ok('B 站主站、移动站与短链可识别，近似域名不会误判',
 // ── 卡片链接抽取（纯函数）───────────────────────────────────────
 // B 站 App 分享到 QQ 的是小程序卡片：链接在 meta.detail_1.qqdocurl，通用卡片解析认的
 // jumpUrl 根本不存在。只认 jumpUrl 的后果是卡片看着有链接、存档里却没有。
+//
+// ⚠️ 接口在 2026-10 拆成两层（按"改动理由"切，详见 `media/media-source/providers/card-payload.ts`）：
+//   · `cardPayloadCandidates` / `xmlPayloadCandidates` —— 把报文摊平成"字段 + 候选链接"，**不认识平台**；
+//   · `bilibiliUrlFromCandidates` —— 从候选里挑 B 站的，**不认识卡片字段名**。
+// 下面照新接口写；`CARD_URL_FIELDS` 与 xm 的摊平都在适配器那一侧。
 const cardData = (payload) => ({ data: JSON.stringify(payload) });
+const CARD_FIELDS = ['qqdocurl', 'jumpUrl', 'url'];
+const fromCard = (value) => bilibiliUrlFromCandidates(cardPayloadCandidates(value), CARD_FIELDS);
+const fromXml = (value) => bilibiliUrlFromCandidates(xmlPayloadCandidates(value), CARD_FIELDS);
+
 ok('小程序卡从 qqdocurl 取到链接（这个形态没有 jumpUrl）',
-  bilibiliUrlFromCardData(cardData({ app: 'com.tencent.miniapp_01', meta: { detail_1: { qqdocurl: 'https://www.bilibili.com/video/BV1xx411c7mD' } } }))
+  fromCard(cardData({ app: 'com.tencent.miniapp_01', meta: { detail_1: { qqdocurl: 'https://www.bilibili.com/video/BV1xx411c7mD' } } }))
     === 'https://www.bilibili.com/video/BV1xx411c7mD');
 ok('老式 news 卡的 jumpUrl 仍然认（回归）',
-  bilibiliUrlFromCardData(cardData({ meta: { news: { jumpUrl: 'https://b23.tv/legacy' } } })) === 'https://b23.tv/legacy');
+  fromCard(cardData({ meta: { news: { jumpUrl: 'https://b23.tv/legacy' } } })) === 'https://b23.tv/legacy');
 ok('已解析成对象的卡片报文同样认（有的协议端不下发字符串）',
-  bilibiliUrlFromCardData({ data: { meta: { detail_1: { qqdocurl: 'https://b23.tv/obj' } } } }) === 'https://b23.tv/obj');
+  fromCard({ data: { meta: { detail_1: { qqdocurl: 'https://b23.tv/obj' } } } }) === 'https://b23.tv/obj');
 // 长度上限判的是**去掉首尾空白后**的报文（纯空白不算内容，也不必为它分配解析树）；
 // 所以这里用一个真的超长报文，而不是往小报文后面补空格。
-ok('非 B 站链接、坏 JSON、超大报文一律返回空串',
-  bilibiliUrlFromCardData(cardData({ meta: { detail_1: { qqdocurl: 'https://example.com/video/1' } } })) === ''
-  && bilibiliUrlFromCardData({ data: '{不是 JSON' }) === ''
-  && bilibiliUrlFromCardData(cardData({ meta: { detail_1: { title: 'x'.repeat(40000), qqdocurl: 'https://b23.tv/x' } } })) === ''
-  && bilibiliUrlFromCardData(undefined) === '');
+ok('非 B 站链接、坏 JSON、超大报文一律取不到',
+  fromCard(cardData({ meta: { detail_1: { qqdocurl: 'https://example.com/video/1' } } })) === ''
+  && fromCard({ data: '{不是 JSON' }) === ''
+  && fromCard(cardData({ meta: { detail_1: { title: 'x'.repeat(40000), qqdocurl: 'https://b23.tv/x' } } })) === ''
+  && fromCard(undefined) === '');
 // 兜底扫描：字段名穷举不完。线上真实卡片 `com.tencent.miniapp_01` /
 // `view_8C8E89B49BE609866298ADDFF2DBABA4` 解析出的 media 里 url 就是空的
 // （kind:'card' 有 title/desc 却没有链接），而下游只认 kind:'video'，于是报"没有视频链接"。
 ok('字段名不在白名单里时靠兜底扫描照样取到链接',
-  bilibiliUrlFromCardData(cardData({
+  fromCard(cardData({
     meta: { detail_1: { title: '哔哩哔哩', desc: '领赛博鸡蛋没想到家被偷', targetUrl: 'https://www.bilibili.com/video/BV1xx411c7mD' } }
   })) === 'https://www.bilibili.com/video/BV1xx411c7mD');
 ok('白名单字段胜过扫描结果（卡片含多个链接时以目标字段为准）',
-  bilibiliUrlFromCardData(cardData({
+  fromCard(cardData({
     meta: { detail_1: { qqdocurl: 'https://b23.tv/wanted', extra: 'https://b23.tv/noise' } }
   })) === 'https://b23.tv/wanted');
 ok('兜底扫描只认 B 站域名，卡片封面等第三方图床不会被当成视频',
-  bilibiliUrlFromCardData(cardData({
+  fromCard(cardData({
     meta: { detail_1: { preview: 'https://qq.ugcimg.cn/fixture-cover', icon: 'https://i0.hdslb.com/fixture.png' } }
   })) === '');
 ok('白名单与扫描都取不到时不返回半截结果',
-  bilibiliUrlFromCardData(cardData({ meta: { detail_1: { url: 'mqqapi://miniapp/open' } } })) === '');
-// 卡片报文是群成员可伪造的不可信输入：只读白名单字段，绝不把对象展开进任何地方。
+  fromCard(cardData({ meta: { detail_1: { url: 'mqqapi://miniapp/open' } } })) === '');
+// 卡片报文是群成员可伪造的不可信输入：只读字段，绝不把对象展开进任何地方。
 ok('伪造的卡片报文既不污染原型也不抛错',
-  bilibiliUrlFromCardData({ data: JSON.stringify({ __proto__: { polluted: 1 }, meta: { __proto__: { polluted: 1 } } }) }) === ''
+  fromCard({ data: JSON.stringify({ __proto__: { polluted: 1 }, meta: { __proto__: { polluted: 1 } } }) }) === ''
   && ({}.polluted === undefined));
 ok('xml 分享卡里抠出 B 站链接（&amp; 先还原）',
-  bilibiliUrlFromXml('<msg serviceID="1"><item><url>https://b23.tv/a?x=1&amp;y=2</url></item></msg>') === 'https://b23.tv/a?x=1&y=2');
-ok('xml 里没有 B 站链接时返回空串',
-  bilibiliUrlFromXml('<msg><url>https://example.com/a</url></msg>') === '' && bilibiliUrlFromXml(null) === '');
+  fromXml('<msg serviceID="1"><item><url>https://b23.tv/a?x=1&amp;y=2</url></item></msg>') === 'https://b23.tv/a?x=1&y=2');
+ok('xml 里没有 B 站链接时取不到',
+  fromXml('<msg><url>https://example.com/a</url></msg>') === '' && fromXml(null) === '');
+
+// ★ 方向性：`cardPayloadCandidates` 是**平台无关**的摊平 —— 非 B 站的地址也要照收，
+// 由调用方去挑。它若自己就按 B 站过滤，将来第二个平台就没法复用它。
+{
+  const anyPayload = cardPayloadCandidates(cardData({ meta: { detail_1: { url: 'https://example.com/x' } } }));
+  ok('★ 摊平层不按平台过滤（非 B 站地址照样进候选，供别的平台复用）',
+    anyPayload.urls.includes('https://example.com/x'), JSON.stringify(anyPayload.urls));
+  ok('摊平层给出白名单字段（字段名 → 值）', anyPayload.fields.url === 'https://example.com/x');
+  ok('对照：B 站挑拣层才做域名判定（同一个候选它不认）',
+    bilibiliUrlFromCandidates(anyPayload, CARD_FIELDS) === '');
+}
 
 const { createIngest } = await load('web/onebot/ingest.js');
 const { ChatStore } = await load('chat/store.js');
@@ -328,13 +349,34 @@ ok('异步入站最终严格按到达顺序分配本地 id 并交给 Agent',
   && orderedForwarded.map((m) => m.mid).join(',') === '1,2');
 
 // FFmpeg 实际只拿本机代理 URL；逐跳重定向在 safe-fetch 内重新校验，不能把原 URL 直传回去。
-const transcribeSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/media/video-transcription.ts'), 'utf8'));
+//
+// ⚠️ 下面这些断言是**跨文件**的（拆模块之后，`spawn` 在 `extract.ts`、`https.request` 在
+// `recognize.ts`、代理在 `media-proxy.ts`）。所以这里读**整个目录**并按文件拼起来，
+// 而不是钉某一个文件 —— 钉单文件的话，下次再拆一层，断言就会以"找不到这段代码"的形式
+// 假红（而它想守的性质其实完好）。用 `split/join` 换行而不是 `join('')`：
+// 有几条正则含 `\s`，贴在一起会把两个文件的首尾误配成一次匹配。
+const transcriptionDir = path.join(ROOT, 'src/media/transcription');
+const transcribeSrc = stripComments(
+  fs.readdirSync(transcriptionDir)
+    .filter((f) => f.endsWith('.ts'))
+    .sort()
+    .map((f) => fs.readFileSync(path.join(transcriptionDir, f), 'utf8'))
+    .join('\n')
+);
 const safeFetchSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/media/safe-fetch.ts'), 'utf8'));
 ok('FFmpeg 输入是本机流式代理，不直接使用 job.sourceUrl',
   /'-i',\s*proxy\.url/.test(transcribeSrc) && !/'-i',\s*job\.sourceUrl/.test(transcribeSrc));
-ok('B 站页面先解析为短时效媒体源，实际媒体仍走同一安全代理',
-  /resolveBilibiliMedia\(sourceUrl, signal, config\.maxDurationSeconds\)/.test(transcribeSrc)
+// ⚠️ 这条断言原来钉的是 `resolveBilibiliMedia(sourceUrl, …)` —— **具体平台名**。
+// 通用媒体层落地后那行换成了 `resolveMediaSource(...)`（平台无关，谁认领谁解析），
+// 于是它当场打红。**意图没变**（分享页必须先解析成短时效媒体源、且解析结果仍走同一个
+// 安全代理），所以改成钉那个意图，而不是钉某个平台 ——
+// 钉平台名的话，加第二个平台时这条断言会逼着人把平台名写回来。
+ok('分享页先解析为短时效媒体源，实际媒体仍走同一安全代理',
+  /resolveMediaSource\(sourceUrl, signal, config\.maxDurationSeconds\)/.test(transcribeSrc)
   && /createMediaProxy\(source, signal, config\.maxSourceBytes\)/.test(transcribeSrc));
+ok('转写层不再直接依赖任何具体平台（平台知识只在 media-source/providers/ 下）',
+  !/resolveBilibiliMedia|BilibiliResolveError|from '\.\.\/bilibili\.js'|from '\.\/bilibili\.js'/.test(transcribeSrc),
+  'transcription/ 里仍有平台专用符号');
 ok('流式响应每一跳重定向都重新调用 validateFetchUrl',
   /const next = new URL\(location, url\)\.toString\(\);\s*\(\{ url, ip \} = await validateFetchUrl\(next\)\)/s.test(safeFetchSrc));
 ok('FFmpeg 使用 spawn 参数数组且显式禁止 shell',

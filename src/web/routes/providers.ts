@@ -1,6 +1,6 @@
 import { chatCompletion, resolveApiKey } from '../../llm/llm.js';
-import { customSearch, probeSiteSearch, normalizeSiteInput } from '../../media/web-search.js';
-import { testBookmarkRequest, MAX_ENDPOINT_CHARS } from '../../media/bookmark-request.js';
+import { customSearch, probeSiteSearch, normalizeSiteInput } from '../../media/web-search/index.js';
+import { testBookmarkRequest, MAX_ENDPOINT_CHARS } from '../../media/web-search/bookmark-request.js';
 import { validateFetchUrl } from '../../media/safe-fetch.js';
 import {
   addModelsToProvider, currentProviders, fetchModelsFrom, removeModelFromProvider,

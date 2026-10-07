@@ -129,7 +129,7 @@ export const DEFAULT_CONFIG = {
     //     所以只靠拼 `site:` 等于没限定。填了模板就直接去那个站自己的搜索页取内容，
     //     绕开搜索引擎。留空则退回 `site:` 行为（对自建 SearXNG 等仍有效）。
     //   · `resultClass` 站内搜索页里"每条结果容器"的类名，用于解析。
-    //     留空时用**通用启发式**（见 media/web-search.ts 的 parseSiteSearch）——
+    //     留空时用**通用启发式**（见 media/web-search/site-search.ts 的 parseSiteSearch）——
     //     抓取解析天生易碎，这个字段是页面改版时的自救通路（同 yandex 那四个选择器）。
     bookmarks: [],
     // 收藏夹的**默认行为**，只影响"模型没说搜哪个站点"时走哪条路：

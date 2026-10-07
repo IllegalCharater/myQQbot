@@ -1,7 +1,7 @@
 import { getConfig } from '../../core/config.js';
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
 import { SlidingWindowBudget } from '../../media/call-budget.js';
-import { TranscriptionError, resolveTranscriptionConfig } from '../../media/video-transcription.js';
+import { TranscriptionError, resolveTranscriptionConfig } from '../../media/transcription/index.js';
 import type { ToolDefinition } from '../shared/types.js';
 
 // 成本闸门：转写按次向腾讯云计费、单次成本远高于一次搜图，所以默认上限（3/10）比搜图（5/30）更紧。
@@ -40,13 +40,16 @@ export function transcriptionTools(): ToolDefinition[] {
         // 混成一句会让模型（和排查的人）都以为是后者。顺带列出**实际看到的附件种类**——
         // 卡片链接没被解析出来时，这条信息就是唯一能看出"卡片在、链接不在"的地方。
         if (!entry) return { content: `错误：没找到消息 ${id}（id 可能不对，或它已经不在存档里了）`, isError: true };
-        // B 站视频卡片在接入层入库**之前**就被补成了 kind:'video' 别名（web/onebot/ingest.ts），
-        // 所以读存档时只认 video 一种 kind 就够，不需要在这里重做卡片解析。
-        const video = entry.media?.find((m) => m.kind === 'video' && m.url);
+        // 分享卡片/视频段在接入层入库**之前**就被补成了 kind:'video' 别名（web/onebot/ingest.ts），
+        // 语音段则是 kind:'audio'（本身就带 url，不需要再解析）。**两种都要认** ——
+        // 只认 video 的话语音消息会报"没有视频链接"，而它明明就在 media 里。
+        // 判据与 `media/transcription/commands.ts` 的 `findTranscriptionMedia` 一致（那边是 `/转写` 那条路），
+        // 两处不能各写一份：一边放宽另一边没放，表现就是"命令能跑、工具说没有"。
+        const video = entry.media?.find((m) => (m.kind === 'video' || m.kind === 'audio') && m.url);
         if (!video?.url) {
           const kinds = [...new Set((entry.media || []).map((m) => String(m.kind)).filter(Boolean))];
           return {
-            content: `错误：这条消息里没有视频链接（只看到：${kinds.length ? kinds.join('、') : '没有附件'}）。也可以直接把视频 URL 或 BV 号发我。`,
+            content: `错误：这条消息里没有可转写的音视频链接（只看到：${kinds.length ? kinds.join('、') : '没有附件'}）。也可以直接把视频 URL 或 BV 号发我。`,
             isError: true
           };
         }

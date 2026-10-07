@@ -229,7 +229,9 @@ ok('在查询词框里回车 = 点「测试」', /e\.key === 'Enter'[\s\S]{0,60}
 // 漂移的表现是"提示说会用 A、实际发了 B"—— 这种不一致没人会去核对，所以钉住。
 {
   const uiDefault = (/const TEST_QUERY_DEFAULT = '([^']+)'/.exec(reqModalSrc) || [])[1];
-  const beDefault = (/export const TEST_QUERY_DEFAULT = '([^']+)'/.exec(readSrc('media/bookmark-request.js')) || [])[1];
+  // 路径跟着实现走：它已搬进 `media/web-search/`（写旧路径在陈 dist 下仍解析得到，
+  // 于是搬家当场不红 —— 只有清空 dist 重建才炸）。
+  const beDefault = (/export const TEST_QUERY_DEFAULT = '([^']+)'/.exec(readSrc('media/web-search/bookmark-request.js')) || [])[1];
   ok(`测试默认查询词前后端逐字一致（UI=${JSON.stringify(uiDefault)} / 后端=${JSON.stringify(beDefault)}）`,
     !!uiDefault && uiDefault === beDefault);
 }

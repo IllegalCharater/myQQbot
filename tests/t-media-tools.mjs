@@ -16,7 +16,7 @@ const { ok, done } = checker();
 
 const { buildToolDefs, executeTool } = await load('agent/tools/index.js');
 const { DEFAULT_CONFIG, updateConfig } = await load('core/config.js');
-const { resolveTranscriptionConfig, TranscriptionError } = await load('media/video-transcription.js');
+const { resolveTranscriptionConfig, TranscriptionError } = await load('media/transcription/index.js');
 const { HotSearchStateStore } = await load('media/hot-search/state-store.js');
 const { HotSearchScheduler } = await load('media/hot-search/scheduler.js');
 

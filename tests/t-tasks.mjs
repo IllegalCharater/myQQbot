@@ -140,7 +140,7 @@ ok('onebot 的重连调度只有一处，且句柄被存进 #reconnectTimer（S1
 // （S10b 已经把 jmcomic 队列移出构造函数，但"用原型"这条仍然成立：本段不需要实例。）
 const { Orchestrator } = await load('agent/runtime/orchestrator.js');
 const { OneBotClient } = await load('qq/onebot.js');
-const { VideoTranscriptionQueue } = await load('media/video-transcription.js');
+const { VideoTranscriptionQueue } = await load('media/transcription/index.js');
 const { HotSearchScheduler } = await load('media/hot-search/scheduler.js');
 const picImageSearch = await load('media/image-source/pic-image-search-client.js');
 const RESOLVERS = {

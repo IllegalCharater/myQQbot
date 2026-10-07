@@ -40,6 +40,7 @@ const ASSERT = [
   't-tasks.mjs',           // 长期任务描述符表（6 行如实标注；反查局部计时器不在表内）
   't-timers.mjs',          // 长期任务的计时器句柄（start 起了什么、stop 有没有收干净）
   't-transcription.mjs',   // 视频 URL 转写（SSRF、单并发状态机、凭证脱敏）
+  't-media-source.mjs',    // 通用音视频来源层（provider 清单、extract 纯函数、裸地址放行、接入层解耦）
   't-hot-search.mjs',      // 每日热搜（接口契约、重试、去重分页、幂等与互斥）
   't-image-source.mjs',    // 图片来源识别（Provider、队列、缓存、脱敏与 UI 接线）
   't-media-tools.mjs',     // 模型自主调用的两个能力工具（取榜单 / 转写、配额闸门与按配置过滤）
