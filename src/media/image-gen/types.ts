@@ -121,10 +121,15 @@ export interface ImageGenJobView {
  * ⚠️ 文件的生命周期**由队列掌握**（`#drain` 建临时目录、投递完删掉），不归 `runTask`：
  * 转写那条链路里 `runTask` 返回的是文本，可以在自己的 `finally` 里删目录；这里返回的是**文件**，
  * 它必须活到投递之后。所以 `workDir` 是队列递进去的，`runTask` 只负责往里写。
+ *
+ * `remoteUrl` 是接口给的结果图地址（**24 小时后失效**），只在**协议端明确拒绝本机路径**时
+ * 被用来兜底重发一次 —— 本机路径是"协议端认不认"这件事唯一没法在本机验证的地方，
+ * 与 stickers 那条退回原链接的兜底同一条判据（见 `queue.ts` 的 `#deliver`）。
  */
 export interface ImageArtifact {
   filePath: string;
   bytes: number;
+  remoteUrl?: string;
 }
 
 /**

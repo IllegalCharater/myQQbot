@@ -62,6 +62,7 @@ export async function fetchReferenceImage(url: unknown, maxBytes: number, signal
  *
  * **必须落盘再发**：结果 URL 只有 24 小时有效期，而 QQ 的图片段收本机路径 ——
  * 直接把 URL 交给协议端，等于把"能不能发出去"押在一条会过期的链接上。
+ * （协议端明确拒绝本机路径时仍有一步退回该 URL 的兜底，见 `queue.ts` 的 `#deliver`。）
  */
 export async function downloadImageToFile(
   url: unknown, maxBytes: number, signal: AbortSignal, filePath: string
@@ -71,6 +72,13 @@ export async function downloadImageToFile(
     tooLargeText: '生成的图片太大，发不出去',
     emptyText: '生成的图片内容为空'
   }, signal);
-  await fsp.writeFile(filePath, buffer);
+  try {
+    await fsp.writeFile(filePath, buffer);
+  } catch (error) {
+    // ⚠️ 必须包成 `ImageGenError`：裸的 fs 异常会一路穿到 `#drain` 的兜底文案，
+    // 于是"写不进临时文件"被说成"画图失败，稍后再试"，**阶段与原因一起丢掉**
+    // （真机实测踩到过这一支）。码取自 errno（`ENOENT` / `EACCES` / `ENOSPC`…）。
+    throw new ImageGenError('downloading', safeErrorCode(error), `图片写不进临时文件（${safeErrorCode(error)}）`);
+  }
   return buffer.length;
 }

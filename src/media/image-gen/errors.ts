@@ -47,5 +47,29 @@ export function sanitizeCode(value: unknown, fallback = 'UNKNOWN'): string {
 /** 任意异常 → 一条 `ImageGenError`；已经是的话原样返回（不覆盖更准的 stage/code）。 */
 export function userError(error: unknown): ImageGenError {
   if (error instanceof ImageGenError) return error;
-  return new ImageGenError('generating', safeErrorCode(error), '画图失败，稍后再试');
+  const code = safeErrorCode(error);
+  // ⚠️ 兜底文案**必须带上码**。原先这里是一句无条件的"画图失败，稍后再试"，
+  // 真机实测就落在这一支上（链路上没被包装的异常），结果群里那句话既不能排查也不能向群友
+  // 解释 —— 是哪一步、什么原因全丢了，只能靠再复现一次定位。宁可难看也不能说不出话。
+  return new ImageGenError('generating', code, `画图失败（${code}），稍后再试`);
+}
+
+/**
+ * 未分类异常的**可进日志**的细节。
+ *
+ * 为什么需要它：`safeErrorCode` 对裸 `Error` 只能给出 `Error` 这个字样（`error.name`），
+ * 而那正是最需要知道"到底怎么了"的时候。细节来自底层/外部，所以**先洗一遍**：
+ * 去掉 URL 与本机绝对路径再截断 —— 日志里不许出现这两样（与"错误码进日志前先洗"同一条规矩）。
+ *
+ * 已知边界：只认 `http(s)://` 与 Windows 盘符路径两种形态，够用即可；这不是安全边界，
+ * 是"别把整条链接和临时目录路径抄进日志"的卫生习惯。
+ */
+export function safeErrorDetail(error: unknown, max = 160): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '');
+  return raw
+    .replace(/https?:\/\/\S+/gi, '[url]')
+    .replace(/[A-Za-z]:\\[^\s"']*/g, '[path]')
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+    .slice(0, max) || 'UNKNOWN';
 }

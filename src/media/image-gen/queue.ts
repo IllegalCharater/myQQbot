@@ -19,7 +19,7 @@ import type { AppConfig } from '../../core/config.js';
 import { SlidingWindowBudget } from '../call-budget.js';
 import { resolveImageGenConfig } from './config.js';
 import { generateImage } from './client.js';
-import { ImageGenError, safeErrorCode, userError } from './errors.js';
+import { ImageGenError, safeErrorCode, safeErrorDetail, userError } from './errors.js';
 import { downloadImageToFile, fetchReferenceImage } from './image-io.js';
 import type {
   DeliveryMode, EffectiveConfig, FailureStage, ImageArtifact, ImageGenJobView, ImageGenSender,
@@ -166,6 +166,8 @@ export class ImageGenQueue {
   #setStatus(job: InternalJob, status: ImageGenStatus, extra: Partial<InternalJob> = {}): void {
     Object.assign(job, extra, { status, updatedAt: Date.now() });
     const fields = [`[image-gen] task=${job.id}`];
+    // 失败阶段必须进日志：它决定"该往哪儿看"，而群里那句话是给群友看的（不带阶段码时更是如此）。
+    if (job.failedStage) fields.push(`stage=${job.failedStage}`);
     if (job.imageBytes != null) fields.push(`bytes=${job.imageBytes}`);
     if (job.elapsedMs != null) fields.push(`elapsedMs=${job.elapsedMs}`);
     if (job.errorCode) fields.push(`code=${job.errorCode}`);
@@ -212,16 +214,26 @@ export class ImageGenQueue {
           this.#setStatus(job, 'done', { elapsedMs: Date.now() - startedAt, imageBytes: artifact.bytes });
         } catch (error) {
           const safe = userError(error);
+          // 未分类的内部异常（不是我们自己抛的那种）必须把**原始信息**留到日志里：
+          // 此时码只说得出 `Error`，而"到底哪一步、什么原因"只有它知道。
+          // 细节先洗过（去 URL 与本机路径）——日志里不许出现这两样。
+          if (!(error instanceof ImageGenError)) {
+            this.#log(`[image-gen] task=${job.id} detail=${safeErrorDetail(error)}`);
+          }
           this.#setStatus(job, 'failed', {
             failedStage: safe.stage, errorCode: safe.code, elapsedMs: Date.now() - startedAt
           });
           // 关停途中不发失败文案：那是我们主动取消的，不是任务真的失败。
           if (!this.#stopping) {
-            await this.#sender.sendTextBatch(
-              job.chatKey,
-              `画图失败（${STAGE_LABELS[safe.stage] || safe.stage}）：${safe.userMessage}`,
-              { replyToMessageId: job.replyToMessageId }
-            ).catch((sendError) => {
+            // 上传阶段**单独一套说法**：图确实已经画好了，说成"画图失败"是撒谎 ——
+            // 实测过一次：协议端其实正在传那张图，只是响应回来得慢，于是群里先收到
+            // 一句"画图失败"、紧接着又收到那张图（见 onebot.ts 的 SEGMENT_UPLOAD_TIMEOUT_MS）。
+            const text = safe.stage === 'uploading'
+              ? `图已经画好了，但没能发到群里：${safe.userMessage}`
+              : `画图失败（${STAGE_LABELS[safe.stage] || safe.stage}）：${safe.userMessage}`;
+            await this.#sender.sendTextBatch(job.chatKey, text, {
+              replyToMessageId: job.replyToMessageId
+            }).catch((sendError) => {
               this.#log(`[image-gen] task=${job.id} code=${safeErrorCode(sendError)}`);
             });
           }
@@ -256,7 +268,8 @@ export class ImageGenQueue {
     const imageUrl = await generateImage(config, { prompt: job.prompt, imageDataUrl }, signal);
     setStatus('downloading');
     const bytes = await downloadImageToFile(imageUrl, config.maxDownloadBytes, signal, filePath);
-    return { filePath, bytes };
+    // `remoteUrl` 只在投递被明确拒绝时用作兜底（见 `#deliver`），不写进对外视图。
+    return { filePath, bytes, remoteUrl: imageUrl };
   }
 
   /**
@@ -267,7 +280,7 @@ export class ImageGenQueue {
    * 回流只负责把"已经发过了"这个事实交给模型，让它补一句话。
    */
   async #deliver(job: Readonly<InternalJob>, artifact: ImageArtifact, _config: EffectiveConfig): Promise<void> {
-    await this.#sender.sendImage(job.chatKey, artifact.filePath, { replyToMessageId: job.replyToMessageId });
+    await this.#send(job, artifact.filePath, artifact);
     if (job.mode !== 'assisted') return;
 
     const sink = this.#deliverImageResult;
@@ -287,6 +300,57 @@ export class ImageGenQueue {
       this.#log(`[image-gen] task=${job.id} code=DELIVER_FAILED`);
     }
   }
+
+  /**
+   * 真正把图发出去，失败一律归到 `uploading` 阶段。
+   *
+   * **本机路径是"协议端认不认"这件事唯一没法在本机验证的地方**（同 stickers 那条），
+   * 所以留一步兜底：协议端**明确拒绝**（错误里带 `retcode=`）时，用接口给的结果图链接重发一次。
+   * 判据与 stickers 一致 —— **只在明确拒绝时**退回，超时那类错误说不清消息到底发出去没有，
+   * 重发就可能是刷屏，不冒这个险。
+   */
+  async #send(job: Readonly<InternalJob>, file: string, artifact: ImageArtifact): Promise<void> {
+    try {
+      await this.#sender.sendImage(job.chatKey, file, { replyToMessageId: job.replyToMessageId });
+      return;
+    } catch (error) {
+      const message = safeErrorDetail(error);
+      if (!artifact.remoteUrl || file !== artifact.filePath || !/retcode=/.test(message)) {
+        throw uploadFailure(error);
+      }
+      this.#log(`[image-gen] task=${job.id} code=LOCAL_PATH_REFUSED`);
+    }
+    try {
+      await this.#sender.sendImage(job.chatKey, artifact.remoteUrl as string, {
+        replyToMessageId: job.replyToMessageId
+      });
+    } catch (error) {
+      throw uploadFailure(error);
+    }
+  }
+}
+
+/**
+ * 上传阶段失败 → 一条 `ImageGenError`。
+ *
+ * 为什么要单独归一次：`SendQueue` 抛的是**裸 Error**，不包的话它会一路穿到 `#drain` 的兜底文案，
+ * 群里就会看到"画图失败（画图）：画图失败（Error），稍后再试"——**阶段和原因一起丢了**
+ * （真机实测踩到过）。三类来源分开说：
+ *   · 限频（"发送频率超限（每分钟最多 80 条），请等一会再发"）与 OneBot 的 `retcode=NNN wording`
+ *     —— 本来就是写给人看的，原样透传；
+ *   · **超时**（`AbortSignal.timeout` 抛的是 `DOMException.name === 'TimeoutError'`，
+ *     见 `qq/onebot.ts` 的 `call`）—— 这是唯一"消息可能已经发出去了"的一种，文案必须留余地，
+ *     不能像 retcode 那样断言失败；
+ *   · 其余（网络层错误可能带主机名或本机路径）只给可机检的码，细节留给日志。
+ */
+function uploadFailure(error: unknown): ImageGenError {
+  const code = safeErrorCode(error);
+  const message = safeErrorDetail(error);
+  if (/发送频率超限|retcode=\d+/.test(message)) return new ImageGenError('uploading', code, message);
+  if (code === 'TimeoutError' || /timed?\s?out/i.test(message)) {
+    return new ImageGenError('uploading', 'SEND_TIMEOUT', '上传超时了（图可能已经在群里，也可能没发出去）');
+  }
+  return new ImageGenError('uploading', code, `发送图片失败（${code}）`);
 }
 
 /** 缺 Key / 地址不可用都要在**建任务之前**拦住，并把下一步说清楚。 */

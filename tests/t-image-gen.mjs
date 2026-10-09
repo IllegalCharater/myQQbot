@@ -11,6 +11,7 @@
 // 而**结果图**的下载走 safeFetchBinary，默认拒内网 —— 所以那一段要临时打开
 // `security.allowPrivateImageHosts`，用完立刻还原（同 t-image-source.mjs 的做法）。
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { checker, dataDir, fakeImageServer, PNG_1X1 } from './lib/harness.mjs';
@@ -263,14 +264,15 @@ async function callGenerate(overrides = {}, input = { prompt: '一只猫' }) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const workFiles = [];
 
-function makeQueue({ operations = {}, deliver } = {}) {
+function makeQueue({ operations = {}, deliver, senderOverrides = {} } = {}) {
   const sentText = [];
   const sentImages = [];
   const queue = new ImageGenQueue({
     getConfig,
     sender: {
       sendTextBatch: async (chatKey, messages) => { sentText.push({ chatKey, messages }); return { sent: [], failed: [] }; },
-      sendImage: async (chatKey, file) => { sentImages.push({ chatKey, file }); return { message_id: 1 }; }
+      sendImage: async (chatKey, file) => { sentImages.push({ chatKey, file }); return { message_id: 1 }; },
+      ...senderOverrides
     },
     log: () => {},
     operations,
@@ -403,6 +405,116 @@ withImageGen({ baseUrl: 'http://127.0.0.1:1' });
     JSON.stringify(queue.get(first.id)));
   ok('stop：**不**往群里发失败文案（那是我们主动取消的，不是任务真的失败）',
     sentText.length === 0, JSON.stringify(sentText));
+}
+
+{
+  // 上传阶段失败必须归到 `uploading` 并带上**真实原因**。
+  // 这一段是真机实测逼出来的：`SendQueue` 抛的是裸 Error，不包的话它会穿到 `#drain` 的兜底文案，
+  // 群里看到的是「画图失败（画图）：画图失败（Error），稍后再试」——阶段和原因一起丢了。
+  const { queue, sentText } = makeQueue({
+    operations: {
+      runTask: async (job, _s, _set, _c, workDir) => ({ filePath: path.join(workDir, `${job.id}.png`), bytes: 10 })
+    },
+    senderOverrides: {
+      sendImage: async () => { throw new Error('发送频率超限（每分钟最多 80 条），请等一会再发'); }
+    }
+  });
+  await queue.start();
+  const view = queue.enqueue({ chatKey: 'group:14', prompt: 'x' });
+  await sleep(60);
+  ok('上传失败：阶段记成 uploading（不是笼统的"画图"）',
+    queue.get(view.id).failedStage === 'uploading', JSON.stringify(queue.get(view.id)));
+  ok('上传失败：群里那句话带**真实原因**（限频那类文案本来就是写给人看的，原样透传）',
+    sentText.length === 1 && String(sentText[0].messages).includes('发送频率超限'),
+    JSON.stringify(sentText));
+  await queue.stop();
+}
+
+{
+  // 协议端**明确拒绝**本机路径（retcode）→ 用结果图链接重发一次（与 stickers 同一条判据）。
+  const attempts = [];
+  const { queue, sentText } = makeQueue({
+    operations: {
+      runTask: async (job, _s, _set, _c, workDir) => ({
+        filePath: path.join(workDir, `${job.id}.png`), bytes: 10, remoteUrl: 'https://example.com/result.png'
+      })
+    },
+    senderOverrides: {
+      sendImage: async (chatKey, file) => {
+        attempts.push(file);
+        if (attempts.length === 1) throw new Error('OneBot send_group_msg 失败: retcode=100 ');
+        return { message_id: 1 };
+      }
+    }
+  });
+  await queue.start();
+  const view = queue.enqueue({ chatKey: 'group:15', prompt: 'x' });
+  await sleep(60);
+  ok('本机路径被协议端拒绝时，退回结果图链接重发一次（本机路径是唯一没法在本机验证的东西）',
+    attempts.length === 2 && attempts[0].endsWith('.png') && attempts[1] === 'https://example.com/result.png',
+    JSON.stringify(attempts));
+  ok('兜底成功 → 任务算成功，不往群里发失败文案',
+    queue.get(view.id).status === 'done' && sentText.length === 0, JSON.stringify(queue.get(view.id)));
+  await queue.stop();
+}
+
+{
+  // 超时那类错误**不许**兜底重发：说不清消息到底发出去没有，重发就是刷屏。
+  // 真机（2026-10-10）就是这一条：图片段吃了 `call()` 的 15 秒默认超时，协议端其实还在传，
+  // 于是群里先收到"画图失败"、紧接着又收到那张图。见 onebot.ts 的 SEGMENT_UPLOAD_TIMEOUT_MS。
+  const attempts = [];
+  const { queue, sentText } = makeQueue({
+    operations: {
+      runTask: async (job, _s, _set, _c, workDir) => ({
+        filePath: path.join(workDir, `${job.id}.png`), bytes: 10, remoteUrl: 'https://example.com/result.png'
+      })
+    },
+    senderOverrides: {
+      // `AbortSignal.timeout()` 抛的就是这个形状：DOMException、name 是 TimeoutError。
+      sendImage: async (chatKey, file) => {
+        attempts.push(file);
+        throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+      }
+    }
+  });
+  await queue.start();
+  const view = queue.enqueue({ chatKey: 'group:16', prompt: 'x' });
+  await sleep(60);
+  ok('只有明确拒绝（retcode）才兜底；超时只报失败、不重发（重发可能是刷屏）',
+    attempts.length === 1 && sentText.length === 1, JSON.stringify(attempts));
+  ok('超时归成 SEND_TIMEOUT（不是笼统的 TimeoutError）',
+    queue.get(view.id).errorCode === 'SEND_TIMEOUT', JSON.stringify(queue.get(view.id)));
+  ok('上传阶段的文案**不说"画图失败"**：图确实画好了，而且消息可能已经在群里',
+    String(sentText[0].messages).startsWith('图已经画好了，但没能发到群里：')
+    && String(sentText[0].messages).includes('可能已经在群里'),
+    JSON.stringify(sentText));
+  await queue.stop();
+}
+
+{
+  // 写盘失败归到 downloading，并带上 errno。
+  const img = await fakeImageServer();
+  updateConfig({ security: { allowPrivateImageHosts: true } });
+  let code = '';
+  try {
+    await downloadImageToFile(`${img.base}/ok.png`, 8 * 1024 * 1024, new AbortController().signal,
+      path.join(os.tmpdir(), 'qq-agent-definitely-missing-dir', 'x.png'));
+  } catch (e) { code = e.code; }
+  ok('写盘失败归到 downloading 并带 errno（裸 fs 异常会一路穿成"画图失败，稍后再试"）',
+    code === 'ENOENT', code);
+  updateConfig({ security: { allowPrivateImageHosts: false } });
+  img.close();
+}
+
+{
+  const { userError, safeErrorDetail } = ig;
+  ok('未分类异常的兜底文案**带上码**（原先那句"画图失败，稍后再试"连哪一步都说不出）',
+    /（ENOENT）/.test(userError(Object.assign(new Error('x'), { code: 'ENOENT' })).userMessage),
+    userError(Object.assign(new Error('x'), { code: 'ENOENT' })).userMessage);
+  ok('日志细节先洗过：URL 与本机路径都不出现在里面',
+    safeErrorDetail(new Error('connect failed https://secret.example.com/a.png at C:\\Users\\me\\tmp\\x.png'))
+      === 'connect failed [url] at [path]',
+    safeErrorDetail(new Error('connect failed https://secret.example.com/a.png at C:\\Users\\me\\tmp\\x.png')));
 }
 
 {
@@ -688,6 +800,18 @@ ok('队列的 0ms 唤醒句柄被存进 #wake（有句柄 stop 才取消得掉�
 const toolSrc = stripComments(readSource('agent/tools/image-gen.ts'));
 ok('工具自己一次都不发消息（不出现 sendTextBatch / sendImage 调用）',
   !/\.sendTextBatch\(|\.sendImage\(/.test(toolSrc));
+
+// 图片段的超时必须比 `call()` 的默认值大得多 —— 真机实测的假失败就是这 15 秒造成的。
+{
+  const { SEGMENT_UPLOAD_TIMEOUT_MS } = await load('qq/onebot.js');
+  const onebotSrc = stripComments(readSource('qq/onebot.ts'));
+  ok('图片段的上传超时远大于 call() 的 15 秒默认值（真机每一次出图都死在这上面）',
+    Number(SEGMENT_UPLOAD_TIMEOUT_MS) >= 60000, String(SEGMENT_UPLOAD_TIMEOUT_MS));
+  ok('sendImage 真的把它传给了 sendSegments（常量在那儿躺着不算数）',
+    /sendSegments\(kind, id, segments, SEGMENT_UPLOAD_TIMEOUT_MS\)/.test(onebotSrc));
+  ok('纯文本仍走默认的 15 秒（别顺手把整条发送链都拉长）',
+    /async call\(action: string, params: Record<string, unknown> = \{\}, timeoutMs = 15000\)/.test(onebotSrc));
+}
 
 // 设置页三件套的 id 必须对得上：只有 save.js 读了某个 id、而 sections.js 里没有这个输入框时，
 // `val()` 取到 undefined 会**静默回退成当前值** —— 用户改了没反应，且没有任何报错。

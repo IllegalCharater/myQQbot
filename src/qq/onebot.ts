@@ -8,6 +8,21 @@ type EventHandler = (event: OneBotEvent) => void;
 type StatusHandler = (status: { connected: boolean; everConnected: boolean; error: string }) => void;
 type MessageKind = 'group' | 'private' | string;
 type SendOptions = { replyToMessageId?: unknown; atUserId?: unknown };
+
+/**
+ * **图片段**（表情与模型画出来的图）的响应超时。
+ *
+ * ⚠️ 它不能吃 `call()` 的 15 秒默认值 —— 那 15 秒是给"发一条文本 / 查一次资料"定的，
+ * 而图片段要协议端先读本机文件、再传到 QQ 的图床。真机实测（2026-10-10，一台 VPS）
+ * 稳定超过 15 秒，于是**每一次出图都死在最后一步**，而协议端其实已经在传了：
+ * 群里先收到一句「画图失败」，紧接着那张图又到了 —— 一个纯粹由超时太短造成的假失败。
+ *
+ * 取 120 秒与转写的 `upload_group_file` 同一口径（上传是慢操作，超时要给足）。
+ * 代价是协议端真的卡住时，该会话的发送链要等这么久才轮到下一条 —— 这是有意的取舍：
+ * 宁可等，也不要对着一条已经在传的图说它失败了。
+ */
+export const SEGMENT_UPLOAD_TIMEOUT_MS = 120_000;
+
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
@@ -268,12 +283,12 @@ export class OneBotClient {
   }
 
   /** 发送消息段。返回 OneBot 响应 data（含 message_id）。 */
-  async sendSegments(kind: MessageKind, id: unknown, segments: OneBotSegment[]) {
+  async sendSegments(kind: MessageKind, id: unknown, segments: OneBotSegment[], timeoutMs?: number) {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private'
       ? { user_id: Number(id), message: segments }
       : { group_id: Number(id), message: segments };
-    return this.call(action, params);
+    return this.call(action, params, timeoutMs);
   }
 
   async sendText(kind: MessageKind, id: unknown, text: unknown, { replyToMessageId = null, atUserId = null }: SendOptions = {}) {
@@ -299,6 +314,8 @@ export class OneBotClient {
    * `sendSticker` 只是它的旧名字（委托过来），保留是因为既有调用点都按那个语义读得通。
    * 分开命名是为了让调用点自己说清楚发的是什么 —— 在 sender.ts 里出现
    * `sendSticker(…一张生成的画…)` 是会让人停下来重读三遍的那种代码。
+   *
+   * ⚠️ 超时用 `SEGMENT_UPLOAD_TIMEOUT_MS`，**不能吃 `call` 的 15 秒默认值**（见那个常量的注释）。
    */
   async sendImage(kind: MessageKind, id: unknown, file: unknown, { replyToMessageId = null, atUserId = null }: SendOptions = {}) {
     const segments: OneBotSegment[] = [];
@@ -313,7 +330,7 @@ export class OneBotClient {
       segments.push({ type: 'at', data: { qq: at } });
     }
     segments.push({ type: 'image', data: { file: String(file) } });
-    return this.sendSegments(kind, id, segments);
+    return this.sendSegments(kind, id, segments, SEGMENT_UPLOAD_TIMEOUT_MS);
   }
 
   async sendSticker(kind: MessageKind, id: unknown, imageUrl: unknown, options: SendOptions = {}) {
