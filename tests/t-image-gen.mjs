@@ -333,10 +333,53 @@ withImageGen({ baseUrl: 'http://127.0.0.1:1' });
   await sleep(80);
   ok('assisted 模式：图由队列发进群，且回流端口恰好被调一次',
     sentImages.length === 1 && delivered.length === 1, `${sentImages.length}/${delivered.length}`);
-  ok('回流载荷带的是**模型给的那段描述**与张数（不是后端合并后的成品）',
-    delivered[0]?.prompt === '一只戴墨镜的鲸鱼' && delivered[0]?.count === 1,
+  ok('回流载荷：状态是 sent、带**模型给的那段描述**（不是后端合并后的成品），且没有失败原因',
+    delivered[0]?.status === 'sent' && delivered[0]?.prompt === '一只戴墨镜的鲸鱼' && delivered[0]?.reason === '',
     JSON.stringify(delivered[0]));
   await queue.stop();
+}
+
+{
+  // **失败也走同一条回流通道**（这是这条路的核心契约：只由模型开口，队列不代它说话）。
+  for (const [label, error, expect] of [
+    ['没画成', new ImageGenError('generating', 'IMAGE_TIMEOUT', '画图超时（超过 300 秒），稍后再试'), 'failed'],
+    ['画好了没发出去', new ImageGenError('uploading', 'SEND_TIMEOUT', '上传超时了（图可能已经在群里，也可能没发出去）'), 'unsent']
+  ]) {
+    const delivered = [];
+    const { queue, sentText } = makeQueue({
+      deliver: (input) => { delivered.push(input); },
+      operations: { runTask: async () => { throw error; } }
+    });
+    await queue.start();
+    queue.enqueue({ chatKey: 'group:17', prompt: '一只猫', mode: 'assisted' });
+    await sleep(60);
+    ok(`assisted 失败（${label}）：回流端口收到 ${expect}，**群里一个字都不发**（代它说会让它以为说过了）`,
+      delivered.length === 1 && delivered[0].status === expect
+      && delivered[0].prompt === '一只猫' && delivered[0].reason === error.userMessage
+      && sentText.length === 0,
+      `${JSON.stringify(delivered)} / ${JSON.stringify(sentText)}`);
+    await queue.stop();
+  }
+}
+
+{
+  // 没有回流端口 / 回流端口抛错时**必须**退回贴一句 —— 否则群友什么都等不到（"只有确定有人接的时候才闭嘴"）。
+  const cases = [
+    ['没装回流端口', null],
+    ['回流端口抛错', () => { throw new Error('落存档失败'); }]
+  ];
+  for (const [label, deliver] of cases) {
+    const { queue, sentText } = makeQueue({
+      deliver,
+      operations: { runTask: async () => { throw new ImageGenError('generating', 'IMAGE_TIMEOUT', '画图超时（超过 300 秒），稍后再试'); } }
+    });
+    await queue.start();
+    queue.enqueue({ chatKey: 'group:18', prompt: 'x', mode: 'assisted' });
+    await sleep(60);
+    ok(`assisted 但${label} → 退回让队列自己说（不能无声无息）`,
+      sentText.length === 1 && String(sentText[0].messages).includes('画图失败'), JSON.stringify(sentText));
+    await queue.stop();
+  }
 }
 
 {
@@ -515,6 +558,36 @@ withImageGen({ baseUrl: 'http://127.0.0.1:1' });
     safeErrorDetail(new Error('connect failed https://secret.example.com/a.png at C:\\Users\\me\\tmp\\x.png'))
       === 'connect failed [url] at [path]',
     safeErrorDetail(new Error('connect failed https://secret.example.com/a.png at C:\\Users\\me\\tmp\\x.png')));
+}
+
+// ── 5. 图片发送不占会话串行链 ────────────────────────────────────
+// 真机（2026-10-10）第二症状：上传慢到分钟级时，**正在进行的对话整体堵住** ——
+// 模型收尾那一步正是 send_message，它排在同一条链上等上传，于是工具调用不返回、
+// 本轮运行不结束，面板上那条会话一直显示"运行中"。
+{
+  const { SendQueue } = await load('qq/sender.js');
+  let releaseText;
+  const gate = new Promise((resolve) => { releaseText = resolve; });
+  let textDone = false;
+  const images = [];
+  const sender = new SendQueue({
+    onebot: {
+      sendText: async () => { await gate; return { message_id: 1 }; },
+      sendImage: async (kind, id, file) => { images.push(file); return { message_id: 2 }; },
+      sendSticker: async () => ({ message_id: 3 }),
+      sendPoke: async () => ({})
+    },
+    store: { appendSelf: () => ({}) }
+  });
+  // 先把链占住（那条文本卡在网关后面），再发图。
+  const textPromise = sender.sendTextBatch('group:700', '占住会话链的一条').then(() => { textDone = true; });
+  await sleep(10);
+  await sender.sendImage('group:700', '/tmp/generated.png');
+  ok('图片发送不等在卡住的文本后面（会话的收尾不该由一张图的传输速度决定）',
+    images.length === 1 && textDone === false, `images=${images.length} textDone=${textDone}`);
+  releaseText();
+  await textPromise;
+  ok('链外发图不影响文本那条照常发出去（限频与存档都还在）', textDone === true);
 }
 
 {
@@ -782,6 +855,32 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
   ok('最低响应档位也不会静默吞掉出图结果（被吞掉 = 模型永远看不到自己画过什么）',
     decision.shouldRespond === true && decision.responseTier === 0 && decision.reason === '图片生成结果',
     JSON.stringify(decision));
+
+  // 失败两态：**同一条通道、同样必须进窗口**，而且标签分得开 —— 模型看到失败标签要做的事
+  // 与看到成功标签不同（交代 vs 顺口补一句）。
+  const failed = store.appendImageResult(KEY, {
+    prompt: '一只猫', status: 'failed', reason: '画图超时（超过 300 秒），稍后再试'
+  });
+  ok('失败条目：正文说清"没画成"、带上原因，count 记 0',
+    failed.imageResult.status === 'failed' && failed.imageResult.count === 0
+    && failed.text.includes('没画成') && failed.text.includes('画图超时'), JSON.stringify(failed));
+  ok('失败条目：提示词里换成【图片生成失败】标签',
+    buildTriggerBlock([failed], {}).includes('【图片生成失败】'));
+  ok('失败条目照样进窗口（成功失败走同一条通道是这条链的硬规则）',
+    !isSystemRecord(failed) && !isPersonMessage(failed)
+    && evaluateWindowTrigger({
+      entries: [failed], identity: { selfNickname: '小鲸鱼' },
+      policy: { responseTier: 1, randomPercent: 0, keywords: [] }, roll: 99
+    }).shouldRespond === true);
+
+  const unsent = store.appendImageResult(KEY, {
+    prompt: '一只猫', status: 'unsent', reason: '上传超时了（图可能已经在群里，也可能没发出去）'
+  });
+  ok('未送达条目**不能**说成"没画成"：图确实画好了，而且消息可能已经在群里',
+    unsent.text.includes('已经画好了，但没能发到群里') && !unsent.text.includes('没画成'),
+    unsent.text);
+  ok('未送达用【图片发送失败】这个标签（与"生成失败"分开）',
+    buildTriggerBlock([unsent], {}).includes('【图片发送失败】'));
 }
 
 // ── 13. 源级接线（几条"删掉不会报错、只会静默变坏"的）────────────

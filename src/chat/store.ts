@@ -20,7 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../core/config.js';
-import type { ChatMessage, ChatReply, DigestRecord, MediaEntry } from './types.js';
+import type { ChatMessage, ChatReply, DigestRecord, ImageResultStatus, MediaEntry } from './types.js';
 
 interface ChatState {
   chatKey: string;
@@ -671,31 +671,47 @@ export class ChatStore {
   /**
    * 追加一条**图像生成结果**（kind:'image-result'）：出图队列的异步产物。
    *
+   * **成功与失败都走这一条**（`status` 三态）。失败由模型自己开口交代，而不是队列代它
+   * 往群里贴一句 —— 所以失败也必须落成一条**未读**条目，否则模型压根看不到（见
+   * `media/image-gen/queue.ts` 的 `#reportFailure`）。
+   *
    * 与转写/漫画两条同形，也同样**必须 `read:false`**（理由见 appendTranscript：写成已读会落在
    * `#lastSeenId` 水位线之下，进程内看得见、重启后永久不可见）。
    *
-   * 与它们唯一的不同：**图已经由队列自己发进群里了**，这条正文只承载"发过了"这个事实，
-   * 让模型在接下来那次运行里能自然收尾，或什么都不说。
+   * 与它们唯一的不同：**图是队列自己发进群的**，这条正文只承载"发过了 / 没发成 / 没画成"
+   * 这个事实。三态各自的说法写在下边 —— 尤其 `unsent` 不能说成"没画成"：图画好了，
+   * 而且消息可能已经在群里。
    */
-  appendImageResult(chatKey: string, { prompt, count = 1, ts = Date.now() }: {
-    prompt?: unknown; count?: number; ts?: number;
+  appendImageResult(chatKey: string, { prompt, status = 'sent', reason = '', count = 1, ts = Date.now() }: {
+    prompt?: unknown;
+    status?: ImageResultStatus;
+    reason?: unknown;
+    count?: number;
+    ts?: number;
   } = {}) {
     const st = this.#state(chatKey);
     const body = String(prompt ?? '').trim().slice(0, 80);
-    const shot = Math.max(1, Number(count) || 1);
+    const why = String(reason ?? '').trim().slice(0, 200);
+    const shot = status === 'sent' ? Math.max(1, Number(count) || 1) : 0;
+    const what = body ? `「${body}」的图片` : '图片';
+    const text = status === 'sent'
+      ? `${what}已生成并发送到当前会话${shot > 1 ? `（共 ${shot} 张）` : ''}`
+      : status === 'unsent'
+        ? `${what}已经画好了，但没能发到群里${why ? `：${why}` : ''}`
+        : `${what}没画成${why ? `：${why}` : ''}`;
     const entry: ChatMessage = {
       id: st.nextLocalId++,
       mid: null,
       ts: Number(ts) || Date.now(),
       senderId: '',
       senderName: '图像',
-      text: `${body ? `「${body}」的图片` : '图片'}已生成并发送到当前会话${shot > 1 ? `（共 ${shot} 张）` : ''}`,
+      text,
       self: false,
       read: false,
       reply: null,
       media: [],
       kind: 'image-result',
-      imageResult: { prompt: body, count: shot }
+      imageResult: { prompt: body, count: shot, status, reason: why }
     };
     st.messages.push(entry);
     this.#trim(st);
@@ -913,7 +929,13 @@ function normalizeMessage(value: unknown): ChatMessage | null {
       ? {
           imageResult: {
             prompt: String(value.imageResult.prompt ?? '').slice(0, 200),
-            count: Number(value.imageResult.count) || 0
+            count: Number(value.imageResult.count) || 0,
+            // 三态**必须白名单窄化**：手改过的聊天 JSON 塞进来的任意字符串会一路进提示词，
+            // 而渲染方（formatEntry）按它选标签 —— 认不出的值一律当成功（最保守的那一种）。
+            status: ['sent', 'unsent', 'failed'].includes(String(value.imageResult.status))
+              ? String(value.imageResult.status) as ImageResultStatus
+              : 'sent',
+            reason: String(value.imageResult.reason ?? '').slice(0, 200)
           }
         }
       : {})

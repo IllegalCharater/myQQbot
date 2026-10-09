@@ -37,21 +37,35 @@ export interface ImageGenSender {
 }
 
 /**
- * 结果回流端口（`assisted` 模式）。
+ * 交付结果的三态。**`unsent` 与 `failed` 必须分开**：前者图已经画好了（消息甚至可能已经在群里），
+ * 后者压根没画出来 —— 对模型这是两件不同的事，对群友也是。
+ *
+ * 与 `chat/types.ts` 的同名联合类型**各写一份**：`media` 与 `chat` 同属 T1、严格互斥，
+ * 队列不能 import 聊天领域（同 `TranscriptionMedia` 与 `MediaEntry` 的关系）。
+ */
+export type ImageResultStatus = 'sent' | 'unsent' | 'failed';
+
+/**
+ * 结果回流端口（成功与失败共用）。
  *
  * 为什么是**注入的函数**而不是让队列直接写存档：`media` 与 `chat`/`agent` 同属 T1、严格互斥，
  * 队列不能 import `ChatStore` 或 `Orchestrator`。装配根（`web/app.ts`）把
  * "落存档 → 入窗 → 触发一次运行"接过去，形态与 `TranscriptSink` 完全一致。
  *
- * ⚠️ 图片**已经由队列自己发出去了**，这个端口只负责把"发过了"这个事实交给模型，
- * 让它在后续一次运行里补一句话 —— 与 jmcomic 的 PDF 上传是同一个分工。
+ * ⚠️ **成功与失败走同一条通道**，这是出图这条路的硬规则：模型只调了一次工具就结束本轮，
+ * 随后那次运行才是它开口的地方。只有两种结果都从这里进上下文，它才有机会用自己的话交代；
+ * 由队列代它往群里贴一句"画图失败"，就回到了"工具代模型发言"那条禁令要防的形态 ——
+ * 模型看着已经说过了，于是不再开口（聊天那次"任务被代发伪装成已收尾"是同一个病）。
  *
- * `prompt` 是**模型给的那段描述**（不含后端叠加的风格层），`count` 是这次实际发出的张数。
+ * `prompt` 是**模型给的那段描述**（不含后端叠加的风格层）；`reason` 是给模型看的**事实**
+ * （一句话，不含"你该说什么"那种指令 —— 那是 `prompt-catalog` 的事）。
  */
 export type ImageResultSink = (input: {
   chatKey: string;
   prompt: string;
-  count: number;
+  status: ImageResultStatus;
+  /** `sent` 时为空串。 */
+  reason: string;
   replyToMessageId?: string | number | null;
 }) => void | Promise<void>;
 
@@ -155,6 +169,6 @@ export interface QueueDeps {
   getConfig: () => AppConfig;
   log?: (...args: unknown[]) => void;
   operations?: QueueOperations;
-  /** 见 `ImageResultSink`。缺省时 assisted 任务只记一条日志、不回流。 */
+  /** 见 `ImageResultSink`。**成功与失败都走它**；缺省时 assisted 任务退回"队列自己往群里贴一句"（否则群友什么都等不到），并记一条日志。 */
   deliverImageResult?: ImageResultSink | null;
 }

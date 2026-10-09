@@ -26,21 +26,33 @@ export interface TranscriptRecord extends Record<string, unknown> {
 }
 
 /**
+ * 出图结果的三态，取值与 `media/image-gen` 的 `ImageResultStatus` **逐字一致**
+ * （两处各写一份：跨层不能互相 import，见那个类型的注释）。
+ *
+ * `unsent` 与 `failed` 是两件不同的事：前者图已经画好了（消息甚至可能已经在群里），
+ * 后者压根没画出来。合成一个"失败"会让模型对着一件说不清的事发言。
+ */
+export type ImageResultStatus = 'sent' | 'unsent' | 'failed';
+
+/**
  * 图像生成结果条目（kind:'image-result'）的结构化事实。
  *
- * 与 TranscriptRecord 同一个取向：只记**发生了什么**。这里有两件事实值得留：
- * `prompt` 是模型给的那段画面描述（不含后端叠加的风格层），`count` 是这次实际发出的张数。
- * 记 `prompt` 的理由不是"留个副本"，而是这类条目的正文里就得点明画的是什么 ——
- * 回流触发的那一次运行拿不到原始工具调用，模型只能靠这条文本回想自己画了啥。
+ * 与 TranscriptRecord 同一个取向：只记**发生了什么**。这里有三件事实值得留：
+ * `prompt` 是模型给的那段画面描述（不含后端叠加的风格层）、`count` 是这次实际发出的张数、
+ * `status` 是上面那三态。记 `prompt` 的理由不是"留个副本"，而是这类条目的正文里就得点明
+ * 画的是什么 —— 回流触发的那一次运行拿不到原始工具调用，模型只能靠这条文本回想自己画了啥。
  *
- * **不回填投递结果**（"发出去没有"）：图片由队列在写这条之前就发出去了，把投递状态
- * 也塞进来只会让投递顺序变成提示词的一部分（同 TranscriptRecord 的取舍）。
+ * **不回填投递结果之外的东西**（"发出去没有"由 `status` 与正文表达）：把投递状态拆成
+ * 一堆字段塞进来，只会让投递顺序变成提示词的一部分（同 TranscriptRecord 的取舍）。
  */
 export interface ImageResultRecord extends Record<string, unknown> {
   /** 模型给的画面描述（未叠加管理员风格层）。 */
   prompt: string;
-  /** 本次实际发送出去的图片张数。 */
+  /** 本次实际发送出去的图片张数（失败时为 0）。 */
   count: number;
+  status: ImageResultStatus;
+  /** `failed` / `unsent` 时给模型看的原因（一句话）；`sent` 时为空串。 */
+  reason: string;
 }
 
 /**

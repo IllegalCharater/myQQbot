@@ -23,7 +23,7 @@ import { ImageGenError, safeErrorCode, safeErrorDetail, userError } from './erro
 import { downloadImageToFile, fetchReferenceImage } from './image-io.js';
 import type {
   DeliveryMode, EffectiveConfig, FailureStage, ImageArtifact, ImageGenJobView, ImageGenSender,
-  ImageGenStatus, ImageResultSink, InternalJob, QueueDeps, QueueOperations
+  ImageGenStatus, ImageResultSink, ImageResultStatus, InternalJob, QueueDeps, QueueOperations
 } from './types.js';
 
 /** 失败阶段 → 群里那句话里的中文标签。阶段码本身仍然单独进日志（`errorCode`）。 */
@@ -223,20 +223,8 @@ export class ImageGenQueue {
           this.#setStatus(job, 'failed', {
             failedStage: safe.stage, errorCode: safe.code, elapsedMs: Date.now() - startedAt
           });
-          // 关停途中不发失败文案：那是我们主动取消的，不是任务真的失败。
-          if (!this.#stopping) {
-            // 上传阶段**单独一套说法**：图确实已经画好了，说成"画图失败"是撒谎 ——
-            // 实测过一次：协议端其实正在传那张图，只是响应回来得慢，于是群里先收到
-            // 一句"画图失败"、紧接着又收到那张图（见 onebot.ts 的 SEGMENT_UPLOAD_TIMEOUT_MS）。
-            const text = safe.stage === 'uploading'
-              ? `图已经画好了，但没能发到群里：${safe.userMessage}`
-              : `画图失败（${STAGE_LABELS[safe.stage] || safe.stage}）：${safe.userMessage}`;
-            await this.#sender.sendTextBatch(job.chatKey, text, {
-              replyToMessageId: job.replyToMessageId
-            }).catch((sendError) => {
-              this.#log(`[image-gen] task=${job.id} code=${safeErrorCode(sendError)}`);
-            });
-          }
+          // 关停途中不汇报：那是我们主动取消的，不是任务真的失败。
+          if (!this.#stopping) await this.#reportFailure(job, safe);
         } finally {
           if (workDir) await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
           this.#currentAbort = null;
@@ -290,15 +278,58 @@ export class ImageGenQueue {
       return;
     }
     try {
-      // `count` 恒为 1：一次任务产出一张图（`n` 固定为 1，见 client.ts）。将来放开多图时，
-      // 这个数字要跟着 artifact 走，而不是再写一个字面量。
       await sink({
-        chatKey: job.chatKey, prompt: job.prompt, count: 1, replyToMessageId: job.replyToMessageId
+        chatKey: job.chatKey, prompt: job.prompt, status: 'sent', reason: '',
+        replyToMessageId: job.replyToMessageId
       });
     } catch {
       // 只记固定错误码，不记异常正文：日志里不得出现 prompt 或图片地址。
+      // **不**退回贴文案：图确实已经发进群了，群里不需要再多一句机器话。
       this.#log(`[image-gen] task=${job.id} code=DELIVER_FAILED`);
     }
+  }
+
+  /**
+   * 失败也要**从同一条回流通道**告诉模型，而不是由队列代它往群里贴一句。
+   *
+   * 为什么（这条是刻意与转写不同的地方）：出图这条路上，模型只调了一次工具就结束本轮，
+   * 随后那次运行才是它开口的地方。成功与失败都从这里进上下文，它才有机会用自己的话交代；
+   * 由队列代说，就回到了"工具代模型发言"那条禁令要防的形态 —— **模型看着群里已经说过了，
+   * 于是不再开口**（转写那次"任务被代发伪装成已收尾"是同一个病）。
+   *
+   * 三条退路，缺一不可 —— 判据是"**只有确定有人接的时候才闭嘴**"：
+   *   · `standalone`（`/画` 命令路径）**压根没有模型**，必须由队列说，否则群友什么都等不到；
+   *   · `assisted` 但没装回流端口（测试夹具 / 装配缺件）→ 记 `NO_DELIVER_SINK` 并照说；
+   *   · 回流端口抛错（落存档/唤醒那一步坏了）→ 记 `DELIVER_FAILED` 并照说。
+   */
+  async #reportFailure(job: Readonly<InternalJob>, safe: ImageGenError): Promise<void> {
+    const status: ImageResultStatus = safe.stage === 'uploading' ? 'unsent' : 'failed';
+    const sink = this.#deliverImageResult;
+    if (job.mode === 'assisted') {
+      if (sink) {
+        try {
+          await sink({
+            chatKey: job.chatKey, prompt: job.prompt, status, reason: safe.userMessage,
+            replyToMessageId: job.replyToMessageId
+          });
+          return;
+        } catch {
+          this.#log(`[image-gen] task=${job.id} code=DELIVER_FAILED`);
+        }
+      } else {
+        this.#log(`[image-gen] task=${job.id} code=NO_DELIVER_SINK`);
+      }
+    }
+    // 群里那句：两个失败阶段分开说 —— 上传阶段**不能说"画图失败"**（图确实画好了，
+    // 而且消息可能已经在群里，见 onebot.ts 的 SEGMENT_UPLOAD_TIMEOUT_MS）。
+    const text = status === 'unsent'
+      ? `图已经画好了，但没能发到群里：${safe.userMessage}`
+      : `画图失败（${STAGE_LABELS[safe.stage] || safe.stage}）：${safe.userMessage}`;
+    await this.#sender.sendTextBatch(job.chatKey, text, {
+      replyToMessageId: job.replyToMessageId
+    }).catch((sendError) => {
+      this.#log(`[image-gen] task=${job.id} code=${safeErrorCode(sendError)}`);
+    });
   }
 
   /**

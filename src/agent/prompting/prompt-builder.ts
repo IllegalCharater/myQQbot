@@ -137,10 +137,14 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
   if (m.kind === 'jmcomic-result') {
     return `[${formatShortTime(m.ts)}] 【漫画下载结果】${String(m.text || '')}`;
   }
-  // 出图队列的异步完成回调。**图已经发进群里了**，这条只是"画好了"这个事实 ——
-  // 与上面两条同形；不给消息 id，因为模型不该去引用一张自己刚发的图。
+  // 出图队列的异步完成回调。**成功与失败都走这里**（图由队列自己发进群，或没发成、没画成）——
+  // 标签按 `status` 选，因为模型看到失败标签要做的事与看到成功标签不同（交代 vs 顺口补一句）。
+  // `unsent` 用【图片发送失败】而不是【图片生成失败】：图确实画好了，标签说"生成失败"是错的
+  // （正文里会写清是哪种，见 store.appendImageResult）。不给消息 id：模型不该去引用一张自己刚发的图。
   if (m.kind === 'image-result') {
-    return `[${formatShortTime(m.ts)}] 【图片生成结果】${String(m.text || '')}`;
+    const status = asRecord(m.imageResult).status;
+    const label = status === 'failed' ? '【图片生成失败】' : (status === 'unsent' ? '【图片发送失败】' : '【图片生成结果】');
+    return `[${formatShortTime(m.ts)}] ${label}${String(m.text || '')}`;
   }
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');

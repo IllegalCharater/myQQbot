@@ -16,6 +16,7 @@ import { initJmcomicQueue, stopJmcomicQueue } from '../media/jmcomic.js';
 import type { JmcomicCompletion } from '../media/jmcomic.js';
 import { VideoTranscriptionQueue } from '../media/transcription/index.js';
 import { ImageGenQueue } from '../media/image-gen/index.js';
+import type { ImageResultStatus } from '../media/image-gen/index.js';
 import { createEventBus } from '../core/util.js';
 import { projectSse, writeSse } from './http/event-projector.js';
 import { startLifecycle, stopLifecycle } from './runtime/lifecycle.js';
@@ -112,12 +113,15 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   }
 
   // 出图结果的回流。与前两条**同一个形态、同一个分工**：图片本身已经由队列直接发进群了
-  // （图片就是交付物，模型没法"说"出一张图），这条条目只承载"画好了"这个事实，
-  // 触发一次运行让模型有机会补一句话 —— 说不说由它自己决定。
-  function deliverImageResult({ chatKey, prompt, count }: {
-    chatKey: string; prompt: string; count: number;
+  // （图片就是交付物，模型没法"说"出一张图），这条条目只承载"画好了 / 没发成 / 没画成"这个事实，
+  // 触发一次运行让模型有机会补一句话 —— 说不说、说什么由它自己决定。
+  //
+  // ⚠️ **失败也走这条路**（不是队列代它往群里贴一句）：这条路上模型只调了一次工具就结束本轮，
+  // 随后那次运行才是它开口的地方；代说会让它以为"群里已经说过了"，于是不再开口。
+  function deliverImageResult({ chatKey, prompt, status, reason }: {
+    chatKey: string; prompt: string; status: ImageResultStatus; reason: string;
   }) {
-    const entry = store.appendImageResult(chatKey, { prompt, count });
+    const entry = store.appendImageResult(chatKey, { prompt, status, reason });
     orchestrator.onIncoming(chatKey, entry);
     emit(EVENTS.chatUpdate, chatKey);
   }

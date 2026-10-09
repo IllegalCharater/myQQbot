@@ -214,12 +214,22 @@ export class SendQueue {
    *
    * 与 `sendSticker` 是**同一个出站动作**（图片段），差别只在留档文本与语义：
    * 这里留 `[图片]`，因为图是"模型画的"而不是"收藏的表情"，存档要能分清。
-   * 走同一条 chain 与限频，所以出图不会绕开"每会话串行 + 限速"。
+   * 限频与存档照旧（它仍是出站动作，仍要记账、仍要留 `我：[图片]`）。
+   *
+   * ⚠️ **刻意不走每会话串行链**（`#chain`），与转写的全文文件、漫画的 PDF 同一条口径
+   * （那两处直接 `onebot.call('upload_*_file', …, 120_000)`，压根不经过 `SendQueue`）。
+   *
+   * 理由是实测出来的（2026-10-10）：图片段要协议端先读本机文件、再传到 QQ 图床，
+   * 慢起来能到分钟级；占着会话链的后果不只是"图晚一点到"，而是**正在进行的对话整体堵住** ——
+   * 模型收尾那一步正是 `send_message`，它排在链上等上传，于是工具调用不返回、本轮运行不结束，
+   * 面板上那条会话一直显示"运行中"。会话的收尾不该由一张图的传输速度决定。
+   *
+   * 代价（与那两处上传相同、且是知情的）：图片可能与文本交错 —— 极端情况下它落在
+   * 同一批多段文本的两段之间。换来的是一条卡住的上传不再冻结整个会话的发言。
    */
   sendImage(chatKey: string, file: unknown, options: SendOptions = {}) {
     const [kind, id] = String(chatKey).split(':');
-    const chain = this.#chain(chatKey);
-    return chain(async () => {
+    return (async () => {
       await this.#checkRate(chatKey);
       await sleep(randInt(600, 1500)); // 与发表情同样的真人式短暂停顿
       const data = await this.onebot.sendImage(kind, id, String(file), {
@@ -231,7 +241,7 @@ export class SendQueue {
       this.store.appendSelf(chatKey, { text: '[图片]', ts, mid: messageId });
       this.onSent?.({ chatKey, text: '[图片]', messageId });
       return { message_id: messageId };
-    });
+    })();
   }
 
   /** 拍一拍。发送成功后留档（self 记录），否则下一次运行不知道自己拍过。 */
