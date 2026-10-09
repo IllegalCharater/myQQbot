@@ -26,6 +26,24 @@ export interface TranscriptRecord extends Record<string, unknown> {
 }
 
 /**
+ * 图像生成结果条目（kind:'image-result'）的结构化事实。
+ *
+ * 与 TranscriptRecord 同一个取向：只记**发生了什么**。这里有两件事实值得留：
+ * `prompt` 是模型给的那段画面描述（不含后端叠加的风格层），`count` 是这次实际发出的张数。
+ * 记 `prompt` 的理由不是"留个副本"，而是这类条目的正文里就得点明画的是什么 ——
+ * 回流触发的那一次运行拿不到原始工具调用，模型只能靠这条文本回想自己画了啥。
+ *
+ * **不回填投递结果**（"发出去没有"）：图片由队列在写这条之前就发出去了，把投递状态
+ * 也塞进来只会让投递顺序变成提示词的一部分（同 TranscriptRecord 的取舍）。
+ */
+export interface ImageResultRecord extends Record<string, unknown> {
+  /** 模型给的画面描述（未叠加管理员风格层）。 */
+  prompt: string;
+  /** 本次实际发送出去的图片张数。 */
+  count: number;
+}
+
+/**
  * 这条消息引用/回复的对象。**`mid` 是它存在的理由，不是附加信息**。
  *
  * 三者分工：`mid` = 被引用消息的 QQ id（可寻址），`sender`/`text` = 预览（人看着像话）。
@@ -56,6 +74,7 @@ export interface ChatMessage extends Record<string, unknown> {
   media?: MediaEntry[];
   digest?: DigestRecord;
   transcript?: TranscriptRecord;
+  imageResult?: ImageResultRecord;
   /**
    * 引用对象。**预览只存在这里，不再拍进 `text`**（见 `Ingest` 的注释）：
    * 拍进去的话 id 就没了，而渲染层拿得到结构化数据才能把它印成 `[引用 #id 谁：什么]`。

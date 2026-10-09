@@ -71,12 +71,12 @@ function archiveFile(chatKey: string) {
 const NON_WAKE_KINDS = new Set(['digest', 'note']);
 
 /**
- * 按"人"统计/取样时要跳过的 kind：上面两种，**再加**两个异步任务结果。
+ * 按"人"统计/取样时要跳过的 kind：上面两种，**再加**三个异步任务结果。
  *
  * 转写结果不是某个群友说的话（senderId 是空串），不跳过就会在"活跃成员"里
- * 多出一个查无此人的幽灵成员，进而生成对它的印象。
+ * 多出一个查无此人的幽灵成员，进而生成对它的印象。图像生成结果是同一回事。
  */
-const NON_PERSON_KINDS = new Set(['digest', 'note', 'transcript', 'jmcomic-result']);
+const NON_PERSON_KINDS = new Set(['digest', 'note', 'transcript', 'jmcomic-result', 'image-result']);
 
 /**
  * "不是某人说的话"的条目：压缩摘要（kind:'digest'）与面板插的人工备注（kind:'note'）。
@@ -669,6 +669,41 @@ export class ChatStore {
   }
 
   /**
+   * 追加一条**图像生成结果**（kind:'image-result'）：出图队列的异步产物。
+   *
+   * 与转写/漫画两条同形，也同样**必须 `read:false`**（理由见 appendTranscript：写成已读会落在
+   * `#lastSeenId` 水位线之下，进程内看得见、重启后永久不可见）。
+   *
+   * 与它们唯一的不同：**图已经由队列自己发进群里了**，这条正文只承载"发过了"这个事实，
+   * 让模型在接下来那次运行里能自然收尾，或什么都不说。
+   */
+  appendImageResult(chatKey: string, { prompt, count = 1, ts = Date.now() }: {
+    prompt?: unknown; count?: number; ts?: number;
+  } = {}) {
+    const st = this.#state(chatKey);
+    const body = String(prompt ?? '').trim().slice(0, 80);
+    const shot = Math.max(1, Number(count) || 1);
+    const entry: ChatMessage = {
+      id: st.nextLocalId++,
+      mid: null,
+      ts: Number(ts) || Date.now(),
+      senderId: '',
+      senderName: '图像',
+      text: `${body ? `「${body}」的图片` : '图片'}已生成并发送到当前会话${shot > 1 ? `（共 ${shot} 张）` : ''}`,
+      self: false,
+      read: false,
+      reply: null,
+      media: [],
+      kind: 'image-result',
+      imageResult: { prompt: body, count: shot }
+    };
+    st.messages.push(entry);
+    this.#trim(st);
+    saveChat(st);
+    return entry;
+  }
+
+  /**
    * 追加漫画队列的完成回调。它与转写结果同属“机器生成、但必须唤醒 Agent”的条目：
    * `read:false`、`self:false` 让它进入窗口；空 senderId 让成员/记忆逻辑不会把它当成群友。
    *
@@ -870,9 +905,17 @@ function normalizeMessage(value: unknown): ChatMessage | null {
     read: value.read === true,
     media: Array.isArray(value.media) ? value.media.filter(isRecord).map((m) => ({ ...m, kind: String(m.kind ?? '') })) : [],
     // 与 media 同样窄化：手改过的聊天 JSON 不能把任意结构塞进提示词，
-    // 渲染方（formatEntry）只读这两个字段。
+    // 渲染方（formatEntry）只读这三个字段。
     ...(isRecord(value.transcript)
       ? { transcript: { chars: Number(value.transcript.chars) || 0, truncated: value.transcript.truncated === true } }
+      : {}),
+    ...(isRecord(value.imageResult)
+      ? {
+          imageResult: {
+            prompt: String(value.imageResult.prompt ?? '').slice(0, 200),
+            count: Number(value.imageResult.count) || 0
+          }
+        }
       : {})
   } as ChatMessage;
 }

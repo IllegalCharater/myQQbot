@@ -11,6 +11,7 @@ interface StickerLike extends Record<string, unknown> { id: string; url: string;
 interface OneBotSender {
   sendText(kind: string, id: string, text: string, options: SendOptions): Promise<unknown>;
   sendSticker(kind: string, id: string, file: string, options: SendOptions): Promise<unknown>;
+  sendImage(kind: string, id: string, file: string, options: SendOptions): Promise<unknown>;
   sendPoke(kind: string, id: string, targetUserId: unknown): Promise<unknown>;
 }
 interface ChatStoreWriter { appendSelf(chatKey: string, input: { text: unknown; ts?: number; mid?: string | number | null }): unknown }
@@ -204,6 +205,31 @@ export class SendQueue {
       const messageId = messageIdOf(data);
       this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: messageId });
       this.onSent?.({ chatKey, text: `[表情包]`, messageId, sticker: sticker.id });
+      return { message_id: messageId };
+    });
+  }
+
+  /**
+   * 发送一张图片（本机绝对路径或公网 URL），独立气泡。
+   *
+   * 与 `sendSticker` 是**同一个出站动作**（图片段），差别只在留档文本与语义：
+   * 这里留 `[图片]`，因为图是"模型画的"而不是"收藏的表情"，存档要能分清。
+   * 走同一条 chain 与限频，所以出图不会绕开"每会话串行 + 限速"。
+   */
+  sendImage(chatKey: string, file: unknown, options: SendOptions = {}) {
+    const [kind, id] = String(chatKey).split(':');
+    const chain = this.#chain(chatKey);
+    return chain(async () => {
+      await this.#checkRate(chatKey);
+      await sleep(randInt(600, 1500)); // 与发表情同样的真人式短暂停顿
+      const data = await this.onebot.sendImage(kind, id, String(file), {
+        replyToMessageId: options.replyToMessageId ?? null,
+        atUserId: options.atUserId ?? null
+      });
+      const ts = Date.now();
+      const messageId = messageIdOf(data);
+      this.store.appendSelf(chatKey, { text: '[图片]', ts, mid: messageId });
+      this.onSent?.({ chatKey, text: '[图片]', messageId });
       return { message_id: messageId };
     });
   }

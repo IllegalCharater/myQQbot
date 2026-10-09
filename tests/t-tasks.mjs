@@ -2,7 +2,7 @@
 //
 // 这张表的价值全在"它说的和现实是不是一回事"。所以本套件不检查表自身的形状，而是拿表里的
 // 每一条声明**去现实里核对**：
-//   1. 9 行齐全，id 集合固定（手工登记，同 t-ports 的 PORT_METHODS 模式）；
+//   1. 10 行齐全，id 集合固定（手工登记，同 t-ports 的 PORT_METHODS 模式）；
 //   2. 每行 owner 文件真实存在，且里面确实有调度调用（防"表里躺着一个不存在的任务"）；
 //   3. **[反向] 局部计时器不在表内** —— 这是设计稿 §6.1 分界线的守护，也是本套件最重要的一段：
 //      最容易犯的错就是把 LLM 超时、重试退避、单次扫图 flush 这些也算成"长期任务"收进表，
@@ -27,7 +27,7 @@ const { getConfig } = await load('core/config.js');
 // 手工登记的 id 清单。表里加一个任务是个**有意的动作**，必须同步登记到这里。
 const EXPECTED_IDS = [
   'proactive.bubble', 'compact.sweep', 'price.feed',
-  'jmcomic.cleanup', 'jmcomic.worker', 'transcription.worker', 'onebot.reconnect',
+  'jmcomic.cleanup', 'jmcomic.worker', 'transcription.worker', 'image-gen.worker', 'onebot.reconnect',
   'hot-search.daily-broadcast', 'image-source.pic-worker'
 ];
 
@@ -50,7 +50,7 @@ const LOCALTIMER_ONLY_FILES = [
 ];
 
 const ids = LONG_TERM_TASKS.map((t) => t.id).sort();
-ok('任务表恰好是这 9 个 id（不多不少）',
+ok('任务表恰好是这 10 个 id（不多不少）',
   ids.length === EXPECTED_IDS.length && ids.every((id, i) => id === [...EXPECTED_IDS].sort()[i]),
   `表里是 ${ids.join('、')}；清单是 ${[...EXPECTED_IDS].sort().join('、')}`);
 
@@ -141,12 +141,14 @@ ok('onebot 的重连调度只有一处，且句柄被存进 #reconnectTimer（S1
 const { Orchestrator } = await load('agent/runtime/orchestrator.js');
 const { OneBotClient } = await load('qq/onebot.js');
 const { VideoTranscriptionQueue } = await load('media/transcription/index.js');
+const { ImageGenQueue } = await load('media/image-gen/index.js');
 const { HotSearchScheduler } = await load('media/hot-search/scheduler.js');
 const picImageSearch = await load('media/image-source/pic-image-search-client.js');
 const RESOLVERS = {
   Orchestrator: () => Orchestrator.prototype,
   OneBotClient: () => OneBotClient.prototype,
   VideoTranscriptionQueue: () => VideoTranscriptionQueue.prototype,
+  ImageGenQueue: () => ImageGenQueue.prototype,
   HotSearchScheduler: () => HotSearchScheduler.prototype,
   'price-feed': () => priceFeed,
   jmcomic: () => jmcomic,

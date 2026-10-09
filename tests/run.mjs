@@ -37,13 +37,15 @@ const ASSERT = [
   't-sse-project.mjs',     // SSE 帧投影（event-projector 纯函数，逐字节）
   't-events.mjs',          // 事件名一致性（发射点必须用 EVENTS.*，词表无空转名字）
   't-ports.mjs',           // 跨模块端口（implements 挂载、成员与外部调用对账、名录只作文档）
-  't-tasks.mjs',           // 长期任务描述符表（6 行如实标注；反查局部计时器不在表内）
+  't-tasks.mjs',           // 长期任务描述符表（9 行如实标注；反查局部计时器不在表内）
   't-timers.mjs',          // 长期任务的计时器句柄（start 起了什么、stop 有没有收干净）
   't-transcription.mjs',   // 视频 URL 转写（SSRF、单并发状态机、凭证脱敏）
   't-media-source.mjs',    // 通用音视频来源层（provider 清单、extract 纯函数、裸地址放行、接入层解耦）
   't-hot-search.mjs',      // 每日热搜（接口契约、重试、去重分页、幂等与互斥）
   't-image-source.mjs',    // 图片来源识别（Provider、队列、缓存、脱敏与 UI 接线）
   't-media-tools.mjs',     // 模型自主调用的两个能力工具（取榜单 / 转写、配额闸门与按配置过滤）
+  't-image-gen.mjs',       // 图像生成（配置归一化、两层提示词、队列单并发、/画 命令与工具）
+  't-slash-commands.mjs',  // 斜杠命令分发层（判据唯一、回执与失败话术、wakeEligible 同源）
   't-web-search.mjs',      // 联网搜索：网页收藏夹（域名优先检索）与查询词清洗，起本地假搜索引擎
   't-jmcomic.mjs',         // 漫画队列去重（按请求者+漫画ID）与完成后记录留存
   't-jmcomic-callback.mjs',// 漫画 Python 结果帧与上传完成后的 Agent 回流

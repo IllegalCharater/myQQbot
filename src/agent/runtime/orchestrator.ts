@@ -59,7 +59,7 @@ export class Orchestrator implements AgentControlPort {
   /** 群名缓存：groupId -> name，只有 `getChatName` / `#chatName` 用，不对类外暴露。 */
   #chatNameCache = new Map<string, string>();
 
-  constructor({ store, memory, stickers, sender, sessions, onebot, emit, windows = null, transcription, hotSearch }: OrchestratorDependencies) {
+  constructor({ store, memory, stickers, sender, sessions, onebot, emit, windows = null, transcription, imageGen, hotSearch }: OrchestratorDependencies) {
     this.store = store;
     this.memory = memory;
     this.stickers = stickers;
@@ -122,6 +122,7 @@ export class Orchestrator implements AgentControlPort {
       isAborted: () => this.aborted,
       // 能力型工具依赖原样透传（本类不用它们，`runAgent` 的 `host` 是上面的 scheduler）。
       transcription,
+      imageGen,
       hotSearch
     });
     // 下面这 6 行是**引用拷贝**，不是再建一份：`abortAll()` 里的 `chatStates.clear()`、

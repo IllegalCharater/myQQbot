@@ -297,6 +297,43 @@ export const DEFAULT_CONFIG = {
     maxCallsPerChatPerHour: 3,
     maxCallsPerDay: 10
   },
+  // ── 图像生成（阿里云百炼 · 千问 Qwen-Image）──
+  // 与转写/搜图同一条规矩：**默认关闭**，不配置就一分钱不花（出图按张计费）。
+  // 钳制与归一化在 media/image-gen/config.ts 的 resolveImageGenConfig() 一处，
+  // 这里只放默认值；设置页另有一份同口径钳制，改一处要同时改那边。
+  imageGen: {
+    enabled: false,
+    // 百炼 API Key。留空时回退环境变量 DASHSCOPE_API_KEY（与官方文档示例同名）。
+    // 控制台配置响应会按 secret 字段脱敏成 hasApiKey，真值不出浏览器。
+    apiKey: '',
+    // 官方通用域名；用业务空间专属域名（https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com）
+    // 更快更稳，也支持整条 endpoint 直接粘进来（会在 /api/v1/ 处截断）。模型、地址、
+    // API Key 必须同地域，跨地域调用会失败。
+    baseUrl: 'https://dashscope.aliyuncs.com',
+    model: 'qwen-image-2.1-turbo',           // 文档自述"综合表现与性价比最优"；设置页可换
+    size: '',                                // '' = 由模型按提示词自动决定；格式 1024*1024
+    promptExtend: true,                      // 提示词智能改写（官方建议开启）
+    watermark: false,
+    // 反向提示词。**仅 qwen-image-3.0 系列支持**，别的模型传了会被判 400 ——
+    // 所以 client.ts 用 supportsNegativePrompt() 把这一条挡在外面，不是原样透传。
+    negativePrompt: '',
+    // 「第二层提示词」：管理员配的画风/质量层，出图时由**代码**拼在模型给的画面描述之后
+    // （见 media/image-gen/client.ts 的 withStyleLayer）。它**对模型完全不可见** ——
+    // 一旦写进给模型看的指令，模型就会自己把那句话也写一遍，同一句出现两遍。
+    // 默认给一句中性的质量层，**刻意不绑画风**：绑了"动漫风格"这类词，
+    // "画一张写实照片"就永远画不对了。留空 = 不注入。
+    stylePrompt: '高质量，细节丰富',
+    timeoutMs: 300000,                       // 官方提示图像生成耗时较长，同步调用挂得住
+    maxPromptChars: 1200,                    // 模型给的画面描述上限（官方推荐 ≤4500 token）
+    maxStyleChars: 200,                      // 风格层上限（这句每张图都带上，必须由我们兜住）
+    maxRefImageBytes: 8 * 1024 * 1024,       // 参考图上限（官方单张 ≤10MB）
+    maxDownloadBytes: 20 * 1024 * 1024,      // 结果 PNG 上限
+    // 成本闸门，**两条入口共用**（模型工具与 /画 命令都经 queue.enqueue）。
+    // ⚠️ 这里刻意偏离 /转写 的做法（那条命令路径不受闸门约束）：出图按张计费，
+    // 而 /画 是群里任何人都能敲的，命令路径不设闸门等于开一个可被刷的开支口子。
+    maxCallsPerChatPerHour: 3,
+    maxCallsPerDay: 20
+  },
   // ── Python 工具（`python-tools/`）共用的解释器 ──
   // **两个工具只有一个入口**：漫画下载（jmcomic_download.py）与搜图 worker
   // （pic_image_search_worker.py）都从 `python.path` 读解释器。原先是钉在漫画那一段里的

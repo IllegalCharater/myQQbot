@@ -16,7 +16,7 @@
 //   3. **import 本文件不启动任何东西**：启动只能由 `app.start()` 调 `startLifecycle()`，
 //      停止只能由 `app.stop()` 调 `stopLifecycle()`。套件在假计时器下 import 一次来钉它。
 //
-// 能力（connect/close、两个巡检、价格表、jmcomic 队列、视频转写）**全部由 `deps` 递进来**，本文件里
+// 能力（connect/close、两个巡检、价格表、jmcomic 队列、视频转写、图像生成）**全部由 `deps` 递进来**，本文件里
 // 对下层模块只有 `import type`（编译期擦除，`dist/web/lifecycle.js` 不 require 任何下层模块）。
 // 这不只是为了好看：只有这样，"顺序"才是一个能在假 `deps` 上被**逐条观察**到的性质
 // （§9.3 的 spy 断言），否则这些 entry 里有一半只能靠"把代码读一遍"来确认。真正把模块函数
@@ -65,6 +65,7 @@ export interface LifecycleDeps {
   priceFeed: { init(url: string): void; stop(): void };
   jmcomic: { init(runtime: LifecycleJmRuntime): void; stop(): void; onCompleted: JmcomicCompletionSink };
   transcription: { start(): void | Promise<void>; stop(): void | Promise<void> };
+  imageGen: { start(): void | Promise<void>; stop(): void | Promise<void> };
   hotSearch: { start(): void | Promise<void>; stop(): void | Promise<void> };
   /**
    * 搜图常驻 worker 的启停。抽成 `start`/`stop` 而不是直接递那两个模块函数，是为了与其余
@@ -103,11 +104,11 @@ const ALWAYS = () => true;
 
 /**
  * 装配清单，**按 S11c 之前 `app.start()` 里的真实启动顺序**排列：
- * connect → 热搜 → 冒泡 → 压缩 → 价格表 → jmcomic → 视频转写 → 搜图 worker。
- * 前五个是 S11c 收口的原顺序；转写与搜图 worker 是后加的两个，都排在最后，
+ * connect → 热搜 → 冒泡 → 压缩 → 价格表 → jmcomic → 视频转写 → 搜图 worker → 图像生成。
+ * 前五个是 S11c 收口的原顺序；转写、搜图 worker 与图像生成是后加的三个，都排在最后，
  * 于是停止时它们**最先**被收掉，不会拖着 OneBot 传输层一起等。
  *
- * 停止时逆序：搜图 worker → 视频转写 → jmcomic → 价格表 → 压缩 → 冒泡 → 热搜 → `onebot.close()`。
+ * 停止时逆序：图像生成 → 搜图 worker → 视频转写 → jmcomic → 价格表 → 压缩 → 冒泡 → 热搜 → `onebot.close()`。
  * 与 S11c 之前相比唯一调换的一对是"价格表 ↔ jmcomic"（原先 `stopPriceFeed()` 在前）：
  * 两者互不依赖，属**可观察但良性**的变化，已记入设计稿 §8.2 与真机冒烟清单。
  */
@@ -185,6 +186,19 @@ export const LIFECYCLE: readonly LifecycleEntry[] = [
     enabled: (config) => config.imageSource?.enabled === true,
     start: (deps) => deps.imageSource.start(),
     stop: (deps) => deps.imageSource.stop()
+  },
+  {
+    // 图像生成队列排在最后 —— 与转写/搜图同样的理由：它与 OneBot 之间没有直接依赖
+    // （上传走 `SendQueue.sendImage`，由清单里靠前的 `onebot.reconnect` 保证传输层最后才关），
+    // 所以位置是自由的，选末尾只是为了把"新增任务排最后"这条先例保持一致。
+    //
+    // 与 image-source 那条**不同**：这里不加 `enabled` 闸门。队列空载时不持有任何东西
+    // （没有子进程、没有常驻计时器），而把闸门提到这里会让"配置关着"报成
+    // "画图服务尚未启动" —— 见 `tasks.ts` 里 image-gen.worker 的说明。
+    ids: ['image-gen.worker'],
+    enabled: ALWAYS,
+    start: (deps) => deps.imageGen.start(),
+    stop: (deps) => deps.imageGen.stop()
   }
 ];
 

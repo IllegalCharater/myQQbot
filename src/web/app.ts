@@ -15,6 +15,7 @@ import { initPriceFeed, stopPriceFeed } from '../llm/price-feed.js';
 import { initJmcomicQueue, stopJmcomicQueue } from '../media/jmcomic.js';
 import type { JmcomicCompletion } from '../media/jmcomic.js';
 import { VideoTranscriptionQueue } from '../media/transcription/index.js';
+import { ImageGenQueue } from '../media/image-gen/index.js';
 import { createEventBus } from '../core/util.js';
 import { projectSse, writeSse } from './http/event-projector.js';
 import { startLifecycle, stopLifecycle } from './runtime/lifecycle.js';
@@ -110,13 +111,26 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     emit(EVENTS.chatUpdate, chatKey);
   }
 
+  // 出图结果的回流。与前两条**同一个形态、同一个分工**：图片本身已经由队列直接发进群了
+  // （图片就是交付物，模型没法"说"出一张图），这条条目只承载"画好了"这个事实，
+  // 触发一次运行让模型有机会补一句话 —— 说不说由它自己决定。
+  function deliverImageResult({ chatKey, prompt, count }: {
+    chatKey: string; prompt: string; count: number;
+  }) {
+    const entry = store.appendImageResult(chatKey, { prompt, count });
+    orchestrator.onIncoming(chatKey, entry);
+    emit(EVENTS.chatUpdate, chatKey);
+  }
+
   const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log, deliverTranscript });
+  const imageGen = new ImageGenQueue({ sender, getConfig, log, deliverImageResult });
   const hotSearchScheduler = new HotSearchScheduler({ getConfig, updateConfig, sender, log });
-  // 这两个能力对象先建、再交给 Orchestrator：模型的两个工具（transcribe_video / get_hot_search）
-  // 需要它们，而依赖是从 Orchestrator → WakeScheduler（`AgentRunnerHost`）→ ToolContext 透传的。
+  // 这三个能力对象先建、再交给 Orchestrator：模型的三个工具（transcribe_video /
+  // generate_image / get_hot_search）需要它们，而依赖是从 Orchestrator → WakeScheduler
+  // （`AgentRunnerHost`）→ ToolContext 透传的。
   const orchestrator = new Orchestrator({
     store, memory, stickers, sender, sessions, onebot, emit,
-    transcription, hotSearch: hotSearchScheduler
+    transcription, imageGen, hotSearch: hotSearchScheduler
   });
   const hotSearch = createHotSearchAdminActions(hotSearchScheduler);
 
@@ -138,7 +152,7 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // 白名单判断、@ 名字解析、引用预览、合并转发展开与拍一拍都在 `web/onebot/ingest.ts`
   // 里（`atNameCache` 与引用预览上限是摄取器自己的状态，组装根不需要知道）。
   // 组装根只把 OneBot 的入站回调接到 `ingest.handle()` 上。
-  const ingest = createIngest({ onebot, store, sender, orchestrator, transcription, emit, getConfig, log });
+  const ingest = createIngest({ onebot, store, sender, orchestrator, transcription, imageGen, emit, getConfig, log });
 
   // ── 控制台 HTTP 表面 ──
   // SSE 端点、鉴权、路由分发、静态文件、状态快照（`buildStatus`）与配置脱敏
@@ -197,6 +211,7 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       priceFeed: { init: initPriceFeed, stop: stopPriceFeed },
       jmcomic: { init: initJmcomicQueue, stop: stopJmcomicQueue, onCompleted: deliverJmcomicCompletion },
       transcription: { start: () => transcription.start(), stop: () => transcription.stop() },
+      imageGen: { start: () => imageGen.start(), stop: () => imageGen.stop() },
       hotSearch: { start: () => hotSearchScheduler.start(), stop: () => hotSearchScheduler.stop() },
       // 搜图 worker 自己吞掉预热失败（没装库不该掀翻 app.start()），所以这里直接递真函数即可。
       imageSource: { start: initPicImageSearch, stop: () => closePicImageSearchClient() }

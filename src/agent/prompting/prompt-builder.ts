@@ -137,6 +137,11 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
   if (m.kind === 'jmcomic-result') {
     return `[${formatShortTime(m.ts)}] 【漫画下载结果】${String(m.text || '')}`;
   }
+  // 出图队列的异步完成回调。**图已经发进群里了**，这条只是"画好了"这个事实 ——
+  // 与上面两条同形；不给消息 id，因为模型不该去引用一张自己刚发的图。
+  if (m.kind === 'image-result') {
+    return `[${formatShortTime(m.ts)}] 【图片生成结果】${String(m.text || '')}`;
+  }
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');
   const who = m.self ? '我' : (notes[senderId] || m.senderName || senderId || '未知');
@@ -373,7 +378,8 @@ function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
   // 转写结果是机器输出，不是"谁在提问题"：整条短路。
   // 不短路的话下面几条正则必然误标 —— 转写正文里出现"吗/呢"或以"？"结尾是常事（→"提问"），
   // 提到 bot 的名字也是常事（→"提到我"），而这两条都会让模型以为有人在向它提问。
-  if (entry?.kind === 'transcript' || entry?.kind === 'jmcomic-result') return [];
+  // 出图结果同理：它的正文是「模型自己写的那段描述」+ "已发送"，同样会命中这些正则。
+  if (entry?.kind === 'transcript' || entry?.kind === 'jmcomic-result' || entry?.kind === 'image-result') return [];
   const labels: string[] = [];
   const text = String(entry?.text ?? '');
   const lower = text.toLowerCase();

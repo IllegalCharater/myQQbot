@@ -47,6 +47,7 @@ src/
    ├─ onebot/           OneBot 接入侧（"那个 OneBot 端"自己的状态，与 `src/qq/` 的传输客户端分开）
    │  ├─ snowluma.ts    SnowLuma 程序目录、子进程、日志环形缓冲、端口探活与 WebUI 地址
    │  ├─ tokens.ts      令牌桥：候选收集、401 轮换、限频与去重签名
+   │  ├─ slash-commands.ts 斜杠命令的唯一落点（判定 / 解析调用 / 入队 / 即时回执）
    │  └─ ingest.ts      入站事件摄取：白名单、@ 名字解析、引用解析（结构化 reply）、合并转发展开、拍一拍、B 站卡片补成视频媒体
    └─ runtime/          长期任务与退出路径
       ├─ tasks.ts       长期任务描述符表（纯数据，回答"有哪些、谁开谁停"）
@@ -103,9 +104,9 @@ Bot 的可选扩展能力主体统一落在 `src/media/<feature>/`；例如每�
 
 `agent/` 对 `web/` 的跨模块面固化成端口 `src/agent/runtime/control-port.ts`（`AgentControlPort`），`Orchestrator implements` 它；`src/web/` 与 `electron/main.js` 只依赖这个接口，不依赖具体类。端口只做**编译期**检查（`implements` 与 `satisfies`），运行期零成本，也不含任何 `instanceof`/`Symbol` 品牌——`tests/t-orch.mjs`、`t-vision-log.mjs` 用普通对象字面量充当依赖，加运行期校验会当场打碎它们。配套的 `METHOD_CATALOG` 只作文档与测试引用，不参与任何运行时分发。
 
-长期后台任务的清点落在 `src/web/runtime/tasks.ts` 的 `LONG_TERM_TASKS`（9 行：原有 6 行 + `transcription.worker` + `hot-search.daily-broadcast` + `image-source.pic-worker`）。它是**纯数据**：描述 owner / 开关来源 / 配置刷新方式 / 启停入口 / 是否 unref / `conformance`，**不触发任何启停**，也不许在文件里出现调度调用；`start`/`stop` 存的是入口的名字而非函数引用，好让 `tests/t-tasks.mjs` 拿到真对象上去核对。请求作用域局部计时器不进这张表（有反向断言守），判定标准见 `docs/global-registry-design.md` §6.1。
+长期后台任务的清点落在 `src/web/runtime/tasks.ts` 的 `LONG_TERM_TASKS`（10 行：原有 6 行 + `transcription.worker` + `hot-search.daily-broadcast` + `image-source.pic-worker` + `image-gen.worker`）。它是**纯数据**：描述 owner / 开关来源 / 配置刷新方式 / 启停入口 / 是否 unref / `conformance`，**不触发任何启停**，也不许在文件里出现调度调用；`start`/`stop` 存的是入口的名字而非函数引用，好让 `tests/t-tasks.mjs` 拿到真对象上去核对。请求作用域局部计时器不进这张表（有反向断言守），判定标准见 `docs/global-registry-design.md` §6.1。
 
-**启停点只有一处**：长期任务一律在 `src/web/app.ts` 的 `start()` 里启动、在 `stop()` 里停止（成对出现），不靠模块加载期或构造函数副作用。**S11c 起这句话是结构性的**：`start()` 只调 `startLifecycle(deps)`、`stop()` 只调 `stopLifecycle(deps)`，顺序写在 `src/web/runtime/lifecycle.ts` 的 `LIFECYCLE` 数组里（`start` 正序、`stop` **逆序**，于是"停长期任务排在 `onebot.close()` 之前"由"`onebot.reconnect` 排第一位"自动满足）；`app.ts` 的 `lifecycleDeps()` 只负责把真模块递进去。清单的元素存**函数引用**（不是名字），`ids` 只作对账元数据，`import` 它不启动任何东西——三条都有断言（`tests/t-lifecycle.mjs` 第 2/3 段），因为"按名字分发的运行时注册表"是明令禁止的形态。配置刷新路径**不接清单**（`applyConfigPatch` 只重应用确实支持热刷新的能力；当前 8 条 entry 中有 5 条无条件，不能整表重跑）。已接管的样子参照 `price.feed`、两个 jmcomic 任务、`onebot.reconnect`、`transcription.worker`、`hot-search.daily-broadcast`（`node-cron` + `Asia/Shanghai`，配置保存经 `applyConfigPatch` 只重建自己的计划），以及 `image-source.pic-worker`（`imageSource.enabled` 门控，**默认 `false`**，不用搜图的部署完全不付 Python 冷启动；启动入口 `initPicImageSearch()` 预热且**预热失败只记日志、不外抛**——没装 `PicImageSearch` 是"搜图不可用"，不该掀翻 `app.start()`）。**9 行长期任务里只剩 `jmcomic.worker` 是 `partial`**（停不掉正在执行的那一次下载），其余 8 行为 `full`。**新增长期任务要动三处**：`LONG_TERM_TASKS`、`lifecycle.ts` 的 `LIFECYCLE`、`app.ts` 的 `lifecycleDeps()`——只改一处会被对账断言拦下。
+**启停点只有一处**：长期任务一律在 `src/web/app.ts` 的 `start()` 里启动、在 `stop()` 里停止（成对出现），不靠模块加载期或构造函数副作用。**S11c 起这句话是结构性的**：`start()` 只调 `startLifecycle(deps)`、`stop()` 只调 `stopLifecycle(deps)`，顺序写在 `src/web/runtime/lifecycle.ts` 的 `LIFECYCLE` 数组里（`start` 正序、`stop` **逆序**，于是"停长期任务排在 `onebot.close()` 之前"由"`onebot.reconnect` 排第一位"自动满足）；`app.ts` 的 `lifecycleDeps()` 只负责把真模块递进去。清单的元素存**函数引用**（不是名字），`ids` 只作对账元数据，`import` 它不启动任何东西——三条都有断言（`tests/t-lifecycle.mjs` 第 2/3 段），因为"按名字分发的运行时注册表"是明令禁止的形态。配置刷新路径**不接清单**（`applyConfigPatch` 只重应用确实支持热刷新的能力；当前 9 条 entry 中有 6 条无条件，不能整表重跑）。已接管的样子参照 `price.feed`、两个 jmcomic 任务、`onebot.reconnect`、`transcription.worker`、`hot-search.daily-broadcast`（`node-cron` + `Asia/Shanghai`，配置保存经 `applyConfigPatch` 只重建自己的计划）、`image-source.pic-worker`（`imageSource.enabled` 门控，**默认 `false`**，不用搜图的部署完全不付 Python 冷启动；启动入口 `initPicImageSearch()` 预热且**预热失败只记日志、不外抛**——没装 `PicImageSearch` 是"搜图不可用"，不该掀翻 `app.start()`），以及 `image-gen.worker`（**不加清单级闸门**：队列空载时不持有任何东西，而把闸门提到清单里会让"配置关着"报成"画图服务尚未启动"）。**10 行长期任务里只剩 `jmcomic.worker` 是 `partial`**（停不掉正在执行的那一次下载），其余 9 行为 `full`。**新增长期任务要动三处**：`LONG_TERM_TASKS`、`lifecycle.ts` 的 `LIFECYCLE`、`app.ts` 的 `lifecycleDeps()`——只改一处会被对账断言拦下。
 
 **端点（`snowluma` 的 ws/http 地址与令牌）只有一个写入口**：`applyConfigPatch` 把 `next.snowluma` 的四个字段交给 `OneBotClient.applyEndpoint(next)`，**它返回 `true`（真的变了）才** `onebot.reconnect()`——所以"保存了一次没动端点的设置"不会断连。归一化规则（去 httpUrl 尾斜杠、空 URL 回落默认值、空 token 真清空）与构造函数**共用同一份**，规则一旦在比较的那一侧另写一份，`…:3000/` 与 `…:3000` 就会被判成变更、每次保存都断一次连接。唯一例外是 `applyTokens`（401 轮换路径上必须先写 token 再无条件重连）。守护在 `tests/t-timers.mjs` 第 5 段。
 
@@ -129,7 +130,9 @@ OneBot 入站事件
 
 模型没有跨运行的原生对话历史。每次 `runAgent` 都重新创建 system 和 user 两条初始消息。同一次运行中的工具轮次会继续追加 assistant、tool 和视觉 user 消息；运行结束后不把这串模型消息作为下一次运行的 LLM history。
 
-链路另有两条**异步回流**入口：后台转写完成后写入 `kind:'transcript'` 的【转写结果】；漫画 PDF 被 OneBot 明确接收后写入 `kind:'jmcomic-result'` 的【漫画下载结果】。两者都会落存档、推入窗口，再走同一套「窗口 → 响应判定 → runAgent」。区别在于那次运行**没有任何 tool result 与之对应**——任务是在更早一次运行里入队的，中间隔了一次会话收尾。所以正确性只能靠 system prompt 规则（见 5.1）与窗口判定（见 4.2）承载，不能指望上下文里还留着工具调用痕迹。
+链路另有**三条异步回流**入口：后台转写完成后写入 `kind:'transcript'` 的【转写结果】；漫画 PDF 被 OneBot 明确接收后写入 `kind:'jmcomic-result'` 的【漫画下载结果】；出图队列把画好的图片发进群后写入 `kind:'image-result'` 的【图片生成结果】。三者都会落存档、推入窗口，再走同一套「窗口 → 响应判定 → runAgent」。区别在于那次运行**没有任何 tool result 与之对应**——任务是在更早一次运行里入队的，中间隔了一次会话收尾。所以正确性只能靠 system prompt 规则（见 5.1）与窗口判定（见 4.2）承载，不能指望上下文里还留着工具调用痕迹。
+
+第三种的**交付物本身是文件**（与漫画的 PDF 同形、与转写不同）：图片由队列**直接发进群**，回流条目只承载"发过了"这个事实，让模型有机会补一句话——说不说由它决定，因为图已经在那里了，模型也没法"说"出一张图。
 
 ## 4. 新消息窗口与历史深度
 
@@ -150,14 +153,14 @@ OneBot 入站事件
 - `foldedCount()`：已滑出但尚未结算的 id 数，用于提示模型较早消息已降级到历史。
 - `seen()`：推进水位线。回复与不回复都会消费，避免旧消息反复成为“新消息”。
 
-窗口收的是“对方发来的消息”，但两类**机器生成的条目**也必须进窗口：转写结果（`kind:'transcript'`）与漫画完成结果（`kind:'jmcomic-result'`）。它们不是谁说的话（`senderId` 为空串，`senderName` 只用于摘要与面板显示），却必须让模型看到并开口。它们的 `read` 必须是 `false`——否则播种时 `#lastSeenId` 取的是“最长的一段 `read === true` 前缀”，条目会落在那条水位线**之下**：进程内刚写入时看得见，重启后永久不可见。
+窗口收的是“对方发来的消息”，但三类**机器生成的条目**也必须进窗口：转写结果（`kind:'transcript'`）、漫画完成结果（`kind:'jmcomic-result'`）与出图结果（`kind:'image-result'`）。它们不是谁说的话（`senderId` 为空串，`senderName` 只用于摘要与面板显示），却必须让模型看到并开口。它们的 `read` 必须是 `false`——否则播种时 `#lastSeenId` 取的是“最长的一段 `read === true` 前缀”，条目会落在那条水位线**之下**：进程内刚写入时看得见，重启后永久不可见。
 
 存档层因此用**两个谓词**回答两个不同的问题（此前由 `isSystemRecord` 一个函数兼任，转写结果的两个答案是相反的，所以必须拆开）：
 
-- `isSystemRecord`：判“要不要进动态唤醒窗口”。只有 `digest` / `note` 不进，两种异步结果**天然通过**。
-- `isPersonMessage`：判“算不算某人说的话”。`digest` / `note` / `transcript` / `jmcomic-result` 都不算，供 `activeMembers` 与记忆整理过滤幽灵成员。
+- `isSystemRecord`：判“要不要进动态唤醒窗口”。只有 `digest` / `note` 不进，三种异步结果**天然通过**。
+- `isPersonMessage`：判“算不算某人说的话”。`digest` / `note` / `transcript` / `jmcomic-result` / `image-result` 都不算，供 `activeMembers` 与记忆整理过滤幽灵成员。
 
-归档范围（`selectArchiveRange`）仍按 `isSystemRecord` 判定，所以两种异步结果**可以被压缩归档**，不会在存档里只增不减。
+归档范围（`selectArchiveRange`）仍按 `isSystemRecord` 判定，所以三种异步结果**可以被压缩归档**，不会在存档里只增不减。
 
 ### 4.2 独立历史策略
 
@@ -176,8 +179,10 @@ OneBot 入站事件
 3. 用 `batch()` 拍下实际进入【本次唤醒】的当前窗口，并以其中最早消息的本地 ID
    作为 `historyBeforeId`。
 
-窗口里只要有一条转写结果或漫画完成结果，`evaluateWindowTrigger()` 就无条件返回 `shouldRespond: true`
-（`reason` 分别为 `转写结果` / `漫画下载结果`，`responseTier: 0`）。理由是它们都是**异步交付**的：到达时距离入队已经隔了一次完整的会话收尾，那次运行的 tool result 早已不在上下文里；若在低档位被判成“未触发”，它会被静默消费，模型永远看不到。`responseTier: 0` 沿用主动机会的同类先例——非档位来源共用 0，含义由 `reason` 承载。
+窗口里只要有一条转写结果、漫画完成结果或出图结果，`evaluateWindowTrigger()` 就无条件返回 `shouldRespond: true`
+（`reason` 分别为 `转写结果` / `漫画下载结果` / `图片生成结果`，`responseTier: 0`）。理由是它们都是**异步交付**的：到达时距离入队已经隔了一次完整的会话收尾，那次运行的 tool result 早已不在上下文里；若在低档位被判成“未触发”，它会被静默消费，模型永远看不到。`responseTier: 0` 沿用主动机会的同类先例——非档位来源共用 0，含义由 `reason` 承载。
+
+注意出图结果那条**不是**"让模型去发那张图"（图已经由队列发进群了），它保证的是"模型有机会补一句话"。
 
 这条规则有两条刻意保住的性质：
 
@@ -210,6 +215,8 @@ UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词
 
 其中一条规则只能在 system prompt 里交代：**看到【转写结果】必须开口**。转写结果是异步到达的，到达的那次运行拿不到任何 tool result，也没有“上一轮我提交过转写”的痕迹；只有 system prompt 能跨运行把这件事说清楚（要求模型评价或转述，并禁止在没有【转写结果】时凭空评价视频内容）。
 
+出图那条规则同样只能在 system prompt 里，但**内容与转写相反**：图由系统直接发进群，所以要求的是"别抢系统的活"——看到【图片生成结果】顺口补一句就够、也可以安静结束，**不许复述"已发送"、不许描述或评价画面**（那张图模型压根看不到）。同一处还交代了第一层提示词怎么写：`generate_image.prompt` 要的是给画图模型看的成稿描述，不是群友的原话。**第二层（管理员配的 `imageGen.stylePrompt`）一个字都不在提示词里**——它由代码拼在描述之后，写进模型看得见的地方只会让模型自己再写一遍，同一句出现两遍。
+
 ### 5.2 User prompt
 
 `buildUserPrompt()` 按以下顺序构造动态内容：
@@ -232,6 +239,8 @@ UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词
 - 参与度与工具细则只保留一个权威注入位置。
 
 转写结果在【本次唤醒】与【过去状态】两处用同一段渲染：`[时间] 【转写结果】<正文>`，正文被截断时前缀里写明原文全长。它不参与触发标签判定——不因为正文里有“吗/呢”被标成「提问」，也不因为正文提到 bot 名字被标成「提到我」（转写正文里出现这两样是常事）；它也不带 `#id` 前缀（`mid` 为 `null`，没有可引用的消息号）。
+
+漫画完成结果与出图结果同形：`[时间] 【漫画下载结果】<正文>` / `[时间] 【图片生成结果】<正文>`，同样不参与触发标签判定（出图条目的正文里就带着"模型自己写的那段画面描述"，里面出现疑问句或 bot 名字同样是常事），同样不带 `#id`。
 
 ### 5.3 统一字符预算
 
@@ -348,7 +357,25 @@ store.promptContextMaxChars = 32000
 
 队列侧的投递按 `mode` 分流（`standalone` / `assisted`），回流端口是注入的最小结构化端口，与 `jmcomic` 的 `store` 端口同款。端口抛错**必须自带 try/catch 且绝不外抛**：`#drain` 把异常一律当成“转写失败”，那会同时把任务记成 `failed` 并往群里发一条莫须有的「转写失败」，而结果其实已经拿到了。
 
-能力型工具的依赖（`transcription` / `hotSearch`）是 `ToolContext` 上的**可选**字段，从 `OrchestratorDependencies` 经 `WakeScheduler`（真正的 `AgentRunnerHost`）透传进来；缺了不做 `instanceof` 校验，由工具自己返回友好错误。未启用的能力由 `agent-runner.ts` 按配置从工具集里过滤掉，与视觉/搜索的过滤同一处。
+### 8.1 斜杠命令与图像生成（Qwen-Image）
+
+**所有 `/xxx` 命令的判定、解析调用、入队与即时回执都在 `src/web/onebot/slash-commands.ts` 一处**（当前两条：`/转写`、`/画 <描述>`）。放一处的原因是那条判据同时决定三件事——要不要并入引用消息里的附件、要不要落成已读历史（`wakeEligible:false`）、这条消息归谁处理——写在两处时漂移不会有任何报错，表现只有"命令没被认出来、消息进了 LLM"或"同一条消息被处理两次"。`ingest.ts` 只用同一个 `isSlashCommand()` 做前两项决定，用完 `if (slashCommand) { await handleSlashCommand(...); return; }` 收口。命令自己的语法（用法提示、参数解析）仍留在各自的领域模块：`media/transcription/commands.ts`、`media/image-gen/commands.ts`。
+
+`generate_image` 与 `/画 <描述>` 走同一条队列（`src/media/image-gen/`），形状照搬转写那条，三处按"交付物是文件"改了：
+
+- **两条路径都只入队**。工具不代模型发言（与 `transcribe_video` / `reverse_image_source` 同一契约），命令路径回一句「在画了，稍等」。
+- **图片由队列自己发进群**（`SendQueue.sendImage`，因此受限频、也留 `我：[图片]` 的存档），发完再按 `mode` 决定要不要回流——`standalone`（命令）不回流，`assisted`（工具）回流成一条【图片生成结果】。
+- **临时文件的生命周期归队列**，不归 `runTask`：转写的 `runTask` 返回文本，可以在自己的 `finally` 里删目录；这里返回的是文件，它必须活到投递之后，所以工作目录由 `#drain` 建、投递完删。
+
+另外三处与转写**刻意不同**，都有理由：
+
+1. **成本闸门在队列的 `enqueue` 里，两条入口共用**。转写的 `/转写` 命令不受闸门约束；出图按张计费，而 `/画` 是群里任何人都能敲的，命令路径不设闸门等于开一个可被刷的开支口子。放进 `enqueue` 也顺手避免了"工具先扣一次、队列再扣一次"的双记。
+2. **`n` 固定为 1**（接口层仍按数组处理）。额度按"一次调用 = 一张图"记账最直观，想画三张就调三次、占三个额度。
+3. **提示词分两层**：模型写"画什么"（工具 description 里要求写成给画图模型看的成稿描述），`imageGen.stylePrompt` 由后端拼在描述之后管"怎么画"，两层在 `client.ts` 的 `buildImageGenRequest()` 这一个纯函数里合并（命令路径与工具路径因此逐字节相同，有断言钉着）。
+
+还有两条接口层的坑写在代码里：`size` 的分隔符是**星号**（OpenAI 兼容协议用字母 x，配置层会把 x 归一成星号），以及**失败可能是 HTTP 200**——接口把错误放在响应体的 `code` 里（DashScope 协议在顶层、OpenAI 兼容嵌在 `error.code`），只看状态码会把"API Key 无效"读成成功，然后卡在"没有返回图片"上。
+
+能力型工具的依赖（`transcription` / `imageGen` / `hotSearch`）是 `ToolContext` 上的**可选**字段，从 `OrchestratorDependencies` 经 `WakeScheduler`（真正的 `AgentRunnerHost`）透传进来；缺了不做 `instanceof` 校验，由工具自己返回友好错误。未启用的能力由 `agent-runner.ts` 按配置从工具集里过滤掉，与视觉/搜索的过滤同一处。
 
 ## 9. 会话记录与可观测性
 
@@ -386,6 +413,10 @@ npm run dev             # tsc --watch
 长期任务与事件相关改动另有一组专项套件：`t-events.mjs`（事件名/载荷/注入类型/`session-update` 通道）、`t-sse-project.mjs`（SSE 帧逐字节）、`t-panel-wiring.mjs`（UI 订阅名跨边界 + 设置页接线：Python 工具那段的 id 解析、保存分支必须写 `patch.python.path` 且**兜底仍是空串**、两个按钮必须先 `saveConfig` 再打探测端点）、`t-ports.mjs`（跨模块端口与 `implements`；另扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`——`.mjs` 不受 `tsc` 管，这条只能文本扫）、`t-tasks.mjs`（`LONG_TERM_TASKS` 描述符与 `conformance` 一致性）、`t-timers.mjs`（计时器句柄：起没起、停没停、有没有被"清掉又没重建"、待触发的那一次取消不取消得掉）、`t-transcription.mjs`（视频命令、SSRF、单并发状态机、凭证脱敏）、`t-jmcomic.mjs`（漫画队列按"请求者 QQ + 漫画 ID"去重：完成后记录**留在** `jobs` 里而不是即时摘除，否则"同一用户短时间内不能重复提交"对**下载成功过**的漫画失效；窗口的计时起点是上传完成时刻而非创建时刻；2026-09-29 起还守 Python 解释器的解析优先级（`python.path` > `QQ_AGENT_PYTHON` > Windows 固定环境 / conda）、每一层报出的 `source`、探测与自检模块（假 `spawn` 注入：非 JSON 输出、非零退出、超时 kill、输出截断、`--self-check` 确实进了 argv），以及旧配置迁移——`jmcomic.pythonPath` 搬进 `python.path` 后旧键必须消失，且保存一次**不会被写回**，因为 `updateConfig` 的 `deepMerge` 只加键不删键，漏掉那句 `delete` 的话内存里看着对、盘上却永远留着；安全网也换了形态：早先靠 `JMCOMIC_PYTHON` 指一个不存在的程序，现在把 `python.path` 写进夹具 `config.json`（`config` 优先级最高，不再依赖"某台机器上恰好有这个变量"），并另配一条正向断言证明安全网真的生效）、`t-jmcomic-callback.mjs`（结果帧即刻结算，不依赖 Python `close`；上传完成 sink 回流 `jmcomic-result`，最低档位仍唤醒）、`t-jmcomic-upload.mjs`（上传超时/断连与重启遗留的 `uploading` 统一进入 `upload_uncertain`：群文件按文件名和大小查群文件列表，私聊按文件名和大小查好友消息历史，核验期间不再次调用非幂等的上传动作）、`t-lifecycle.mjs`（注册层执行侧：退出路径的信号接线与幂等、装配清单 ⇄ 描述符表对账、`app.start()/stop()` 的接线与逆序、无按键分发；S11d 起还守"被删的死代码与空转事件不许长回来"——`core/config.ts` 无任何计时器、三个文件再无 `emit`、`EventMap` 与 `vision-scan` 在 `src/` 绝迹，同时**正向**钉住 `routes/providers.ts` 里那个活着的 `visionScan` 局部对象；S11e 起还守 electron 的退出等待——`before-quit` 的**函数体**里必须有 `preventDefault(`、排在它前面的 `stopping` 守卫、promise 链上的 `.catch(`，以及 `.finally` 里那次 `app.quit()`，否则桌面端要么不退要么死循环）。
 
 每日热搜另有 `t-hot-search.mjs`，覆盖 ApiZero 匿名/Bearer 请求、429/5xx/超时重试、字段缺失与空榜、标题去重、按条目分页、白名单目标、重启后当天不重复以及手动/定时互斥。
+
+斜杠命令分发层另有 `t-slash-commands.mjs`（21 条）：认命令的边界（`/画xx`、`/转写啦`、展开后的转发正文都不算）、`/转写[视频]` 那条分支、每条命令的回执与"不入队"的边界（`/画` 没写描述时只回用法提示）、失败时把**真实原因**原样发回群里（解析层抛的本来就是中文用户文案），以及一条源级断言：**`ingest.ts` 里不许再出现命令正则**（判据只有一份，漂移时不会有任何报错）。
+
+图像生成另有 `t-image-gen.mjs`（91 条），起一个**本地假百炼端点**（`baseUrl` 是管理员配置、不是用户输入，所以指向 127.0.0.1 是正常用法；与「请求结构」那条同一条边界），覆盖：配置归一化与钳制（含 `x` → `*`、整条 endpoint 粘进来、`DASHSCOPE_API_KEY` 回退）、请求体形状（T2I 只有 `{text}`、I2I 参考图在前、`negative_prompt` **只在 3.0 系列出现**）、**两层提示词**（风格层留空时与模型给的描述逐字相同——这条对照必须有，否则"永远拼一层空串"看不出来）、错误映射（HTTP 400、**HTTP 200 但响应体带 `code`**、无图 URL、响应体超限、超时、abort 各一条）、队列（单并发、`stop()` 取消排队中的那一个并 abort 在途、视图不含 prompt、临时文件投递后即删）、成本闸门（每会话与全局两本账、被拒的不占额度、**两条入口共用**）、`/画` 解析与参考图定位、工具侧（不代发消息、不把任务号写进结果、messageId 取不到图时列出实际附件种类），以及端到端那一条：**命令路径与工具路径拼出来的请求体逐字节相同**（两层提示词只有一份实现）。
 
 搜图另有 `t-image-source.mjs`，七段：① 通用 provider 的薄适配——参数按**位次**原样转发（含 `engineOptions` 里的 `apiKey`）、错误码原样透传（`RATE_LIMIT` / `QUOTA_EXHAUSTED` / `TIMEOUT`）、`test()` 走 `ping()` 且**从不抛**（ping 返回 `false` 或直接抛异常都收敛成 `false`）；② **服务层的分发第一次有了直接断言**——用注入的假 provider（`PicImageSearchPort` 是编译期端口，测试用对象字面量顶替，没有 `instanceof`）实测 `intent` 决定的先后顺序（`anime` 先 `trace.moe`、`manga` / `illustration` 先 `saucenao`、**`unknown` 直接走一般向兜底**）、专属引擎答不上（低于门槛 / 抛错 / 超时）之后**兜底真的被调用**、每一发的超时被夹住给后面留位置（预算不够则跳过并记 `NO_BUDGET`、一次调用都不发）、逐引擎的 `timeoutMs`/`maxResults`/`mime`、`similarity < minSimilarity` 过滤（**无置信度的结果只对没有门槛的引擎算命中**——`baidu` 那条被采用，而带门槛的引擎照样丢弃它，两条互为对照）、关闭或空 `apiKey` 的引擎被跳过，以及 `failures` 标签仍是 `trace:` / `sauce:` / `baidu:`（这条字符串会进模型可见文本）。**`unknown` 这条是补上来的缺口**：它此前没有任何断言，而模型判不出类型时填的就是它 —— 于是"当初与 `anime` 同序（理由只是'与改动前一致'）"这个缺陷在四套件全绿的情况下活了一整轮；夹具让 trace.moe 也自称命中（0.99 > 它自己的门槛 0.87）才可判别（顺序错则 trace 的假命中赢并拦住兜底）。为了让 `loadSafeImage` 真的下载到字节，这一段用**回环 HTTP 服务**（`security.allowPrivateImageHosts` 临时打开，跑完复原——先例是 `t-sticker.mjs`），因此它必须排在"被 SSRF 挡下"那条断言**之后**；③ 同一段窗口内另有**缓存**用例（共用同一个 service 实例才有缓存可言）：同引擎同图第二次不发远端调用、**换 intent 不会被另一个引擎的缓存顶替**（旧实现按图片 hash 缓存整轮结论，这条在旧实现下会红）、失败不进缓存、`maxResults` 与引擎参数指纹都进键；④ `formatImageSourceResult` 的输出形状（此前一条断言都没有）——集数与时间点彼此独立、`time === 0` 是合法值、缺失字段兜底而不是印出 `undefined`、**没有置信度时整行让位**（判据是"字段在不在"，`pct(undefined)` 印出来的是 `NaN%`）；另有两条文本断言钉住 `SearchIntent` 的取值域在**三处**（`types.ts` 的联合类型、工具 schema 的 `enum`、`prompt-catalog` 的 intent 描述）逐字一致 —— 少一处模型就永远填不出那一档，且没有任何报错；⑤ 文本断言钉住原生 fetch 已绝迹：`src/media/image-source/` 下不再出现 `saucenao.com` / `api.trace.moe` / `TraceMoeProvider` / `SauceNaoProvider` / `fetchImpl`，两个按引擎的 provider 文件不存在，服务层源码里不出现 `anime_trace`（它是 trace.moe 的别名，不许加成第三个引擎）；⑥ 引擎名是**跨进程的手工镜像**：worker 的 `ENGINE_CLASS_CANDIDATES` 键集合 ⇄ Node 的 `PIC_IMAGE_SEARCH_ENGINES` 逐字比对（`.py` 不进 `tsc`，没有别的套件会读它），另加 `MEASURED_CLASS_NAMES`（2026-09-29 实测到的 7 个类名）钉住它们在候选链里**够得着**；⑦（源码段 ⑩）扫 `python-tools/pic_image_search_worker.py` 的**源码文本**，钉住第三次实测抓到的那两个真机 bug 的修法——时间取自大写 `From`、取不到时**不写** `time` 键（写 0 会让 formatter 的"字段在不在"判据失效）、标题按 `title_chinese` → `title_native` → `title_romaji` 取实测平铺字段、`origin` 当标题的兜底不存在。**两条射程不同，别当同一条用**：键集合那条看不见候选类名的拼写（把 `BaiDu` 改回 `Baidu`，实测该套件全绿），实测名那条挡不住"库改名"——它只挡得住"把已经实测对的名字又改回去"。⑦ 那段还有一条通用教训：**取函数体时只按行丢了 `#` 注释，docstring 不是注释、丢不掉**，所以断言必须**锚定到具体调用**（`_pick(raw_item, "title_chinese")`）而不是裸字段名——初版写的是 `/title_chinese[\s\S]*title_native/`，把代码里那次调用删掉后它**照样绿**（名字原样躺在 docstring 里），是证伪探针撞出来的假绿。
 

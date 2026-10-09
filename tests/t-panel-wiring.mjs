@@ -421,6 +421,9 @@ ok('转写结果行同样不给"改"（面板的「改」走的是插人工备�
 ok('漫画完成回调同样不给"改"，并有独立 kind 判定',
   noEditGuard && js.includes('漫画下载结果由任务生成，不能手改')
   && /const isJmcomicResult = m\.kind === 'jmcomic-result'/.test(js));
+ok('出图结果同样不给"改"，并有独立 kind 判定',
+  noEditGuard && js.includes('出图结果由任务生成，不能手改')
+  && /const isImageResult = m\.kind === 'image-result'/.test(js));
 ok('摘要行仍然给"删"（后端 DELETE 不拦摘要，只拦 PATCH）',
   /\+ '<button class="btn btn-small btn-danger" data-op="del"/.test(js)
   && !/title="摘要由模型生成，不能手改；可以删除"/.test(js));
@@ -436,6 +439,7 @@ ok('切换会话时清空查找词', /state\.chatQuery = '';/.test(js));
 ok('备注行有独立样式 .note-row', css.includes('.archive-table .note-row'));
 ok('转写结果行有独立样式 .transcript-row', css.includes('.archive-table .transcript-row'));
 ok('漫画完成回调行有独立样式 .jmcomic-result-row', css.includes('.archive-table .jmcomic-result-row'));
+ok('出图结果行有独立样式 .image-result-row', css.includes('.archive-table .image-result-row'));
 
 // ── 会话日志的横向滚动 ──
 // `.detail-pane` 只有 `overflow-y: auto`（横向是 visible），所以**折不了的长行**会被截掉

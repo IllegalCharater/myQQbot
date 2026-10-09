@@ -322,6 +322,35 @@ export async function saveConfig({ quiet = false } = {}) {
     };
   }
 
+  if (sec === 'image-gen') {
+    const g = c.imageGen || {};
+    // 钳制范围与 `media/image-gen/config.ts` 的 resolveImageGenConfig() **逐项一致**。
+    // 漂移的表现是"我填了 5000 却按别的数走"，而没人会去比这三处源码。
+    const key = val('#cfg-imagegen-apikey', '').trim();
+    const mib = 1048576;
+    patch.imageGen = {
+      enabled: chk('#cfg-imagegen-enabled', g.enabled === true),
+      baseUrl: val('#cfg-imagegen-baseurl', g.baseUrl || 'https://dashscope.aliyuncs.com').trim() || 'https://dashscope.aliyuncs.com',
+      model: val('#cfg-imagegen-model', g.model || 'qwen-image-2.1-turbo').trim() || 'qwen-image-2.1-turbo',
+      // 尺寸与风格层都**允许留空**（'' 是合法值：前者=自动，后者=不注入），所以不兜默认值。
+      size: val('#cfg-imagegen-size', g.size || '').trim(),
+      stylePrompt: val('#cfg-imagegen-style', g.stylePrompt || '').trim(),
+      negativePrompt: val('#cfg-imagegen-negative', g.negativePrompt || '').trim(),
+      promptExtend: chk('#cfg-imagegen-prompt-extend', g.promptExtend !== false),
+      watermark: chk('#cfg-imagegen-watermark', g.watermark === true),
+      timeoutMs: clampInt(val('#cfg-imagegen-timeout', g.timeoutMs), 30000, 900000, 300000),
+      maxPromptChars: clampInt(val('#cfg-imagegen-max-prompt', g.maxPromptChars), 50, 4000, 1200),
+      maxStyleChars: clampInt(val('#cfg-imagegen-max-style', g.maxStyleChars), 0, 500, 200),
+      maxRefImageBytes: clampInt(val('#cfg-imagegen-max-ref-mib', Math.round(Number(g.maxRefImageBytes || 8 * mib) / mib)), 1, 10, 8) * mib,
+      maxDownloadBytes: clampInt(val('#cfg-imagegen-max-download-mib', Math.round(Number(g.maxDownloadBytes || 20 * mib) / mib)), 1, 64, 20) * mib,
+      maxCallsPerChatPerHour: clampInt(val('#cfg-imagegen-chat-hourly', g.maxCallsPerChatPerHour), 1, 60, 3),
+      maxCallsPerDay: clampInt(val('#cfg-imagegen-daily', g.maxCallsPerDay), 1, 1000, 20),
+      // 密钥只有真的输入了新值才写回；'******' 是服务端脱敏后的回显掩码（照 sauceNao.apiKey）。
+      // 回传掩码会让真 Key 被覆盖成六个星号，而且**下次保存还会再覆盖一次**。
+      ...(key && key !== '******' ? { apiKey: key } : {})
+    };
+  }
+
   if (sec === 'python') {
     const p = c.python || {};
     // 空串是**合法值**，含义是"没配，走自动探测链"（见 core/python-runtime.ts），

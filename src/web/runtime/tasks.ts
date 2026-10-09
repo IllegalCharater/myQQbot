@@ -45,7 +45,7 @@ export interface TaskEntry {
    * - `'Orchestrator'` / `'OneBotClient'` → 类方法，套件在原型或真实例上解析；
    * - `'price-feed'` / `'jmcomic'` / `'pic-image-search'` → 模块导出；其余名字 → 类方法。
    */
-  on: 'Orchestrator' | 'OneBotClient' | 'VideoTranscriptionQueue' | 'HotSearchScheduler' | 'price-feed' | 'jmcomic' | 'pic-image-search';
+  on: 'Orchestrator' | 'OneBotClient' | 'VideoTranscriptionQueue' | 'ImageGenQueue' | 'HotSearchScheduler' | 'price-feed' | 'jmcomic' | 'pic-image-search';
   kind: 'method' | 'export';
   name: string;
 }
@@ -88,7 +88,7 @@ export interface LongTermTask {
 }
 
 /**
- * 9 个长期任务（原有 6 个 + 视频转写 worker + 每日热搜播报 + 搜图常驻 worker）。**不含** `wake.debounce`：那是每会话的唤醒防抖，按 §6.1 的分界线
+ * 10 个长期任务（原有 6 个 + 视频转写 worker + 每日热搜播报 + 搜图常驻 worker + 图像生成 worker）。**不含** `wake.debounce`：那是每会话的唤醒防抖，按 §6.1 的分界线
  * （生命周期是否长于一次请求或一次会话）属于局部计时器，`tests/t-tasks.mjs` 有一条
  * 反向断言专门钉它不在表内——设计稿 §6.3 的表里把它列为第 7 行"排除"是清点时的写法，
  * 不是表的一行。
@@ -255,5 +255,28 @@ export const LONG_TERM_TASKS: LongTermTask[] = [
       '（强杀 / 崩溃）会留下一个孤儿 Python 进程**，那一侧只能靠操作系统回收；Windows 上尤其如此，' +
       '因为 TerminateProcess 不走 worker 的 SIGTERM 处理器。另：解释器路径（python.path）在 spawn 时读取，' +
       '改它需要重启才生效，刻意不接 applyConfigPatch（与配置刷新路径只热刷价格表 / 热搜计划同一决定）。'
+  },
+  {
+    id: 'image-gen.worker',
+    // owner 同样是**实际持有那个 setTimeout 的文件**（`t-tasks.mjs` 会读它、要求里面有调度调用），
+    // 所以这里指 `image-gen/queue.ts` 而不是桶文件 —— 桶文件里没有调度。
+    owner: 'src/media/image-gen/queue.ts',
+    label: '图像生成单并发 worker（百炼 · 千问 Qwen-Image 同步接口 → 发图 → 回流入窗）',
+    // 与 transcription 同一条：队列**无条件装配**，能力开关由 enqueue 自己判（`imageGen.enabled`）。
+    // 不把闸门提到清单里的理由是可观察的：配置关着时工具/命令要回答"图像生成未启用"，
+    // 而没装上队列会让它回答"画图服务尚未启动" —— 后者把用户引向"是不是没启动成功"，
+    // 而真相只是没开这个功能。
+    enabledBy: null,
+    configRefresh: 'not-applicable',
+    unref: false,
+    holdsProcessWhilePending: true,
+    start: { on: 'ImageGenQueue', kind: 'method', name: 'start' },
+    stop: { on: 'ImageGenQueue', kind: 'method', name: 'stop' },
+    stopCancelsPending: true,
+    conformance: 'full',
+    note: '入队只排一个可取消的 0ms wake，worker 始终单并发（下游是同步出图接口，排队时间会吃掉' +
+      '总任务预算）。stop() 清 wake、把尚未开跑的任务判失败（errorCode SHUTDOWN）、abort 在途请求，' +
+      '并等 worker 收尾与临时目录清理；运行中持有进程，避免无信号退出时静默丢任务。' +
+      '队列本身不持有任何计时器之外的东西（不 spawn 子进程），所以没有"孤儿进程"那类代价。'
   }
 ];

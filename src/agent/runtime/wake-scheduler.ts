@@ -18,6 +18,7 @@ import type { SessionRegistry } from '../../chat/sessions.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
 import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
+import type { ImageGenQueue } from '../../media/image-gen/index.js';
 import type { HotSearchScheduler } from '../../media/hot-search/scheduler.js';
 import type { ChatRuntimeState, HistoryPolicyResult, ResponseDecision, ToolDefinition } from '../shared/types.js';
 
@@ -37,6 +38,7 @@ export interface WakeSchedulerDependencies {
   isAborted(): boolean;
   /** 能力型工具依赖，可选：缺失时对应工具自行返回友好错误。 */
   transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  imageGen?: Pick<ImageGenQueue, 'enqueue'>;
   hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
 }
 
@@ -51,6 +53,7 @@ export class WakeScheduler {
   readonly toolDefs: ToolDefinition[];
   readonly emit: AppEmit;
   readonly transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  readonly imageGen?: Pick<ImageGenQueue, 'enqueue'>;
   readonly hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
   readonly runtimeState: RuntimeStateRegistry;
   readonly chatStates: Map<string, ChatRuntimeState>;
@@ -72,6 +75,7 @@ export class WakeScheduler {
     this.toolDefs = deps.toolDefs;
     this.emit = deps.emit;
     this.transcription = deps.transcription;
+    this.imageGen = deps.imageGen;
     this.hotSearch = deps.hotSearch;
     this.runtimeState = new RuntimeStateRegistry(this.sender);
     this.chatStates = this.runtimeState.states;

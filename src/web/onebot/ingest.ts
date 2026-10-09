@@ -21,8 +21,9 @@ import {
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { OneBotEvent } from '../../qq/types.js';
 import type { SendQueue } from '../../qq/sender.js';
-import { parseTranscriptionCommand } from '../../media/transcription/index.js';
+import { handleSlashCommand, isSlashCommand } from './slash-commands.js';
 import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
+import type { ImageGenQueue } from '../../media/image-gen/index.js';
 // ⚠️ 别名不是洁癖：`qq/onebot.js` 已经导出一个同名的 `extractMediaFromSegments`（那是
 // **通用 OneBot 协议解析**：图片、表情、视频段本身），而这里要的是**平台卡片识别**
 // （某某站的小程序卡片/分享卡里那个链接）。两者是不同的事、都由本文件调用，
@@ -90,13 +91,14 @@ export interface Ingest {
   handle(event: OneBotEvent): Promise<void>;
 }
 
-export function createIngest({ onebot, store, sender, orchestrator, transcription, emit, getConfig, log }: {
+export function createIngest({ onebot, store, sender, orchestrator, transcription, imageGen, emit, getConfig, log }: {
   onebot: OneBotClient;
   store: ChatStore;
   sender: Pick<SendQueue, 'sendTextBatch'>;
   /** 只用到 `onIncoming`——跨模块方法面走端口，不依赖 Orchestrator 具体类。 */
   orchestrator: AgentControlPort;
   transcription: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  imageGen: Pick<ImageGenQueue, 'enqueue'>;
   emit: AppEmit;
   getConfig: () => AppConfig;
   log: (...args: unknown[]) => void;
@@ -265,8 +267,13 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
 
     if (!text && !media.length) return;
     const chatKey = `${kind}:${id}`;
-    const isTranscriptionCommand = /^\/转写(?:\s|\[视频\]|$)/u.test(String(commandText || '').trim());
-    if (isTranscriptionCommand && repliedMedia.length) {
+    // 斜杠命令（`/转写`、`/画` …）是**确定性快路径**：不进 LLM、不占一次唤醒。
+    // 判定、解析、入队与即时回执**全在 `web/onebot/slash-commands.ts` 一处**（那张表是唯一事实源），
+    // 这里只用同一个判据决定两件事：要不要并入引用附件、要不要落成已读历史。
+    // 判据若在这里另写一份，漂移的表现是"命令没被认出来、消息进了 LLM"，不报任何错。
+    const slashCommand = isSlashCommand(commandText);
+    if (slashCommand && repliedMedia.length) {
+      // 引用的那条消息里的附件要并进来：`/转写` 靠它取引用视频，`/画` 靠它取参考图（图生图）。
       media.push(...repliedMedia);
       addVideoAliases(media);
     }
@@ -281,30 +288,24 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       text: text || '[图片]',
       reply,
       media,
-      wakeEligible: !isTranscriptionCommand
+      wakeEligible: !slashCommand
     });
     emit(EVENTS.chatUpdate, chatKey);
 
-    // `/转写` 是确定性命令，不进入 LLM。先把它作为已读存档保留，再只做校验、入队和即时回执；
-    // FFmpeg 与 ASR 极速版请求全部在单并发后台 worker 里运行，不占住 OneBot 入站处理链。
-    if (isTranscriptionCommand) {
-      try {
-        const url = parseTranscriptionCommand(commandText, media);
-        if (!url) return;
-        const job = transcription.enqueue({
+    // 命令消息到此为止：它已经作为**已读存档**留在会话里了，处理完就返回、不惊动模型。
+    // 出图/转写这类要几十秒的活由各自的单并发后台队列接着干，不占住 OneBot 的入站处理链。
+    if (slashCommand) {
+      await handleSlashCommand(
+        {
           chatKey,
-          url,
+          // 用 `commandText` 而不是 `text`：后者可能已被合并转发展开整份替换过。
+          text: commandText,
+          media,
           replyToMessageId: typeof event.message_id === 'string' || typeof event.message_id === 'number'
             ? event.message_id : null
-        });
-        await sender.sendTextBatch(chatKey, `已开始处理（任务 ${job.id.slice(0, 8)}）`, {
-          replyToMessageId: event.message_id
-        });
-      } catch (error) {
-        await sender.sendTextBatch(chatKey, error instanceof Error ? error.message : '转写任务创建失败', {
-          replyToMessageId: event.message_id
-        }).catch(() => log('[transcribe] task=unassigned code=ONEBOT_SEND_FAILED'));
-      }
+        },
+        { transcription, imageGen, sender, log }
+      );
       return;
     }
 

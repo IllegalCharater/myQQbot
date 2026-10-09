@@ -591,6 +591,76 @@ export function renderTranscriptionSection(c) {
     <div class="hint">转写按次计费，所以模型自主调用时受这两项限制（<code>/转写</code> 命令不受限）。超限时工具直接失败并说明原因。</div>`;
 }
 
+export function renderImageGenSection(c) {
+  const g = c.imageGen || {};
+  const mib = 1024 * 1024;
+  const models = ['qwen-image-2.1-turbo', 'qwen-image-2.1-pro', 'qwen-image-3.0', 'qwen-image-3.0-pro'];
+  const currentModel = String(g.model || 'qwen-image-2.1-turbo');
+  // 配置里可能写着下拉里没有的模型名（手改过 config.json，或新模型还没进这份清单）。
+  // 把它原样补进下拉，否则"保存一次设置"就会把它悄悄改回默认值 —— 用户不会知道是自己那次保存干的。
+  const options = models.includes(currentModel) ? models : [currentModel, ...models];
+  const supportsNegative = currentModel.startsWith('qwen-image-3.0');
+  return `
+    <h3>图像生成</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-imagegen-enabled" ${g.enabled === true ? 'checked' : ''} />
+      <label for="cfg-imagegen-enabled">启用出图：QQ 命令 <code>/画 &lt;描述&gt;</code>，以及模型自主调用 <code>generate_image</code></label></div>
+    <div class="hint" style="margin-bottom:10px">出图<strong>按张计费</strong>，所以默认关闭。图片由后台队列直接发进群；模型自主调用时还会多一次运行，让它顺口补一句。</div>
+
+    <h3>阿里云百炼</h3>
+    <div class="field"><label>API Key</label>
+      <input type="password" id="cfg-imagegen-apikey" value="${g.hasApiKey ? '******' : ''}"
+        placeholder="${g.hasApiKey ? '已配置；留空不修改' : '未配置'}" autocomplete="new-password" />
+      <div class="hint">也可以留空，改用服务端环境变量 <code>DASHSCOPE_API_KEY</code>。浏览器不会读取原值。</div></div>
+    <div class="field"><label>接口地址</label>
+      <input type="text" id="cfg-imagegen-baseurl" value="${esc(g.baseUrl || '')}" placeholder="https://dashscope.aliyuncs.com" />
+      <div class="hint">默认用官方通用域名；也可以填业务空间专属域名（<code>https://{业务空间ID}.cn-beijing.maas.aliyuncs.com</code>），
+        或直接把整条接口地址粘进来（会在 <code>/api/v1/</code> 处截断）。<strong>模型、地址与 API Key 必须同一地域</strong>，跨地域调用会失败。</div></div>
+    <div class="field-row">
+      <div class="field"><label>模型</label>
+        <select id="cfg-imagegen-model">${options.map((m) => `<option value="${esc(m)}" ${m === currentModel ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>
+        <div class="hint">2.1-turbo 综合表现与价格最划算；3.0 系列支持负向提示词。</div></div>
+      <div class="field"><label>尺寸（留空 = 自动）</label>
+        <input type="text" id="cfg-imagegen-size" value="${esc(g.size || '')}" placeholder="1024*1024" />
+        <div class="hint">格式 <code>宽*高</code>（星号，不是字母 x；填了 x 也会自动换成星号）。像素面积需在 512×512 ～ 2048×2048 之间。</div></div>
+    </div>
+
+    <h3>画面风格</h3>
+    <div class="field"><label>风格提示词（留空 = 不加）</label>
+      <input type="text" id="cfg-imagegen-style" value="${esc(g.stylePrompt || '')}" placeholder="例如：动漫赛璐璐风格，柔光，高质量" style="width:100%" />
+      <div class="hint">这一句会<strong>拼在每次出图描述的最后</strong>（模型自己写的是"画什么"，这一句管"怎么画"），改一处全局生效，<code>/画</code> 与模型调用都吃它。
+        它会算进整体提示词，所以别写太长。<strong>不要在这里写"你想让模型说的话"</strong> —— 它只发给画图模型，模型看不到它。</div></div>
+    <div class="field-row">
+      <div class="field"><label>负向提示词（仅 3.0 系列）</label>
+        <input type="text" id="cfg-imagegen-negative" value="${esc(g.negativePrompt || '')}" ${supportsNegative ? '' : 'disabled'} placeholder="不想出现的元素" style="width:100%" />
+        <div class="hint" id="cfg-imagegen-negative-hint">${supportsNegative
+          ? '只有 qwen-image-3.0 / qwen-image-3.0-pro 认这个参数；换成别的模型时它不会被发送。'
+          : '当前选的模型不支持这个参数，它<strong>不会</strong>被发送（发了会被接口判 400）。想用请把模型换成 3.0 系列。'}</div></div>
+    </div>
+    <div class="field-row">
+      <div class="checkbox-row"><input type="checkbox" id="cfg-imagegen-prompt-extend" ${g.promptExtend !== false ? 'checked' : ''} />
+        <label for="cfg-imagegen-prompt-extend">开启提示词智能改写（官方建议开启）</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-imagegen-watermark" ${g.watermark === true ? 'checked' : ''} />
+        <label for="cfg-imagegen-watermark">给生成的图片加水印</label></div>
+    </div>
+
+    <h3>限制</h3>
+    <div class="field-row">
+      <div class="field"><label>出图超时（毫秒，30000～900000）</label><input type="number" id="cfg-imagegen-timeout" min="30000" max="900000" step="1000" value="${esc(g.timeoutMs ?? 300000)}" /></div>
+      <div class="field"><label>画面描述上限（字符）</label><input type="number" id="cfg-imagegen-max-prompt" min="50" max="4000" value="${esc(g.maxPromptChars ?? 1200)}" /></div>
+      <div class="field"><label>风格提示词上限（字符）</label><input type="number" id="cfg-imagegen-max-style" min="0" max="500" value="${esc(g.maxStyleChars ?? 200)}" /></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>参考图上限（MiB，最高 10）</label><input type="number" id="cfg-imagegen-max-ref-mib" min="1" max="10" value="${esc(Math.round(Number(g.maxRefImageBytes || 8 * mib) / mib))}" /></div>
+      <div class="field"><label>结果图上限（MiB）</label><input type="number" id="cfg-imagegen-max-download-mib" min="1" max="64" value="${esc(Math.round(Number(g.maxDownloadBytes || 20 * mib) / mib))}" /></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>每群每小时上限</label><input type="number" id="cfg-imagegen-chat-hourly" min="1" max="60" value="${esc(g.maxCallsPerChatPerHour ?? 3)}" /></div>
+      <div class="field"><label>全局每日上限</label><input type="number" id="cfg-imagegen-daily" min="1" max="1000" value="${esc(g.maxCallsPerDay ?? 20)}" /></div>
+    </div>
+    <div class="hint">这两项<strong>同时约束模型自主调用与 <code>/画</code> 命令</strong>（这一点与转写不同：转写命令不受限）。
+      理由是出图按张计费，而 <code>/画</code> 是群里任何人都能敲的。超限时工具与命令都会直接说明原因。</div>`;
+}
+
 export function renderPythonSection(c) {
   const p = c.python || {};
   return `

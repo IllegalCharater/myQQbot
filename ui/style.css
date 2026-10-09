@@ -521,6 +521,10 @@ body {
 /* 漫画下载完成回调：文件已经上传，这一行只是唤醒 Agent 的机器结果。 */
 .archive-table .jmcomic-result-row td { background: rgba(120,200,140,.07); }
 .archive-table .jmcomic-result-row .w { color: var(--green); font-style: italic; }
+/* 出图结果（kind:'image-result'）：与上面三条同属异步回流，换一种色调区分 ——
+   **注意图片本身是单独一条 `我：[图片]` 的发送记录**，这一行讲的是"画得怎么样了"。 */
+.archive-table .image-result-row td { background: rgba(150,140,220,.08); }
+.archive-table .image-result-row .w { color: var(--accent); font-style: italic; }
 .archive-table .ops { white-space: nowrap; width: 1%; }
 .archive-table .ops .btn { padding: 2px 7px; font-size: 11.5px; }
 

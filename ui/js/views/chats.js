@@ -352,7 +352,8 @@ export function renderChatMessages() {
       const who = m.kind === 'digest' ? '摘要'
         : (m.kind === 'note' ? '备注'
           : (m.kind === 'transcript' ? '转写'
-            : (m.kind === 'jmcomic-result' ? '漫画' : (m.self ? '我' : (m.senderName || '某人')))));
+            : (m.kind === 'jmcomic-result' ? '漫画'
+              : (m.kind === 'image-result' ? '图像' : (m.self ? '我' : (m.senderName || '某人'))))));
       let warn = `确定要永久删除这条存档吗？\n\n${fmtTime(m.ts)}  ${who}：${snip}\n\n`;
       warn += '· 会在 data/messages/ 下留一份 .panel.bak 备份（只保留最近一次）\n';
       // 人工备注是从没收发过的记录，对它说"原文可能仍在冷归档"是误导
@@ -472,9 +473,10 @@ export function chatMsgRowHtml(m, opts) {
   const isNote = m.kind === 'note';
   const isTranscript = m.kind === 'transcript';
   const isJmcomicResult = m.kind === 'jmcomic-result';
+  const isImageResult = m.kind === 'image-result';
   const who = isDigest ? '摘要'
     : (isNote ? '备注' : (isTranscript ? '转写'
-      : (isJmcomicResult ? '漫画' : (m.self ? '我' : esc(m.senderName)))));
+      : (isJmcomicResult ? '漫画' : (isImageResult ? '图像' : (m.self ? '我' : esc(m.senderName))))));
   // 摘要由模型生成，手改会让它与 digest.summary/count 对不上（后端也会 400）。
   // 这里直接不给「改」，而不是给一个点了报错的按钮。
   // 但「删」必须给：删掉一条摘要本身完全合法 —— 后端只拦 PATCH，不拦 DELETE，
@@ -483,8 +485,8 @@ export function chatMsgRowHtml(m, opts) {
   //
   // 转写结果同样不给「改」：面板的「改」走的是插人工备注那条路，会把一段机器识别出的
   // 正文悄悄变成一条手写批注。
-  const ops = (isDigest || isTranscript || isJmcomicResult
-    ? `<span class="muted" title="${isTranscript ? '转写结果由任务生成，不能手改' : (isJmcomicResult ? '漫画下载结果由任务生成，不能手改' : '摘要由模型生成，不能手改')}">—</span>`
+  const ops = (isDigest || isTranscript || isJmcomicResult || isImageResult
+    ? `<span class="muted" title="${isTranscript ? '转写结果由任务生成，不能手改' : (isJmcomicResult ? '漫画下载结果由任务生成，不能手改' : (isImageResult ? '出图结果由任务生成，不能手改' : '摘要由模型生成，不能手改'))}">—</span>`
     : '<button class="btn btn-small" data-op="edit" title="改这条的正文">改</button>')
     + '<button class="btn btn-small btn-danger" data-op="del" title="真删除这条存档">删</button>';
   // 顶部历史印象块只给预览（previewChars）：一条摘要正文可达 4000 字，整段铺在最上面
@@ -496,7 +498,7 @@ export function chatMsgRowHtml(m, opts) {
       ? `${esc(raw.slice(0, previewChars))}…`
       : esc(raw));
   return `
-    <tr class="${m.read ? '' : 'unread'}${isDigest ? ' digest-row' : ''}${isNote ? ' note-row' : ''}${isTranscript ? ' transcript-row' : ''}${isJmcomicResult ? ' jmcomic-result-row' : ''}" data-midrow="${m.id}">
+    <tr class="${m.read ? '' : 'unread'}${isDigest ? ' digest-row' : ''}${isNote ? ' note-row' : ''}${isTranscript ? ' transcript-row' : ''}${isJmcomicResult ? ' jmcomic-result-row' : ''}${isImageResult ? ' image-result-row' : ''}" data-midrow="${m.id}">
       <td class="t">${fmtTime(m.ts)}</td>
       <td class="w ${m.self ? 'self' : ''}">${who}</td>
       <td class="text">${replyPrefixHtml(m)}${body}${badge}${m.read ? '' : ' <span class="unread-pill">未读</span>'}</td>

@@ -292,7 +292,15 @@ export class OneBotClient {
     return this.sendSegments(kind, id, segments);
   }
 
-  async sendSticker(kind: MessageKind, id: unknown, imageUrl: unknown, { replyToMessageId = null, atUserId = null }: SendOptions = {}) {
+  /**
+   * 发送一张图片（本机绝对路径或公网 URL）。返回 OneBot 响应 data（含 message_id）。
+   *
+   * 表情与"模型画出来的图"发的是**同一种消息段**，所以只有这一份实现；
+   * `sendSticker` 只是它的旧名字（委托过来），保留是因为既有调用点都按那个语义读得通。
+   * 分开命名是为了让调用点自己说清楚发的是什么 —— 在 sender.ts 里出现
+   * `sendSticker(…一张生成的画…)` 是会让人停下来重读三遍的那种代码。
+   */
+  async sendImage(kind: MessageKind, id: unknown, file: unknown, { replyToMessageId = null, atUserId = null }: SendOptions = {}) {
     const segments: OneBotSegment[] = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
       const rid = String(replyToMessageId).trim();
@@ -304,8 +312,12 @@ export class OneBotClient {
       if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
       segments.push({ type: 'at', data: { qq: at } });
     }
-    segments.push({ type: 'image', data: { file: String(imageUrl) } });
+    segments.push({ type: 'image', data: { file: String(file) } });
     return this.sendSegments(kind, id, segments);
+  }
+
+  async sendSticker(kind: MessageKind, id: unknown, imageUrl: unknown, options: SendOptions = {}) {
+    return this.sendImage(kind, id, imageUrl, options);
   }
 
   async sendPoke(kind: MessageKind, id: unknown, targetUserId: unknown) {
