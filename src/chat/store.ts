@@ -21,7 +21,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../core/config.js';
 import type {
-  AsyncResultStatus, ChatMessage, ChatReply, DigestRecord, ImageResultStatus, JmcomicStatus, MediaEntry
+  AsyncResultStatus, ChatMessage, ChatReply, DigestRecord, ImageResultStatus, JmcomicStatus, MediaEntry,
+  TranscriptStatus
 } from './types.js';
 
 interface ChatState {
@@ -692,19 +693,37 @@ export class ChatStore {
   /**
    * 追加一条**转写结果**（kind:'transcript'）：异步任务的产物，不是群友说的话。
    *
+   * **成功与失败都走这一条**（`status` 两态，与出图/漫画同形，2026-10-10 统一）：识别失败时
+   * 同样落成一条**未读**条目，由模型自己开口交代，而不是队列代它往群里贴一句「转写失败」
+   * —— 代发的后果实测过：消息写进 `session.sent`、这一轮按发送记录收尾成 `done`，
+   * 模型以为"群里已经说过了"于是不再开口。
+   *
    * 落库的四条不变量在 `appendAsyncResult` 里；这里只管这条自己的正文与结构化事实。
+   * 标签按 `status` 分（【转写结果】/【转写失败】，见 prompt-builder）：看到失败标签，
+   * 模型要做的事与看到成功标签不同（交代一句 vs 转述内容），压成一句它就分不出来。
    */
-  appendTranscript(chatKey: string, { text, ts = Date.now(), truncated = false, chars = 0 }: {
+  appendTranscript(chatKey: string, { text, ts = Date.now(), truncated = false, chars = 0, status = 'sent', reason = '' }: {
     text?: unknown; ts?: number; truncated?: boolean; chars?: number;
+    status?: TranscriptStatus; reason?: unknown;
   } = {}) {
     const body = String(text ?? '');
+    const why = String(reason ?? '').trim().slice(0, 200);
+    // 失败条目的正文是"给群友看的那句话"：存档面板那一列只印 `text`（不带 prompt-builder
+    // 的【】标记），所以它必须自己说得清是哪件事没成。
+    const failed = status === 'failed';
     return this.appendAsyncResult(chatKey, {
       kind: 'transcript',
       senderName: '转写',
-      text: body,
+      text: failed ? `视频转写失败${why ? `：${why}` : ''}` : body,
       ts,
       extra: {
-        transcript: { chars: Math.max(0, Number(chars) || body.length), truncated: truncated === true }
+        transcript: {
+          // 失败时没有正文，`chars` 只能是 0（写 body.length 会谎报"原文 0 字"以外的东西）。
+          chars: failed ? 0 : Math.max(0, Number(chars) || Array.from(body).length),
+          truncated: failed ? false : truncated === true,
+          status,
+          reason: why
+        }
       }
     });
   }

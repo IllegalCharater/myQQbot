@@ -239,8 +239,33 @@ const iState = p1.indexOf('【此刻状态】');
 const iDig = p1.indexOf('【历史印象');
 const iPast = p1.indexOf('【过去状态】');
 const iTrig = p1.indexOf('【本次唤醒】');
-ok('段序：此刻状态 → 历史印象 → 过去状态 → 本次唤醒',
-  iState >= 0 && iDig > iState && iPast > iDig && iTrig > iPast, `${iState}/${iDig}/${iPast}/${iTrig}`);
+const iTime = p1.indexOf('【当前时间】');
+const iDecision = p1.indexOf('【本轮决策】');
+// 段序 = **稳定度降序**，判据是前缀缓存（各家 OpenAI 兼容端点都按"最长公共前缀"命中，
+// 第一处不同点之后全部作废）。所以**这条断言守的不是"读起来顺"，而是那个取舍**：
+// 谁若按可读性把它重排回去，这里会红。此刻状态（分钟级）与当前时间（秒级）必须在
+// 【本次唤醒】之前、且**在【过去状态】之后**——放在第一行的那种排法会把整段前缀作废。
+ok('段序：历史印象 → 过去状态 → 此刻状态 → 当前时间 → 本次唤醒（稳定度降序）',
+  iDig >= 0 && iPast > iDig && iState > iPast && iTime > iState && iTrig > iTime,
+  `${iDig}/${iPast}/${iState}/${iTime}/${iTrig}`);
+// 【本轮决策】固定不变，本可以搬到最前吃进缓存，但刻意留在末尾（紧贴生成位置的提醒，
+// 而它只有一百来字）—— 这条把那个取舍也钉住。
+ok('【本轮决策】仍在最末尾（固定段也不为缓存让位）', iDecision > iTrig, `${iTrig}/${iDecision}`);
+// 另一半：慢变的【可用表情包】与半变的【记忆】必须排在**每轮都变的【过去状态】之前** ——
+// 它们原先排在【本次唤醒】之后，那样永远进不了缓存前缀（见 buildUserPrompt 的段序注释）。
+{
+  const rich = {
+    ...mkCtx(CK, 80, {}),
+    memory: { formatForPrompt: () => '- 小强（10005）：爱发「在吗」' },
+    stickerEntries: [{ id: 'st-1', desc: '开心', localNote: '开心' }]
+  };
+  const p3 = buildUserPrompt(rich);
+  const iSticker = p3.indexOf('【可用表情包】');
+  const iMem = p3.indexOf('【记忆】');
+  const iPast3 = p3.indexOf('【过去状态】');
+  ok('表情目录（慢变）→ 记忆（半变）→ 过去状态（每轮变）',
+    iSticker >= 0 && iMem > iSticker && iPast3 > iMem, `${iSticker}/${iMem}/${iPast3}`);
+}
 ok('摘要正文进了提示词', p1.includes('那天主要在聊天气'));
 ok('已注入【历史印象】的摘要不再于【过去状态】重复出现', !p1.includes('【历史摘要'));
 ok('pastStateCount 反映去重后真正注入的历史条数',

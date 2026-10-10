@@ -26,20 +26,47 @@ export interface OneBotFileClient {
 }
 
 /**
- * 结果回流端口（`assisted` 模式）。
+ * 转写结果的结局。
+ *
+ * **只有两态，没有 `unsent`** —— 这一点与出图/漫画刻意不同，判据是"交付物是不是文件"：
+ * 那两条的交付物是**由队列自己发出去的文件**，所以"做好了但没能发出去"是一件真实、
+ * 且与"没做成"完全不同的事（那份东西**可能已经在群里了**）。转写这条路的交付物是**文本**，
+ * 而 assisted 模式下开口的是**模型**：结果要么交到回流端口（= 条目存在 = 模型会看到它），
+ * 要么无人接单 —— 而"无人接单"时队列退回 standalone 的投递行为（自己贴文本），
+ * **压根不产生条目**，所以那个中间态在这条路上既不可达、也无处可记。
+ * 少了的那一档由**成员的缺席**表达（同 `EngineLimits.minSimilarity` 与 `ImageSourceResult.time` 那条规矩）。
+ *
+ * 三态在出图那边**不能合成一个"失败"**；这里反过来 —— **不许为了对齐形状凭空补一个 `unsent`**：
+ * 一个没有人能产生的取值，读代码的人分不清它是"暂未使用"还是"忘了实现"。
+ */
+export type TranscriptStatus = 'sent' | 'failed';
+
+/**
+ * 结果回流端口（`assisted` 模式）：**成功与失败都走它**。
  *
  * 为什么是**注入的函数**而不是让队列直接写存档：`media` 与 `chat`/`agent` 同属 T1、
  * 严格互斥，队列不能 import `ChatStore` 或 `Orchestrator`。装配根（`web/app.ts`）
- * 把"落存档 → 入窗 → 触发一次运行"接过去。与 `jmcomic` 的 `store: { appendSelf }`
- * 是同一个形态：最小结构化端口，没有 `instanceof`、没有品牌。
+ * 把"落存档 → 入窗 → 触发一次运行"接过去。与出图/漫画两条同款：最小结构化端口，
+ * 没有 `instanceof`、没有品牌。
  *
- * `text` 是**已被截断**（到 `resultMaxChars`）的正文；`chars` 是**原文全长**。
+ * **失败也走这条**（`status: 'failed'`，`text` 为空串、`reason` 带原因）：这样模型才有机会
+ * 用自己的话给群友一个交代，而不是由队列代它贴一句机器文案 —— 代发的后果实测过：
+ * 消息写进 `session.sent` 之后这一轮按发送记录收尾成 `done`，模型以为"群里已经说过了"
+ * 于是不再开口（见 `prompt-catalog` 的 `toolProtocol` 第 8 条与 `Agent` 的收尾判定）。
+ * 只有"确定没人接"时才退回贴文案：端口缺失或抛错。
+ *
+ * `sent` 时 `text` 是**已被截断**（到 `resultMaxChars`）的正文、`chars` 是**原文全长**；
+ * `failed` 时 `chars` / `truncated` 无意义（队列一律给 0 / `false`）。
  */
 export type TranscriptSink = (input: {
   chatKey: string;
+  status: TranscriptStatus;
+  /** 识别正文（`sent`）；失败时为空串 —— 失败条目承载的是"没转成"这个事实，没有正文可载。 */
   text: string;
   truncated: boolean;
   chars: number;
+  /** `failed` 时给模型看的原因（一句话）；`sent` 时为空串。 */
+  reason: string;
   replyToMessageId?: string | number | null;
 }) => void | Promise<void>;
 
@@ -73,6 +100,8 @@ export interface InternalJob {
    *   确定性、零 LLM 成本，也是既有断言守着的路径。
    * - `assisted`（模型自主调用 `transcribe_video` 的路径）：结果交给注入的回流端口，
    *   由它落成一条存档条目并唤醒 Agent，**由模型自己决定说什么**。队列不再贴文本。
+   *   **只有"确定没人接"时才退回 `standalone` 的行为**：没装回流端口、或端口抛错
+   *   （那时再说一遍群里已经说过的话，也比什么都不说好）。
    *
    * 归一化只发生在 `enqueue` 一处，投递侧保证拿到的是确定值。
    */
@@ -123,6 +152,6 @@ export interface QueueDeps {
   getConfig: () => AppConfig;
   log?: (...args: unknown[]) => void;
   operations?: QueueOperations;
-  /** 见 `TranscriptSink`。缺省时 assisted 任务只记一条日志、不投递。 */
+  /** 见 `TranscriptSink`。缺省时 assisted 任务退回 standalone 的投递行为（贴文本 / 贴失败文案）。 */
   deliverTranscript?: TranscriptSink | null;
 }

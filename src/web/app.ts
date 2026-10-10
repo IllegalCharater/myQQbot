@@ -16,6 +16,7 @@ import { initPriceFeed, stopPriceFeed } from '../llm/price-feed.js';
 import { initJmcomicQueue, stopJmcomicQueue, enqueueJmcomicDownload } from '../media/jmcomic/index.js';
 import type { JmcomicCompletion } from '../media/jmcomic/index.js';
 import { VideoTranscriptionQueue } from '../media/transcription/index.js';
+import type { TranscriptStatus } from '../media/transcription/index.js';
 import { ImageGenQueue } from '../media/image-gen/index.js';
 import type { ImageResultStatus } from '../media/image-gen/index.js';
 import { createEventBus } from '../core/util.js';
@@ -103,10 +104,14 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     emit(EVENTS.chatUpdate, chatKey);
   }
 
-  function deliverTranscript({ chatKey, text, truncated, chars }: {
-    chatKey: string; text: string; truncated: boolean; chars: number;
+  // 转写结果的回流。**成功与失败都走这一条**（`status` 两态，与出图/漫画同形，2026-10-10 统一）：
+  // 识别失败时同样落成一条未读条目，让模型自己给群友一句交代 —— 队列不再代它往群里贴
+  // 「转写失败」，否则那一轮会按"已经发过消息"收尾成 done，模型以为群里已经知道了。
+  function deliverTranscript({ chatKey, text, status, truncated, chars, reason }: {
+    chatKey: string; text: string; status: TranscriptStatus;
+    truncated: boolean; chars: number; reason: string;
   }) {
-    deliverAsyncResult(chatKey, store.appendTranscript(chatKey, { text, truncated, chars }));
+    deliverAsyncResult(chatKey, store.appendTranscript(chatKey, { text, status, truncated, chars, reason }));
   }
 
   // 漫画队列的完成回流与转写同形：文件仍由队列确定性上传；OneBot 确认接收后，

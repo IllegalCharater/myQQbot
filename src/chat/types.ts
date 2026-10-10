@@ -19,11 +19,27 @@ export interface DigestRecord extends Record<string, unknown> {
  * 投递结果——那会让投递顺序变成提示词的一部分。
  */
 export interface TranscriptRecord extends Record<string, unknown> {
-  /** 识别出的原文总字符数；条目正文被截断时它大于正文长度。 */
+  /** 识别出的原文总字符数；条目正文被截断时它大于正文长度。失败条目为 0。 */
   chars: number;
-  /** 条目正文是否只是原文开头（原文超过单条上限）。 */
+  /** 条目正文是否只是原文开头（原文超过单条上限）。失败条目恒为 `false`。 */
   truncated: boolean;
+  /** 结局。**只有两态**（见下 `TranscriptStatus`）。字段缺席 = 本改动之前的存档，按 `sent` 处理。 */
+  status?: TranscriptStatus;
+  /** `failed` 时给模型看的原因（一句话）；`sent` 时为空串。 */
+  reason?: string;
 }
+
+/**
+ * 转写的结局：**只有 `sent` / `failed` 两态，没有 `unsent`**。
+ *
+ * 判据是**交付物是不是文件**：出图与漫画的交付物是队列自己发出去的文件，所以"做好了但没能
+ * 发出去"（`unsent`）是一件真实、且与"没做成"完全不同的事 —— 那份东西**可能已经在群里了**。
+ * 转写的交付物是**文本**：它要么交到回流端口（= 条目存在 = 模型会看到），要么无人接单 ——
+ * 而"无人接单"时队列自己把文本贴进群，**压根不产生条目**，那个中间态无处可记。
+ * 与 `media/transcription/types.ts` 的 `TranscriptStatus` 逐字同值（`chat` 与 `media` 同属 T1，
+ * 不能互相 import）。**不许为了对齐形状凭空补一个 `unsent`**。
+ */
+export type TranscriptStatus = 'sent' | 'failed';
 
 /**
  * 异步任务结果的**三态结局**（`sent` 成功 / `unsent` 做成了但没能确认送达 / `failed` 没做成）。

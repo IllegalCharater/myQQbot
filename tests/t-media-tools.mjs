@@ -115,6 +115,11 @@ ok('工具结果点名禁掉系统状态措辞（"已派上/已安排/正在处�
 ok('工具结果仍然交代了"现在别评价、结果稍后进上下文、届时必须开口"',
   byUrl.content.includes('不要评价') && byUrl.content.includes('【转写结果】')
   && byUrl.content.includes('你必须开口'), byUrl.content);
+// 失败也回流（2026-10-10 统一）之后，回执必须提到它：不说的话模型看到【转写失败】会以为
+// 那是系统故障、自己插不上话 —— 而那正是它唯一该开口的时刻。两面（description 与 receipt）
+// 都要有，理由同"参数是 JSON 只写一处"反过来的那条：同一件事的两个面分居两地就调不齐。
+ok('工具结果也交代了失败那条路（【转写失败】同样由模型开口）',
+  byUrl.content.includes('【转写失败】'), byUrl.content);
 
 // 本轮消息（窗口内）
 const inBatch = [{ mid: '-2040798711', media: [{ kind: 'video', url: 'https://b23.tv/abc' }] }];

@@ -17,6 +17,12 @@
 //
 // `job.mode` 是**唯一**分岔点（见 `types.ts` 的 `InternalJob.mode`）：`standalone` 自己
 // 往群里贴文本；`assisted` 交给注入的回流端口，由模型自己决定说什么。
+//
+// **成功与失败都走这条分岔**（2026-10-10 统一，与出图/漫画同形）：assisted 下失败也交给
+// 回流端口（`status:'failed'`），由模型自己给群友一句交代。只有"确定没人接"时才退回
+// `standalone` 的行为 —— 缺端口（`NO_DELIVER_SINK`）或端口抛错（`DELIVER_FAILED`）。
+// 那种退回在成功与失败两条路上都要做：静默丢弃等于群友什么都等不到，而模型也不知道
+// 有这条结果（`#deliverAssisted` / `#reportFailure` 的返回值就是给调用方判这个的）。
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -219,6 +225,10 @@ export class VideoTranscriptionQueue {
   /**
    * 失败收尾。核心**关停时也照样调它**（那是"这个任务确实没跑成"，状态必须记），
    * 而"要不要发那句话"是这里看的 —— 关停途中不发失败文案：那是我们主动取消的。
+   *
+   * 谁开口与出图那条同一条规矩（见文件头的「两条投递路径」）：assisted 下先交给回流端口，
+   * **由模型自己交代**；只有没人接（缺端口 / 端口抛错）才退回往群里贴一句。
+   * `standalone`（`/转写` 命令路径）压根没有模型，照旧直接贴。
    */
   async #fail(job: InternalJob, error: unknown, elapsedMs: number): Promise<void> {
     const safe = userError(error);
@@ -226,11 +236,47 @@ export class VideoTranscriptionQueue {
       failedStage: safe.stage, errorCode: safe.code, elapsedMs
     });
     if (this.#stopping) return;
+    if (job.mode === 'assisted' && await this.#reportFailure(job, safe)) return;
     await this.#sender.sendTextBatch(job.chatKey, `转写失败（${safe.stage}）：${safe.userMessage}`, {
       replyToMessageId: job.replyToMessageId
     }).catch((sendError) => {
       this.#log(`[transcribe] task=${job.id} code=${safeErrorCode(sendError)}`);
     });
+  }
+
+  /**
+   * 失败也走**同一条回流通道**告诉模型（与出图/漫画同形，2026-10-10 统一）。
+   *
+   * 为什么必须回流而不是队列代它开口：这条路上模型只调了一次工具就结束本轮，随后那次运行
+   * 才是它说话的地方。队列代说，它就会以为"群里已经说过了"而不再开口 —— 症状看起来是
+   * "任务没有正常结束"，其实是**任务被代发伪装成了已收尾**（这条在转写上实测过）。
+   *
+   * 返回 `true` = 已经有人接了（模型会在下一次运行里开口）；`false` = 没人接，
+   * 调用方退回贴文案。**两条退路都要如实说清**：缺端口（`NO_DELIVER_SINK`）与端口抛错
+   * （`DELIVER_FAILED`）—— 静默丢弃会让群友什么都等不到。
+   */
+  async #reportFailure(job: Readonly<InternalJob>, safe: TranscriptionError): Promise<boolean> {
+    const sink = this.#deliverTranscript;
+    if (!sink) {
+      this.#log(`[transcribe] task=${job.id} code=NO_DELIVER_SINK`);
+      return false;
+    }
+    try {
+      await sink({
+        chatKey: job.chatKey,
+        status: 'failed',
+        text: '',
+        truncated: false,
+        chars: 0,
+        reason: safe.userMessage,
+        replyToMessageId: job.replyToMessageId
+      });
+      return true;
+    } catch {
+      // 只记固定错误码，不记异常正文：日志里不得出现 URL 或识别文本。
+      this.#log(`[transcribe] task=${job.id} code=DELIVER_FAILED`);
+      return false;
+    }
   }
 
   /** 默认的生产实现：临时目录 → 提取音轨 → 云端识别。临时目录**无论如何**都要删。 */
@@ -255,69 +301,97 @@ export class VideoTranscriptionQueue {
     const text = result || '（未识别到有效语音）';
     const prefix = '转写结果：\n';
     // 留 20 字余量：`sendTextBatch` 会自己再拼回复前缀，贴边会被它顶出去。
+    //
+    // `limit` 的取值两条路共用。这本来是 **QQ 单条消息**的上限，assisted 下同时当作
+    // **条目正文**的上限：好处是"群里人看到的"与"模型看到的"是同一段文本、与文件上传
+    // 阈值也自然一致。代价要知道：【本次唤醒】是保护区、**永不裁剪**，所以一条 3500 字的
+    // 条目约占 `store.promptContextMaxChars`（默认 32000）的 11%，极端情况下会挤掉
+    // 表情/摘要/记忆/已读历史。有界、可接受，故不另开配置项。
     const limit = Math.max(200, config.resultMaxChars - prefix.length - 20);
 
     // 两条路的**唯一**分岔点。job.mode 在 enqueue 里已归一化，这里不需要兜底。
-    if (job.mode === 'assisted') {
-      await this.#deliverAssisted(job, text, limit);
+    if (job.mode !== 'assisted') {
+      await this.#speakResult(job, text, prefix, limit);
       return;
     }
 
-    if (text.length <= limit) {
+    // Array.from 与 slice 同一口径：按码点算，代理对不会被劈成两半。
+    const chars = Array.from(text).length;
+    const truncated = chars > limit;
+    // 超长时**先**把全文作为文件发给群里 —— 模型只会念开头那一段，群里那份完整的得另给。
+    // 失败只记日志、不当成任务失败（结果本身还在）。
+    const fullFileOk = truncated ? await this.#uploadText(job, text) : true;
+    const head = Array.from(text).slice(0, limit).join('');
+    if (await this.#deliverAssisted(job, { text: head, truncated, chars })) return;
+    // 没人接（缺端口 / 端口抛错）→ 退回 standalone 的投递行为，否则群友什么都等不到。
+    // ⚠️ 全文文件上面已经发过一次了（`fullFileOk` 就是那次的结果）：**不许再发**，
+    // 否则群里会出现两份全文；补救文案照旧按那次的结果说。
+    await this.#speakResult(job, text, prefix, limit, fullFileOk);
+  }
+
+  /**
+   * standalone 的投递行为：截断段 + 超长时的全文文件 + 上传失败时的补救文案。
+   * `/转写` 命令那条路的顺序与文案**逐字保留**（它没有模型，全靠这几句）。
+   *
+   * `fullFileOk` 传 `null` 表示"还没发过，这一步来发"；assisted 退回时文件已经发过了，
+   * 传那次的结果 —— 不能重发（群里会出现两份全文）。
+   */
+  async #speakResult(
+    job: Readonly<InternalJob>, text: string, prefix: string, limit: number, fullFileOk: boolean | null = null
+  ): Promise<void> {
+    // 判据用**码点**（与 assisted 那条同一口径）：UTF-16 长度会把一个 emoji 数成两个字符，
+    // 于是同一个 limit 在两条路上分岔。行为与旧实现只在这一点上不同，且是往对的方向。
+    if (Array.from(text).length <= limit) {
       await this.#sender.sendTextBatch(job.chatKey, prefix + text, { replyToMessageId: job.replyToMessageId });
       return;
     }
-
     await this.#sender.sendTextBatch(
       job.chatKey,
       `${prefix}${Array.from(text).slice(0, limit).join('')}\n\n文本过长，已截断；完整内容将作为 UTF-8 文本文件发送。`,
       { replyToMessageId: job.replyToMessageId }
     );
-    if (!await this.#uploadText(job, text)) {
+    const ok = fullFileOk === null ? await this.#uploadText(job, text) : fullFileOk;
+    if (!ok) {
       await this.#sender.sendTextBatch(job.chatKey, '完整文本文件发送失败；上方为截断结果。').catch(() => {});
     }
   }
 
   /**
    * 模型自主路径的投递：把结果交给回流端口，由它落成一条存档条目并唤醒 Agent，
-   * **由模型自己决定说什么**。队列不往群里贴任何文本 —— 模型稍后会自己开口，
+   * **由模型自己决定说什么**。队列不往群里贴任何文本 —— 模型稍后自己会开口，
    * 再贴一段转写就是重复发言。
    *
-   * 超长时仍然上传全文文件：条目正文只留开头（`resultMaxChars`），群里那份完整的
-   * 得另给。上传失败只记日志，不当成任务失败。
+   * 返回 `true` = 已经有人接了这个结果。
    *
-   * ⚠️ **全程不抛**。调用方 `#drain` 把异常一律当成"转写失败"，那会同时把任务记成
-   * failed 并往群里发一条莫须有的「转写失败」——而结果其实已经拿到了，只是没送出去。
-   *
-   * `limit` 的取值沿用了 standalone 的口径（`resultMaxChars`）。这本来是 **QQ 单条消息**
-   * 的上限，这里同时当作**条目正文**的上限：好处是"群里人看到的"与"模型看到的"是同一段
-   * 文本、与文件上传阈值也自然一致。代价要知道：【本次唤醒】是保护区、**永不裁剪**，
-   * 所以一条 3500 字的条目约占 `store.promptContextMaxChars`（默认 32000）的 11%，
-   * 极端情况下会挤掉表情/摘要/记忆/已读历史。有界、可接受，故不另开配置项。
+   * ⚠️ **全程不抛**。调用方把异常一律当成"转写失败"，那会同时把任务记成 failed
+   * 并往群里发一条莫须有的「转写失败」——而结果其实已经拿到了，只是没送出去。
+   * ⚠️ 缺端口 / 端口抛错时**不静默**：返回 `false` 让调用方退回贴文本 ——
+   * "只有确定有人接的时候才闭嘴"（与出图那条同一条规矩；静默丢弃的后果是群友
+   * 什么都等不到，而模型压根不知道有这条结果）。
    */
-  async #deliverAssisted(job: Readonly<InternalJob>, text: string, limit: number): Promise<void> {
-    // Array.from 与 slice 同一口径：按码点算，代理对不会被劈成两半。
-    const chars = Array.from(text).length;
-    const truncated = chars > limit;
-    if (truncated) await this.#uploadText(job, text);
-
+  async #deliverAssisted(
+    job: Readonly<InternalJob>, { text, truncated, chars }: { text: string; truncated: boolean; chars: number }
+  ): Promise<boolean> {
     const sink = this.#deliverTranscript;
     if (!sink) {
-      // 没有回流端口就什么都发不出去 —— 不能无声无息，留一条日志说明结果没落地。
       this.#log(`[transcribe] task=${job.id} code=NO_DELIVER_SINK`);
-      return;
+      return false;
     }
     try {
       await sink({
         chatKey: job.chatKey,
-        text: Array.from(text).slice(0, limit).join(''),
+        status: 'sent',
+        text,
         truncated,
         chars,
+        reason: '',
         replyToMessageId: job.replyToMessageId
       });
+      return true;
     } catch {
       // 只记固定错误码，不记异常正文：日志里不得出现 URL 或识别文本。
       this.#log(`[transcribe] task=${job.id} code=DELIVER_FAILED`);
+      return false;
     }
   }
 

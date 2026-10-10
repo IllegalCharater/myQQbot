@@ -182,6 +182,15 @@ const tbTrap = buildTriggerBlock([trTrap], { selfNickname: '小鲸鱼' });
 ok('不打任何触发标签（正文里的 @、『吗』、『？』都不作数）', !tbTrap.includes('（'), tbTrap);
 ok('正文照旧完整保留', tbTrap.includes('@小鲸鱼 这视频里提到小鲸鱼了吗？'), tbTrap);
 
+// 失败条目（2026-10-10 起转写的失败也走回流通道）：标签必须与成功那条分开 ——
+// 看到【转写失败】要做的事（如实交代一句）与看到【转写结果】完全不同（转述内容）。
+const trFail = store.appendTranscript(KEY, { status: 'failed', reason: '腾讯云识别失败' });
+const tbFail = buildTriggerBlock([trFail], { selfNickname: '小鲸鱼' });
+ok('失败条目渲染成【转写失败】、带上原因，不冒充群友',
+  /^\[.+\] 【转写失败】视频转写失败：腾讯云识别失败$/.test(tbFail), tbFail);
+ok('失败条目不带截断标记（没有正文可截，"原文共 N 字"会是无中生有）',
+  !tbFail.includes('原文共'), tbFail);
+
 const psTr = buildPastState(store, KEY, { limit: 30 });
 const trLines = psTr.text.split('\n').filter((l) => l.includes('【转写结果】'));
 ok('【过去状态】用的是同一套渲染', trLines.length >= 3, `实际 ${trLines.length} 行`);
