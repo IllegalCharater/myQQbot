@@ -178,7 +178,7 @@ await withFakeTimers((t) => {
 // 这一段要证明的核心是 `scheduleNextWake()` 开头那句 `if (!runtime) return`：
 // `runWorker` 的 `finally` 会无条件调它，所以"下载途中停队列"时，它本来会**立刻排一个新
 // wake timer 把队列自己拉回来**——stop 就成了摆设。这条路径只有真跑一次 worker 才走得到。
-const jmcomic = await load('media/jmcomic.js');
+const jmcomic = await load('media/jmcomic/index.js');
 
 await withFakeTimers(async (t) => {
   // 停队列**正发生在 worker 在途时**：fake 的 onebot.call 一被调到就停队列，再抛错。

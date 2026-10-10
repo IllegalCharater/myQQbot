@@ -410,7 +410,8 @@ withImageGen({ baseUrl: 'http://127.0.0.1:1' });
     }
   });
   await queue.start();
-  const view = queue.enqueue({ chatKey: 'group:11', prompt: 'x' });
+  // 显式 standalone：这是**没有模型接**的那条路（今天只有它自己会贴文案；两条生产入口都走 assisted）。
+  const view = queue.enqueue({ chatKey: 'group:11', prompt: 'x', mode: 'standalone' });
   await sleep(60);
   const after = queue.get(view.id);
   ok('失败时任务状态与阶段都记下来了（阶段决定排查方向）',

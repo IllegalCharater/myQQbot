@@ -22,6 +22,7 @@ import type { OneBotClient } from '../../qq/onebot.js';
 import type { OneBotEvent } from '../../qq/types.js';
 import type { SendQueue } from '../../qq/sender.js';
 import { handleSlashCommand, isSlashCommand } from './slash-commands.js';
+import type { SlashCommandDeps } from './slash-commands.js';
 import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
 import type { ImageGenQueue } from '../../media/image-gen/index.js';
 // ⚠️ 别名不是洁癖：`qq/onebot.js` 已经导出一个同名的 `extractMediaFromSegments`（那是
@@ -91,7 +92,7 @@ export interface Ingest {
   handle(event: OneBotEvent): Promise<void>;
 }
 
-export function createIngest({ onebot, store, sender, orchestrator, transcription, imageGen, emit, getConfig, log }: {
+export function createIngest({ onebot, store, sender, orchestrator, transcription, imageGen, jmcomic, emit, getConfig, log }: {
   onebot: OneBotClient;
   store: ChatStore;
   sender: Pick<SendQueue, 'sendTextBatch'>;
@@ -99,6 +100,8 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
   orchestrator: AgentControlPort;
   transcription: Pick<VideoTranscriptionQueue, 'enqueue'>;
   imageGen: Pick<ImageGenQueue, 'enqueue'>;
+  /** 斜杠命令层的漫画下载端口（`onebot/sender/store` 由装配根在绑定处补齐）。 */
+  jmcomic: SlashCommandDeps['jmcomic'];
   emit: AppEmit;
   getConfig: () => AppConfig;
   log: (...args: unknown[]) => void;
@@ -301,10 +304,12 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
           // 用 `commandText` 而不是 `text`：后者可能已被合并转发展开整份替换过。
           text: commandText,
           media,
+          // `/漫画` 的去重键是"请求者 + 漫画 ID"，缺了它俩人就共用一个额度。
+          senderId,
           replyToMessageId: typeof event.message_id === 'string' || typeof event.message_id === 'number'
             ? event.message_id : null
         },
-        { transcription, imageGen, sender, log }
+        { transcription, imageGen, jmcomic, sender, log }
       );
       return;
     }

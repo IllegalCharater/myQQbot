@@ -33,7 +33,7 @@ import type { AgentControlPort } from '../../agent/runtime/control-port.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { SendQueue } from '../../qq/sender.js';
 import type { ChatStore } from '../../chat/store.js';
-import type { JmcomicCompletionSink } from '../../media/jmcomic.js';
+import type { JmcomicCompletionSink } from '../../media/jmcomic/index.js';
 
 /** jmcomic 队列需要的运行时（与 `media/jmcomic.ts` 的 `JmRuntime` 结构一致）。 */
 export interface LifecycleJmRuntime {

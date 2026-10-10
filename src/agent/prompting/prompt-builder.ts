@@ -132,10 +132,13 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
     const cut = meta.truncated === true ? `（原文共 ${Number(meta.chars) || 0} 字，超出上限，此处为开头部分）` : '';
     return `[${formatShortTime(m.ts)}] 【转写结果】${cut}${String(m.text || '')}`;
   }
-  // 漫画队列的异步完成回调。PDF 已由队列直接上传，这里只把完成事实交给模型，
-  // 让它像群友一样自然收尾；不套“某人：”，也不给可引用的消息 id。
+  // 漫画的异步完成回调与出图同形：**成功与失败都走这里**，标签按三态选。
+  // `unsent`（PDF 发出去了但没能确认）用【漫画发送未确认】——正文会写清原因，
+  // 而那份 PDF **可能已经在群里了**，说"没下成"会让模型对群友说反话。
   if (m.kind === 'jmcomic-result') {
-    return `[${formatShortTime(m.ts)}] 【漫画下载结果】${String(m.text || '')}`;
+    const status = asRecord(m.jmcomic).status;
+    const label = status === 'failed' ? '【漫画下载失败】' : (status === 'unsent' ? '【漫画发送未确认】' : '【漫画下载结果】');
+    return `[${formatShortTime(m.ts)}] ${label}${String(m.text || '')}`;
   }
   // 出图队列的异步完成回调。**成功与失败都走这里**（图由队列自己发进群，或没发成、没画成）——
   // 标签按 `status` 选，因为模型看到失败标签要做的事与看到成功标签不同（交代 vs 顺口补一句）。

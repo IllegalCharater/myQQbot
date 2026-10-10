@@ -411,6 +411,71 @@ console.log('\n=== 17. 转写结果端到端（低档位仍被唤醒）===');
   orc.abortAll();
 }
 
+// ── 18. 异步任务结果**不许被滑出窗口**（2026-10-10 真机 + 探针实测）─────
+//
+// 窗口超上限会滑出最老成员，而被滑出的未消费条目会经 `takeFoldedIds()` **直接标成已读历史**
+// （`#commitFolded`），从此不再参与响应判定。对普通闲聊这是对的取舍，对异步结果就是**静默丢失**：
+// 那是"你的任务结束了"的唯一凭据 —— 模型只会看到群里凭空多了一张图，永远不知道那是自己画的。
+// 真机症状：「图已经发出来了，模型却没有任何反应」，而日志里一条线索都没有。
+// 出图最容易中招：图要 25~40 秒，窗口里挤进 `maxContextMessages` 条闲话就把它顶出去了。
+console.log('\n=== 18. 异步任务结果不参与窗口滑出 ===');
+{
+  const { ContextWindow } = await load('agent/context/context-window.js');
+  const asyncKinds = [
+    ['transcript', { text: '【转写结果】视频里在讲茶叶', senderName: '转写' }],
+    ['jmcomic-result', { text: '漫画 12345 的 PDF 已上传到当前会话', senderName: '漫画下载' }],
+    ['image-result', { text: '「一只猫」的图片已生成并发送到当前会话', senderName: '图像' }]
+  ];
+  for (const [kind, extra] of asyncKinds) {
+    const w = new ContextWindow({ chatKey: `group:pin-${kind}`, capacity: 3 });
+    w.push(msg(1, extra.text, { kind, senderId: '', ...extra }));
+    for (let i = 0; i < 5; i++) w.push(msg(10 + i, `闲聊 ${i}`));
+    const kept = w.pending().some((m) => m.kind === kind);
+    const normals = w.pending().filter((m) => !m.kind).length;
+    ok(`${kind}：容量 3、后面又来 5 条闲话，它仍在窗口里（pending 里看得见）`, kept,
+      JSON.stringify(w.pending().map((m) => m.kind || 'chat')));
+    ok(`${kind}：容量仍然管着**普通消息**（只留最新 3 条，不是整个窗口失效）`, normals === 3, String(normals));
+  }
+  // 对照：同样位置的一条**普通**消息照旧被滑出（豁免只给异步结果，不是"窗口不再滑出"）
+  {
+    const w = new ContextWindow({ chatKey: 'group:pin-plain', capacity: 3 });
+    w.push(msg(1, '一条老闲聊'));
+    for (let i = 0; i < 5; i++) w.push(msg(10 + i, `闲聊 ${i}`));
+    ok('对照：普通消息照旧按上限滑出（豁免只给异步结果）',
+      !w.pending().some((m) => m.id === 1), JSON.stringify(w.pending().map((m) => m.id)));
+  }
+}
+
+// ── 19. 端到端：容量受限 + 群里继续说话，图仍然唤醒一次运行 ──────────
+console.log('\n=== 19. 出图结果在容量受限下仍唤醒运行 ===');
+{
+  updateConfig({
+    allow: { groups: [] }, allowAllWhenEmpty: true, proactive: { enabled: false },
+    store: { contextSliderPos: 5, historyCount: 20, maxContextMessages: 3 }
+  });
+  const { store, orc, sessions } = harness();
+  const K = key();
+  const img = store.appendImageResult(K, { prompt: '一只猫', status: 'sent', reason: '' });
+  orc.onIncoming(K, img);
+  for (let i = 0; i < 5; i++) {
+    const m = store.appendIncoming(K, { mid: 30 + i, ts: Date.now(), senderId: '556', senderName: '李四', text: `闲聊 ${i}` });
+    orc.onIncoming(K, m);
+  }
+  orc.scheduleWake(K, 0);
+  const hit = await new Promise((resolve) => {
+    const iv = setInterval(() => {
+      for (const s of sessions.current.values()) if (s.chatKey === K && s.status === 'running' && s.trigger) { clearInterval(iv); resolve(s); }
+    }, 10);
+    setTimeout(() => { clearInterval(iv); resolve(null); }, 5000);
+  });
+  ok('档位 1（只认 @）+ 窗口塞满闲聊，出图结果照样唤醒一次运行', hit != null, hit ? `session=${hit.id}` : '压根没建会话');
+  ok('触发批里带着那条出图结果（它进了【本次唤醒】，而不是被当成已读历史）',
+    hit != null && hit.trigger.some((m) => m.kind === 'image-result'),
+    hit ? JSON.stringify(hit.trigger.map((m) => m.kind || 'chat')) : '没抓到');
+  orc.abortAll();
+  updateConfig({ store: { maxContextMessages: 0 }, contextSliderPos: 95 });
+}
+
 console.log(`\n${bad === 0 ? '✅ 全部通过' : `❌ ${bad} 项失败`}`);
 fs.rmSync(DIR, { recursive: true, force: true });
 process.exit(bad === 0 ? 0 : 1);

@@ -33,7 +33,7 @@ import { BASE_URL, load } from './lib/src.mjs';
 
 const DATA = dataDir('qqagent-jmcomic-');
 const { ok, done } = checker();
-// 安全网（见文件头）。必须写在 `load('media/jmcomic.js')` 之前：config.js 在加载时就把
+// 安全网（见文件头）。必须写在 `load('media/jmcomic/index.js')` 之前：config.js 在加载时就把
 // DATA_DIR 定死并读一次 config.json。
 const NO_SUCH_PYTHON = path.join(DATA, 'no-such-python.exe');
 fs.writeFileSync(path.join(DATA, 'config.json'), JSON.stringify({ python: { path: NO_SUCH_PYTHON } }), 'utf8');
@@ -100,7 +100,7 @@ function submit(requesterId, comicId) {
 const savedJobs = () => JSON.parse(fs.readFileSync(JOBS_FILE, 'utf8')).jobs;
 
 // ── 1. 真跑一次上传：完成后记录必须留在 jobs.json 里 ──
-const jmcomic = await load('media/jmcomic.js');
+const jmcomic = await load('media/jmcomic/index.js');
 const { DEFAULT_CONFIG } = await load('core/config.js');
 const { resolvePythonCommand } = await load('core/python-runtime.js');
 

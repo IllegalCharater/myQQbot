@@ -25,11 +25,11 @@ const readSource = (rel) => fs.readFileSync(path.join(ROOT, 'src', rel), 'utf8')
 // ── 1. 判据 ──────────────────────────────────────────────────────
 ok('认命令：`/词` 后面跟空白或直接结束',
   isSlashCommand('/转写 https://example.com/a.mp4') && isSlashCommand('/画 一只猫')
-  && isSlashCommand('/画') && isSlashCommand('/转写'));
+  && isSlashCommand('/画') && isSlashCommand('/转写') && isSlashCommand('/漫画 12345') && isSlashCommand('/漫画'));
 ok('认命令：`/转写` + 视频段时渲染出的 `/转写[视频]` 也算（不带这个分支就永远认不出）',
   isSlashCommand('/转写[视频]'));
-ok('不认：关键词连在一起的（`/画xx`、`/转写啦` 都不是这两条命令）',
-  !isSlashCommand('/画xx') && !isSlashCommand('/转写啦'));
+ok('不认：关键词连在一起的（`/画xx`、`/转写啦`、`/漫画123` 都不是命令）',
+  !isSlashCommand('/画xx') && !isSlashCommand('/转写啦') && !isSlashCommand('/漫画123'));
 ok('不认：没有斜杠、或斜杠不在开头（普通消息绝不能被当成命令）',
   !isSlashCommand('画一只猫') && !isSlashCommand('帮我 /画 一只猫') && !isSlashCommand(''));
 ok('不认：展开后的合并转发正文以命令开头也不行（判据只吃"用户真正敲的那句"，见 commandText）',
@@ -51,8 +51,9 @@ function deps({ failEnqueue = null, failSend = false } = {}) {
   return {
     log,
     deps: {
-      transcription: { enqueue: (job) => { throwIfAsked('transcription'); log.enqueued.push({ kind: 'transcription', ...job }); return { id: 'abcdef12-3456-7890-abcd-ef1234567890' }; } },
-      imageGen: { enqueue: (job) => { throwIfAsked('imageGen'); log.enqueued.push({ kind: 'imageGen', ...job }); return { id: 'job-1' }; } },
+      transcription: { enqueue: (job) => { throwIfAsked('transcription'); log.enqueued.push({ ...job, via: 'transcription' }); return { id: 'abcdef12-3456-7890-abcd-ef1234567890' }; } },
+      imageGen: { enqueue: (job) => { throwIfAsked('imageGen'); log.enqueued.push({ ...job, via: 'imageGen' }); return { id: 'job-1' }; } },
+      jmcomic: { enqueue: (job) => { throwIfAsked('jmcomic'); log.enqueued.push({ ...job, via: 'jmcomic' }); return { position: 1 }; } },
       sender,
       log: () => {}
     }
@@ -60,7 +61,7 @@ function deps({ failEnqueue = null, failSend = false } = {}) {
 }
 
 const input = (text, extra = {}) => ({
-  chatKey: 'group:10001', text, media: [], replyToMessageId: '9001', ...extra
+  chatKey: 'group:10001', text, media: [], replyToMessageId: '9001', senderId: '555', ...extra
 });
 
 {
@@ -74,9 +75,13 @@ const input = (text, extra = {}) => ({
   const { deps: d, log } = deps();
   const handled = await handleSlashCommand(input('/画 一只戴墨镜的鲸鱼'), d);
   ok('`/画`：入队并回执（确定性路径，不经过模型）',
-    handled === true && log.enqueued.length === 1 && log.enqueued[0].kind === 'imageGen'
+    handled === true && log.enqueued.length === 1 && log.enqueued[0].via === 'imageGen'
     && log.enqueued[0].prompt === '一只戴墨镜的鲸鱼' && log.enqueued[0].chatKey === 'group:10001',
     JSON.stringify(log.enqueued));
+  // 与 `generate_image` 工具**同一个 mode**（用户要求"两边行为统一"）：图发出去之后总得有人知道。
+  // 漏了它，这条命令的图就永远是"发出来了但模型不知道"——正是 2026-10-10 真机排查了半天的症状。
+  ok('`/画` 走 assisted（图发完回流入窗、唤醒模型），与工具路径一致',
+    log.enqueued[0].mode === 'assisted', String(log.enqueued[0].mode));
   ok('回执取自命令层、且**不带任务号**（群友等的是一张图，一串 uuid 只会让人以为要记住什么）',
     log.sent.length === 1 && String(log.sent[0].message) === '在画了，稍等'
     && !String(log.sent[0].message).includes('job-1'), JSON.stringify(log.sent));
@@ -111,7 +116,7 @@ const input = (text, extra = {}) => ({
   const { deps: d, log } = deps();
   await handleSlashCommand(input('/转写 https://cdn.example.com/a.mp4'), d);
   ok('`/转写`：入队并回执（回执里的任务号是给敲命令的人看的进度凭据，与 `/画` 刻意不同）',
-    log.enqueued.length === 1 && log.enqueued[0].kind === 'transcription'
+    log.enqueued.length === 1 && log.enqueued[0].via === 'transcription'
     && log.enqueued[0].url === 'https://cdn.example.com/a.mp4'
     && String(log.sent[0].message).includes('已开始处理'), JSON.stringify(log.sent));
 }
@@ -122,6 +127,38 @@ const input = (text, extra = {}) => ({
   ok('`/转写` 的内网地址被解析层拒绝时，那句可执行的提示原样进群（不是"命令执行失败"）',
     log.enqueued.length === 0 && log.sent.length === 1
     && String(log.sent[0].message).includes('禁止内网'), JSON.stringify(log.sent));
+}
+
+{
+  const { deps: d, log } = deps();
+  const handled = await handleSlashCommand(input('/漫画 12345'), d);
+  ok('`/漫画 <ID>`：入队并回执',
+    handled === true && log.enqueued.length === 1 && log.enqueued[0].via === 'jmcomic'
+    && log.enqueued[0].comicId === '12345' && String(log.sent[0].message).includes('在下了'),
+    JSON.stringify(log.enqueued));
+  // 漫画的去重键是**请求者 + 漫画 ID**（`commandKey(requesterId, comicId)`）：不带请求者的话
+  // 全群共用一个额度，甲刚下过、乙再下就被判成"重复提交"。这条断言钉的就是那条链路。
+  ok('`/漫画` 把请求者 QQ 与会话身份一起递下去（去重键的一半）',
+    log.enqueued[0].requesterId === '555' && log.enqueued[0].kind === 'group'
+    && log.enqueued[0].chatId === '10001' && log.enqueued[0].chatKey === 'group:10001',
+    JSON.stringify(log.enqueued[0]));
+  ok('回执不带队列位置/任务号（那些数字对敲命令的人没有用处）',
+    !/位置|任务|队列/.test(String(log.sent[0].message)), String(log.sent[0].message));
+}
+
+{
+  const { deps: d, log } = deps();
+  await handleSlashCommand(input('/漫画'), d);
+  ok('`/漫画` 没写 ID：只回用法提示，**不入队**', log.enqueued.length === 0 && log.sent.length === 1
+    && String(log.sent[0].message) === '用法：/漫画 <漫画ID>', JSON.stringify(log.sent));
+}
+
+{
+  // 去重/格式这类拒绝来自领域模块（`enqueueJmcomicDownload` 抛中文文案），原样进群。
+  const { deps: d, log } = deps({ failEnqueue: 'jmcomic' });
+  await handleSlashCommand(input('/漫画 12345'), d);
+  ok('`/漫画` 被领域层拒绝（重复提交等）时，那句中文文案原样进群',
+    log.sent.length === 1 && String(log.sent[0].message).includes('未配置'), JSON.stringify(log.sent));
 }
 
 {

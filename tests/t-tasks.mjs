@@ -114,7 +114,7 @@ ok('conformance 与启停入口相符（full 齐全 / partial 缺一样 / none �
 // 之所以留成独立的实名断言（而不是并进第 6 段）：第 6 段只检查"表里写了的名字能解析到"，
 // 把表里那一行的 stop 删掉它就跟着不查了；这两条不问表，直接钉住**能力本身在不在**。
 const priceFeed = await load('llm/price-feed.js');
-const jmcomic = await load('media/jmcomic.js');
+const jmcomic = await load('media/jmcomic/index.js');
 ok('price.feed 标 full 是真的：price-feed 有 stopPriceFeed 导出（S10a 接管）',
   typeof priceFeed.stopPriceFeed === 'function',
   '导出被删掉的话表里的 full 就是谎话 → app.stop() 接线也会跟着断');

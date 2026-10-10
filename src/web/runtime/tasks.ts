@@ -156,7 +156,7 @@ export const LONG_TERM_TASKS: LongTermTask[] = [
   },
   {
     id: 'jmcomic.cleanup',
-    owner: 'src/media/jmcomic.ts',
+    owner: 'src/media/jmcomic/queue.ts',
     label: 'jmcomic 下载缓存定期清理（首次还会立刻跑一次）',
     enabledBy: null,
     configRefresh: 'not-applicable',
@@ -171,7 +171,7 @@ export const LONG_TERM_TASKS: LongTermTask[] = [
   },
   {
     id: 'jmcomic.worker',
-    owner: 'src/media/jmcomic.ts',
+    owner: 'src/media/jmcomic/queue.ts',
     label: 'jmcomic 下载 worker（复跑待办队列）',
     enabledBy: null,
     configRefresh: 'not-applicable',

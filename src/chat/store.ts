@@ -20,7 +20,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../core/config.js';
-import type { ChatMessage, ChatReply, DigestRecord, ImageResultStatus, MediaEntry } from './types.js';
+import type {
+  AsyncResultStatus, ChatMessage, ChatReply, DigestRecord, ImageResultStatus, JmcomicStatus, MediaEntry
+} from './types.js';
 
 interface ChatState {
   chatKey: string;
@@ -71,12 +73,29 @@ function archiveFile(chatKey: string) {
 const NON_WAKE_KINDS = new Set(['digest', 'note']);
 
 /**
+ * **异步任务结果**的 kind：机器产生、但必须进窗口唤醒 Agent 的那几种。
+ *
+ * 它与 `NON_WAKE_KINDS` 是两回事（那个管"该不该占一次唤醒"，只有 digest/note 不进），
+ * 与 `NON_PERSON_KINDS` 也是两回事（那个还多含 digest/note）。三个集合回答三个问题，
+ * 别合并。`NON_PERSON_KINDS` 由它派生，所以**加第四种异步结果只要改这一行**。
+ *
+ * 它另一个用途在 `agent/context/context-window.ts`：这些条目**不许被滑出窗口**
+ * （滑出即标已读 = 模型永远看不到自己的任务结果，且没有任何日志）。
+ */
+const ASYNC_RESULT_KINDS = new Set(['transcript', 'jmcomic-result', 'image-result']);
+
+/** 这条条目是不是异步任务结果（见上）。 */
+export function isAsyncResult(m: ChatMessage | null | undefined): boolean {
+  return !!m && ASYNC_RESULT_KINDS.has(String(m.kind ?? ''));
+}
+
+/**
  * 按"人"统计/取样时要跳过的 kind：上面两种，**再加**三个异步任务结果。
  *
  * 转写结果不是某个群友说的话（senderId 是空串），不跳过就会在"活跃成员"里
  * 多出一个查无此人的幽灵成员，进而生成对它的印象。图像生成结果是同一回事。
  */
-const NON_PERSON_KINDS = new Set(['digest', 'note', 'transcript', 'jmcomic-result', 'image-result']);
+const NON_PERSON_KINDS = new Set(['digest', 'note', ...ASYNC_RESULT_KINDS]);
 
 /**
  * "不是某人说的话"的条目：压缩摘要（kind:'digest'）与面板插的人工备注（kind:'note'）。
@@ -629,43 +648,65 @@ export class ChatStore {
   }
 
   /**
-   * 追加一条**转写结果**（kind:'transcript'）：异步任务的产物，不是群友说的话。
+   * 三条**异步任务结果**（转写 / 漫画 / 出图）共用的落库口。
    *
-   * `read:false` 是关键，**不要**照抄 insertNote 的 `read:true`：窗口播种时
-   * `#lastSeenId` 取的是"最长的一段 read===true 前缀"，写成已读的条目会落在水位线
-   * **之下** —— 进程内看得见、重启后永久不可见。转写结果要进窗口被响应判定看见，
-   * 就必须是未读的。
+   * 它们各自只负责"正文怎么写、带哪些结构化字段"，四条**不变量**收在这里 ——
+   * 每个 append* 各写一遍的话，漏掉任何一条都是静默的：
    *
-   * `senderName:'转写'` 是给"等待中"会话的摘要用的（wake-scheduler 写
-   * `${senderName || senderId}：…`），两者都空会渲染成 `：<正文>`。
-   * `senderId` 保持空串：它是机器生成的，任何按 QQ 号的匹配都不该认上它。
+   *   · `read:false` —— 写成 `true` 会落进 `#lastSeenId` 水位线**之下**：进程内刚写入时看得见、
+   *     **重启后永久不可见**（播种时水位线取的是"最长的一段 read===true 前缀"）。
+   *     这三条都靠它进窗口被响应判定看见，所以必须是未读的。
+   *   · `self:false` + `senderId:''` —— 它是机器产物，不是谁说的话：`isPersonMessage` 据此排除，
+   *     否则空 senderId 会在"活跃成员"里造出幽灵成员，进而生成对它的印象。
+   *   · 追加在**末尾**（不像 `insertNote` 那样按 ts 找位置）—— 结果是**当下**才产生的，
+   *     不是给历史补的一条批注。
+   *   · `mid:null` —— 没有可引用的 QQ 消息号（模型不该去引用自己刚发的东西）。
    *
-   * 追加在末尾（不像 insertNote 那样按 ts 找位置）：结果是**当下**才产生的，
-   * 不是给历史补的一条批注。
+   * `senderName` 是给"等待中"会话的摘要用的（wake-scheduler 写 `${senderName || senderId}：…`），
+   * 两者都空会渲染成 `：<正文>`，所以三条各自都给了名字（转写 / 漫画下载 / 图像）。
    */
-  appendTranscript(chatKey: string, { text, ts = Date.now(), truncated = false, chars = 0 }: {
-    text?: unknown; ts?: number; truncated?: boolean; chars?: number;
-  } = {}) {
+  appendAsyncResult(chatKey: string, { kind, senderName, text, extra, ts = Date.now() }: {
+    kind: string; senderName: string; text?: unknown; extra?: Partial<ChatMessage>; ts?: number;
+  }): ChatMessage {
     const st = this.#state(chatKey);
-    const body = String(text ?? '');
     const entry: ChatMessage = {
       id: st.nextLocalId++,
       mid: null,
       ts: Number(ts) || Date.now(),
       senderId: '',
-      senderName: '转写',
-      text: body,
+      senderName,
+      text: String(text ?? ''),
       self: false,
       read: false,
       reply: null,
       media: [],
-      kind: 'transcript',
-      transcript: { chars: Math.max(0, Number(chars) || body.length), truncated: truncated === true }
+      kind,
+      ...(extra || {})
     };
     st.messages.push(entry);
     this.#trim(st);
     saveChat(st);
     return entry;
+  }
+
+  /**
+   * 追加一条**转写结果**（kind:'transcript'）：异步任务的产物，不是群友说的话。
+   *
+   * 落库的四条不变量在 `appendAsyncResult` 里；这里只管这条自己的正文与结构化事实。
+   */
+  appendTranscript(chatKey: string, { text, ts = Date.now(), truncated = false, chars = 0 }: {
+    text?: unknown; ts?: number; truncated?: boolean; chars?: number;
+  } = {}) {
+    const body = String(text ?? '');
+    return this.appendAsyncResult(chatKey, {
+      kind: 'transcript',
+      senderName: '转写',
+      text: body,
+      ts,
+      extra: {
+        transcript: { chars: Math.max(0, Number(chars) || body.length), truncated: truncated === true }
+      }
+    });
   }
 
   /**
@@ -689,7 +730,6 @@ export class ChatStore {
     count?: number;
     ts?: number;
   } = {}) {
-    const st = this.#state(chatKey);
     const body = String(prompt ?? '').trim().slice(0, 80);
     const why = String(reason ?? '').trim().slice(0, 200);
     const shot = status === 'sent' ? Math.max(1, Number(count) || 1) : 0;
@@ -699,24 +739,13 @@ export class ChatStore {
       : status === 'unsent'
         ? `${what}已经画好了，但没能发到群里${why ? `：${why}` : ''}`
         : `${what}没画成${why ? `：${why}` : ''}`;
-    const entry: ChatMessage = {
-      id: st.nextLocalId++,
-      mid: null,
-      ts: Number(ts) || Date.now(),
-      senderId: '',
+    return this.appendAsyncResult(chatKey, {
+      kind: 'image-result',
       senderName: '图像',
       text,
-      self: false,
-      read: false,
-      reply: null,
-      media: [],
-      kind: 'image-result',
-      imageResult: { prompt: body, count: shot, status, reason: why }
-    };
-    st.messages.push(entry);
-    this.#trim(st);
-    saveChat(st);
-    return entry;
+      ts,
+      extra: { imageResult: { prompt: body, count: shot, status, reason: why } }
+    });
   }
 
   /**
@@ -726,28 +755,38 @@ export class ChatStore {
    * PDF 已在这条记录产生前由 OneBot 确认上传，所以正文只陈述完成事实。模型看到
    * 【漫画下载结果】后可以自然地给请求者一句交代，但不能再提交同一任务。
    */
-  appendJmcomicResult(chatKey: string, { comicId, cached = false, ts = Date.now() }: {
-    comicId: unknown; cached?: boolean; ts?: number;
+  /**
+   * 追加一条**漫画下载结果**（kind:'jmcomic-result'）：异步任务的产物，不是群友说的话。
+   *
+   * **成功与失败走同一条**（`status` 三态），与出图那条一模一样：失败同样要落成**未读**条目，
+   * 由模型自己开口交代，而不是队列往群里贴一句 ❌/⚠️ 的机器文案（2026-10-10 统一）。
+   * 落库的四条不变量在 `appendAsyncResult` 里；这里只管这条自己的正文与结构化事实。
+   *
+   * 三态各自的说法也分开写，尤其 `unsent` **不能说成"没下成"**：那份 PDF 可能已经在群里了
+   * （上传核验不上时**刻意不重传**，就是为了避免重复发一份）。
+   */
+  appendJmcomicResult(chatKey: string, { comicId, cached = false, status = 'sent', reason = '', ts = Date.now() }: {
+    comicId: unknown;
+    cached?: boolean;
+    status?: JmcomicStatus;
+    reason?: unknown;
+    ts?: number;
   }) {
-    const st = this.#state(chatKey);
     const id = String(comicId ?? '').trim();
-    const entry: ChatMessage = {
-      id: st.nextLocalId++,
-      mid: null,
-      ts: Number(ts) || Date.now(),
-      senderId: '',
+    const why = String(reason ?? '').trim().slice(0, 300);
+    const what = `漫画 ${id}`;
+    const text = status === 'sent'
+      ? `${what} 的 PDF 已上传到当前会话${cached ? '（使用本地缓存）' : ''}`
+      : status === 'unsent'
+        ? `${what} 的 PDF 发出去了，但没能确认${why ? `：${why}` : ''}`
+        : `${what}没下成${why ? `：${why}` : ''}`;
+    return this.appendAsyncResult(chatKey, {
+      kind: 'jmcomic-result',
       senderName: '漫画下载',
-      text: `漫画 ${id} 的 PDF 已上传到当前会话${cached ? '（使用本地缓存）' : ''}`,
-      self: false,
-      read: false,
-      reply: null,
-      media: [],
-      kind: 'jmcomic-result'
-    };
-    st.messages.push(entry);
-    this.#trim(st);
-    saveChat(st);
-    return entry;
+      text,
+      ts,
+      extra: { jmcomic: { comicId: id, cached: cached === true, status, reason: why } }
+    });
   }
 
   /** 最近 senderId 出现过的活跃成员（带最后发言时间）。 */
@@ -906,6 +945,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+/**
+ * 三态的白名单窄化：手改过的聊天 JSON 塞进来的任意字符串会一路进提示词，
+ * 而渲染方（formatEntry）按它选标签 —— **认不出的值一律当成功**（最保守的那一种：
+ * 说"已发送"最多是少一句交代，说"失败"会让模型对着一件没发生的事发言）。
+ */
+function normalizeStatus(value: unknown): AsyncResultStatus {
+  const raw = String(value ?? '');
+  return raw === 'unsent' || raw === 'failed' ? raw : 'sent';
+}
+
 function normalizeMessage(value: unknown): ChatMessage | null {
   if (!isRecord(value)) return null;
   const id = Number(value.id);
@@ -932,10 +981,18 @@ function normalizeMessage(value: unknown): ChatMessage | null {
             count: Number(value.imageResult.count) || 0,
             // 三态**必须白名单窄化**：手改过的聊天 JSON 塞进来的任意字符串会一路进提示词，
             // 而渲染方（formatEntry）按它选标签 —— 认不出的值一律当成功（最保守的那一种）。
-            status: ['sent', 'unsent', 'failed'].includes(String(value.imageResult.status))
-              ? String(value.imageResult.status) as ImageResultStatus
-              : 'sent',
+            status: normalizeStatus(value.imageResult.status),
             reason: String(value.imageResult.reason ?? '').slice(0, 200)
+          }
+        }
+      : {}),
+    ...(isRecord(value.jmcomic)
+      ? {
+          jmcomic: {
+            comicId: String(value.jmcomic.comicId ?? '').slice(0, 40),
+            cached: value.jmcomic.cached === true,
+            status: normalizeStatus(value.jmcomic.status),
+            reason: String(value.jmcomic.reason ?? '').slice(0, 300)
           }
         }
       : {})

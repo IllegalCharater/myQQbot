@@ -1,10 +1,17 @@
 // 转写队列：单并发状态机。
 //
+// ── 与出图/漫画共用的东西在 `media/task-queue.ts` ──
+//
+// 注册表、串行排空、中止与关停语义、"跑完/失败"的判定全在那边（三个能力同形）；
+// 这里只留**这条路自己的**：FFmpeg 探测、临时目录、音轨提取与云端识别、投递与回流、失败话术。
+// 计时器（下面那个 `#wake`）**刻意留在本文件**：`LONG_TERM_TASKS.owner` 的语义是
+// "实际持有这些计时器的模块"，`tests/t-tasks.mjs` 按它反查"文件里有没有调度调用"。
+//
 // ── 为什么恒为单并发 ──
 //
 // 下游是 FFmpeg + 一次几十 MB 的上传，放开并发只会让每一段都变慢（带宽与 CPU 互相抢），
 // 而"总任务超时"是从发出时刻起算的 —— 排队时间会把真正干活的预算吃掉。要提高吞吐应
-// 限制入队速率，而不是把 `#drain` 改成 N 个。
+// 限制入队速率，而不是把排空改成 N 个。
 //
 // ── 两条投递路径 ──
 //
@@ -15,6 +22,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '../../core/config.js';
+import { SlidingWindowBudget } from '../call-budget.js';
+import { TaskQueue } from '../task-queue.js';
+import type { SetTaskStatus } from '../task-queue.js';
 import { resolveTranscriptionConfig } from './config.js';
 import { normalizeTranscriptionUrl } from './commands.js';
 import { checkFfmpegBinary, extractAudio } from './extract.js';
@@ -32,14 +42,17 @@ export class VideoTranscriptionQueue {
   #log: (...args: unknown[]) => void;
   #operations: QueueOperations;
   #deliverTranscript: TranscriptSink | null;
-  #jobs = new Map<string, InternalJob>();
-  #pending: InternalJob[] = [];
+  #queue: TaskQueue<InternalJob, EffectiveConfig>;
   #wake: ReturnType<typeof setTimeout> | null = null;
-  #drainPromise: Promise<void> | null = null;
-  #currentAbort: AbortController | null = null;
   #started = false;
   #stopping = false;
   #ffmpegError = '';
+  /**
+   * 成本闸门。**两条入口共用**（`transcribe_video` 工具与 `/转写` 命令都走 `enqueue`），
+   * 所以它挂在这里而不是工具层 —— 见 `enqueue` 里那段说明。
+   * 限额每次现读配置（改完设置即时生效），与 `webBudget` / 出图同一写法。
+   */
+  #budget: SlidingWindowBudget;
 
   constructor({ sender, onebot, getConfig, log = console.log, operations = {}, deliverTranscript = null }: QueueDeps) {
     this.#sender = sender;
@@ -48,6 +61,24 @@ export class VideoTranscriptionQueue {
     this.#log = log;
     this.#operations = operations;
     this.#deliverTranscript = deliverTranscript;
+    this.#budget = new SlidingWindowBudget({
+      getLimits: () => {
+        const cfg = resolveTranscriptionConfig(this.#getConfig());
+        return { perChatPerHour: cfg.maxCallsPerChatPerHour, perDay: cfg.maxCallsPerDay };
+      }
+    });
+    this.#queue = new TaskQueue<InternalJob, EffectiveConfig>({
+      getConfig: this.#getConfig,
+      log: this.#log,
+      resolveConfig: resolveTranscriptionConfig,
+      execute: (job, signal, setStatus, config) => this.#execute(job, signal, setStatus, config),
+      onError: (job, error, elapsedMs) => this.#fail(job, error, elapsedMs),
+      onChange: (job) => this.#logStatus(job),
+      // 对外视图：**不含 `sourceUrl`**（用户给的 URL 不该出现在读模型/接口里）。
+      projectView: ({ id, chatKey, status, failedStage, createdAt, updatedAt, audioBytes, elapsedMs, errorCode }) =>
+        ({ id, chatKey, status, failedStage, createdAt, updatedAt, audioBytes, elapsedMs, errorCode }),
+      limit: 100
+    });
   }
 
   async start(): Promise<void> {
@@ -63,7 +94,7 @@ export class VideoTranscriptionQueue {
       this.#log('[transcribe] code=FFMPEG_UNAVAILABLE');
     }
     this.#started = true;
-    if (this.#pending.length) this.#schedule();
+    if (this.#queue.hasPending()) this.#schedule();
   }
 
   async stop(): Promise<void> {
@@ -71,13 +102,14 @@ export class VideoTranscriptionQueue {
     if (this.#wake) clearTimeout(this.#wake);
     this.#wake = null;
     // 还没开跑的直接判失败并说清是关停 —— 留着它们会随着进程消失而静默丢失。
-    for (const job of this.#pending.splice(0)) {
-      this.#setStatus(job, 'failed', { failedStage: 'extracting', errorCode: 'SHUTDOWN' });
+    // （出图同样这么处置；漫画**不**，它的任务要活过重启。）
+    for (const job of this.#queue.takePending()) {
+      this.#queue.setStatus(job, 'failed', { failedStage: 'extracting', errorCode: 'SHUTDOWN' });
     }
-    this.#currentAbort?.abort();
-    // 等在跑的那一次收尾（它会自己清理临时目录），并把 rejected 吞掉：
-    // stop 的语义是"停干净"，不是"把上一次的失败再抛一遍"。
-    await this.#drainPromise?.catch(() => {});
+    this.#queue.abortInFlight();
+    // 等在跑的那一次收尾（它会自己清理临时目录）：stop 的语义是"停干净"，
+    // 不是"把上一次的失败再抛一遍"（核心不会把这次关停报成失败）。
+    await this.#queue.whenIdle().catch(() => {});
     this.#started = false;
   }
 
@@ -102,6 +134,23 @@ export class VideoTranscriptionQueue {
     if (!config.enabled) throw new TranscriptionError('validation', 'DISABLED', '转写服务未启用');
     requireCloudConfig(config);
     const sourceUrl = normalizeTranscriptionUrl(url);
+    // ── 成本闸门 ──
+    // ⚠️ 它**曾经在工具层**（`agent/tools/transcription.ts`），于是 `/转写` 命令路径不受限。
+    // 2026-10-10 统一到队列，与出图同形，理由有两条：
+    //   ① `/转写` 是群里任何人都能敲的，而转写按次向腾讯云计费 —— 命令路径不设闸门
+    //      等于开一个可被刷的开支口子（出图当初就是这么定的）；
+    //   ② 放进 `enqueue` 后两条入口**自动共用同一本账**，也避免了"工具先扣一次、
+    //      队列再扣一次"的双记。**这是有意的行为变更**（旧文档写的"命令不受限"已作废）。
+    // 闸门排在所有**零成本校验之后**：被拒的那一次不该占额度，也不该建任务。
+    try {
+      this.#budget.take(chatKey);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'RATE_LIMITED') {
+        throw new TranscriptionError('validation', 'RATE_LIMITED',
+          `本群转写太频繁（每小时最多 ${config.maxCallsPerChatPerHour} 次、全部会话每天 ${config.maxCallsPerDay} 次），稍后再试`);
+      }
+      throw error;
+    }
     const now = Date.now();
     const job: InternalJob = {
       id: randomUUID(), chatKey, sourceUrl, replyToMessageId,
@@ -109,28 +158,20 @@ export class VideoTranscriptionQueue {
       mode: mode === 'assisted' ? 'assisted' : 'standalone',
       status: 'queued', createdAt: now, updatedAt: now
     };
-    this.#jobs.set(job.id, job);
-    this.#pending.push(job);
-    // 有界保留最近 100 条：任务视图是给"刚派上那几条"看的，无上限会随运行时长涨。
-    while (this.#jobs.size > 100) this.#jobs.delete(this.#jobs.keys().next().value as string);
+    // 有界保留最近 100 条由核心管（只挤**已结束**的：任务视图是给"刚派上那几条"看的）。
+    this.#queue.add(job);
     this.#log(`[transcribe] task=${job.id}`);
     this.#schedule();
-    return this.#view(job);
+    return this.#queue.view(job) as unknown as TranscriptionJobView;
   }
 
   get(taskId: string): TranscriptionJobView | null {
-    const job = this.#jobs.get(taskId);
-    return job ? this.#view(job) : null;
+    const job = this.#queue.get(taskId);
+    return job ? this.#queue.view(job) as unknown as TranscriptionJobView : null;
   }
 
-  /** 对外视图：**不含 `sourceUrl`**（用户给的 URL 不该出现在读模型/接口里）。 */
-  #view(job: InternalJob): TranscriptionJobView {
-    const { id, chatKey, status, failedStage, createdAt, updatedAt, audioBytes, elapsedMs, errorCode } = job;
-    return { id, chatKey, status, failedStage, createdAt, updatedAt, audioBytes, elapsedMs, errorCode };
-  }
-
-  #setStatus(job: InternalJob, status: TranscriptionStatus, extra: Partial<InternalJob> = {}): void {
-    Object.assign(job, extra, { status, updatedAt: Date.now() });
+  /** 状态一变就记一行（与旧实现逐字同形：只有任务号时不打，免得入队刷两行）。 */
+  #logStatus(job: InternalJob): void {
     const fields = [`[transcribe] task=${job.id}`];
     if (job.audioBytes != null) fields.push(`bytes=${job.audioBytes}`);
     if (job.elapsedMs != null) fields.push(`elapsedMs=${job.elapsedMs}`);
@@ -138,61 +179,58 @@ export class VideoTranscriptionQueue {
     if (fields.length > 1) this.#log(fields.join(' '));
   }
 
-  /** 排一个 0ms 的唤醒，把 `enqueue` 与 `#drain` 解耦（入队不阻塞在 `await` 上）。 */
+  /**
+   * 排一个 0ms 的唤醒，把"入队"与"开工"解耦（入队不阻塞在 `await` 上）。
+   *
+   * 计时器**归本文件持有**（见文件头）：`LONG_TERM_TASKS.owner` 要指到实际调度的那一层。
+   * 延迟由核心给（`idleDelay()`）：转写/出图永远是 0（有活就干），漫画那里是"最早的重试时刻"。
+   */
   #schedule(): void {
-    if (this.#wake || this.#drainPromise || this.#stopping) return;
+    if (this.#wake || this.#queue.draining || this.#stopping) return;
+    const delay = this.#queue.idleDelay();
+    if (delay === null) return;
     this.#wake = setTimeout(() => {
       this.#wake = null;
-      void this.#drain();
-    }, 0);
+      void this.#queue.drain(() => this.#stopping).finally(() => this.#schedule());
+    }, delay);
   }
 
-  async #drain(): Promise<void> {
-    if (this.#drainPromise || this.#stopping) return;
-    this.#drainPromise = (async () => {
-      while (!this.#stopping) {
-        const job = this.#pending.shift();
-        if (!job) break;
-        const startedAt = Date.now();
-        const controller = new AbortController();
-        this.#currentAbort = controller;
-        const config = resolveTranscriptionConfig(this.#getConfig());
-        try {
-          const run = this.#operations.runTask || ((target, signal, setStatus, current) =>
-            this.#runProduction(target, signal, setStatus, current));
-          const result = await run(job, controller.signal, (status, extra) => this.#setStatus(job, status, extra), config);
-          // 即使关停与远端响应同时发生，也不得交付迟到结果。
-          if (controller.signal.aborted || this.#stopping) {
-            throw new TranscriptionError('extracting', 'CANCELLED', '转写任务已取消');
-          }
-          const deliver = this.#operations.deliver || ((target, text, current) => this.#deliver(target, text, current));
-          await deliver(job, result, config);
-          this.#setStatus(job, 'done', { elapsedMs: Date.now() - startedAt });
-        } catch (error) {
-          const safe = userError(error);
-          this.#setStatus(job, 'failed', {
-            failedStage: safe.stage, errorCode: safe.code, elapsedMs: Date.now() - startedAt
-          });
-          // 关停途中不发失败文案：那是我们主动取消的，不是任务真的失败。
-          if (!this.#stopping) {
-            await this.#sender.sendTextBatch(job.chatKey, `转写失败（${safe.stage}）：${safe.userMessage}`, {
-              replyToMessageId: job.replyToMessageId
-            }).catch((sendError) => {
-              this.#log(`[transcribe] task=${job.id} code=${safeErrorCode(sendError)}`);
-            });
-          }
-        } finally {
-          this.#currentAbort = null;
-        }
-      }
-    })();
-    try {
-      await this.#drainPromise;
-    } finally {
-      this.#drainPromise = null;
-      // 排空期间可能又入队了；`#stopping` 时不再排（否则 stop 永远等不到"没有下次"）。
-      if (this.#pending.length && !this.#stopping) this.#schedule();
+  /**
+   * 一个任务的**整件事**：干活 → 投递。
+   *
+   * 两个操作的注入点**逐字保留**（套件靠它们假造一次完整的提取/识别/投递）。
+   */
+  async #execute(
+    job: InternalJob, signal: AbortSignal,
+    setStatus: SetTaskStatus<InternalJob>, config: EffectiveConfig
+  ): Promise<void> {
+    const run = this.#operations.runTask
+      || ((target, sig, status, current) => this.#runProduction(target, sig, status, current));
+    const result = await run(job, signal, setStatus, config);
+    // 关停与远端响应可能同时发生：不得交付迟到结果。
+    if (signal.aborted || this.#stopping) {
+      throw new TranscriptionError('extracting', 'CANCELLED', '转写任务已取消');
     }
+    const deliver = this.#operations.deliver
+      || ((target, text, current) => this.#deliver(target, text, current));
+    await deliver(job, result, config);
+  }
+
+  /**
+   * 失败收尾。核心**关停时也照样调它**（那是"这个任务确实没跑成"，状态必须记），
+   * 而"要不要发那句话"是这里看的 —— 关停途中不发失败文案：那是我们主动取消的。
+   */
+  async #fail(job: InternalJob, error: unknown, elapsedMs: number): Promise<void> {
+    const safe = userError(error);
+    this.#queue.setStatus(job, 'failed', {
+      failedStage: safe.stage, errorCode: safe.code, elapsedMs
+    });
+    if (this.#stopping) return;
+    await this.#sender.sendTextBatch(job.chatKey, `转写失败（${safe.stage}）：${safe.userMessage}`, {
+      replyToMessageId: job.replyToMessageId
+    }).catch((sendError) => {
+      this.#log(`[transcribe] task=${job.id} code=${safeErrorCode(sendError)}`);
+    });
   }
 
   /** 默认的生产实现：临时目录 → 提取音轨 → 云端识别。临时目录**无论如何**都要删。 */

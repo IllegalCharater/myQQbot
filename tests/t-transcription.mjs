@@ -395,6 +395,11 @@ Object.assign(process.env, {
   TENCENTCLOUD_SECRET_KEY: 'placeholder-key'
 });
 const cfg = structuredClone(DEFAULT_CONFIG);
+// 调用额度放到最大：**闸门 2026-10-10 从工具层挪进了队列**（`/转写` 因此也受限），
+// 而本套件在同一个群里连开十几个任务来验状态机与投递 —— 留着小额度只会让它们
+// 齐刷刷撞上限，红得像状态机坏了。闸门本身在下面单开一段验（那是行为变更的守护）。
+cfg.transcription.maxCallsPerChatPerHour = 60;
+cfg.transcription.maxCallsPerDay = 1000;
 const resolved = resolveTranscriptionConfig(cfg);
 ok('腾讯云 AppID 与凭证支持服务端环境变量回退',
   resolved.enabled && resolved.secretId === 'placeholder-id' && resolved.secretKey === 'placeholder-key'
@@ -487,6 +492,35 @@ ok('stop 会中止当前 worker、禁止迟到结果发送并等待其落到 fai
 //     「转写失败」——而结果其实已经拿到了
 const assistedTexts = [];     // 队列自己发出去的群文本（assisted 下必须始终为空）
 const assistedUploads = [];   // upload_* 调用的文件名
+// ── 调用闸门在**队列**里（2026-10-10 从工具层挪过来；`/转写` 因此也受限）──────
+//
+// 这条守护的是一个**行为变更**：闸门以前在 `agent/tools/transcription.ts`，于是工具路径受限、
+// `/转写` 命令不受限（旧文档写明了那是刻意的）。现在它和出图一样在 `enqueue` 里 ——
+// 两条入口共用同一本账。判据打在队列上，因为那才是它现在的家。
+{
+  const gateCfg = structuredClone(cfg);
+  gateCfg.transcription.maxCallsPerChatPerHour = 2;
+  gateCfg.transcription.maxCallsPerDay = 100;
+  const gateQueue = new VideoTranscriptionQueue({
+    sender: fakeSender,
+    onebot: { call: async () => ({}) },
+    getConfig: () => gateCfg,
+    log: () => {},
+    // 闸门排在 FFmpeg 可用性检查**之后**（缺 ffmpeg 时该报的是"转写不可用"，
+    // 而不是"太频繁"）—— 所以夹具要把那一步替换掉，否则一个真解释器探测会先抛。
+    operations: { checkFfmpeg: async () => {}, runTask: async () => '识别文本', deliver: async () => {} }
+  });
+  await gateQueue.start();
+  const codes = [];
+  for (let i = 0; i < 3; i++) {
+    try { gateQueue.enqueue({ chatKey: 'group:gate', url: 'https://example.com/a.mp4' }); }
+    catch (error) { codes.push(error.code); }
+  }
+  ok('闸门在队列里：每群每小时上限真的拦得住（工具与 `/转写` 共用同一本账）',
+    codes.length === 1 && codes[0] === 'RATE_LIMITED', JSON.stringify(codes));
+  await gateQueue.stop();
+}
+
 const sinkCalls = [];
 const assistedLogs = [];
 let uploadShouldFail = false;

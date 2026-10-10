@@ -1,21 +1,12 @@
-import { getConfig } from '../../core/config.js';
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
-import { SlidingWindowBudget } from '../../media/call-budget.js';
-import { TranscriptionError, resolveTranscriptionConfig } from '../../media/transcription/index.js';
+import { asyncTaskTool } from './async-task.js';
 import type { ToolDefinition } from '../shared/types.js';
 
-// 成本闸门：转写按次向腾讯云计费、单次成本远高于一次搜图，所以默认上限（3/10）比搜图（5/30）更紧。
-// 只限次数，不判断"该不该转"（那是模型结合上下文的事，见工具 description）。
-// 上限从 resolveTranscriptionConfig 取，钳制与 enabled 判定都归它一处管。
-const budget = new SlidingWindowBudget({
-  getLimits: () => {
-    const cfg = resolveTranscriptionConfig(getConfig());
-    return { perChatPerHour: cfg.maxCallsPerChatPerHour, perDay: cfg.maxCallsPerDay };
-  }
-});
-
+// 闸门**不在这里**：转写的额度检查在 `media/transcription/queue.ts` 的 `enqueue` 里，
+// 与出图同形 —— 两条入口（工具与 `/转写` 命令）共用同一本账。2026-10-10 之前它在本文件里，
+// 于是 `/转写` 命令不受限、而 `/画` 受；统一到队列是有意的行为变更。
 export function transcriptionTools(): ToolDefinition[] {
-  return [{
+  return [asyncTaskTool({
     name: 'transcribe_video',
     description: TOOL_PROMPT_TEXT.transcribe_video.description,
     parameters: {
@@ -26,8 +17,8 @@ export function transcriptionTools(): ToolDefinition[] {
       },
       required: []
     },
-    async execute(ctx, args) {
-      // 顺序与 reverse_image_source 一致：先解析出目标（取不到时零成本返回）→ 占额度 → 才建任务。
+    async run(ctx, args) {
+      // 顺序与 reverse_image_source 一致：先解析出目标（取不到时零成本返回）→ 才建任务。
       const explicit = typeof args.url === 'string' ? args.url.trim() : '';
       const messageId = args.messageId ?? null;
       let url = explicit;
@@ -57,44 +48,24 @@ export function transcriptionTools(): ToolDefinition[] {
       }
       const queue = ctx.transcription;
       if (!queue) return { content: '错误：转写功能未启用', isError: true };
-      // 限频排在建任务之前：被拒绝的调用不该进队列，也不该占额度。
-      try {
-        budget.take(ctx.chatKey);
-      } catch (error) {
-        if (error instanceof Error && error.message === 'RATE_LIMITED') {
-          const cfg = resolveTranscriptionConfig(getConfig());
-          return { content: `错误：本群转写太频繁（每小时最多 ${cfg.maxCallsPerChatPerHour} 次），稍后再试。`, isError: true };
-        }
-        throw error;
-      }
-      try {
-        // enqueue 自己会做 URL 安全校验（协议/凭据/内网）、云凭证检查与任务去重前置判断，
-        // 这里不重复实现任何一道闸门。
-        //
-        // **刻意不接 job.id、也不把它写进工具结果**：任务号对模型毫无用处（它没法用这个 id
-        // 做任何事），却是"任务已派上（任务 xxxx）"这句话的全部原料。去掉原料比事后禁令可靠。
-        queue.enqueue({
-          chatKey: ctx.chatKey,
-          url,
-          replyToMessageId: typeof messageId === 'string' || typeof messageId === 'number' ? messageId : null,
-          // assisted：结果不直接贴进群，而是作为一条【转写结果】进入上下文，由模型决定说什么。
-          mode: 'assisted'
-        });
-        // 工具**自己不发任何消息**：入队后要不要先说一句（例如"我先看看"）是模型在这一次运行里
-        // 自己的决定 —— 想说就接着调发送类工具，不想说就直接结束。所以这里既不代发回执，也不写
-        // ctx.session.sent（那是"我这轮真的发了什么"的账，代发会让账目对不上）。
-        //
-        // 代价要知道：模型选择沉默时，群里在结果到达前没有任何提示。这是刻意的取舍 —— 定死一句
-        // 回执会和模型自己的发言重复，而结果到达的那一次运行本来就必须开口（见 toolProtocol 第 7 条）。
-        //
-        // 结果串（receipt）整句都在 prompt-catalog：它没有动态成分，且是在**诱导模型说哪句话**，
-        // 属于"模型可见的固定指令"，不是这条路返回的数据。
-        return { content: TOOL_PROMPT_TEXT.transcribe_video.receipt };
-      } catch (error) {
-        // TranscriptionError 携带的 message 本来就是中文用户文案（与 `/转写` 命令路径同源）。
-        if (error instanceof TranscriptionError) return { content: `错误：${error.message}`, isError: true };
-        return { content: '错误：转写任务创建失败，稍后再试。', isError: true };
-      }
+      // enqueue 自己会做全部闸门：URL 安全校验（协议/凭据/内网）、云凭证检查、**调用额度**。
+      // 这里不重复实现任何一道 —— 重复实现的那一份必然与队列里那份漂移。
+      queue.enqueue({
+        chatKey: ctx.chatKey,
+        url,
+        replyToMessageId: typeof messageId === 'string' || typeof messageId === 'number' ? messageId : null,
+        // assisted：结果不直接贴进群，而是作为一条【转写结果】进入上下文，由模型决定说什么。
+        mode: 'assisted'
+      });
+      // 工具**自己不发任何消息**：入队后要不要先说一句（例如"我先看看"）是模型在这一次运行里
+      // 自己的决定 —— 想说就接着调发送类工具，不想说就直接结束。
+      //
+      // 代价要知道：模型选择沉默时，群里在结果到达前没有任何提示。这是刻意的取舍 —— 定死一句
+      // 回执会和模型自己的发言重复，而结果到达的那一次运行本来就必须开口（见 toolProtocol 第 8 条）。
+      //
+      // 回执整句在 prompt-catalog：它没有动态成分，且是在**诱导模型说哪句话**，
+      // 属于"模型可见的固定指令"，不是这条路返回的数据。
+      return TOOL_PROMPT_TEXT.transcribe_video.receipt;
     }
-  }];
+  })];
 }

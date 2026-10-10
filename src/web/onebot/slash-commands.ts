@@ -25,6 +25,7 @@
 // 不参与分发。
 import { parseTranscriptionCommand } from '../../media/transcription/index.js';
 import { findReferenceImage, parseDrawCommand } from '../../media/image-gen/index.js';
+import { parseJmcomicCommand } from '../../media/jmcomic/index.js';
 import { errorMessage } from '../http/http.js';
 import type { MediaEntry } from '../../chat/types.js';
 import type { SendQueue } from '../../qq/sender.js';
@@ -33,6 +34,14 @@ import type { ImageGenQueue } from '../../media/image-gen/index.js';
 
 export interface SlashCommandInput {
   chatKey: string;
+  /**
+   * 发起这条命令的群友 QQ 号。
+   *
+   * 命令**不只是**"一个会话里的一次入队"：`/漫画` 的去重键是**请求者 + 漫画 ID**
+   * （`commandKey(requesterId, comicId)`），少了它就会退化成"全群共用一个人的额度"，
+   * 表现为甲刚下过、乙再下就被判成重复提交。
+   */
+  senderId: string;
   /**
    * **用户真正敲的那句话**。
    *
@@ -45,9 +54,20 @@ export interface SlashCommandInput {
   replyToMessageId: string | number | null;
 }
 
+/** `/漫画` 只需要这些：会话标识、请求者、漫画 ID。运行时依赖由装配根绑好。 */
+export interface SlashCommandJmcomicInput {
+  chatKey: string;
+  kind: 'group' | 'private';
+  chatId: string;
+  requesterId: string;
+  comicId: string;
+}
+
 export interface SlashCommandDeps {
   transcription: Pick<VideoTranscriptionQueue, 'enqueue'>;
   imageGen: Pick<ImageGenQueue, 'enqueue'>;
+  /** 漫画下载：端口只暴露"入队"，`onebot/sender/store` 由装配根在绑定处补齐。 */
+  jmcomic: { enqueue(input: SlashCommandJmcomicInput): { position?: number } };
   sender: Pick<SendQueue, 'sendTextBatch'>;
   log: (...args: unknown[]) => void;
 }
@@ -93,11 +113,40 @@ const COMMANDS: readonly SlashCommand[] = [
           prompt,
           // 本条消息或它引用的那条里的第一张图 → 图生图；没有就是纯文字画图。
           imageUrl: findReferenceImage(media),
-          replyToMessageId
+          replyToMessageId,
+          // **与工具路径同一个 mode**（用户明确要求"两边行为统一"）：群友敲 `/画` 与让模型画
+          // 出来的是同一件事，图发出去之后总得有人知道 —— 模型补一句「喏」也好、静默也好，
+          // 那是它的判断。代价是每条命令多一次 LLM 运行（按次计费），
+          // 与 `/转写` 那个"命令路径零 LLM 成本"的取舍**刻意不同**。
+          mode: 'assisted'
         });
         // 回执里**不带任务号**：`/转写` 那句带它是因为那个任务是给敲命令的人看的进度凭据，
         // 而这里群友等的是一张图，一串 uuid 只会让人以为需要记住什么。
         return '在画了，稍等';
+      });
+    }
+  },
+  {
+    name: 'jmcomic',
+    // `/漫画 12345`：只做"下载"这一件事 —— **搜索仍只由模型用 search_jmcomic 做**
+    // （那是刻意的两条路：搜索廉价可反复，下载要拉全本、导出 PDF、传群文件且不可撤销）。
+    // 敲命令的人已经明确给出了 ID，等于自己走完了"先搜、再挑、再确认"那道人工闸门。
+    match: (text) => /^\/漫画(?:\s|$)/u.test(text),
+    async run({ chatKey, text, senderId, replyToMessageId }, { jmcomic, sender, log }) {
+      await runCommand('jmcomic', { sender, log }, chatKey, replyToMessageId, async () => {
+        const comicId = parseJmcomicCommand(text);
+        if (!comicId) return null;
+        const [kind, chatId] = String(chatKey).split(':');
+        // 去重键是**请求者 + 漫画 ID**，所以 senderId 必须一路传下去。
+        // 回执同样不带队列位置/任务号：那些数字对敲命令的人没有任何用处。
+        jmcomic.enqueue({
+          chatKey,
+          kind: kind === 'private' ? 'private' : 'group',
+          chatId,
+          requesterId: senderId,
+          comicId
+        });
+        return '在下了，等下把 PDF 发上来';
       });
     }
   }

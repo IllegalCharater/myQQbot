@@ -15,7 +15,7 @@
 // 【本次唤醒】的语义是"你还没看过的最新消息"，机器人自己的话由【过去状态】以"我"出现。
 //
 // ── 三个状态，务必分清（混淆任意两个都会出难查的 bug）──
-//   #win        最新 N 条对方消息的私有快照。超上限严格滑出最老成员。
+//   #win        最新 N 条对方消息的私有快照。超上限滑出最老成员（**异步任务结果除外**）。
 //   #foldedIds  被滑出、但还没被消费的消息 id。只保留结算账本，不再保留窗口外消息内容，
 //               因而响应判定和【本次唤醒】都严格只看最长 N 条。
 //   lastSeenId  消费游标。id ≤ 游标 = 已被某次运行"看过"（含被折进【过去状态】的）。
@@ -25,7 +25,7 @@
 // ⚠️ **本类不写存档。** 唯一的下沉通道是 settled[]：消费时攒下"已看过"的 id，由调用方
 //    （orchestrator 的 #consumeWindow）一次性写进存档的 read 字段。窗口自己从不读 read
 //    （唯一例外：首次播种时用它还原游标）。
-import { isWakeEligibleIncoming } from '../../chat/store.js';
+import { isAsyncResult, isWakeEligibleIncoming } from '../../chat/store.js';
 import type { ChatStore } from '../../chat/store.js';
 import type { ChatMessage } from '../../chat/types.js';
 
@@ -100,14 +100,28 @@ export class ContextWindow {
   }
 
   /**
-   * 超上限就严格滑出最老成员。已消费的直接丢；未消费的只留下 id，供本批消费时
-   * 下沉 read 镜像和报告 foldedAway，消息内容不再留在窗口外参与响应判定。
+   * 超上限就滑出最老成员 —— 但**异步任务结果永不滑出**。
+   *
+   * 为什么给它们豁免（2026-10-10 真机 + 探针实测）：被滑出的未消费条目会经
+   * `takeFoldedIds()` **直接标成已读历史**（见 `#commitFolded`），从此不再参与响应判定。
+   * 对普通闲聊这是对的取舍（新消息更重要），但对异步结果就是**静默丢失**：那是"你的任务
+   * 结束了"的唯一凭据，模型只会看到群里凭空多了一张图，永远不知道那是自己画的。
+   * 探针实测（容量 3、图到达后群里再说 5 句）：条目被滑出 → 那一轮**不由它触发**，
+   * 只剩在【过去状态】的历史里露一面，连一条日志都没有。
+   *
+   * 代价是窗口长度可以短暂超过 `cap`（超出的是异步结果本身，数量由各能力的调用闸门兜住：
+   * 每群每小时最多几次）。已消费的直接丢；未消费的只留下 id，供本批消费时
+   * 下沉 read 镜像和报告 foldedAway —— 这条对普通消息**逐字未变**。
    */
   #trim() {
     const cap = this.capacity;
     if (cap <= 0) return;
-    while (this.#win.length > cap) {
-      const e = this.#win.shift();
+    let normal = this.#win.filter((e) => !isAsyncResult(e)).length;
+    while (normal > cap) {
+      const at = this.#win.findIndex((e) => !isAsyncResult(e));
+      if (at < 0) break;   // 理论到不了：normal > cap ≥ 0 说明一定有普通成员
+      const [e] = this.#win.splice(at, 1);
+      normal--;
       const id = Number(e?.id) || 0;
       if (id > this.#lastSeenId) {
         this.#foldedIds.push(id);

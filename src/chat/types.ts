@@ -26,13 +26,20 @@ export interface TranscriptRecord extends Record<string, unknown> {
 }
 
 /**
- * 出图结果的三态，取值与 `media/image-gen` 的 `ImageResultStatus` **逐字一致**
- * （两处各写一份：跨层不能互相 import，见那个类型的注释）。
+ * 异步任务结果的**三态结局**（`sent` 成功 / `unsent` 做成了但没能确认送达 / `failed` 没做成）。
  *
- * `unsent` 与 `failed` 是两件不同的事：前者图已经画好了（消息甚至可能已经在群里），
- * 后者压根没画出来。合成一个"失败"会让模型对着一件说不清的事发言。
+ * 出图与漫画**各写一份取值逐字相同的联合类型**（`media/image-gen/types.ts` 的
+ * `ImageResultStatus`、`media/jmcomic.ts` 的 `JmcomicStatus`）：`chat` 与 `media` 同属 T1，
+ * 不能互相 import。**三态不能合成一个"失败"** —— `unsent` 那一支的东西**可能已经在群里了**，
+ * 对模型（该说什么）和对群友（要不要再要一次）都完全是另一件事。
  */
-export type ImageResultStatus = 'sent' | 'unsent' | 'failed';
+export type AsyncResultStatus = 'sent' | 'unsent' | 'failed';
+
+/** 出图结果的三态（见上；`chat` 内部用它自己的名字，与 media 那份逐字同值）。 */
+export type ImageResultStatus = AsyncResultStatus;
+
+/** 漫画下载结果的三态（见上）。 */
+export type JmcomicStatus = AsyncResultStatus;
 
 /**
  * 图像生成结果条目（kind:'image-result'）的结构化事实。
@@ -51,6 +58,20 @@ export interface ImageResultRecord extends Record<string, unknown> {
   /** 本次实际发送出去的图片张数（失败时为 0）。 */
   count: number;
   status: ImageResultStatus;
+  /** `failed` / `unsent` 时给模型看的原因（一句话）；`sent` 时为空串。 */
+  reason: string;
+}
+
+/**
+ * 漫画下载结果条目（kind:'jmcomic-result'）的结构化事实。与上面那条同形（含三态）。
+ *
+ * `cached` 记的是"这一份用的是本地缓存"——它会进正文（"（使用本地缓存）"），
+ * 因为那解释了"为什么这次这么快"。
+ */
+export interface JmcomicResultRecord extends Record<string, unknown> {
+  comicId: string;
+  cached: boolean;
+  status: JmcomicStatus;
   /** `failed` / `unsent` 时给模型看的原因（一句话）；`sent` 时为空串。 */
   reason: string;
 }
@@ -87,6 +108,7 @@ export interface ChatMessage extends Record<string, unknown> {
   digest?: DigestRecord;
   transcript?: TranscriptRecord;
   imageResult?: ImageResultRecord;
+  jmcomic?: JmcomicResultRecord;
   /**
    * 引用对象。**预览只存在这里，不再拍进 `text`**（见 `Ingest` 的注释）：
    * 拍进去的话 id 就没了，而渲染层拿得到结构化数据才能把它印成 `[引用 #id 谁：什么]`。

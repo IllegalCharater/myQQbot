@@ -177,24 +177,19 @@ ok('转写被队列拒绝时转述队列给的原因',
 ok('入队抛错时一条消息都没发',
   sent.length === sentBeforeRejected, `多发了 ${sent.length - sentBeforeRejected} 条`);
 
-// ── 成本闸门：超限不建任务 ───────────────────────────────────────
-// 用一个**全新的 chatKey**：模块级闸门是单例，前面几条用例已经在本群记过账，
-// 复用同一个 key 会让这里的第一次调用就被前面记的时间戳拦下（假红）。
-// 全局每日上限放到很宽，让本用例只考察"每群每小时"这一条。
-updateConfig({ transcription: { maxCallsPerChatPerHour: 1, maxCallsPerDay: 1000 } });
-const gateJobs = [];
-const gateQueue = { enqueue: ({ url }) => { gateJobs.push(url); return { id: 'gate00000000' }; } };
-const gateCtx = () => ctxOf({ transcription: gateQueue, chatKey: 'group:77001' });
-
-const gateFirst = await executeTool(defs, gateCtx(), 'transcribe_video', { url: 'https://example.com/1.mp4' });
-const sentAfterGateFirst = sent.length;
-const gateSecond = await executeTool(defs, gateCtx(), 'transcribe_video', { url: 'https://example.com/2.mp4' });
-ok('未超限的第一次正常建任务', gateFirst.isError !== true, gateFirst.content);
-ok('超过每群每小时上限时拒绝，且被拒的那一次不建任务',
-  gateSecond.isError === true && gateSecond.content.includes('太频繁') && gateJobs.length === 1,
-  `jobs=${gateJobs.length} content=${gateSecond.content}`);
-ok('被限频拒绝时同样一条消息都没发（工具不发"我收到了"的空头支票）',
-  sent.length === sentAfterGateFirst, `多发了 ${sent.length - sentAfterGateFirst} 条`);
+// ── 闸门**不在工具层**了（2026-10-10 挪进队列：`/转写` 因此也受限）──────────
+// 这里只保留工具侧那条仍然成立的性质：**入队失败时一条消息都不发**（不发"我收到了"的空头支票）。
+// 闸门本身（两条入口共用一本账、被拒的不建任务）改在 `t-transcription.mjs` 里**对着队列**验 ——
+// 那才是它现在的家；在本套件里 `ctx.transcription` 是假队列，压根拦不住。
+{
+  const before = sent.length;
+  const failQueue = { enqueue: () => { throw new Error('本群转写太频繁（每小时最多 1 次），稍后再试'); } };
+  const rejected = await executeTool(defs,
+    ctxOf({ transcription: failQueue, chatKey: 'group:77002' }), 'transcribe_video', { url: 'https://example.com/1.mp4' });
+  ok('入队被拒时：把**真实原因**回给模型，且一条消息都不发',
+    rejected.isError === true && String(rejected.content).includes('太频繁') && sent.length === before,
+    `sent=${sent.length - before} content=${rejected.content}`);
+}
 
 // ── 配置默认值与钳制 ────────────────────────────────────────────
 ok('转写新增两个配额字段有默认值',
@@ -246,7 +241,9 @@ ok('热搜工具只读榜单：不碰 broadcast（播报带当天幂等与目标
 const trToolSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/agent/tools/transcription.ts'), 'utf8'));
 ok('转写工具里没有关键词闸门（"该不该转"交回模型判断）',
   !trToolSrc.includes('什么视频') && !trToolSrc.includes('requestText'));
-ok('转写工具在建任务前先消耗调用额度', trToolSrc.includes('budget.take(ctx.chatKey)'));
+const trQueueSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/media/transcription/queue.ts'), 'utf8'));
+ok('转写闸门在**队列**里、且工具层不再自带一份（两条入口共用一本账）',
+  trQueueSrc.includes('this.#budget.take(chatKey)') && !trToolSrc.includes('SlidingWindowBudget'));
 ok('模型自主路径以 assisted 入队', trToolSrc.includes("mode: 'assisted'"));
 // 工具必须**完全不发消息**：这是"入队后说不说话由模型自己决定"的全部内容。
 // 拿掉 `sendTextBatch` 还不够——`ctx.session.sent` 与 `emit` 同样是把这次调用算成"已发言"，

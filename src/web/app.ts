@@ -6,14 +6,15 @@ import { EVENTS } from '../core/events.js';
 import type { AppEmit } from '../core/events.js';
 import { OneBotClient } from '../qq/onebot.js';
 import { ChatStore } from '../chat/store.js';
+import type { ChatMessage } from '../chat/types.js';
 import { MemoryStore } from '../chat/memory.js';
 import { StickerManager } from '../stickers/sticker-manager.js';
 import { SendQueue } from '../qq/sender.js';
 import { SessionRegistry } from '../chat/sessions.js';
 import { Orchestrator } from '../agent/runtime/orchestrator.js';
 import { initPriceFeed, stopPriceFeed } from '../llm/price-feed.js';
-import { initJmcomicQueue, stopJmcomicQueue } from '../media/jmcomic.js';
-import type { JmcomicCompletion } from '../media/jmcomic.js';
+import { initJmcomicQueue, stopJmcomicQueue, enqueueJmcomicDownload } from '../media/jmcomic/index.js';
+import type { JmcomicCompletion } from '../media/jmcomic/index.js';
 import { VideoTranscriptionQueue } from '../media/transcription/index.js';
 import { ImageGenQueue } from '../media/image-gen/index.js';
 import type { ImageResultStatus } from '../media/image-gen/index.js';
@@ -86,44 +87,43 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     onebot, store,
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`)
   });
-  // 转写结果的回流：把识别文本落成一条存档条目并唤醒一次运行，**由模型决定说什么**
-  // （`/转写` 命令走的是另一条路，队列自己把结果贴进群，见 internal job 的 mode）。
+  // ── 异步回流的**共同接线**（转写 / 漫画 / 出图三条共用）──
+  //
+  // 顺序照 ingest：先落存档 → 再入窗（`onIncoming` 会推窗口并按防抖唤醒）→ 最后通知面板。
+  // 三条只差"用哪个 append* 落库、正文怎么写"，那部分在各自的 sink 里一行说完。
   //
   // 为什么这段留在组装根：它同时碰 store、orchestrator 端口与 emit —— **它就是共享组件图**，
   // 按"只碰共享图的不搬"的判据不搬。web/ 根目录白名单也不允许新开文件；onebot/ 是入站侧、
   // runtime/ 是长期任务与退出路径，都不合适。
   //
-  // 用函数声明（会提升）：下面传给队列时 `orchestrator` 这个 const 还没初始化，
+  // 用函数声明（会提升）：下面传给各队列时 `orchestrator` 这个 const 还没初始化，
   // 但函数体要等到 `start()` 之后、队列真正投递时才会执行，那时它早就建好了。
+  function deliverAsyncResult(chatKey: string, entry: ChatMessage) {
+    orchestrator.onIncoming(chatKey, entry);
+    emit(EVENTS.chatUpdate, chatKey);
+  }
+
   function deliverTranscript({ chatKey, text, truncated, chars }: {
     chatKey: string; text: string; truncated: boolean; chars: number;
   }) {
-    // 顺序照 ingest：先落存档 → 再入窗（onIncoming 会推窗口并按防抖唤醒）→ 最后通知面板。
-    const entry = store.appendTranscript(chatKey, { text, truncated, chars });
-    orchestrator.onIncoming(chatKey, entry);
-    emit(EVENTS.chatUpdate, chatKey);
+    deliverAsyncResult(chatKey, store.appendTranscript(chatKey, { text, truncated, chars }));
   }
 
   // 漫画队列的完成回流与转写同形：文件仍由队列确定性上传；OneBot 确认接收后，
   // 再把一条未读机器结果送进窗口，触发 Agent 给请求者自然收尾。
-  function deliverJmcomicCompletion({ chatKey, comicId, cached }: JmcomicCompletion) {
-    const entry = store.appendJmcomicResult(chatKey, { comicId, cached });
-    orchestrator.onIncoming(chatKey, entry);
-    emit(EVENTS.chatUpdate, chatKey);
+  // **失败也走这条路**（2026-10-10 统一）：队列不再往群里贴 ❌/⚠️ 文案，改由模型交代。
+  function deliverJmcomicCompletion({ chatKey, comicId, cached, status, reason }: JmcomicCompletion) {
+    deliverAsyncResult(chatKey, store.appendJmcomicResult(chatKey, { comicId, cached, status, reason }));
   }
 
-  // 出图结果的回流。与前两条**同一个形态、同一个分工**：图片本身已经由队列直接发进群了
-  // （图片就是交付物，模型没法"说"出一张图），这条条目只承载"画好了 / 没发成 / 没画成"这个事实，
-  // 触发一次运行让模型有机会补一句话 —— 说不说、说什么由它自己决定。
-  //
-  // ⚠️ **失败也走这条路**（不是队列代它往群里贴一句）：这条路上模型只调了一次工具就结束本轮，
-  // 随后那次运行才是它开口的地方；代说会让它以为"群里已经说过了"，于是不再开口。
+  // 出图结果的回流：图片由队列直接发进群（图片就是交付物，模型没法"说"出一张图），
+  // 条目承载"画好了 / 没发成 / 没画成"这个事实，触发一次运行让模型有机会开口 ——
+  // 说不说、说什么由它自己决定。**失败也走这条路**（不是队列代它往群里贴一句）：
+  // 这条路上模型只调了一次工具就结束本轮，随后那次运行才是它开口的地方。
   function deliverImageResult({ chatKey, prompt, status, reason }: {
     chatKey: string; prompt: string; status: ImageResultStatus; reason: string;
   }) {
-    const entry = store.appendImageResult(chatKey, { prompt, status, reason });
-    orchestrator.onIncoming(chatKey, entry);
-    emit(EVENTS.chatUpdate, chatKey);
+    deliverAsyncResult(chatKey, store.appendImageResult(chatKey, { prompt, status, reason }));
   }
 
   const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log, deliverTranscript });
@@ -156,7 +156,15 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // 白名单判断、@ 名字解析、引用预览、合并转发展开与拍一拍都在 `web/onebot/ingest.ts`
   // 里（`atNameCache` 与引用预览上限是摄取器自己的状态，组装根不需要知道）。
   // 组装根只把 OneBot 的入站回调接到 `ingest.handle()` 上。
-  const ingest = createIngest({ onebot, store, sender, orchestrator, transcription, imageGen, emit, getConfig, log });
+  const ingest = createIngest({
+    onebot, store, sender, orchestrator, transcription, imageGen, emit, getConfig, log,
+    // `/漫画 <ID>` 只拿到"入队"这一个口子；`onebot/sender/store` 在这里补齐 ——
+    // 漫画队列的运行时依赖本来就是这么绑的（与工具路径同一个 `enqueueJmcomicDownload`）。
+    jmcomic: {
+      enqueue: ({ chatKey, kind, chatId, requesterId, comicId }) =>
+        enqueueJmcomicDownload({ onebot, sender, store, chatKey, kind, chatId, requesterId }, comicId)
+    }
+  });
 
   // ── 控制台 HTTP 表面 ──
   // SSE 端点、鉴权、路由分发、静态文件、状态快照（`buildStatus`）与配置脱敏

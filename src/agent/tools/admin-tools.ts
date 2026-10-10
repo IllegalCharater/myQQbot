@@ -1,6 +1,7 @@
 import { EVENTS } from '../../core/events.js';
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
-import { enqueueJmcomicDownload, searchJmcomic } from '../../media/jmcomic.js';
+import { enqueueJmcomicDownload, searchJmcomic } from '../../media/jmcomic/index.js';
+import { asyncTaskTool } from './async-task.js';
 import { err, errorMessage, ok } from './shared.js';
 import type { ToolDefinition } from '../shared/types.js';
 
@@ -80,7 +81,9 @@ function completionTools(): ToolDefinition[] {
         }
       }
     },
-    {
+    // 与 `transcribe_video` / `generate_image` 共用同一个外壳（入队型工具的共同流程）：
+    // 入队失败的原因原样回给模型 —— 那是校验层的中文文案，模型是唯一能把它转述给群友的人。
+    asyncTaskTool({
       name: 'download_jmcomic',
       description: TOOL_PROMPT_TEXT.download_jmcomic.description,
       parameters: {
@@ -91,15 +94,11 @@ function completionTools(): ToolDefinition[] {
         required: ['comicId'],
         additionalProperties: false
       },
-      async execute(ctx, args) {
-        try {
-          const result = enqueueJmcomicDownload(ctx, args.comicId);
-          return ok({ ...result, note: `已加入下载队列，当前位置：${result.position}。完成后会自动发送 PDF。` });
-        } catch (error) {
-          return err(errorMessage(error));
-        }
+      async run(ctx, args) {
+        const result = enqueueJmcomicDownload(ctx, args.comicId);
+        return ok({ ...result, note: `已加入下载队列，当前位置：${result.position}。完成后会自动发送 PDF。` });
       }
-    },
+    }),
     {
       name: 'finish',
       description: TOOL_PROMPT_TEXT.finish.description,

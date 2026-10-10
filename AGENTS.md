@@ -57,8 +57,12 @@ web
 `media/` 同时承载媒体处理与 Bot 的可选扩展能力。新增这类能力时，主体实现统一放在
 `src/media/<feature>/`，按功能目录收拢；`src/web/routes/` 只保留 HTTP 管理表面，`src/web/app.ts`
 只负责依赖注入和生命周期装配。`media/` 下**平铺的单文件是给"单一职责、没有内部结构"的模块用的**
-（`safe-fetch` / `html-to-text` / `call-budget` / `bookmark-request`），一旦它长成"几个来源共用一个形状"
-就该开目录（`hot-search/`、`image-source/`、`web-search/`、`transcription/`、`image-gen/`）。由于 `llm`、`chat`、`qq`、
+（`safe-fetch` / `html-to-text` / `call-budget` / `bookmark-request` / `task-queue` / `task-error`），一旦它长成"几个来源共用一个形状"
+就该开目录（`hot-search/`、`image-source/`、`web-search/`、`transcription/`、`image-gen/`、`jmcomic/`）。
+**这条规则是机检的**（`scripts/check-layers.mjs`）：`media/` 根下出现白名单之外的 `.ts` 直接报错。
+它抓过一条真不一致——`jmcomic` 原本是根下一个 900 行的平铺文件（2026-10-10 拆成目录）。
+**能力目录要不要带 `index.ts` 桶文件不强制**：五个有，`hot-search/` 没有（消费者直接用那四个文件、套件也直接取内部的纯函数），
+写文档时别把"通常有"说成"必须有"。由于 `llm`、`chat`、`qq`、
 `media` 同属 T1，能力模块不得直接横向 import `qq/` 等同层实现；需要发送消息等能力时定义最小
 结构化端口，由 `web/app.ts` 注入真实对象。
 
@@ -104,7 +108,7 @@ web/
 
 **这套目录约束是可机检的**（`check-layers.mjs`）：根目录出现白名单（上表前四个文件）之外的 `.ts` 直接报错，四个子目录缺一个也报错。守护空白照 `agent/` 那条：它只**禁止回根**，不管你在子目录里怎么分。
 
-**斜杠命令只有一个落点**（`web/onebot/slash-commands.ts`）：判定、解析调用、入队与即时回执全在那里；`ingest.ts` 只用**同一个** `isSlashCommand()` 决定"要不要并入引用附件"与 `wakeEligible`。**不许在 ingest 或别处再写一份命令正则** —— 两份判据漂移（`/^\/画(?:\s|$)/` 与 `/^\/画/` 看着都对）不会有任何报错，表现只有两种：命令没被认出来、消息进了 LLM；或者同一条消息被处理两次。加一条命令 = 在 `COMMANDS` 表里**加一行**（存函数引用、按数组顺序匹配，与装配清单同形，**不是**按键分发的注册表）；命令自己的语法（用法提示、参数解析）仍留在各自的领域模块（`media/transcription/commands.ts`、`media/image-gen/commands.ts`）。守护是 `tests/t-slash-commands.mjs`（含一条源级断言：ingest.ts 里不许再出现命令正则）。
+**斜杠命令只有一个落点**（`web/onebot/slash-commands.ts`，当前三条：`/转写`、`/画`、`/漫画 <ID>`）：判定、解析调用、入队与即时回执全在那里；`ingest.ts` 只用**同一个** `isSlashCommand()` 决定"要不要并入引用附件"与 `wakeEligible`。**不许在 ingest 或别处再写一份命令正则** —— 两份判据漂移（`/^\/画(?:\s|$)/` 与 `/^\/画/` 看着都对）不会有任何报错，表现只有两种：命令没被认出来、消息进了 LLM；或者同一条消息被处理两次。加一条命令 = 在 `COMMANDS` 表里**加一行**（存函数引用、按数组顺序匹配，与装配清单同形，**不是**按键分发的注册表）；命令自己的语法（用法提示、参数解析）仍留在各自的领域模块（`media/transcription/commands.ts`、`media/image-gen/commands.ts`）。守护是 `tests/t-slash-commands.mjs`（含一条源级断言：ingest.ts 里不许再出现命令正则）。
 
 `http/http.ts` 的目录名与文件名重复是刻意保留的（该轮只搬运不重命名，diff 才可审）。**`app.ts` / `server.ts` / `types.ts` 的位置动不得**：套件按字面路径读它们，还按函数名切 `app.ts` 的源码文本（见下条）。
 
@@ -134,11 +138,55 @@ OneBot 入站
 
 Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息存档、历史摘要和成员记忆。
 
-链路另有**三条异步回流**入口：后台转写完成后写入 `kind:'transcript'` 的【转写结果】；漫画 PDF 被 OneBot 明确接收后写入 `kind:'jmcomic-result'` 的【漫画下载结果】；出图队列把画好的图片发进群后写入 `kind:'image-result'` 的【图片生成结果】。三条都会落存档、推入窗口，再走同一套「窗口 → 响应判定 → runAgent」。那次运行**拿不到原始 tool result**（任务在更早一次运行里入队），所以正确性只能由 system prompt 规则与窗口判定承载，不能指望上下文里留着工具调用痕迹。
+链路另有**三条异步回流**入口：后台转写完成后写入 `kind:'transcript'` 的【转写结果】；漫画 PDF 被 OneBot 明确接收后（**或下载失败时**）写入 `kind:'jmcomic-result'` 的【漫画下载结果】/【漫画下载失败】；出图队列把画好的图片发进群后（**或没画成/没发出去时**）写入 `kind:'image-result'` 的【图片生成结果】。三条都会落存档、推入窗口，再走同一套「窗口 → 响应判定 → runAgent」。那次运行**拿不到原始 tool result**（任务在更早一次运行里入队），所以正确性只能由 system prompt 规则与窗口判定承载，不能指望上下文里留着工具调用痕迹。**三条的队列、错误类型、回流落库与工具外壳都是共用的**，见下面的「异步任务的共同骨架」。
 
-第三种的**交付物本身是文件**，与漫画那条同形、与转写不同：图片由队列**直接发进群**（`SendQueue.sendImage`），回流条目承载的是**三态结局**（`sent` 已发送 / `unsent` 画好了没发出去 / `failed` 没画成）。**成功与失败走同一条回流通道，队列不代模型说话**（只有"确定没人接"时才退回贴一句：`/画` 命令路径压根没有模型、assisted 却没装回流端口、回流端口抛错）—— 出图这条路上模型只调了一次工具就结束本轮，随后那次运行才是它开口的地方；队列代它说，它就会以为"群里已经说过了"而不再开口（转写那次"任务被代发伪装成已收尾"是同一个病）。
+第三种的**交付物本身是文件**，与漫画那条同形、与转写不同：图片由队列**直接发进群**（`SendQueue.sendImage`），回流条目承载的是**三态结局**（`sent` 已发送 / `unsent` 画好了没发出去 / `failed` 没画成）。**成功与失败走同一条回流通道，队列不代模型说话**（只有"确定没人接"时才退回贴一句：`mode` 显式为 `standalone`、assisted 却没装回流端口、回流端口抛错）—— 出图这条路上模型只调了一次工具就结束本轮，随后那次运行才是它开口的地方；队列代它说，它就会以为"群里已经说过了"而不再开口（转写那次"任务被代发伪装成已收尾"是同一个病）。**`generate_image` 工具与 `/画` 命令都走 `assisted`**（用户明确要求"两边行为统一"）：这两条入口做的是同一件事，图发出去之后总得有人知道。
 
 **合并转发展开后仍然是「一条」消息，不是几条记录**：`ingest.ts` 认到 `forward` 段就展开，产物是 `[合并转发 共N条]\n名字: 内容\n…`（`expandForwardNodes`），然后**整份替换**那条消息的 `text` —— 存档里发送者仍是转发的人，那些行只是 `text` 里的换行。三条推论：① 那些行**不带时间戳**（OneBot 的转发节点没有时间）、发送者也属于别的会话，所以任何按行展示的地方都必须让"这是一段被转发进来的东西"看得出来，否则观感就是"混进了几条不属于本群、还没有时间的记录"（实测报过一次）；② 面板侧 `ui/js/views/chats.js` 的 `forwardBlockHtml` 只把它渲染成缩进/弱化的区块、**不改 `text`**（模型要读的仍是展开后的原文），且判据 `/^\[合并转发 共\d+条\]/` 必须与 `read_forward` 工具那句 `entry.text.startsWith('[合并转发 共')` 同形 —— 两边认的不是同一件事时，工具说"已展开"、面板却平铺；渲染出的仍是**一行 `<tr>`**，多渲染出行会打乱分页账本（`state.chatMsgRendered` 与滚动加载）。③ 已知空白：`expandForwardNodes` **没有任何套件覆盖**（`[合并转发 共N条]` 这个字面也没被钉过），且展开后的形态在 `prompt-catalog.ts` 里**没有说明** —— 目录只写了未展开的 `[合并转发聊天记录]` / `[转发消息 …]`，而入站是自动展开的，模型实际看到的是第三种拼法。
+
+## 异步任务的共同骨架（转写 / 漫画 / 出图）
+
+三个能力是**同一条流程的三份实现**：模型调一次工具（或群友敲一条斜杠命令）→ **立刻**拿到回执 →
+后台单并发队列干活（几十秒到几分钟）→ 结果由队列**直接交付**（贴文本 / 发图 / 传 PDF）→
+回流一条**未读**条目唤醒模型，由它自己开口。2026-10-10 把这份骨架抽成了四件共用产物：
+
+| 共用件 | 位置 | 说明 |
+| --- | --- | --- |
+| 队列的机械部分 | `media/task-queue.ts` | 登记（有界，只挤已结束的）、串行排空、中止与关停、状态迁移、"跑完/失败"的判定 |
+| 错误类型 | `media/task-error.ts` | `TaskError(stage, code, userMessage)` + `safeErrorCode` / `userError`（两个能力的错误类改成一行别名，`instanceof` 与公开面不变） |
+| 回流落库与入窗 | `chat/store.ts` 的 `appendAsyncResult` + `web/app.ts` 的 `deliverAsyncResult` | 四条不变量的唯一落点（`read:false` / `self:false` / `senderId:''` / 追加在末尾），三条 sink 各剩一行 |
+| 工具外壳 | `agent/tools/async-task.ts` | "闸门 → 入队 → 回执 / **把真实原因回给模型**"；回执整句仍取自 Catalog |
+
+**四条边界，改动时别拆散：**
+
+- **每个能力的 `execute` 自己干完整件事**（干活 + 投递 + 回流）。核心**刻意不**把流程切成
+  `run`/`deliver`/`cleanup` 三段：转写要多一步 FFmpeg、出图要临时目录与"本机路径被拒就改发链接"
+  的兜底、漫画有三阶段与重试，切成统一的三段只会把差异挤进更多钩子，钩子比差异本身还长。
+- **计时器（`setTimeout` 与句柄）留在各能力文件里，不进核心**。`LONG_TERM_TASKS.owner` 的语义是
+  "**实际持有这些计时器的模块**"，`tests/t-tasks.mjs` 按它反查"文件里有没有调度调用"；
+  收进核心的话三条 entry 的 owner 会一起塌成同一个文件，那条断言就退化成"这个文件还有没有
+  `setTimeout`"。核心只回答"有没有活、下一次该等多久"（`hasPending()` / `idleDelay()`）。
+- **闸门在队列的 `enqueue` 里，工具与命令共用同一本账**（转写 2026-10-10 从工具层挪过来，
+  `/转写` 因此**也受限** —— 这是有意的行为变更，与 `/画` 对齐）。排在全部零成本校验**之后**：
+  被拒的那一次不占额度、也不建任务。
+- **失败一律回流给模型**（`onError`），**只有"确定没人接"时才退回贴一句**：`mode` 显式为
+  `standalone`、没装回流端口（`NO_DELIVER_SINK`）、回流端口抛错（`DELIVER_FAILED`）。
+  判据是"**状态总要记下来，而说不说那句话才看是不是在关停**"——核心把这两件事分开：
+  关停时**照样**调 `onError`（那个任务确实没跑成），由宿主决定要不要开口。
+  把它们合成一个 `if` 的后果是任务永远停在 `queued`（实测踩到过）。
+
+`TaskQueue` 是**静态装配**：钩子是构造时给的一组函数引用，运行期只有顺序遍历与直接调用，
+没有任何 `REGISTRY[动态键]` 形态（同 `web/runtime/lifecycle.ts` 的装配清单）。
+
+**这层抽象的代价要说清**（2026-10-10 实测，**别指望它把代码变少**）：抽出前后两个克隆队列的**代码行几乎没变**
+（转写 232 → 236、出图 284 → 280，去掉的机械部分 ≈ 换回来的钩子接线 + 宿主侧的小函数），
+净增的是核心那 118 行（含大量注释）。**收益是"同一件事只有一份实现"**：修一次
+`drain()`/`stop()`/状态语义，三个能力同时受益，而"停不干净""失败停在 queued""被取走的任务还算排队中"
+这三种 bug 从此只可能错一次。**已知守护空白**：核心的重入护栏（`drain()` 里 `if (this.#running) return this.#running`）
+删掉**不会让任何套件变红**（承载它的是宿主那边的 `draining` 判断，探针实测过）；
+把 `await this.#step(...)` 改成不 await（破坏串行）会让套件**挂住**而不是干净地变红。
+所以动这两处时不要指望套件拦住你 —— 真正被钉住的是"取走的任务不算排队中"（`#activeId`）
+与"关停时状态照记、只是不汇报"这两条（都被 `t-image-gen.mjs` 的 stop 用例抓到过）。
 
 ## 上下文的四种数据必须分开
 
@@ -155,6 +203,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - 是否回复都要消费已经判断过的消息，防止旧消息反复成为“本次新消息”。
 - 原始历史以本轮 `triggerEntries` 最早消息为边界，只从边界之前读取；当前批只进【本次唤醒】。
 - 内部统一使用 `historyCount/historyLimit`，不要重新引入 `contextLimit`。
+- **异步任务结果条目绝不参与窗口滑出**（`ContextWindow.#trim` 对 `isAsyncResult` 的豁免，2026-10-10 真机 + 探针实测）：被滑出的未消费条目会经 `takeFoldedIds()` **直接标成已读历史**（`#commitFolded`），从此不参与响应判定 —— 而那条条目是"你的任务结束了"的**唯一凭据**，被滑出就是静默丢失：模型只会看到群里凭空多了一张图，永远不知道那是自己画的，**日志里一条线索都没有**。探针（容量 3、图到达后群里再说 5 句）：修之前那一轮**不由它触发**、只在【过去状态】的历史里露一面；修之后它进【本次唤醒】。代价是窗口长度可短暂超过 `cap`（超出的只有异步结果，数量由各能力的调用闸门兜住：每群每小时几次）。**普通消息的滑出逐字未变**（`t-window.mjs` 第 18 段有对照断言），第 19 段是端到端（容量受限 + 低档位下出图结果照样唤醒一次运行）。三种异步结果各自一条断言，加第四种时 `chat/store.ts` 的 `ASYNC_RESULT_KINDS` 是唯一要改的地方（`NON_PERSON_KINDS` 由它派生）。
 - **异步任务结果（`transcript` / `jmcomic-result` / `image-result`）是一等窗口条目，且两个谓词给出的答案相反**：`isSystemRecord` 必须**不**认它们（否则永远进不了窗口），`isPersonMessage` 必须**排除**它们（否则空 `senderId` 会制造幽灵成员）。它们必须 `read:false`——写 `true` 会落进 `#lastSeenId` 水位线之下：进程内刚写入时看得见，**重启后永久不可见**。窗口里只要有其中一种，`evaluateWindowTrigger` 无条件响应（`responseTier:0`，原因分别为“转写结果”/“漫画下载结果”/“图片生成结果”）；**`forceWake` 绕不过档位判定**，这是唯一落点，且规则不能读 `roll`。规则作用于**整批**。出图那条要单独记两句：① 它保证的是"模型有机会开口"，**不是**"图能发出去"——图由队列自己发；② **失败的那两种结局走同一条通道**（`image-result` 的三态），所以一个只带"图片生成失败"的窗口同样会唤醒模型 —— 这正是这条路要的：**群里不该出现队列代说的失败文案**。标签与正文按 `status` 分（结果 / 发送失败 / 生成失败），别把三者压成一句。
 
 ## 提示词维护规则
@@ -210,7 +259,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - **局部计时器不进任务表**：LLM/HTTP 超时、重试退避、限速与拟人停顿、唤醒防抖、单次扫描轮询、启动期端口轮询等，按"生命周期是否长于一次请求或一次会话"判定为局部计时器（**判定看的是这条界线，不是某个数字**——设计稿附录 B 里那些汇总数各条增量说明各写一次、已经漂了：2026-09-29 实测源码共 34 处调度调用点，其中属于长期任务的 9 处，其余是局部计时器（含解释器探测/自检那处硬超时，宿主 `core/python-probe.ts`）；逐条清单见 `docs/global-registry-design.md` 附录 B）。**绝不要包装 `setTimeout`/`setInterval` 全局来"顺便"收编它们**——那会把排除清单变成谎言。`tests/t-tasks.mjs` 有一条反向断言专门钉这条，设计稿里被点名排除的 `wake.debounce` 就是它的靶子。
 - 新增长期后台任务必须能显式启停，**不得靠模块加载期或构造函数副作用启动**。启停点已收敛成一条硬规则：**长期任务一律在 `src/web/app.ts` 的 `start()` 里启动、在 `stop()` 里停止**。**S11c 起这条规则由 `src/web/runtime/lifecycle.ts` 的装配清单（`LIFECYCLE`）驱动**：`start()` 只调 `await startLifecycle(deps)`，`stop()` 只调 `await stopLifecycle(deps)`，`app.ts` 里**不再出现任何一条硬编码的任务启停调用**（`lifecycleDeps()` 只负责把真模块递进去——"装的是什么"在 app，"按什么顺序装"在清单）。清单的三条可机检性质：① `start`/`stop` 存**函数引用**（不是名字），运行期只有 `for...of`，没有 `LIFECYCLE[动态键]`/`.find(`/`.get(`；② `ids` 只作**对账元数据**，运行期从不读；③ **import 它不启动任何东西**。**顺序即语义**：start 正序 = 清单顺序，stop **逆序**，于是"停长期任务排在 `onebot.close()` **之前**"（在途的 QQ 上传调用还依赖传输层）由"`onebot.reconnect` 排第一位"自动满足，不再靠人记。**往清单里插一行时位置就是行为**——插错地方不会有任何编译错误，只有 `t-lifecycle.mjs` 第 3 段的顺序断言会红。可参照的现成实现有：`price.feed`、两个 jmcomic 任务、`onebot.reconnect`、`transcription.worker`，以及 `hot-search.daily-broadcast`（`HotSearchScheduler.start/stop`，`node-cron` 句柄可销毁并等待在途播报）；`image-gen.worker` 是**唯一不加清单级闸门**的一条（队列空载时不持有任何东西，而把闸门提到清单里会让"配置关着"报成"画图服务尚未启动"，见该行 note）。**配置刷新路径刻意不接清单**：`applyConfigPatch` 只直接刷新确实支持热刷新的价格表与热搜计划，避免误调无条件任务。`stop()` 里 `abortAll()` **不进清单**（它管的是中止在跑的会话）。**`conformance` 列今天只剩 `jmcomic.worker` 是 `partial`**，成因是"停不掉**正在执行**的那一次下载"。新增任务时**要动三处**：`LONG_TERM_TASKS`（+ `tests/t-tasks.mjs` 的 `EXPECTED_IDS`）、`web/runtime/lifecycle.ts` 的 `LIFECYCLE`（+ `tests/t-lifecycle.mjs` 的 `EXPECTED_ENTRY_IDS` 与两条顺序期望），以及 `app.ts` 的 `lifecycleDeps()`；**只改一处会被套件拦下**。
 - 请求作用域计时器（LLM/HTTP 超时、重试退避、限速与拟人停顿、会话防抖、单次扫描轮询、启动期端口轮询等）**不是长期任务**，不要纳入任务表——判定标准与清单见上一条。
-- 改长期任务相关代码前先看 `tests/t-timers.mjs` 的 `withFakeTimers()`：它替换的是**全局** `setTimeout`/`setInterval`/`clearInterval`（`dist/` 里编译成裸标识符，所以拦得住）。两条坑写在它的注释里——假句柄必须放**原对象**进记录数组（放拷贝会把 `unrefCalled` 冻在 `false`，断言永远假绿），以及 `try/finally` 必须恢复（被测模块是模块级单例，漏恢复会污染同进程后续用例）。**第三条是 S10c 踩出来的**：断言"某处排定被取消"时，夹具必须让**新的排定真的不会发生**（例如测试 `connect()` 的取消时，要让 `new WebSocket` 构造成功）——否则被替换路径上的新排定会顺手清掉旧句柄，被测的那一行删不删都一样，探针会拿到**假的绿**（实测踩到，见设计稿 §9.5 第 16 项②）。**另有一处已知的守护空白**：`jmcomic` 的 `runWorker` 里 `while (runtime && …)` 那道闸门删掉不会让任何套件变红（要观察到差别得让夹具里有两个可跑任务，而第二个会过继给后面的真起 app 段去碰真 onebot），它只有注释在守——别以为它被管着。
+- 改长期任务相关代码前先看 `tests/t-timers.mjs` 的 `withFakeTimers()`：它替换的是**全局** `setTimeout`/`setInterval`/`clearInterval`（`dist/` 里编译成裸标识符，所以拦得住）。两条坑写在它的注释里——假句柄必须放**原对象**进记录数组（放拷贝会把 `unrefCalled` 冻在 `false`，断言永远假绿），以及 `try/finally` 必须恢复（被测模块是模块级单例，漏恢复会污染同进程后续用例）。**第三条是 S10c 踩出来的**：断言"某处排定被取消"时，夹具必须让**新的排定真的不会发生**（例如测试 `connect()` 的取消时，要让 `new WebSocket` 构造成功）——否则被替换路径上的新排定会顺手清掉旧句柄，被测的那一行删不删都一样，探针会拿到**假的绿**（实测踩到，见设计稿 §9.5 第 16 项②）。**另有一处已知的守护空白**：`jmcomic` 的u505cu4e4bu540eu4e0du8bb8u518du628au5df2u7ecfu53efu8dd1u7684u53d6u5b8c那道闸门（原先在 `runWorker` 的 `while (runtime && …)`，2026-10-10 拆目录后落在 `media/jmcomic/queue.ts` 的 `next` 钩子里）删掉不会让任何套件变红（要观察到差别得让夹具里有两个可跑任务，而第二个会过继给后面的真起 app 段去碰真 onebot），它只有注释在守——别以为它被管着。
 
 ## 图片链路
 
@@ -310,7 +359,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - **对模型的约束在 system prompt 里**（`toolProtocol` 那条"搜到之后不要自己挑一本下载"）：要它把候选标题（带 ID）念给用户、等对方指定后再 `download_jmcomic`。这是**刻意的人工闸门**，不是没做完。工具结果里也重申了一句"以上只是搜索结果，不会自动下载"——模型很容易把"搜到了"当成"那就下载吧"。
 - **参数走白名单，不透传库的魔法值**：排序是 `latest/view/picture/like/score/comment`（映射到 `mr/mv/mp/tf/tr/md`），范围是 `keyword/tag/author/work/actor`（映射到 `search_site`/`search_tag`/…）。**Node 与 Python 两侧各校验一次**，这些值会拼进查询串，透传等于让模型决定 URL 内容。两侧的表必须同步改（`SEARCH_MODES`/`ORDER_BY_CHOICES` ⇄ `JmSearchMode`/`JmSearchOrder`）。
 - **`search` 是子命令，无子命令 = 旧的下载契约**：`jmcomic_download.py <漫画ID> <下载目录>` 必须继续逐字可用（Node 的下单路径与既有测试都按这个形状调用）。判据写的是"第一个参数是不是 `search`"，**不要**改成"参数个数"或"位置推断"。
-- **`parseResultFrame` 是两条路共用的**（`media/jmcomic.ts`）：stdout 任意分块、JSON 可能没收全、只看最后一帧，这三条坑不该写两份。改它要同时想到下载的 `validatePdf` 收尾与搜索的失败文案。
+- **`parseResultFrame` 是两条路共用的**（`media/jmcomic/python.ts`）：stdout 任意分块、JSON 可能没收全、只看最后一帧，这三条坑不该写两份。改它要同时想到下载的 `validatePdf` 收尾与搜索的失败文案。
 - **搜索超时 12 秒，远短于下载的 30 分钟**：它是模型在等的同步调用，不是后台任务。它**不写 per-job 日志、不碰 `jobs`、不做心跳**——搜索结果没有留存价值（同名再搜还要重查）。`tests/t-jmcomic.mjs` 第 5 段正面钉住"搜索前后 `jobs.json` 逐字节相同、onebot 调用数为 0"。
 - **"没搜到"与"搜索坏了"必须分开说**：都返回空列表的话模型会以为结果就是空的，而实际可能是查询词不对（`total > 0` 时提示换词或回前几页）或分页越界。库缺失时把"用哪个解释器装依赖"那句一并带出（同下载路径的 `PYTHON_MISSING_HINT`）。
 - 实测（2026-10-05，jmcomic 2.7.0）：`client.search_site/search_tag/search_author/search_work/search_actor` 都返回 `JmSearchPage`，用 `iter_id_title_tag()` 拿 `(album_id, name, tags)`；`total` 是总数（tag 搜索能到 10000），**分页大小由服务端定**，所以 `limit` 只在客户端截断。`iter_id` 是**方法不是属性**（写成属性会 `TypeError: 'method' object is not iterable`）。
@@ -383,16 +432,22 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - **`check-layers.mjs` 的正则会扫到注释里的 `from '...'`**：在文件头注释里举例写 `from './providers/…'` 会被判成"相对说明符必须显式带扩展名"而报错（实测踩到）。注释里别写完整的 import 语句形态，或写成真文件名的 `.js`。
 - **改了模块路径 / 拆了目录之后，必须 `rm -rf dist && npm run build` 再跑套件**（**实测**：本轮拆分 `media/web-search.ts` → `media/web-search/` 时，套件里那条 `load('media/web-search.js')` **没有当场变红** —— Node 把 `web-search` 当目录、悄悄取到 `index.js`，于是"巧合成立"；直到一次**清空 dist 的干净重建**才以 `ERR_MODULE_NOT_FOUND: dist/media/web-search.js` 炸出来，而那条报错看起来像"文件被删了"。同一轮清空重建还**顺带救回一个真丢的文件**：`src/media/bookmark-request.ts` 当时已从磁盘消失，但 `dist/media/bookmark-request.js` 是旧的，所有套件照常全绿 —— **陈产物会替丢失的源码兜底**，只有从零构建才看得出来。配套的两条：① 套件里的 `load()` 写**全路径**（`media/web-search/index.js`），别依赖目录/index 的隐式解析；② 清空重建后拿 `src/**/*.ts` 与 `dist/**/*.js` **对一遍账**（`src/qq/ws.d.ts` 天然没有产物，是唯一的合法例外），确认每个源文件都真的编译出了产物。
 - **`media/transcription/` 的模块划分**（2026-10 从单个 866 行的 `video-transcription.ts` 拆出，仿 `web-search/`）：`types.ts`（共享类型，**不 import 本模块任何文件** —— 它被所有别的文件依赖，反向依赖就成环）/ `errors.ts`（`TranscriptionError` + `safeErrorCode`/`userError`）/ `primitives.ts`（env 读取与整数钳制）/ `config.ts`（配置解析与钳制）/ `commands.ts`（`/转写` 解析 + `findTranscriptionMedia`，**只读无副作用**）/ `media-proxy.ts`（SSRF 安全的本机流式代理）/ `extract.ts`（音轨提取 + FFmpeg 探测）/ `recognize.ts`（腾讯云极速版：签名、上传、响应解析）/ `queue.ts`（单并发状态机 + 两条投递路径）/ `index.ts`（桶文件）。三条边界：① 消费方一律 import `media/transcription/index.js`；② **`extract.ts` 里不许出现平台名**（解析交给 `media-source`），套件有断言钉住整个目录；③ **`t-tasks.mjs` 的 `owner` 必须指实际持有那个 `setTimeout` 的文件**（拆分后是 `src/media/transcription/queue.ts`，不是桶文件 —— 那个套件会读 owner 文件并要求里面有调度调用）。实测：旧 10 个导出在桶里**全部可达**，多出的 17 个是原先不导出、被 `export *` 顺带公开的内部帮手。
+- **`media/jmcomic/` 的模块划分**（2026-10-10 从根下一个 939 行的 `jmcomic.ts` 拆出，仿 `transcription/`）：`types.ts`（共享类型，**不 import 本模块任何文件**）/ `shared.ts`（常量表 + 三个小助手）/ `runtime.ts`（模块级可变状态，**为断环单开**）/ `jobs.ts`（任务数据层：归一化、落盘、"算不算待办"的判据）/ `python.ts`（子进程与结果帧）/ `stages.ts`（三阶段与投递）/ `queue.ts`（注册表 + 持久化 + 缓存清理 + 唤醒 + 三个入口）/ `commands.ts`（`/漫画` 解析）/ `search.ts`（搜索）/ `index.ts`（桶文件）。四条边界：
+  - **`runtime` 与 `saveJobs` 各被拆到独立的一层，是为了断环**：三个阶段要用 `runtime`（谁都要读、`queue.ts` 写），`updateJob` 要落盘（数据层写、而落盘需要完整任务表，那份表在注册表所在的 `queue.ts`）。所以 `runtime.ts` 用存取器暴露两个字段、`jobs.ts` 用一次性绑定（`bindPersist`，与 `runtime` 同一手法）接下落盘。**`bindPersist(saveJobs)` 那一行少了不会有任何报错**——任务状态照改、`jobs.json` 却永远不更新；实测它**被套件抓得住**（去掉后 `t-jmcomic.mjs` 红 2 条，含安全网那条）。
+  - **三个阶段的 `execute` 只跑一个阶段**：正常返回可能意味着"回去排队等下一次重试"，所以注册表的 `onSuccess` 是**空实现**、终局状态一律由 `stages.ts` 自己置。
+  - **计时器与 owner**：`LONG_TERM_TASKS` 里两个 jmcomic 条目的 owner 是 **`src/media/jmcomic/queue.ts`**（`setInterval` 与 `setTimeout` 都在那里，`t-tasks.mjs` 按 owner 反查"文件里有没有调度调用"）。
+  - **消费方一律 import `media/jmcomic/index.js`**（写全路径，别依赖目录/index 的隐式解析——陈产物会让它看起来"能跑"）。
 - **`media/image-gen/` 的模块划分**（2026-10 新增，仿 `transcription/`）：`types.ts`（共享类型，**不 import 本模块任何文件**）/ `errors.ts`（`ImageGenError` + `safeErrorCode`）/ `config.ts`（解析、钳制与两处归一化：接口地址、尺寸分隔符）/ `commands.ts`（`/画` 解析 + `findReferenceImage`，**只读无副作用**）/ `image-io.ts`（两条取图路径：进来的参考图、出去的结果图）/ `client.ts`（百炼同步接口，请求体是**纯函数**）/ `queue.ts`（单并发状态机）/ `index.ts`（桶文件）。四条边界：
   - **投递是确定性的**：图片由队列自己发（`SendQueue.sendImage`，因此受限频、也留 `我：[图片]` 的存档），条目承载**三态结局**；**失败也回流**（见下面那条）。与 jmcomic 的 PDF 是同一分工，区别只在"失败时谁开口"。
-  - **失败也走同一条回流通道，队列不代模型说话**（`#reportFailure`）。三态在条目里是分开的，**`unsent` 与 `failed` 绝不能合成一个"失败"**：前者图已经画好了、消息甚至可能已经在群里，后者压根没画出来。store 的正文与 `formatEntry` 的标签都按 `status` 分（【图片生成结果】/【图片发送失败】/【图片生成失败】），`prompt-catalog` 的 `toolProtocol` 第 9 条把三种结局各自该怎么做都写了（补一句 / 交代一句 / **不要自动重画**——重画要再花一次钱）。三条退路是"**只有确定有人接的时候才闭嘴**"：`/画` 命令路径压根没有模型（必须队列说）、assisted 却没装回流端口（`NO_DELIVER_SINK`）、回流端口抛错（`DELIVER_FAILED`）——后两种也要退回贴一句，否则群友什么都等不到。
+  - **失败也走同一条回流通道，队列不代模型说话**（`#reportFailure`）。三态在条目里是分开的，**`unsent` 与 `failed` 绝不能合成一个"失败"**：前者图已经画好了、消息甚至可能已经在群里，后者压根没画出来。store 的正文与 `formatEntry` 的标签都按 `status` 分（【图片生成结果】/【图片发送失败】/【图片生成失败】），`prompt-catalog` 的 `toolProtocol` 第 9 条把三种结局各自该怎么做都写了（补一句 / 交代一句 / **不要自动重画**——重画要再花一次钱）。三条退路是"**只有确定有人接的时候才闭嘴**"：`mode` 显式为 `standalone`（今天只有测试这么写）、assisted 却没装回流端口（`NO_DELIVER_SINK`）、回流端口抛错（`DELIVER_FAILED`）——后两种也要退回贴一句，否则群友什么都等不到。
   - **临时文件的生命周期归队列**（`#drain` 建目录、投递完删），**不归 `runTask`**：转写的 `runTask` 返回文本，可以在自己的 `finally` 里删；这里返回的是文件，必须活到投递之后。所以 `runTask` 的第 5 个参数是队列递进去的 `workDir`。
-  - **成本闸门在 `enqueue` 里，两条入口共用**。⚠️ 这是**刻意偏离 `/转写`** 的地方（那条命令路径不受闸门约束）：`/画` 是群里任何人都能敲的，而出图按张计费，命令路径不设闸门等于开一个可被刷的开支口子。放进 `enqueue` 也顺手避免了"工具先扣一次、队列再扣一次"的双记，并让被拒的那一次不占额度。
+  - **成本闸门在 `enqueue` 里，两条入口共用**。放进 `enqueue` 一来避免了"工具先扣一次、队列再扣一次"的双记，二来让被拒的那一次不占额度。**转写 2026-10-10 也挪到了同一处**（见「异步任务的共同骨架」那条），所以三条能力现在一个形状：命令与工具共用一本账。
   - **`n` 固定为 1**（接口层仍按数组处理）。额度按"一次调用 = 一张图"记账最直观：想画三张就调三次、占三个额度。
   - **每一段失败都要能自己说清是哪一段**：链路上**不许有裸异常穿到 `#drain` 的兜底文案**。原先 `fsp.writeFile` 与 `sender.sendImage` 没包装，真机实测的群里那句就是「画图失败（画图）：画图失败，稍后再试」——阶段和原因一起丢了（`userError` 的兜底阶段恒为 `generating`）。现在写盘归 `downloading`（带 errno）、上传归 `uploading`（限频与 `retcode=` 那两类文案本来就是写给人看的，原样透传；其余只给码），未分类异常一律把**码写进群里那句**、把**洗过的原文**写进日志（`safeErrorDetail` 去 URL 与本机路径——日志里不许出现这两样）。
   - **本机路径被协议端拒绝时，退回结果图链接重发一次**：判据与 stickers 那条**逐字相同**（错误里带 `retcode=` 才退，超时那类说不清发出去没有、重发就是刷屏）。这是"协议端认不认本机路径"唯一没法在本机验证的地方，所以 `ImageArtifact` 带着 `remoteUrl`（接口给的 24 小时结果链接）一路走到投递。
   - ⚠️ **图片段不能吃 `OneBotClient.call()` 的 15 秒默认超时**（`qq/onebot.ts` 的 `SEGMENT_UPLOAD_TIMEOUT_MS = 120s`，`sendImage` 与 `sendSticker` 共用）。**2026-10-10 真机实测**：那 15 秒是给"发一条文本 / 查一次资料"定的，而图片段要协议端先读本机文件、再传到 QQ 图床，一台 VPS 上稳定超过它 —— 于是**每一次出图都死在最后一步**，而协议端其实正在传：群里先收到一句「画图失败（画图）：画图失败，稍后再试」，紧接着那张图又到了。三条教训值得单记：① **通用默认超时用在慢操作上就是 bug**，改慢操作时先看它继承的是谁的默认值；② `AbortSignal.timeout()` 抛的是 `DOMException`、`name` 是 `TimeoutError`，而 `safeErrorCode` 取的是 `name` —— 日志里那个 `code=TimeoutError` 就是这么来的；③ 超时意味着"消息可能已经发出去了"，所以**上传阶段的话术必须留余地**（`图已经画好了，但没能发到群里：…`），不能说成"画图失败"——图就在上面，自相矛盾。
   - ⚠️ **出图的发送刻意不走 `SendQueue` 的每会话串行链**（`SendQueue.sendImage` 是链外实现，只保留限频与 `我：[图片]` 的存档）。同一次真机测试的第二个症状逼出来的：上传慢到分钟级时，**正在进行的对话整体堵住** —— 模型收尾那一步正是 `send_message`，它排在链上等上传，于是工具调用不返回、本轮运行不结束、面板上那条会话一直显示"运行中"。**会话的收尾不该由一张图的传输速度决定。** 这与转写的全文文件、漫画的 PDF 是同一条口径（那两处直接 `onebot.call('upload_*_file', …, 120_000)`，压根不经过 `SendQueue`）；差别是这里仍要记账，所以留在 `SendQueue` 里、只是不排那条链。代价知情：图片可能与文本交错。**sticker 不走这条豁免**——它是运行内的动作，模型本来就在等它的结果，而且它是本地小文件；把"后台队列的慢动作"与"本轮对话的发言"分开才是这条规则要守的东西。
+  - **排查"图出来了但模型没反应"时，先看那三样**（真机连报三次，三次的成因都不同，别一上来就改代码）：① 日志里 `[image-gen] task=… mode=…` —— 只有 `standalone` 才按设计不回流（今天只有测试会写它，两条生产入口都是 `assisted`；**默认值也是 `assisted`**，忘了传不会退化成静默）；② 限流的**那一次什么都不会建**（闸门排在 `budget.take()` 之前，被拒的连任务都没有），所以"报限流却出了图"必然是**更早那次**的产物，不是它；③ 图到达时如果窗口被塞满过（`store.maxContextMessages > 0`），看 `t-window.mjs` 第 18 段的那个豁免还在不在。**默认取 `assisted` 是刻意的**：反过来的话，任何一处忘了传 `mode` 都会静默变成"图发出来了模型不知道"——那正是这一轮排查了半天的症状；要静默必须显式写出来。
 - **`media/` 内部只横向引用共享的平铺助手**（`safe-fetch` / `call-budget` / `media-source`），功能目录之间**不互相 import**：`image-gen` 需要"安全下载 + 大小上限"时没有去 import `image-source/image-loader.ts`，而是就地重写了那 6 行（**含 `maxBytes + 1` 这个手法**——`safeFetchBinary` 到量只截断、不抛，多读一个字节才能把"正好这么大"与"被截断了"分开）。同理，`image-gen/errors.ts` 与 `transcription/errors.ts` 各留一份（唯一差别是前者把裸 `new Error('HTTP 404')` 收成 `HTTP_404`，否则"结果图 404"在日志里写成 `code=Error`，等于没有信息）。
 - **跨文件的源级断言要读整个目录、不要钉单个文件**（**实测**）：`t-transcription.mjs` 里那几条"FFmpeg 只拿本机代理 URL / 用 spawn 参数数组且 shell:false / 不用 SDK"的断言原本只读 `video-transcription.ts`，拆模块后 `spawn` 在 `extract.ts`、`https.request` 在 `recognize.ts`、代理在 `media-proxy.ts`，钉单文件就会以"找不到这段代码"的形式**假红**（而它想守的性质其实完好）。改成读 `src/media/transcription/*.ts` 拼起来，并**用 `join('\n')` 而不是 `join('')`** —— 有几条正则含 `\s`，贴在一起会把两个文件的首尾误配成一次匹配。**另一条同型的坑**：`tests/lib/src.mjs` 的 `readSrc()` 读的是 `dist/`，拿它去读 `src/**/*.ts` 会以 ENOENT 中止整个套件（未捕获异常会吃掉后面所有断言）—— 要扫源码就用 `fs.readFileSync(path.join(ROOT, 'src', …))`。
 - **`media/media-source/` 的 `parsers/` 与 `providers/` 是"平台实现"与"协议端适配"的分工**（2026-10 拆出）：`parsers/<x>.ts` 是平台自己的知识（短链展开、`view`/`playurl` 接口、挑最小音频流、CDN 要求的 Referer）；`providers/<x>.ts` 是**适配器**（知道 QQ 卡片的字段名 `qqdocurl`/`jumpUrl` 与该平台域名，转发给 parser）；`providers/card-payload.ts` 是**平台无关的报文摊平**（只判"是 http(s) 且长度合规"）。判据是**方向性**的：**`parsers/` 里不许出现卡片字段名**（那层知识跟着协议端变，跟站点改版无关），`t-media-source.mjs` 第 1b 节有断言钉住，并配了"字段名确实在 providers 里"的对照（否则前一条是假绿）。
@@ -466,6 +521,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - **文本扫描式断言先剥注释**：`tests/lib/src.mjs` 导出的 `stripComments()` 用于"这段代码里没有 X"这类断言。注释里提一嘴 X 不参与任何逻辑，不剥会把断言打红（实测踩到过两次：`runtime/tasks.ts` 的注释提到 `METHOD_CATALOG` 打红了 t-ports；注释里写 `setInterval(fn, 1000)` 打红了 t-tasks）。该助手用状态机跳字符串，**已知边界**记在它的注释里，别在它上面加正则。**反方向的坑同样真实**：扫"某名字还有没有人在用"时，不剥注释会让**一句纯文档注释把"调用已被删掉"伪装成"还在用"**——S11 之后的 web 模块整理里，`web/onebot/ingest.ts` 头部注释提到 `orchestrator.onIncoming`，于是"把端口绑定改名成 `orc`"这个探针在 `t-ports.mjs` 第 2 段**全绿**（端口唯一的 `onIncoming` 调用点其实已经消失）。现在该段从剥注释的文本取**成员集合**、从原文取**行号**。判据：扫"有没有 X"和扫"还有没有人在用 X"都要剥，只有取行号时才用原文。
 - **带副作用的入口文件只能靠文本断言守**：`src/web/server.ts`（import 即 `createApp()`、起服务、装信号处理器）与 `electron/main.js` 套件都 import 不了，所以它们的接线事实由 `tests/t-lifecycle.mjs` **扫源码文本**钉住（`stripComments()` 后逐行扫，不用全文 `includes`——全文扫描放得过"再加一个自己 `exit` 的旁路处理器"）。同类还有：Windows 下 `SIGTERM` 事实上送不到子进程的处理器，行为级的信号测试不可靠，所以"注册了哪两个信号"只能看文本。这些入口的纯逻辑应当抽成可 import 的模块（先例：`web/http/event-projector.ts`、`web/runtime/shutdown.ts`），文本扫描只负责剩下的接线那几行。
 - **`.mjs` 不受 `tsc` 管**：`tsconfig.json` 显式排除了 `tests/`，所以"改了 `src/` 的必填依赖/参数形状，忘了改某个测试调用点"**不会**编译报错。判断要不要配一条扫 `tests/` 的文本断言，看这个测试调用点**是否真的会被用到**——而不是"它看起来没用到"。S10d 实测过一次：8 个 `new Orchestrator({…})` 里原以为只有 1 个会因缺 `emit` 变红，实际 `t-orch.mjs` 在第一条 `scheduleWake` 就抛 `TypeError`；真正完全静默的只有 `t-ports.mjs` 那一个（它只做 `typeof` 检查）。**写证伪探针时同理：探针的"期望值"本身也要实测确认，不能从代码外观推断。**
+- ⚠️ **`tsconfig.json` 是 `incremental: true`，所以"手改 `dist/` 做证伪探针"之后 `npm run build` 不会把它改回来**（实测：把 `context-window.js` 的 `#trim` 临时改回旧行为、跑出 5 条红，然后 `npm run build` 复原 —— tsc 认为输出是最新的，**根本没有重写那个文件**，于是后续每次跑套件都还在用那份被改过的产物，`npm run check` 一直红）。凡是对 `dist/` 动过手，复原必须 `rm -rf dist && npm run build`。这条与"搬动源码后要清 dist"是同一条纪律的另一种触发方式，而它的表现更迷惑：红的是套件，看起来像源码没改对。
 - **抛异常的断言会"吃掉"它后面的所有断言**：套件是顺序执行的一串 `ok(...)`，中途一个未捕获的 `TypeError` 会**中止整个套件**——后面的断言不是变红，是**从未运行**，而终端上仍然只看到"这个套件失败了"。所以**报"套件全绿"之前要核对断言总数与上一次是否一致**：`t-lifecycle.mjs` 从 27 变成 33 看得见，但"33 条里其实只跑了 21 条"看不见。S11c 的真实交付缺陷就长这样：spy 依赖写成 `jmcomic.initialize`，而 `LifecycleDeps.jmcomic` 是 `init`，套件在 `startLifecycle` 处抛 `TypeError` 后静默中止，后半段的文本扫描**一次都没跑过**（S11d 用 `t-lifecycle.mjs` 第 3 段 ⑱ 的结构对账把它变成一条普通的红）。**`LifecycleDeps` 这类纯结构接口正是重灾区**：没有 `runtime` 校验、`tsc` 又看不见 `.mjs`，写错一个属性名只会在运行期炸。
 - **一个布尔选项承载多条语义、且只由一处传参时，它就是最容易被一次"无害重构"抹掉的东西**：内联一层调用（`this.wake(k, opt)` → `this.scheduler.wake(k, opt)`）会让人顺手把它当冗余参数删掉，删完**代码看着更干净、所有套件全绿**。当前唯一的实例是 `Orchestrator` 递给 `ProactiveController` 的 `wake: (chatKey) => this.scheduler.wake(chatKey, { proactive: true })`——这个标志在 `wake-scheduler.ts` 里同时管三件事（越过 `isPaused()` 闸门、**跳过整个响应档位判定**（含"窗口里没有未读就早退"那条）、不取触发批只带状态）。而 `ProactiveController.candidates()` 挑的恰恰是**窗口里没有未读**的空闲群，所以标志一丢主动冒泡**不是偶尔失灵而是恒为 no-op**。实测：去掉它全量 23 套件全绿（守护空白），`tests/t-window.mjs` 第 15 段补上后才有判别力（去掉红、加回绿）。写这类守卫的夹具时注意：**`ContextWindowRegistry.ensure()` 会把存档里的未读播种进窗口**，构造"空闲群"必须顺带 `store.markRead()`，否则前置条件不成立、断言退化成假的绿。**另有一条实测踩到的**：第 15 段初版**会随机红**（六次挂三次，报"压根没建会话"）——`ProactiveController.tick()` 是 `candidates[Math.floor(Math.random() * candidates.length)]`，从**所有**合格群聊里随机挑一个；而存档按 `QQ_AGENT_DATA_DIR` 落盘、整个套件共用同一个临时目录，前面 9 个小节留下的空闲群**全都合格**，本群被选中只有约 1/N 的概率。于是上一轮"全绿"的报告来自一次**走运的运行**。修法是**把条件显式钉死**：`updateConfig({ allow: { groups: [本群], allowAllWhenEmpty: false } })` 让候选唯一，改完连跑 ≥8 次再下结论。**教训是通用的**：夹具里凡是"全局状态里只有我一个满足条件"的前提，都要显式钉死，不能靠"运行到这里时恰好只有它"。
 

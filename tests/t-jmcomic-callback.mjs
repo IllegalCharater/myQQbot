@@ -15,6 +15,10 @@ const { ok, done } = checker();
 const NOW = Date.now();
 const CHAT_KEY = 'group:123';
 const COMIC_ID = '1253981';
+// 第二个任务专门走**终局失败**：`loadJobs()` 有 `if (loaded) return`（进程内只读一次盘），
+// 所以"重写 jobs.json 再 init 一遍"读不进来 —— 两个任务必须写在初始夹具里、一次跑完。
+const FAIL_CHAT = 'group:456';
+const FAIL_ID = '7654321';
 const JM_DIR = path.join(DATA, 'jmcomic');
 const DOWNLOADS = path.join(DATA, 'downloads', 'jmcomic');
 const PDF = path.join(DOWNLOADS, `${COMIC_ID}.pdf`);
@@ -26,31 +30,54 @@ fs.writeFileSync(PDF, Buffer.concat([Buffer.from('%PDF-1.4\n', 'ascii'), Buffer.
 fs.writeFileSync(path.join(JM_DIR, 'cleanup-state.json'), JSON.stringify({ lastCleanupAt: NOW }), 'utf8');
 fs.writeFileSync(JOBS_FILE, JSON.stringify({
   version: 1,
-  jobs: [{
-    id: 'jm_callback_fixture', key: `u:${COMIC_ID}`, comicId: COMIC_ID, requesterId: 'u',
-    kind: 'group', chatId: '123', chatKey: CHAT_KEY, status: 'queued',
-    downloadAttempts: 0, uploadAttempts: 0, pdfPath: '', lastError: '',
-    nextAttemptAt: NOW - 1, createdAt: NOW - 1, updatedAt: NOW - 1
-  }]
+  jobs: [
+    {
+      id: 'jm_callback_fixture', key: `u:${COMIC_ID}`, comicId: COMIC_ID, requesterId: 'u',
+      kind: 'group', chatId: '123', chatKey: CHAT_KEY, status: 'queued',
+      downloadAttempts: 0, uploadAttempts: 0, pdfPath: '', lastError: '',
+      nextAttemptAt: NOW - 1, createdAt: NOW - 1, updatedAt: NOW - 1
+    },
+    {
+      // downloadAttempts=2 ⇒ 本次是第 3 次 ⇒ 超过 `DOWNLOAD_RETRY_MS`（3 档）的退避表，
+      // **直接终局**，不必在测试里等 5/30/120 秒。
+      id: 'jm_fail_fixture', key: `u:${FAIL_ID}`, comicId: FAIL_ID, requesterId: 'u',
+      kind: 'group', chatId: '456', chatKey: FAIL_CHAT, status: 'queued',
+      downloadAttempts: 2, uploadAttempts: 0, pdfPath: '', lastError: '',
+      nextAttemptAt: NOW - 1, createdAt: NOW - 1, updatedAt: NOW - 1
+    }
+  ]
 }, null, 2), 'utf8');
 
 const { ChatStore, isPersonMessage, isSystemRecord } = await load('chat/store.js');
 const { buildTriggerBlock } = await load('agent/prompting/prompt-builder.js');
 const { evaluateWindowTrigger } = await load('agent/context/response-policy.js');
-const jmcomic = await load('media/jmcomic.js');
+const jmcomic = await load('media/jmcomic/index.js');
 
 const store = new ChatStore(0);
 const calls = [];
+/** 全部完成回调（成功一条 + 失败一条）。 */
 const completions = [];
-let killed = 0;
+/** 只含成功那条（`status === 'sent'`），供成功路径的断言用。 */
+const completed = [];
+/** 收到 kill 的漫画 ID（按任务分开记：两个任务都会收掉各自的子进程）。 */
+const killedFor = [];
+/** 队列直接贴进群的全部文本（失败改回流之后它必须一直是空的）。 */
+const groupTexts = [];
 let closeEmitted = false;
 
 const fakeSpawn = (_command, args) => {
+  const comicId = String(args[args.length - 2]);
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
-  child.kill = () => { killed++; return true; };
+  child.kill = () => { killedFor.push(comicId); return true; };
   setImmediate(() => {
+    if (comicId === FAIL_ID) {
+      // 失败帧：`ok:false` + error 就是 Python 侧的报错契约（`settleFromResultFrame` 认它）。
+      child.stdout.emit('data', Buffer.from(
+        `__QQ_AGENT_RESULT__${JSON.stringify({ ok: false, error: '禁止下载：本子已被下架' })}\n`));
+      return;
+    }
     const frame = `__QQ_AGENT_RESULT__${JSON.stringify({ ok: true, comicId: COMIC_ID, pdfPath: PDF, cached: false })}\n`;
     // 故意拆在 JSON 中间：第一块解析失败不能误判任务失败，第二块补齐后才回调。
     const cut = Math.floor(frame.length / 2);
@@ -71,18 +98,21 @@ const onebot = {
 
 jmcomic.initJmcomicQueue({
   onebot,
-  sender: { sendTextBatch: async () => ({}) },
+  sender: { sendTextBatch: async (_chatKey, text) => { groupTexts.push(String(text)); return {}; } },
   store,
   spawnProcess: fakeSpawn,
   onCompleted: (input) => {
     completions.push(input);
-    store.appendJmcomicResult(input.chatKey, { comicId: input.comicId, cached: input.cached });
+    if (input.status !== 'failed') completed.push(input);
+    store.appendJmcomicResult(input.chatKey, {
+      comicId: input.comicId, cached: input.cached, status: input.status, reason: input.reason
+    });
   }
 });
 
 try {
   const deadline = Date.now() + 3000;
-  while (Date.now() < deadline && completions.length === 0) {
+  while (Date.now() < deadline && completions.length < 2) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 
@@ -91,15 +121,18 @@ try {
   ok('stdout 结果帧一到就进入上传，不依赖 Python close 事件',
     closeEmitted === false && !!upload && saved?.status === 'completed',
     JSON.stringify({ closeEmitted, actions: calls.map((call) => call.action), status: saved?.status }));
-  ok('完整结果帧到达后主动收掉可能残留后台线程的 Python 进程', killed === 1, `kill=${killed}`);
+  ok('完整结果帧到达后主动收掉可能残留后台线程的 Python 进程',
+    killedFor.filter((id) => id === COMIC_ID).length === 1, `kills=${JSON.stringify(killedFor)}`);
   ok('上传参数仍指向当前群、最终 PDF 与 30 分钟超时',
     upload?.params?.group_id === 123 && upload?.params?.file === PDF
     && upload?.params?.name === `${COMIC_ID}.pdf` && upload?.timeoutMs === 30 * 60_000,
     JSON.stringify(upload));
   ok('OneBot 确认上传后完成 sink 只收到一次结构化事实',
-    completions.length === 1 && completions[0].chatKey === CHAT_KEY
-    && completions[0].comicId === COMIC_ID && completions[0].source === 'response'
-    && completions[0].fileId === 'uploaded-file-id',
+    // 按漫画 ID 定位到**这一个**任务：夹具里还有一条走终局失败的，别把它的回调算进来。
+    completed.filter((item) => item.comicId === COMIC_ID).length === 1
+    && completed[0].chatKey === CHAT_KEY
+    && completed[0].comicId === COMIC_ID && completed[0].source === 'response'
+    && completed[0].fileId === 'uploaded-file-id' && completed[0].status === 'sent',
     JSON.stringify(completions));
 
   const result = store.recent(CHAT_KEY, { limit: 10 }).find((entry) => entry.kind === 'jmcomic-result');
@@ -124,5 +157,31 @@ try {
 } finally {
   jmcomic.stopJmcomicQueue();
 }
+
+// ── 失败也走同一条回流通道（2026-10-10 统一）─────────────────────────
+//
+// 修之前：失败由队列**直接往群里贴**一句 ❌/🚫（`sendStatus`），模型不知道发生过什么，
+// 而它才是刚对群友说过"我去下了"的那个人。现在终局失败走同一个 sink，由模型自己交代。
+// ⚠️ **这套夹具此前一条都没断言过那些文案**（实测 grep 过）—— 也就是说这个行为变更
+// 原处在守护空白里，改错了不会有任何套件报警。这一段就是补上的那一道。
+{
+  const failResult = completions.find((item) => item.comicId === FAIL_ID);
+  ok('下载终局失败：走回流端口、带上失败原因，**群里一个字都不发**',
+    completions.length === 2 && failResult?.status === 'failed'
+    && String(failResult.reason).includes('禁止下载') && groupTexts.length === 0,
+    `${JSON.stringify(completions)} / 群文本 ${JSON.stringify(groupTexts)}`);
+  const failed = store.recent(FAIL_CHAT, { limit: 10 }).find((entry) => entry.kind === 'jmcomic-result');
+  ok('失败条目照样未读、可进窗口，正文说清"没下成"并带上原因',
+    failed?.read === false && failed?.text.includes('没下成') && failed?.text.includes('禁止下载'),
+    JSON.stringify(failed?.text));
+  ok('失败用【漫画下载失败】标签（与成功分开：模型据此决定"交代一句"还是"顺口补一句"）',
+    buildTriggerBlock([failed], { selfNickname: '小鲸鱼' }).includes('【漫画下载失败】'));
+  ok('失败条目同样能唤醒模型（最低档位下也是）',
+    evaluateWindowTrigger({
+      entries: [failed], identity: { selfNickname: '小鲸鱼' },
+      policy: { responseTier: 1, randomPercent: 0, keywords: [] }, roll: 99
+    }).shouldRespond === true);
+}
+
 
 process.exit(done() ? 0 : 1);

@@ -292,7 +292,8 @@ export const DEFAULT_CONFIG = {
     maxAudioBytes: 100 * 1024 * 1024,
     maxSourceBytes: 256 * 1024 * 1024,
     resultMaxChars: 3500,
-    // 模型自主调用时的成本闸门（`/转写` 命令不受它约束）。转写按次计费且单次成本远高于一次搜图，
+    // 成本闸门（**模型工具与 `/转写` 命令共用同一本账**，闸门在 media/transcription/queue.ts 的
+    // enqueue 里）。转写按次计费且单次成本远高于一次搜图，
     // 所以默认值比 imageSource 的 5/30 更紧。语义与 imageSource 同名两项一致，见 media/call-budget.ts。
     maxCallsPerChatPerHour: 3,
     maxCallsPerDay: 10
