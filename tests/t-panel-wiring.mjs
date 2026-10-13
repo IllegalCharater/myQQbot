@@ -47,6 +47,15 @@ ok('switchTab 覆盖了全部页签（漏一个就永远加载不出内容）',
 // 判定"第二份逻辑"的特征是有人绕过 switchTab 自己拼一套 if。
 ok('页签点击只绑了一次，且直接交给 switchTab',
   (js.match(/\$\$\('\.tab'\)\.forEach\(\(?tab\)? => \{\s*\n\s+tab\.addEventListener\('click', \(\) => switchTab\(tab\.dataset\.tab\)\);/g) || []).length === 1);
+// 页签条的纵向滚动条：`overflow-x: auto` 会把 `overflow-y` 的 `visible` **计算成 `auto`**，
+// 而 `.tab` 的 `margin-bottom: -1px`（下划线与 nav 下边框对齐用的）恰好造成 1px 纵向可滚内容
+// —— 于是最右边常年挂着一根纵向滚动条（实测 11px，**实测反馈**）。显式 `hidden` 才收得掉。
+// ⚠️ 断言只能证明声明存在；「下划线看起来没变」是截图逐像素比出来的，不是这里证得了的。
+ok('#tabs 显式 overflow-y: hidden（否则最右侧挂着 1px 溢出引出的纵向滚动条）',
+  /#tabs \{[^}]*overflow-x:\s*auto[^}]*overflow-y:\s*hidden/.test(css));
+ok('没有靠删掉 .tab 的 margin-bottom: -1px 来消那 1px（那会让下划线与下边框之间空一条）',
+  // 锚在 `.tab` 真规则的首行（`background: none;`）上，免得先匹配到上面那条注释里的 `.tab { … }`
+  /^\s*\.tab \{\r?\n\s*background: none;[\s\S]*?margin-bottom:\s*-1px/m.test(css));
 ok('switchTab 内部只切 class，没自己拼视图逻辑',
   /classList\.toggle\('active', t\.dataset\.tab === name\)/.test(js));
 

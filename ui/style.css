@@ -275,6 +275,15 @@ body {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   overflow-x: auto;
+  /* 纵向必须是 `hidden`：`overflow-x: auto` 会把 `overflow-y` 的 `visible` **计算成 `auto`**，
+     而 `.tab` 的 `margin-bottom: -1px`（让活动页签的 2px 下划线与这条 1px 下边框对齐重叠）
+     恰好制造出 1px 的纵向可滚内容 —— 于是页签条**最右边常年挂着一根纵向滚动条**
+     （**实测**：`offsetWidth - clientWidth` = 11px，可用宽度从 1280 被挤到 1269；
+     用户看到的"tabs 最右侧的纵向滑动条"就是它）。
+     `hidden` 只裁掉溢出那 1px，下划线看起来**逐像素一致**（截图对过），滚动条则消失。
+     ⚠️ 别改成"顺手删掉 `.tab` 的 `margin-bottom: -1px`"：那样活动页签的下划线与
+     nav 的下边框之间会空出一条，比现在难看（截图也比过）。 */
+  overflow-y: hidden;
 }
 /* ⚠️ .tab 的基础定义必须完整写在这一处。
    曾经因为在别处又写了一条 `.tab { transition: ... }`，
