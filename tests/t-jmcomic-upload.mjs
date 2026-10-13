@@ -107,7 +107,7 @@ const runtime = {
 
 let jmcomic;
 try {
-  jmcomic = await load('media/jmcomic.js');
+  jmcomic = await load('media/jmcomic/index.js');
   jmcomic.initJmcomicQueue(runtime);
   await flush();
 

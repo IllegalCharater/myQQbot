@@ -8,6 +8,7 @@ import { chatCompletionWithRetry, addUsage } from '../../llm/llm.js';
 import { toOpenAiTools, executeTool } from '../tools/index.js';
 import { modelImageVerdict } from '../../llm/vision-scan.js';
 import { resolveTranscriptionConfig } from '../../media/transcription/index.js';
+import { resolveImageGenConfig } from '../../media/image-gen/index.js';
 import { bookmarkList } from '../../media/web-search/index.js';
 import { parseInlineToolCalls } from '../shared/inline-tool-parser.js';
 import { isRecord, safeParse } from '../shared/json-parse.js';
@@ -22,6 +23,7 @@ import type { OneBotClient } from '../../qq/onebot.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
 import type { HistoryPolicyResult, ResponseDecision, ToolContext, ToolDefinition } from '../shared/types.js';
 import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
+import type { ImageGenQueue } from '../../media/image-gen/index.js';
 import type { HotSearchScheduler } from '../../media/hot-search/scheduler.js';
 import type { InlineToolCall } from '../shared/inline-tool-parser.js';
 import type { ChatRequestMessage } from '../../llm/types.js';
@@ -55,6 +57,7 @@ export interface AgentRunnerHost {
   getChatName(groupId: string | number): Promise<string>;
   /** 能力型工具依赖，可选：见 shared/types.ts 的 ToolContext 说明。 */
   transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  imageGen?: Pick<ImageGenQueue, 'enqueue'>;
   hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
 }
 
@@ -156,13 +159,15 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
 
     // 工具集按配置过滤：无视觉模型 → 移除看图工具；搜索关闭 → 移除联网工具；能力未启用 → 移除对应工具
     // 视觉判定 = 全局开关 && 选中模型未被探测为"明确不支持图片"（未探测/unknown 时保持开关行为）
-    // 转写与热搜走 resolveTranscriptionConfig / hotSearchEnabled，与 ingest、tasks.ts 的启用判定同源，
-    // 不各写一份（否则环境变量注入的启用会被这里悄悄判成关闭）。
+    // 转写与出图走 resolveTranscriptionConfig / resolveImageGenConfig，与 ingest、tasks.ts 的启用
+    // 判定同源，不各写一份（否则环境变量注入的启用会被这里悄悄判成关闭）。
     const transcriptionEnabled = resolveTranscriptionConfig(cfg).enabled;
+    const imageGenEnabled = resolveImageGenConfig(cfg).enabled;
     const toolDefs = host.toolDefs.filter((d) => {
       if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
       if (!transcriptionEnabled && d.name === 'transcribe_video') return false;
+      if (!imageGenEnabled && d.name === 'generate_image') return false;
       if (cfg.hotSearchEnabled !== true && d.name === 'get_hot_search') return false;
       return true;
     });
@@ -186,6 +191,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       sender: host.sender,
       session,
       transcription: host.transcription,
+      imageGen: host.imageGen,
       hotSearch: host.hotSearch,
       emit: (type, payload) => host.emit(type, payload)
     };

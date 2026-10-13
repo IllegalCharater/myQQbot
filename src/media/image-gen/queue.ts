@@ -1,0 +1,421 @@
+// 图像生成队列：单并发状态机。
+//
+// ── 与转写/漫画共用的东西在 `media/task-queue.ts` ──
+//
+// 注册表、串行排空、中止与关停语义、"跑完/失败"的判定全在那边（三个能力同形）；
+// 这里只留**这条路自己的**：校验、临时目录、出图与下载、投递与回流、失败话术。
+// 计时器（下面那个 `#wake`）**刻意留在本文件**：`LONG_TERM_TASKS.owner` 的语义是
+// "实际持有这些计时器的模块"，`tests/t-tasks.mjs` 按它反查"文件里有没有调度调用"。
+//
+// ── 为什么恒为单并发 ──
+//
+// 与转写同一条判断：出图是"挂着等几十秒"的同步请求，下游按张计费；放开并发只会让几张图
+// 一起变慢，而"总任务超时"是从发出时刻起算的 —— 排队时间会把真正干活的预算吃掉。
+// 要提高吞吐应该限制入队速率，而不是把排空改成 N 个。
+//
+// ── 两条投递路径 ──
+//
+// `job.mode` 是**唯一**分岔点（见 `types.ts` 的 `InternalJob.mode`）：两条路都**由队列自己
+// 把图发进群**（图片就是交付物，模型没法"说"出一张图），差别只在发完要不要回流一次唤醒
+// 让模型补一句话。这与 jmcomic 的 PDF 上传是同一个分工。
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import type { AppConfig } from '../../core/config.js';
+import { SlidingWindowBudget } from '../call-budget.js';
+import { TaskQueue } from '../task-queue.js';
+import type { SetTaskStatus } from '../task-queue.js';
+import { resolveImageGenConfig } from './config.js';
+import { generateImage } from './client.js';
+import { ImageGenError, safeErrorCode, safeErrorDetail, userError } from './errors.js';
+import { downloadImageToFile, fetchReferenceImage } from './image-io.js';
+import type {
+  DeliveryMode, EffectiveConfig, FailureStage, ImageArtifact, ImageGenJobView, ImageGenSender,
+  ImageGenStatus, ImageResultSink, ImageResultStatus, InternalJob, QueueDeps, QueueOperations
+} from './types.js';
+
+/** 失败阶段 → 群里那句话里的中文标签。阶段码本身仍然单独进日志（`errorCode`）。 */
+const STAGE_LABELS: Record<FailureStage, string> = {
+  validation: '参数',
+  fetching: '取参考图',
+  generating: '画图',
+  downloading: '下载图片',
+  uploading: '发送'
+};
+
+export class ImageGenQueue {
+  #sender: ImageGenSender;
+  #getConfig: () => AppConfig;
+  #log: (...args: unknown[]) => void;
+  #operations: QueueOperations;
+  #deliverImageResult: ImageResultSink | null;
+  #budget: SlidingWindowBudget;
+  #queue: TaskQueue<InternalJob, EffectiveConfig>;
+  #wake: ReturnType<typeof setTimeout> | null = null;
+  #started = false;
+  #stopping = false;
+
+  constructor({ sender, getConfig, log = console.log, operations = {}, deliverImageResult = null }: QueueDeps) {
+    this.#sender = sender;
+    this.#getConfig = getConfig;
+    this.#log = log;
+    this.#operations = operations;
+    this.#deliverImageResult = deliverImageResult;
+    // 成本闸门。**两条入口共用**（`generate_image` 工具与 `/画` 命令都走 enqueue），
+    // 所以它挂在这里而不是工具层 —— 这与 `/转写` 的取舍刻意不同：出图按张计费，
+    // 而 `/画` 是群里任何人都能敲的，命令路径不设闸门等于开一个可被刷的开支口子。
+    // 限额每次现读配置（改完设置即时生效），与 webBudget / 转写同一写法。
+    this.#budget = new SlidingWindowBudget({
+      getLimits: () => {
+        const cfg = resolveImageGenConfig(this.#getConfig());
+        return { perChatPerHour: cfg.maxCallsPerChatPerHour, perDay: cfg.maxCallsPerDay };
+      }
+    });
+    this.#queue = new TaskQueue<InternalJob, EffectiveConfig>({
+      getConfig: this.#getConfig,
+      log: this.#log,
+      resolveConfig: resolveImageGenConfig,
+      execute: (job, signal, setStatus, config) => this.#execute(job, signal, setStatus, config),
+      onError: (job, error, elapsedMs) => this.#fail(job, error, elapsedMs),
+      // `done` 由这里置（核心的默认实现只写 status + elapsedMs）：出图要把 `imageBytes`
+      // 一并写上（面板与日志的 `bytes=` 都用它），而那只有 execute 里拿得到。
+      onSuccess: (job, elapsedMs) => {
+        this.#queue.setStatus(job, 'done', {
+          elapsedMs, ...(job.imageBytes != null ? { imageBytes: job.imageBytes } : {})
+        });
+      },
+      // 状态一变就记一行（与旧实现逐字同形：只有任务号时不打，免得入队刷两行）。
+      onChange: (job) => this.#logStatus(job),
+      // 对外视图**不含 `prompt` 与 `referenceUrl`**（用户内容不进读模型/接口）。
+      projectView: ({ id, chatKey, status, failedStage, createdAt, updatedAt, imageBytes, elapsedMs, errorCode }) =>
+        ({ id, chatKey, status, failedStage, createdAt, updatedAt, imageBytes, elapsedMs, errorCode }),
+      limit: 100
+    });
+  }
+
+  async start(): Promise<void> {
+    this.#stopping = false;
+    this.#started = true;
+    if (this.#queue.hasPending()) this.#schedule();
+  }
+
+  async stop(): Promise<void> {
+    this.#stopping = true;
+    if (this.#wake) clearTimeout(this.#wake);
+    this.#wake = null;
+    // 还没开跑的直接判失败并说清是关停 —— 留着它们会随着进程消失而静默丢失。
+    // （漫画的处置不同：它的任务要活过重启，所以那边**不**调 `takePending`。）
+    for (const job of this.#queue.takePending()) {
+      this.#queue.setStatus(job, 'failed', { failedStage: 'validation', errorCode: 'SHUTDOWN' });
+    }
+    this.#queue.abortInFlight();
+    // 等在跑的那一次收尾（它自己清临时目录）。核心不会把这次关停报成"任务失败"。
+    await this.#queue.whenIdle().catch(() => {});
+    this.#started = false;
+  }
+
+  /**
+   * 入队。
+   *
+   * 校验顺序是刻意的：**所有零成本的拒绝都排在记账之前**（未启用/缺 Key/描述为空或超长/
+   * 地址无效），被拒的那一次不占额度、也不建任务。与 `reverse_image_source` 的
+   * "先解析出目标 → 占额度 → 才建任务"同一条。
+   */
+  enqueue({ chatKey, prompt, imageUrl = '', replyToMessageId = null, mode = 'assisted' }: {
+    chatKey: string;
+    prompt: unknown;
+    /** 图生图（I2I）的参考图地址；留空 = 纯文生图。 */
+    imageUrl?: unknown;
+    replyToMessageId?: string | number | null;
+    /**
+     * 投递方式，默认 `assisted`（见 `InternalJob.mode`）。
+     *
+     * **可选是刻意的**（`tests/` 是 `.mjs`，`tsc` 看不见它们，必填字段只会逼着每个夹具改一遍），
+     * 但默认值取的是**会回流**的那一支：静默那条路要显式写 `standalone`，
+     * 这样"忘了传"只会多一次唤醒，不会变成"图出来了模型不知道"。
+     */
+    mode?: DeliveryMode;
+  }): ImageGenJobView {
+    if (!this.#started) throw new ImageGenError('validation', 'NOT_STARTED', '画图服务尚未启动');
+    if (this.#stopping) throw new ImageGenError('validation', 'STOPPING', '画图服务正在关闭');
+    const config = resolveImageGenConfig(this.#getConfig());
+    if (!config.enabled) throw new ImageGenError('validation', 'DISABLED', '图像生成未启用');
+    requireApiConfig(config);
+    const text = String(prompt ?? '').trim();
+    if (!text) throw new ImageGenError('validation', 'MISSING_PROMPT', '缺少画面描述');
+    if (text.length > config.maxPromptChars) {
+      throw new ImageGenError('validation', 'PROMPT_TOO_LONG',
+        `描述太长了（最多 ${config.maxPromptChars} 字），说短一点再来`);
+    }
+    try {
+      this.#budget.take(chatKey);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'RATE_LIMITED') {
+        throw new ImageGenError('validation', 'RATE_LIMITED',
+          `画图太频繁了（每群每小时最多 ${config.maxCallsPerChatPerHour} 次，全部会话每天 ${config.maxCallsPerDay} 次），稍后再试`);
+      }
+      throw error;
+    }
+    const now = Date.now();
+    const job: InternalJob = {
+      id: randomUUID(),
+      chatKey,
+      prompt: text,
+      referenceUrl: String(imageUrl ?? '').trim(),
+      replyToMessageId,
+      // 归一化只在这一处：投递侧永远拿到确定值，不需要自己兜 undefined。
+      mode: mode === 'assisted' ? 'assisted' : 'standalone',
+      status: 'queued',
+      createdAt: now,
+      updatedAt: now
+    };
+    this.#queue.add(job);
+    // 日志带上 `mode`：`standalone` **不会**回流、也就不会惊动模型，而 `assisted` 一定会。
+    // 真机排查"图出来了但模型没反应"时，第一个要看的就是这一格 —— 少了它只能靠来回猜。
+    this.#log(`[image-gen] task=${job.id} mode=${job.mode}`);
+    this.#schedule();
+    return this.#queue.view(job) as unknown as ImageGenJobView;
+  }
+
+  get(taskId: string): ImageGenJobView | null {
+    const job = this.#queue.get(taskId);
+    return job ? this.#queue.view(job) as unknown as ImageGenJobView : null;
+  }
+
+  /** 状态一变就记一行；只有任务号时不打（入队那行由 `enqueue` 自己写）。 */
+  #logStatus(job: InternalJob): void {
+    const fields = [`[image-gen] task=${job.id}`];
+    // 失败阶段必须进日志：它决定"该往哪儿看"，而群里那句话是给群友看的。
+    if (job.failedStage) fields.push(`stage=${job.failedStage}`);
+    if (job.imageBytes != null) fields.push(`bytes=${job.imageBytes}`);
+    if (job.elapsedMs != null) fields.push(`elapsedMs=${job.elapsedMs}`);
+    if (job.errorCode) fields.push(`code=${job.errorCode}`);
+    if (fields.length > 1) this.#log(fields.join(' '));
+  }
+
+  /**
+   * 排一个唤醒，把"入队"与"开工"解耦（入队不阻塞在 `await` 上）。
+   *
+   * 计时器**归本文件持有**（见文件头）：`LONG_TERM_TASKS.owner` 要指到实际调度的那一层，
+   * 而 `tests/t-tasks.mjs` 会读 owner 文件、要求里面有调度调用。
+   * 延迟由核心给（`idleDelay()`）：出图/转写永远是 0（有活就干），漫画那里是"最早的重试时刻"。
+   */
+  #schedule(): void {
+    if (this.#wake || this.#queue.draining || this.#stopping) return;
+    const delay = this.#queue.idleDelay();
+    if (delay === null) return;
+    this.#wake = setTimeout(() => {
+      this.#wake = null;
+      void this.#queue.drain(() => this.#stopping).finally(() => this.#schedule());
+    }, delay);
+  }
+
+  /**
+   * 一个任务的**整件事**：临时目录 → 取参考图 → 出图 → 下载 → 投递。
+   *
+   * 临时目录归这里（`finally` 删）：`runTask` 返回的是**文件**，它必须活到投递之后 ——
+   * 转写那条返回文本，可以在自己的 `finally` 里删，两点不同别混。
+   */
+  async #execute(
+    job: InternalJob, signal: AbortSignal,
+    setStatus: SetTaskStatus<InternalJob>, config: EffectiveConfig
+  ): Promise<void> {
+    const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qq-agent-image-gen-')).catch(() => '');
+    try {
+      if (!workDir) throw new ImageGenError('validation', 'TEMP_DIR_FAILED', '临时目录创建失败');
+      // 两个操作的注入点**逐字保留**（套件靠它们假造一次完整的出图/投递）。
+      const run = this.#operations.runTask
+        || ((target, sig, status, current, dir) => this.#runProduction(target, sig, status, current, dir));
+      const artifact = await run(
+        job, signal, (status, extra) => setStatus(status, extra), config, workDir
+      );
+      job.imageBytes = artifact.bytes;
+      // 即使关停与远端响应同时发生，也不得交付迟到结果。
+      if (signal.aborted || this.#stopping) {
+        throw new ImageGenError('uploading', 'CANCELLED', '画图任务已取消');
+      }
+      setStatus('uploading');
+      const deliver = this.#operations.deliver
+        || ((target, result, current) => this.#deliver(target, result, current));
+      await deliver(job, artifact, config);
+    } finally {
+      if (workDir) await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /** 默认的生产实现：取参考图（可选）→ 出图 → 下载到本机临时文件。 */
+  async #runProduction(
+    job: Readonly<InternalJob>, signal: AbortSignal,
+    setStatus: (status: ImageGenStatus, extra?: Partial<InternalJob>) => void,
+    config: EffectiveConfig, workDir: string
+  ): Promise<ImageArtifact> {
+    const filePath = path.join(workDir, `${job.id}.png`);
+    let imageDataUrl = '';
+    if (job.referenceUrl) {
+      setStatus('fetching');
+      imageDataUrl = await fetchReferenceImage(job.referenceUrl, config.maxRefImageBytes, signal);
+    }
+    setStatus('generating');
+    const imageUrl = await generateImage(config, { prompt: job.prompt, imageDataUrl }, signal);
+    setStatus('downloading');
+    const bytes = await downloadImageToFile(imageUrl, config.maxDownloadBytes, signal, filePath);
+    // `remoteUrl` 只在投递被明确拒绝时用作兜底（见 `#deliver`），不写进对外视图。
+    return { filePath, bytes, remoteUrl: imageUrl };
+  }
+
+  /**
+   * 投递：**先由队列自己把图发进群**，再决定要不要回流。
+   *
+   * 图片就是交付物，模型没法"说"出一张图 —— 所以上传是确定性的（与 jmcomic 的 PDF 同理）：
+   * 走 `sender.sendImage` 意味着它受限频约束、也会在存档里留下 `我：[图片]`。
+   * 回流只负责把"已经发过了"这个事实交给模型，让它补一句话。
+   */
+  async #deliver(job: Readonly<InternalJob>, artifact: ImageArtifact, _config: EffectiveConfig): Promise<void> {
+    await this.#send(job, artifact.filePath, artifact);
+    if (job.mode !== 'assisted') return;
+
+    const sink = this.#deliverImageResult;
+    if (!sink) {
+      // 没有回流端口就没人告诉模型 —— 不能无声无息，留一条日志说明结果没落地。
+      this.#log(`[image-gen] task=${job.id} code=NO_DELIVER_SINK`);
+      return;
+    }
+    try {
+      await sink({
+        chatKey: job.chatKey, prompt: job.prompt, status: 'sent', reason: '',
+        replyToMessageId: job.replyToMessageId
+      });
+    } catch {
+      // 只记固定错误码，不记异常正文：日志里不得出现 prompt 或图片地址。
+      // **不**退回贴文案：图确实已经发进群了，群里不需要再多一句机器话。
+      this.#log(`[image-gen] task=${job.id} code=DELIVER_FAILED`);
+    }
+  }
+
+  /**
+   * 真正把图发出去，失败一律归到 `uploading` 阶段。
+   *
+   * **本机路径是"协议端认不认"这件事唯一没法在本机验证的地方**（同 stickers 那条），
+   * 所以留一步兜底：协议端**明确拒绝**（错误里带 `retcode=`）时，用接口给的结果图链接重发一次。
+   * 判据与 stickers 一致 —— **只在明确拒绝时**退回，超时那类错误说不清消息到底发出去没有，
+   * 重发就可能是刷屏，不冒这个险。
+   */
+  async #send(job: Readonly<InternalJob>, file: string, artifact: ImageArtifact): Promise<void> {
+    try {
+      await this.#sender.sendImage(job.chatKey, file, { replyToMessageId: job.replyToMessageId });
+      return;
+    } catch (error) {
+      const message = safeErrorDetail(error);
+      if (!artifact.remoteUrl || file !== artifact.filePath || !/retcode=/.test(message)) {
+        throw uploadFailure(error);
+      }
+      this.#log(`[image-gen] task=${job.id} code=LOCAL_PATH_REFUSED`);
+    }
+    try {
+      await this.#sender.sendImage(job.chatKey, artifact.remoteUrl as string, {
+        replyToMessageId: job.replyToMessageId
+      });
+    } catch (error) {
+      throw uploadFailure(error);
+    }
+  }
+
+  /**
+   * 失败收尾。**交给 `TaskQueue.onError`**，所以只有"真的失败了"才会走到这儿
+   * （关停途中的取消不算，核心不会调它）。两件事：记终局状态、决定谁开口。
+   */
+  async #fail(job: InternalJob, error: unknown, elapsedMs: number): Promise<void> {
+    const safe = userError(error);
+    // 未分类的内部异常（不是我们自己抛的那种）必须把**原始信息**留到日志里：
+    // 此时码只说得出 `Error`，而"到底哪一步、什么原因"只有它知道。
+    // 细节先洗过（去 URL 与本机路径）——日志里不许出现这两样。
+    if (!(error instanceof ImageGenError)) {
+      this.#log(`[image-gen] task=${job.id} detail=${safeErrorDetail(error)}`);
+    }
+    this.#queue.setStatus(job, 'failed', {
+      failedStage: safe.stage, errorCode: safe.code, elapsedMs
+    });
+    // 关停途中不汇报：那是我们主动取消的，不是任务真的失败（但状态照记 —— 见上面）。
+    if (!this.#stopping) await this.#reportFailure(job, safe);
+  }
+
+  /**
+   * 失败也要**从同一条回流通道**告诉模型，而不是由队列代它往群里贴一句。
+   *
+   * 为什么（这条是刻意与转写不同的地方）：出图这条路上，模型只调了一次工具就结束本轮，
+   * 随后那次运行才是它开口的地方。成功与失败都从这里进上下文，它才有机会用自己的话交代；
+   * 由队列代说，就回到了"工具代模型发言"那条禁令要防的形态 —— **模型看着群里已经说过了，
+   * 于是不再开口**（转写那次"任务被代发伪装成已收尾"是同一个病）。
+   *
+   * 两条退路是"**只有确定有人接的时候才闭嘴**"：assisted 却没装回流端口（`NO_DELIVER_SINK`）、
+   * 回流端口抛错（`DELIVER_FAILED`）—— 这两种也要退回贴一句，否则群友什么都等不到。
+   * （`standalone` 那条路压根没有模型，同样退到贴文案。）
+   */
+  async #reportFailure(job: Readonly<InternalJob>, safe: ImageGenError): Promise<void> {
+    const status: ImageResultStatus = safe.stage === 'uploading' ? 'unsent' : 'failed';
+    const sink = this.#deliverImageResult;
+    if (job.mode === 'assisted') {
+      if (sink) {
+        try {
+          await sink({
+            chatKey: job.chatKey, prompt: job.prompt, status, reason: safe.userMessage,
+            replyToMessageId: job.replyToMessageId
+          });
+          return;
+        } catch {
+          this.#log(`[image-gen] task=${job.id} code=DELIVER_FAILED`);
+        }
+      } else {
+        this.#log(`[image-gen] task=${job.id} code=NO_DELIVER_SINK`);
+      }
+    }
+    // 群里那句：两个失败阶段分开说 —— 上传阶段**不能说"画图失败"**（图确实画好了，
+    // 而且消息可能已经在群里，见 onebot.ts 的 SEGMENT_UPLOAD_TIMEOUT_MS）。
+    const text = status === 'unsent'
+      ? `图已经画好了，但没能发到群里：${safe.userMessage}`
+      : `画图失败（${STAGE_LABELS[safe.stage] || safe.stage}）：${safe.userMessage}`;
+    await this.#sender.sendTextBatch(job.chatKey, text, {
+      replyToMessageId: job.replyToMessageId
+    }).catch((sendError) => {
+      this.#log(`[image-gen] task=${job.id} code=${safeErrorCode(sendError)}`);
+    });
+  }
+}
+
+/**
+ * 上传阶段失败 → 一条 `ImageGenError`。
+ *
+ * 为什么要单独归一次：`SendQueue` 抛的是**裸 Error**，不包的话它会一路穿到兜底文案，
+ * 群里就会看到"画图失败（画图）：画图失败（Error），稍后再试"——**阶段和原因一起丢了**
+ * （真机实测踩到过）。三类来源分开说：
+ *   · 限频（"发送频率超限（每分钟最多 80 条），请等一会再发"）与 OneBot 的 `retcode=NNN wording`
+ *     —— 本来就是写给人看的，原样透传；
+ *   · **超时**（`AbortSignal.timeout` 抛的是 `DOMException.name === 'TimeoutError'`，
+ *     见 `qq/onebot.ts` 的 `call`）—— 这是唯一"消息可能已经发出去了"的一种，文案必须留余地，
+ *     不能像 retcode 那样断言失败；
+ *   · 其余（网络层错误可能带主机名或本机路径）只给可机检的码，细节留给日志。
+ */
+function uploadFailure(error: unknown): ImageGenError {
+  const code = safeErrorCode(error);
+  const message = safeErrorDetail(error);
+  if (/发送频率超限|retcode=\d+/.test(message)) return new ImageGenError('uploading', code, message);
+  if (code === 'TimeoutError' || /timed?\s?out/i.test(message)) {
+    return new ImageGenError('uploading', 'SEND_TIMEOUT', '上传超时了（图可能已经在群里，也可能没发出去）');
+  }
+  return new ImageGenError('uploading', code, `发送图片失败（${code}）`);
+}
+
+/** 缺 Key / 地址不可用都要在**建任务之前**拦住，并把下一步说清楚。 */
+function requireApiConfig(config: EffectiveConfig): void {
+  if (!config.apiKey) {
+    throw new ImageGenError('validation', 'CONFIG_MISSING',
+      '图像生成未配置：请在设置页填写百炼 API Key（或设置环境变量 DASHSCOPE_API_KEY）');
+  }
+  try {
+    const url = new URL(config.baseUrl);
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('protocol');
+  } catch {
+    throw new ImageGenError('validation', 'INVALID_BASE_URL', '画图接口地址无效，请在设置页检查');
+  }
+}

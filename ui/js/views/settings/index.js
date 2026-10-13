@@ -10,7 +10,8 @@ import { clampInt, renderChatSection, sliderDesc, sliderToTierUI, sliderToTierUI
 import {
   renderAllowSection, renderApiSection, renderDesktopSection, renderMemorySettingsSection,
   renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderPythonSection,
-  renderSearchSection, renderTranscriptionSection, renderImageSourceSection, renderBookmarkRows
+  renderSearchSection, renderTranscriptionSection, renderImageSourceSection, renderImageGenSection,
+  renderBookmarkRows
 } from './sections.js';
 import { parseList, saveConfig } from './save.js';
 import { openBlocklistModal } from '../../parts/blocklist.js';
@@ -83,6 +84,7 @@ export function renderSettingsSidebar() {
     ['allow', '聊天白名单'],
     ['hotsearch', '每日热搜播报'],
     ['transcription', '音视频转写'],
+    ['image-gen', '图像生成'],
     ['python', 'Python 工具'],
     ['chat', '聊天设置'],
     ['desktop', '桌面端'],
@@ -126,6 +128,7 @@ export function renderSettingsSection(c) {
     allow: () => renderAllowSection(c),
     hotsearch: () => renderHotSearchSection(c),
     transcription: () => renderTranscriptionSection(c),
+    'image-gen': () => renderImageGenSection(c),
     python: () => renderPythonSection(c),
     chat: () => renderChatSection(c),
     desktop: () => renderDesktopSection(c),
@@ -146,6 +149,23 @@ export function bindSettingsEvents(c) {
     const out = $('#image-source-test-result'); out.textContent = '测试中…';
     try { const r = await api('/api/image-source/test', { method: 'POST', body: '{}' }); out.textContent = `trace.moe：${r.traceMoe ? '可用' : '失败'}；SauceNAO：${r.sauceNao}；百度识图：${r.baidu}`; }
     catch { out.textContent = '测试失败（未暴露任何密钥）'; }
+  });
+
+  // ── 图像生成：负向提示词只有 3.0 系列认 ──
+  // 换模型时**当场**把那个输入框禁用/启用，并换掉解释文案。后端本来就会按模型判断
+  // （不支持的模型根本不发这个参数），这里只是别让用户对着一个填了不生效的框发呆。
+  const imageGenModel = $('#cfg-imagegen-model');
+  if (imageGenModel) imageGenModel.addEventListener('change', () => {
+    const negative = $('#cfg-imagegen-negative');
+    const hint = $('#cfg-imagegen-negative-hint');
+    if (!negative) return;
+    const supported = String(imageGenModel.value || '').startsWith('qwen-image-3.0');
+    negative.disabled = !supported;
+    if (hint) {
+      hint.innerHTML = supported
+        ? '只有 qwen-image-3.0 / qwen-image-3.0-pro 认这个参数；换成别的模型时它不会被发送。'
+        : '当前选的模型不支持这个参数，它<strong>不会</strong>被发送（发了会被接口判 400）。想用请把模型换成 3.0 系列。';
+    }
   });
   // 保存当前区块设置（通用保存按钮）。只有当前区块的字段才会被读取，不会 null 报错。
   const saveCfgBtn = $('#save-cfg-btn');

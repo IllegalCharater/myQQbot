@@ -2,6 +2,7 @@ import { adminTools } from './admin-tools.js';
 import { chatActionTools } from './chat-actions.js';
 import { historyMediaTools } from './history-media.js';
 import { hotSearchTools } from './hot-search.js';
+import { imageGenTools } from './image-gen.js';
 import { imageSourceTools } from './image-source.js';
 import { memoryTools } from './memory-tools.js';
 import { transcriptionTools } from './transcription.js';
@@ -24,6 +25,7 @@ export function buildToolDefs(): ToolDefinition[] {
     ...imageSourceTools(),
     ...hotSearchTools(),
     ...transcriptionTools(),
+    ...imageGenTools(),
     ...memory,
     admin[0],
     ...web,

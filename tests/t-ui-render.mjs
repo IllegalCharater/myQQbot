@@ -97,6 +97,17 @@ ok('漫画回调：任务生成的记录不能手改，但仍可删除',
   !jmResult.includes('data-op="edit"') && jmResult.includes('data-op="del"')
   && jmResult.includes('漫画下载结果由任务生成，不能手改'));
 
+const imgResult = sandbox.chatMsgRowHtml({
+  id: 11, ts: Date.parse('2026-09-24T10:09:00'), senderId: '', senderName: '图像',
+  text: '「一只戴墨镜的鲸鱼」的图片已生成并发送到当前会话', self: false, read: false,
+  kind: 'image-result', media: []
+});
+ok('出图结果：走 image-result-row 独立样式并标成「图像」',
+  imgResult.includes('image-result-row') && imgResult.includes('>图像<'));
+ok('出图结果：任务生成的记录不能手改，但仍可删除',
+  !imgResult.includes('data-op="edit"') && imgResult.includes('data-op="del"')
+  && imgResult.includes('出图结果由任务生成，不能手改'));
+
 console.log('\n  ── 未读 / XSS ──');
 const unread = sandbox.chatMsgRowHtml({ id: 11, ts: Date.now(), senderId: '1', senderName: '小红', text: '在吗', self: false, read: false, kind: null, media: [] });
 ok('未读行带 unread 类', unread.includes('unread'));

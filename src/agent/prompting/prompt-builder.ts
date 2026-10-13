@@ -123,19 +123,34 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
     return `[${formatShortTime(m.ts)}] 【人工备注】${String(m.text || '')}`;
   }
   // 转写结果条目（kind:'transcript'）：异步任务的产物，同样"不是某人说的话"。
+  // **成功与失败都走这里**（标签按 `status` 选，与漫画/出图同形）：看到【转写失败】要做的事
+  // 与看到【转写结果】不同（如实交代一句 vs 转述内容），标签不分开它就分不出来。
   // 截断标记**必须**有 —— 没有它模型会把半截转写当成全文照转。`transcript.chars` 是
   // **原文全长**（条目正文本身给不出这个信息），措辞只说这条目自己的事实，
   // 不承诺"完整文本已作为文件发送"：那要追踪投递结果，会让投递顺序变成提示词的一部分
   // （见 chat/types.ts 的 TranscriptRecord）。
   if (m.kind === 'transcript') {
     const meta = asRecord(m.transcript);
+    const label = meta.status === 'failed' ? '【转写失败】' : '【转写结果】';
     const cut = meta.truncated === true ? `（原文共 ${Number(meta.chars) || 0} 字，超出上限，此处为开头部分）` : '';
-    return `[${formatShortTime(m.ts)}] 【转写结果】${cut}${String(m.text || '')}`;
+    return `[${formatShortTime(m.ts)}] ${label}${cut}${String(m.text || '')}`;
   }
-  // 漫画队列的异步完成回调。PDF 已由队列直接上传，这里只把完成事实交给模型，
-  // 让它像群友一样自然收尾；不套“某人：”，也不给可引用的消息 id。
+  // 漫画的异步完成回调与出图同形：**成功与失败都走这里**，标签按三态选。
+  // `unsent`（PDF 发出去了但没能确认）用【漫画发送未确认】——正文会写清原因，
+  // 而那份 PDF **可能已经在群里了**，说"没下成"会让模型对群友说反话。
   if (m.kind === 'jmcomic-result') {
-    return `[${formatShortTime(m.ts)}] 【漫画下载结果】${String(m.text || '')}`;
+    const status = asRecord(m.jmcomic).status;
+    const label = status === 'failed' ? '【漫画下载失败】' : (status === 'unsent' ? '【漫画发送未确认】' : '【漫画下载结果】');
+    return `[${formatShortTime(m.ts)}] ${label}${String(m.text || '')}`;
+  }
+  // 出图队列的异步完成回调。**成功与失败都走这里**（图由队列自己发进群，或没发成、没画成）——
+  // 标签按 `status` 选，因为模型看到失败标签要做的事与看到成功标签不同（交代 vs 顺口补一句）。
+  // `unsent` 用【图片发送失败】而不是【图片生成失败】：图确实画好了，标签说"生成失败"是错的
+  // （正文里会写清是哪种，见 store.appendImageResult）。不给消息 id：模型不该去引用一张自己刚发的图。
+  if (m.kind === 'image-result') {
+    const status = asRecord(m.imageResult).status;
+    const label = status === 'failed' ? '【图片生成失败】' : (status === 'unsent' ? '【图片发送失败】' : '【图片生成结果】');
+    return `[${formatShortTime(m.ts)}] ${label}${String(m.text || '')}`;
   }
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');
@@ -373,7 +388,8 @@ function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
   // 转写结果是机器输出，不是"谁在提问题"：整条短路。
   // 不短路的话下面几条正则必然误标 —— 转写正文里出现"吗/呢"或以"？"结尾是常事（→"提问"），
   // 提到 bot 的名字也是常事（→"提到我"），而这两条都会让模型以为有人在向它提问。
-  if (entry?.kind === 'transcript' || entry?.kind === 'jmcomic-result') return [];
+  // 出图结果同理：它的正文是「模型自己写的那段描述」+ "已发送"，同样会命中这些正则。
+  if (entry?.kind === 'transcript' || entry?.kind === 'jmcomic-result' || entry?.kind === 'image-result') return [];
   const labels: string[] = [];
   const text = String(entry?.text ?? '');
   const lower = text.toLowerCase();
@@ -490,9 +506,7 @@ export function buildUserPrompt(ctx: PromptContext): string {
     optionalParts.push({ index: parts.length, priority, truncate });
     parts.push(text);
   };
-  parts.push(PROMPT_CATALOG.user.currentTime(formatFullTime(now)));
-
-  // 此刻状态
+  // 此刻状态（**先算、最后才 push** —— 段落顺序按缓存友好度排，见下面那段注释）
   const stateLines: string[] = [];
   if (ctx.kind === 'group') {
     // 两个名字都递进去：显示名（`selfNickname`，群友 @ 你用的）与人设名（`persona.botName`）。
@@ -515,12 +529,40 @@ export function buildUserPrompt(ctx: PromptContext): string {
   } else {
     stateLines.push(PROMPT_CATALOG.user.selfNeverSpoke);
   }
-  parts.push(PROMPT_CATALOG.user.currentState(stateLines.join('\n')));
-
-  // 历史印象：放在【过去状态】**之前**（紧接【此刻状态】）。
-  // 位置是有讲究的，别"整理"到末尾：摘要只在压缩后变、前缀稳定，而【过去状态】
-  // 每轮都变 —— 稳定的放前面，对提示词缓存友好（缓存按前缀命中）。
+  // ── 段落的**排列顺序是刻意的：稳定的在前、易变的在后** ──
+  //
+  // 这套 bot 走 OpenAI 兼容端点，各家都是**自动前缀缓存**：命中判据是"从第 0 个 token
+  // 开始的最长公共前缀"，**第一处不同点之后全部作废**。所以段落的先后直接决定命中率 ——
+  // **别按"读起来顺"重排**。改动前【当前时间】在第一行（秒级变化），用户提示词这段几乎
+  // 没有可命中的前缀；而下面这三段本来是慢变的，却被排在"每条消息都在变"的【本次唤醒】之后。
+  //
+  // 现在的顺序即**稳定度降序**：摘要（压缩后才变）→ 表情目录（发/标表情后才变）→
+  // 记忆（取决于本轮谁在说话）→ 过去状态（每轮变）→ 此刻状态（分钟级）→ 当前时间（秒级）
+  // → 本次唤醒（每条消息变）→ 本轮决策（固定，**刻意留在末尾**，见那条注释）。
+  //
+  // ⚠️ 这与统一字符预算**无关**：`joinPromptWithinBudget` 按 priority 删段落、用
+  // `optionalParts.index` 回指，与段落位置无关 —— 搬家不改变"超限时先收缩谁"。
   if (dig.sectionText) pushOptional(dig.sectionText, 2);
+
+  // 表情包目录：慢变（发送或标注一个表情才会动），所以排在易变段之前。
+  if (cfg.sticker?.enabled !== false) {
+    const stickerCtx = buildStickerContext(ctx.stickerEntries || [], Number(cfg.sticker?.promptMaxStickers) || 10);
+    if (stickerCtx) pushOptional(stickerCtx, 1);
+  }
+
+  // 记忆：只注入与本次对话相关群友的印象（触发者 + 本次真的会发给模型的历史里出现的群友）。
+  // 它是**半变**的（取决于本轮的发言者），所以排在慢变段之后、每轮变的【过去状态】之前。
+  const relevantUserIds = new Set<string>();
+  for (const m of ctx.triggerEntries || []) {
+    if (m.senderId && !m.self) relevantUserIds.add(String(m.senderId));
+  }
+  // 只取"这次真的会发给模型"的消息里出现的群友 —— 当前批 + 独立历史策略选中的记录。
+  // 曾经这里写死 store.recent(limit:12)，会把模型实际看不到的群友印象混进记忆段。
+  for (const m of (past?.messages || [])) {
+    if (m.senderId && !m.self) relevantUserIds.add(String(m.senderId));
+  }
+  const memText = ctx.memory.formatForPrompt(ctx.chatKey, { userIds: [...relevantUserIds] });
+  if (memText) pushOptional(PROMPT_CATALOG.user.memory(memText), 3);
 
   // 过去状态
   let pastPartIndex = -1;
@@ -535,6 +577,12 @@ export function buildUserPrompt(ctx: PromptContext): string {
   } else {
     parts.push(PROMPT_CATALOG.user.noPastState);
   }
+
+  // 此刻状态 + 当前时间：**从最前挪到这里**。它们一个分钟级、一个秒级变化，放在第一行会
+  // 把整段用户提示词的缓存前缀当场作废；而紧挨【本次唤醒】读数也更顺（"最近 10 分钟多少条、
+  // 你上次发言是 …，以下是你还没看过的新消息"）。
+  parts.push(PROMPT_CATALOG.user.currentState(stateLines.join('\n')));
+  parts.push(PROMPT_CATALOG.user.currentTime(formatFullTime(now)));
 
   // 本次唤醒
   const triggerBlock = buildTriggerBlock(ctx.triggerEntries, ctx);
@@ -551,30 +599,12 @@ export function buildUserPrompt(ctx: PromptContext): string {
   }
 
   // 参与度已并入系统提示的【该说/不该说】，这里不再重复。
+  // 成员备注也不再单独成段 —— 备注名已经直接替换了消息里的显示名（formatEntry / triggerLabels
+  // 都优先用备注），单独列一遍是重复信息。
 
-  // 记忆：只注入与本次对话相关群友的印象（触发者 + 最近活跃成员），控制 token
-  const relevantUserIds = new Set<string>();
-  for (const m of ctx.triggerEntries || []) {
-    if (m.senderId && !m.self) relevantUserIds.add(String(m.senderId));
-  }
-  // 只取"这次真的会发给模型"的消息里出现的群友 —— 当前批 + 独立历史策略选中的记录。
-  // 曾经这里写死 store.recent(limit:12)，会把模型实际看不到的群友印象混进记忆段。
-  for (const m of (past?.messages || [])) {
-    if (m.senderId && !m.self) relevantUserIds.add(String(m.senderId));
-  }
-  const memText = ctx.memory.formatForPrompt(ctx.chatKey, { userIds: [...relevantUserIds] });
-  if (memText) pushOptional(PROMPT_CATALOG.user.memory(memText), 3);
-
-  // 成员备注：不再单独成段——备注名已经直接替换了消息里的显示名
-  // （formatEntry/triggerLabels 都优先用备注），单独列一遍是重复信息。
-
-  // 表情包（目录本身）。活跃度档位已并入系统提示的【表情包策略】段，这里不再重复引导。
-  if (cfg.sticker?.enabled !== false) {
-    const stickerCtx = buildStickerContext(ctx.stickerEntries || [], Number(cfg.sticker?.promptMaxStickers) || 10);
-    if (stickerCtx) pushOptional(stickerCtx, 1);
-  }
-
-  // 只保留本轮决策提醒；工具参数和引用细则分别归 tools schema / system prompt。
+  // 只保留本轮决策提醒（工具参数与引用细则分别归 tools schema / system prompt）。
+  // **它固定不变、搬到这里之前本来可以吃进缓存前缀**，但刻意留在末尾：紧贴生成位置的
+  // "提醒"对行为有用，而它只有一百来字 —— 为这点 token 牺牲那个效果不划算。
   parts.push(PROMPT_CATALOG.user.decision);
 
   const prompt = joinPromptWithinBudget(parts, optionalParts, cfg.store?.promptContextMaxChars);

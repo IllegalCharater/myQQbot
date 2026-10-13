@@ -96,10 +96,13 @@ ok('appendTranscript mid === null（没有 #id，模型引用不了它）', trEn
 ok('appendTranscript senderId 空 / senderName 为「转写」（会话摘要不会渲染成":正文"）',
   trEntry.senderId === '' && trEntry.senderName === '转写');
 ok('isSystemRecord 不认转写结果（它恰恰必须进唤醒窗口）', !isSystemRecord({ kind: 'transcript' }));
-ok('isPersonMessage 把 digest/note/两个异步结果都排除，普通消息与旧数据不排除',
+ok('isPersonMessage 把 digest/note/三个异步结果都排除，普通消息与旧数据不排除',
   !isPersonMessage({ kind: 'digest' }) && !isPersonMessage({ kind: 'note' }) && !isPersonMessage({ kind: 'transcript' })
-  && !isPersonMessage({ kind: 'jmcomic-result' })
+  && !isPersonMessage({ kind: 'jmcomic-result' }) && !isPersonMessage({ kind: 'image-result' })
   && isPersonMessage({ kind: 'text' }) && isPersonMessage({}) && !isPersonMessage(null));
+ok('isSystemRecord 同样不认出图结果（它必须进唤醒窗口让模型看到）',
+  !isSystemRecord({ kind: 'image-result' }) && !isSystemRecord({ kind: 'transcript' })
+  && isSystemRecord({ kind: 'digest' }) && isSystemRecord({ kind: 'note' }));
 ok('转写结果不占活跃成员（否则会多出一个查无此人的幽灵成员）',
   !store.activeMembers(K, 20).some((m) => m.userId === '' || m.name === '转写'), JSON.stringify(store.activeMembers(K, 20)));
 ok('转写结果仍会被 selectArchiveRange 取走（长文本不能在存档里只增不减）',

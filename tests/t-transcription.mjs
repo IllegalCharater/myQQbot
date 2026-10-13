@@ -395,6 +395,11 @@ Object.assign(process.env, {
   TENCENTCLOUD_SECRET_KEY: 'placeholder-key'
 });
 const cfg = structuredClone(DEFAULT_CONFIG);
+// 调用额度放到最大：**闸门 2026-10-10 从工具层挪进了队列**（`/转写` 因此也受限），
+// 而本套件在同一个群里连开十几个任务来验状态机与投递 —— 留着小额度只会让它们
+// 齐刷刷撞上限，红得像状态机坏了。闸门本身在下面单开一段验（那是行为变更的守护）。
+cfg.transcription.maxCallsPerChatPerHour = 60;
+cfg.transcription.maxCallsPerDay = 1000;
 const resolved = resolveTranscriptionConfig(cfg);
 ok('腾讯云 AppID 与凭证支持服务端环境变量回退',
   resolved.enabled && resolved.secretId === 'placeholder-id' && resolved.secretKey === 'placeholder-key'
@@ -485,8 +490,39 @@ ok('stop 会中止当前 worker、禁止迟到结果发送并等待其落到 fai
 //   · 超长时仍上传全文文件（群里那份完整的得另给）
 //   · **绝不把异常抛回 `#drain`**：那里会同时把任务记成 failed 并往群里发一句莫须有的
 //     「转写失败」——而结果其实已经拿到了
+//   · **成功与失败都交给回流端口**（2026-10-10 统一）；只有"确定没人接"（缺端口 / 端口抛错）
+//     才退回贴文本 —— 那时静默丢弃会让群友什么都等不到
 const assistedTexts = [];     // 队列自己发出去的群文本（assisted 下必须始终为空）
 const assistedUploads = [];   // upload_* 调用的文件名
+// ── 调用闸门在**队列**里（2026-10-10 从工具层挪过来；`/转写` 因此也受限）──────
+//
+// 这条守护的是一个**行为变更**：闸门以前在 `agent/tools/transcription.ts`，于是工具路径受限、
+// `/转写` 命令不受限（旧文档写明了那是刻意的）。现在它和出图一样在 `enqueue` 里 ——
+// 两条入口共用同一本账。判据打在队列上，因为那才是它现在的家。
+{
+  const gateCfg = structuredClone(cfg);
+  gateCfg.transcription.maxCallsPerChatPerHour = 2;
+  gateCfg.transcription.maxCallsPerDay = 100;
+  const gateQueue = new VideoTranscriptionQueue({
+    sender: fakeSender,
+    onebot: { call: async () => ({}) },
+    getConfig: () => gateCfg,
+    log: () => {},
+    // 闸门排在 FFmpeg 可用性检查**之后**（缺 ffmpeg 时该报的是"转写不可用"，
+    // 而不是"太频繁"）—— 所以夹具要把那一步替换掉，否则一个真解释器探测会先抛。
+    operations: { checkFfmpeg: async () => {}, runTask: async () => '识别文本', deliver: async () => {} }
+  });
+  await gateQueue.start();
+  const codes = [];
+  for (let i = 0; i < 3; i++) {
+    try { gateQueue.enqueue({ chatKey: 'group:gate', url: 'https://example.com/a.mp4' }); }
+    catch (error) { codes.push(error.code); }
+  }
+  ok('闸门在队列里：每群每小时上限真的拦得住（工具与 `/转写` 共用同一本账）',
+    codes.length === 1 && codes[0] === 'RATE_LIMITED', JSON.stringify(codes));
+  await gateQueue.stop();
+}
+
 const sinkCalls = [];
 const assistedLogs = [];
 let uploadShouldFail = false;
@@ -577,26 +613,60 @@ ok('上传失败只留固定错误码，日志不含 URL、识别文本或文件
 
 // 端口抛错必须被吞掉：`#drain` 把异常一律当成"转写失败"，会在结果已拿到的情况下
 // 同时记 failed 并往群里发一句莫须有的「转写失败」。
+// 但也**不许静默**：没人接这个结果时队列退回自己贴文本（否则群友什么都等不到）。
 sinkShouldThrow = true;
 const a5 = assistedQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/short.mp4', mode: 'assisted' });
 const a5Status = await settle(a5.id);
 uploadShouldFail = false;
 sinkShouldThrow = false;
-ok('端口抛错不外抛：任务照旧 done、不发任何失败文案、只记 DELIVER_FAILED',
-  a5Status === 'done' && sinkCalls.length === 4 && assistedTexts.length === 2
+ok('端口抛错不外抛：任务照旧 done、记 DELIVER_FAILED，并退回自己把结果贴进群',
+  a5Status === 'done' && sinkCalls.length === 4 && assistedTexts.length === 3
+  && String(assistedTexts[2]).startsWith('转写结果：\n') && String(assistedTexts[2]).includes(SHORT_TEXT)
   && assistedLogs.some((line) => line.includes('code=DELIVER_FAILED')),
-  `status=${a5Status} sink=${sinkCalls.length} text=${assistedTexts.length}`);
+  `status=${a5Status} sink=${sinkCalls.length} text=${JSON.stringify(assistedTexts.map((t) => t.slice(0, 12)))}`);
 
-// runTask 失败是另一回事：那时确实没有结果，必须照旧往群里说一句
+// runTask 失败是另一回事：那时确实没有结果 —— 但它**同样走回流通道**（2026-10-10 统一）：
+// 队列一个字都不贴，交给模型自己交代。这条是这次改动的核心断言。
 const a6 = assistedQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/boom.mp4', mode: 'assisted' });
 const a6Status = await settle(a6.id);
-ok('转写本身失败：群里收到失败文案，回流端口**不被调用**',
-  a6Status === 'failed' && assistedTexts.length === 3
-  && String(assistedTexts[2]).startsWith('转写失败') && sinkCalls.length === 4,
-  `status=${a6Status} text=${assistedTexts.length} sink=${sinkCalls.length}`);
+ok('转写本身失败：回流端口拿到一条 status=failed 的条目（由模型开口），队列**零群文本**',
+  a6Status === 'failed' && assistedTexts.length === 3 && sinkCalls.length === 5
+  && sinkCalls[4]?.status === 'failed' && sinkCalls[4]?.text === ''
+  && sinkCalls[4]?.chars === 0 && sinkCalls[4]?.truncated === false
+  && String(sinkCalls[4]?.reason || '').length > 0 && sinkCalls[4]?.chatKey === 'group:7',
+  `status=${a6Status} text=${assistedTexts.length} sink=${sinkCalls.length} last=${JSON.stringify(sinkCalls[4])}`);
+ok('失败条目不带识别正文，也不写成"截断"（它不是"原文 0 字"，是压根没有原文）',
+  sinkCalls[4]?.text === '' && sinkCalls[4]?.chars === 0 && sinkCalls[4]?.truncated === false);
+
+// `standalone`（`/转写` 命令那条路）**压根没有模型**：失败必须照旧贴群文案，
+// 一步都不许走回流端口 —— 走了的话群里什么都等不到（那条条目的读者是模型，
+// 而这个会话根本没有模型在跑）。这条守的是 `#fail` 里那个 mode 判断。
+const a9 = assistedQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/boom.mp4' });
+const a9Status = await settle(a9.id);
+ok('standalone 失败（/转写 那条路）：照旧贴失败文案，回流端口一次都不碰',
+  a9Status === 'failed' && assistedTexts.length === 4 && String(assistedTexts[3]).startsWith('转写失败')
+  && sinkCalls.length === 5,
+  `status=${a9Status} text=${JSON.stringify(assistedTexts.map((t) => t.slice(0, 12)))} sink=${sinkCalls.length}`);
+
+// 退回 standalone 行为时**不许**把全文文件再发一遍：上面（assisted 分支）已经发过一次了，
+// 重发意味着群里出现两份全文。判据是上传次数**恰好 +1**。
+{
+  sinkShouldThrow = true;
+  const beforeUploads = assistedUploads.length;
+  const a10 = assistedQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/long.mp4', mode: 'assisted' });
+  const a10Status = await settle(a10.id);
+  sinkShouldThrow = false;
+  ok('assisted 超长 + 端口抛错：退回贴截断段，全文文件**只上传一次**（不重发已发过的那份）',
+    a10Status === 'done' && assistedUploads.length === beforeUploads + 1
+    && String(assistedTexts.at(-1)).startsWith('转写结果：\n')
+    && String(assistedTexts.at(-1)).includes('文本过长，已截断')
+    && !String(assistedTexts.at(-1)).includes('完整文本文件发送失败'),
+    `status=${a10Status} uploads=${assistedUploads.length - beforeUploads} text=${String(assistedTexts.at(-1)).slice(0, 40)}`);
+}
 await assistedQueue.stop();
 
-// 没有回流端口时（例如某种装配缺失）不能无声无息：留一条日志说明结果没落地。
+// 没有回流端口时（例如某种装配缺失）不能无声无息：**成功与失败都退回贴文本**，
+// 各留一条日志说明结果没落地。
 const noSinkLogs = [];
 const noSinkTexts = [];
 const noSinkQueue = new VideoTranscriptionQueue({
@@ -606,17 +676,74 @@ const noSinkQueue = new VideoTranscriptionQueue({
   log: (line) => noSinkLogs.push(String(line)),
   operations: {
     checkFfmpeg: async () => {},
-    runTask: async (_job, _signal, setStatus) => { setStatus('extracting'); return SHORT_TEXT; }
+    runTask: async (job, _signal, setStatus) => {
+      setStatus('extracting');
+      if (String(job.sourceUrl).includes('boom')) throw new Error('fixture-run-failed');
+      return SHORT_TEXT;
+    }
   }
 });
 await noSinkQueue.start();
 const a7 = noSinkQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/short.mp4', mode: 'assisted' });
 for (let i = 0; i < 200 && noSinkQueue.get(a7.id)?.status !== 'done'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
-ok('缺回流端口：什么都不发，但留一条 NO_DELIVER_SINK 日志（不静默丢结果）',
-  noSinkQueue.get(a7.id)?.status === 'done' && noSinkTexts.length === 0
+ok('缺回流端口（成功）：退回自己把结果贴进群，并留一条 NO_DELIVER_SINK 日志（不静默丢结果）',
+  noSinkQueue.get(a7.id)?.status === 'done' && noSinkTexts.length === 1
+  && String(noSinkTexts[0]).startsWith('转写结果：\n') && String(noSinkTexts[0]).includes(SHORT_TEXT)
   && noSinkLogs.some((line) => line.includes('code=NO_DELIVER_SINK')),
-  `status=${noSinkQueue.get(a7.id)?.status} text=${noSinkTexts.length}`);
+  `status=${noSinkQueue.get(a7.id)?.status} text=${JSON.stringify(noSinkTexts)}`);
+const a8 = noSinkQueue.enqueue({ chatKey: 'group:7', url: 'https://example.com/boom.mp4', mode: 'assisted' });
+for (let i = 0; i < 200 && noSinkQueue.get(a8.id)?.status !== 'failed'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+ok('缺回流端口（失败）：退回贴失败文案（assisted 只在"确定有人接"时才闭嘴）',
+  noSinkQueue.get(a8.id)?.status === 'failed' && noSinkTexts.length === 2
+  && String(noSinkTexts[1]).startsWith('转写失败'),
+  `status=${noSinkQueue.get(a8.id)?.status} text=${JSON.stringify(noSinkTexts.map((t) => t.slice(0, 12)))}`);
 await noSinkQueue.stop();
+
+// ── 失败条目：落库形状、提示词标签与响应档位 ──────────────────────
+//
+// 失败也走回流通道之后，"模型真的看得到它并会开口"由三处承载，少一处这条链就断在
+// 看不见的地方（与出图那条同形，见 t-image-gen.mjs 第 12 节）：进窗口（不是
+// isSystemRecord、又是 isPersonMessage 的反面）、提示词标签与成功分开、最低档位也唤醒。
+{
+  const { ChatStore, isSystemRecord, isPersonMessage } = await load('chat/store.js');
+  const { buildTriggerBlock } = await load('agent/prompting/prompt-builder.js');
+  const { evaluateWindowTrigger } = await load('agent/context/response-policy.js');
+  const store = new ChatStore(0);
+  const KEY = 'group:71001';
+
+  const sent = store.appendTranscript(KEY, { text: '视频里在讲一个关于茶叶的故事', chars: 15 });
+  ok('成功条目：status 记 sent、reason 空、正文就是识别文本（面板那一列直接印它）',
+    sent.transcript?.status === 'sent' && sent.transcript?.reason === ''
+    && sent.text === '视频里在讲一个关于茶叶的故事', JSON.stringify(sent.transcript));
+
+  const failed = store.appendTranscript(KEY, { status: 'failed', reason: '腾讯云识别失败' });
+  ok('失败条目：未读、非 self、不可引用、senderId 空 —— 但要进窗口',
+    failed.read === false && failed.self === false && failed.mid === null && failed.senderId === ''
+    && failed.senderName === '转写' && failed.kind === 'transcript', JSON.stringify(failed));
+  ok('失败条目：正文自己说得清是哪件事没成（存档面板不带【】标记，只能靠它）',
+    failed.text === '视频转写失败：腾讯云识别失败', failed.text);
+  ok('失败条目：chars 记 0、不写成"截断"（它是"压根没有原文"，不是"原文 0 字"）',
+    failed.transcript?.chars === 0 && failed.transcript?.truncated === false
+    && failed.transcript?.status === 'failed' && failed.transcript?.reason === '腾讯云识别失败',
+    JSON.stringify(failed.transcript));
+  ok('失败条目：进唤醒窗口（不是 isSystemRecord），但不算某个群友的发言（是 isPersonMessage 的反面）',
+    !isSystemRecord(failed) && !isPersonMessage(failed));
+  {
+    const block = buildTriggerBlock([failed], { selfNickname: '小鲸鱼' });
+    ok('失败条目：提示词里换成【转写失败】标签、带上原因，且不冒充群友',
+      block.includes('【转写失败】') && block.includes('腾讯云识别失败')
+      && !block.slice(0, block.indexOf('【转写失败】')).includes('：'), block);
+    ok('失败条目不产生 #消息id 前缀（mid 是 null，引用不了）', !/#/.test(block), block);
+  }
+  ok('失败条目：最低响应档位也照样唤醒一次运行（被吞掉 = 模型永远不会交代）',
+    evaluateWindowTrigger({
+      entries: [failed], identity: { selfNickname: '小鲸鱼' },
+      policy: { responseTier: 1, randomPercent: 0, keywords: [] }, roll: 99
+    }).shouldRespond === true);
+  ok('失败条目不占活跃成员（空 senderId 不会造出幽灵群友）',
+    !store.activeMembers(KEY, 20).some((m) => m.userId === ''),
+    JSON.stringify(store.activeMembers(KEY, 20)));
+}
 
 // 控制台 GET /api/config 必须沿用既有 secret 递归脱敏，不能把新凭证带给浏览器。
 updateConfig({

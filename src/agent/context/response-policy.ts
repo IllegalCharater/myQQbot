@@ -74,6 +74,11 @@ export function evaluateWindowTrigger({ entries, identity = {}, policy, roll }: 
   if (entries.some((entry) => entry?.kind === 'jmcomic-result')) {
     return { responseTier: 0, reason: '漫画下载结果', shouldRespond: true };
   }
+  // 图像生成结果同理。注意这里**不是**"让模型去发那张图"——图已经由队列发进群了，
+  // 这条规则保证的是"模型有机会补一句话"，而不是"图能发出去"。
+  if (entries.some((entry) => entry?.kind === 'image-result')) {
+    return { responseTier: 0, reason: '图片生成结果', shouldRespond: true };
+  }
   if (tier >= 2 && hitKeyword(texts.join('\n'), policy.keywords)) return { responseTier: 2, reason: '关键词命中', shouldRespond: true };
   const rollValue = Number(roll);
   const randomHit = rollValue < Math.max(0, Math.min(100, Number(policy.randomPercent) || 0));

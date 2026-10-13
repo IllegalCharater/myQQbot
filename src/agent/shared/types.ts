@@ -10,6 +10,7 @@ import type { SessionRegistry } from '../../chat/sessions.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
 import type { AppEmit } from '../../core/events.js';
 import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
+import type { ImageGenQueue } from '../../media/image-gen/index.js';
 import type { HotSearchScheduler } from '../../media/hot-search/scheduler.js';
 
 export type ToolArguments = Record<string, unknown>;
@@ -43,6 +44,7 @@ export interface ToolContext extends Record<string, unknown> {
    * 工具侧一律按"可能没有"处理，缺了返回友好错误而不是抛。
    */
   transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  imageGen?: Pick<ImageGenQueue, 'enqueue'>;
   hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
 }
 
@@ -95,6 +97,7 @@ export interface OrchestratorDependencies {
   windows?: ContextWindowRegistry | null;
   // 能力型工具依赖，可选：透传给 WakeScheduler（它才是 `AgentRunnerHost`），见 ToolContext 的说明。
   transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
+  imageGen?: Pick<ImageGenQueue, 'enqueue'>;
   hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
 }
 
