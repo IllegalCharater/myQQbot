@@ -438,15 +438,29 @@ ok('转写结果行有独立样式 .transcript-row', css.includes('.archive-tabl
 ok('漫画完成回调行有独立样式 .jmcomic-result-row', css.includes('.archive-table .jmcomic-result-row'));
 
 // ── 会话日志的横向滚动 ──
-// `.detail-pane` 只有 `overflow-y: auto`（横向是 visible），所以**折不了的长行**会被截掉
-// 右边、后半截根本看不到（**实测反馈**）。这几块是 `pre-wrap`（自然语言照常软换行）
-// **加** `overflow-x`，不是二选一 —— 覆盖不到的话这个 bug 会静默回来。
-// ⚠️ 这条只证明声明**存在**，证明不了它生效（被后续规则覆盖同样会红不了）。
-for (const sel of ['.collapsible .coll-body', '.tool-args', '.tool-result', '.bubble']) {
+// 这条链有**两层**，缺哪层都是"横向滚动条一根都不出现"，且都不报任何错：
+//   ① 根因层：`.view` 是 row flex 的子项，`min-width` 默认 `auto` = 内容最小宽度，
+//      所以一行折不了的长内容会把 `.view` → `.detail-pane` 整条链撑宽，而
+//      `body { overflow: hidden }` 把多出来的部分静默裁掉 —— 里面所有 `overflow-x`
+//      都**永远等不到溢出**。**实测**（Electron 自带 Chromium，1280 窗口）：600 字符的
+//      token 让 `.detail-pane` 从 960px 撑到 4558px、四块日志的滚动条全是 0px；
+//      补上 `min-width: 0` 后同样的夹具立刻给出 11~12px 的滚动条、面板回到 960px。
+//   ② 声明层：这几块是 `pre-wrap`（自然语言照常软换行）**加** `overflow-x`，不是二选一。
+// ⚠️ 这里的断言**只能证明声明存在**，证明不了它生效（被后续规则覆盖同样红不了）。
+//    布局本身要靠真浏览器量，重做办法：造一个只含这些块的静态页 + 一个 Electron
+//    BrowserWindow，量 `scrollWidth > clientWidth` 与 `offsetHeight - clientHeight - 边框`。
+//    正因如此，① 那行（光看声明完全无从判断的根因）必须由下面第一条断言钉住。
+ok('.view 有 min-width: 0（flex 子项默认 auto 会被长内容撑宽 → 面板里所有 overflow-x 失效）',
+  /\.view \{[^}]*min-width:\s*0/.test(css));
+for (const sel of ['.collapsible .coll-body', '.tool-args', '.tool-result', '.bubble', '.sent-badge', '.session-error']) {
   const esc2 = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   ok(`${sel} 有 overflow-x: auto（否则长行被截、看不到后半截）`,
     new RegExp(`${esc2}[^{]*\\{[^}]*overflow-x:\\s*auto`, 's').test(css));
 }
+// `.sent-badge` 是 flex 子项、宽度按 max-content 算，**光有 overflow-x 是空转的**
+// （实测：仍是 4499px、0px 滚动条），必须同时把盒子压回容器宽度。
+ok('.sent-badge 有 max-width: 100%（缺了它，上面那条 overflow-x 永远不生效）',
+  /\.sent-badge \{[^}]*max-width:\s*100%/.test(css));
 ok('横向滚动**没有**用 `white-space: pre` 换掉软换行（那会让普通文本长到没法读）',
   /\.collapsible \.coll-body \{[^}]*white-space:\s*pre-wrap/.test(css));
 
