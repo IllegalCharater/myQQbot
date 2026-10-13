@@ -36,6 +36,24 @@ npm run test:all
 
 完成普通源码改动至少运行 `npm run check`。涉及真实 Electron、OneBot 或桌面交互时，说明仍需人工真机冒烟，不要擅自操作真实账号。
 
+**桌面打包**：`npm run dist:desktop`（`scripts/build-desktop.mjs`，零依赖）产出"解压即用"的绿色目录
+`release/qq-agent-<版本>-<平台>-<架构>/`，不是安装包。它自带三道校验：必需文件清单、`src/**/*.ts` ⇄
+`dist/**/*.js` 对账、用产物里那份 `dist/` 真跑一遍 `createApp → start → stop`（临时数据目录）。打包是
+**唯一**会让"某个模块没被搬进包"这类错误抵达用户的出口，所以动构建产物布局（新增运行时资源目录、
+改 `dist/` 结构、换生产依赖）时要同时看它——**白名单在脚本的 `APP_ENTRIES`，加目录就加一行**，别把
+它改成排除法。四条已定的边界：**不打 asar**（Python 脚本要 spawn、SnowLuma 要执行、`ui/` 与 `data/`
+必须是真文件）、**只搬生产依赖闭包**、**不改 `electron/main.js`**（"数据目录 = exe 旁边"正是绿色版要的
+形状，而 `before-quit` 那段被 `t-lifecycle.mjs` 按函数体钉着）、**内置 Python 只由解析链接管**
+（`--with-python` 把运行时放进 `resources/app/python-runtime/`，命中与否与优先级全由
+`resolvePythonCommand()` 的 `bundled` 层决定，打包脚本不再自己写一份"谁优先"的判据 —— 当前它在
+**链首**，所以带了它的包里 `python.path` 不生效，使用说明里必须写明这件事）。另有三条**实测踩过的坑**：
+`--skip-build` 时产物里是旧 `dist`（表现成"内置层不生效"，其实是源码没编译）、GNU tar 会把 `C:\…`
+当成远程主机（解压必须只给相对文件名）、内置运行时的 `*.pyc` **不是垃圾**（它正好对应我们带的那版
+解释器，敏感文件扫描对 `python-runtime/` 下的 `.pyc` 网开一面）。还有一条**环境坑**：VS Code 的
+集成终端注入了 `ELECTRON_RUN_AS_NODE=1`，在那里 `npm start` 或跑打包出的 exe 都会以
+`cjsPreparseModuleExports` 的 TypeError 崩掉（Electron 被当成纯 Node，`import 'electron'` 去解析
+`node_modules/electron` 那个 CJS 包）——那不是代码坏了，换系统终端即可。
+
 ## 依赖分层
 
 允许的依赖方向：
@@ -325,8 +343,8 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 **Python 工具只有一个目录、一份依赖、一个解释器配置**（2026-09-29 统一）：
 
 - 脚本一律放 `python-tools/`（当前两个：`jmcomic_download.py`、`pic_image_search_worker.py`），依赖合并进 `python-tools/requirements.txt`——**不要在工具旁边另开一份依赖清单**，两份必然漂移，最后没人知道该装哪个。新脚本的路径常量加进 `src/core/python-runtime.ts`（**不要**在调用方自己 `path.join(ROOT, 'python-tools', 'x.py')`：脚本改名不会编译报错，只会在运行期炸，而 `spawn` 一个不存在的文件连日志都不会有）。
-- 解释器只从 `python.path` 读，解析链唯一实现在 `src/core/python-runtime.ts` 的 `resolvePythonCommand()`：`python.path` → `QQ_AGENT_PYTHON` → Windows 固定环境 → `conda run -n my_bot python`。**不要再给新工具加一个自己的解释器环境变量或配置项**——两个工具用同一个解释器的前提下，各给一个变量的结果就是"装了 A 库的那个环境跑不了 B"，而报错会指向库缺失，排查方向完全错。
-- `JMCOMIC_PYTHON` 已于 2026-09-29 **正式废弃并从解析链删除**（旧别名支持的代价就是上一条那句话）。同一原因，`resolvePythonCommand()` 的返回值现在带 `source`（`config`/`env-primary`/`windows-direct`/`conda`），设置页靠它显示"当前生效的是哪一层"。**探测/自检的安全网已从环境变量搬进夹具的 `config.json`**：`tests/t-jmcomic.mjs` 把 `python.path` 写成一个不存在的程序（`config` 层优先级最高，比任何环境变量都硬），保证那个套件永远不真的 spawn conda 去下载漫画。**别再退回环境变量做法** —— 那会让"某台机器上有这个变量"决定套件的红绿；而且安全网死掉本身是**静默**的（真下载与"任务压根没跑"看起来一样），所以它另配了一条正向断言（任务失败文本必须含"无法启动 Python"）。
+- 解释器只从 `python.path` 读，解析链唯一实现在 `src/core/python-runtime.ts` 的 `resolvePythonCommand()`：**随包内置的运行时 → `python.path` → `QQ_AGENT_PYTHON` → `conda run`（环境由 `python.condaEnv` 决定：环境名走 `-n`、环境目录走 `-p`、留空则不带选择器）**。**内置层排在链首是有意的**（2026-10-13 定）：它是我们自己装好依赖、跟着包发出去的那一份，也是唯一"确定能用"的解释器，而后面三层都是这台机器上的猜测；**代价是带内置运行时的包里 `python.path` 不生效**，所以设置页提示、使用说明与 README 都写明了这句话和两条出路（删掉 `resources/app/python-runtime/`，或换一个不带 `--with-python` 的包）——不然就是本项目最忌讳的那类故障：填了、看着生效、实际用的是别的。后三层顺序不变（配置 > 环境变量 > conda）且**必须**排在 conda 之前：conda 那一级的 command 是未必存在的命令名，解析永不失败、失败发生在 `spawn` 那一刻。**源码里不许再有机器相关的绝对路径**：conda 那一级原是一行写死的 `E:\anaconda\envs\my_bot\python.exe`（`windows-direct` 那一档），只对作者的机器成立、换环境只能改代码，现已整级交给配置（出厂值仍是 `my_bot`，升级不改变既有行为）。**不要再给新工具加一个自己的解释器环境变量或配置项**——两个工具用同一个解释器的前提下，各给一个变量的结果就是"装了 A 库的那个环境跑不了 B"，而报错会指向库缺失，排查方向完全错。守护在 `tests/t-jmcomic.mjs` 第 1b-2（内置层：`bundledDir` 顶替那个目录 —— 空目录必须跳过、有解释器时必须命中且**压过** `python.path` 与环境变量）与 1b-3 段（conda 环境三种形态 + 一条剥了注释的反向断言：`WINDOWS_DIRECT_PYTHON`/`anaconda` 不许回到源码里）；那一段的开头用一个 `NO_RUNTIME` 包装把**其余每一条**调用都顶掉内置层，否则"仓库根恰好放了一份运行时"就会让它们集体变红。设置页那一栏的接线与"出厂默认值两边逐字相同"在 `tests/t-panel-wiring.mjs`。
+- `JMCOMIC_PYTHON` 已于 2026-09-29 **正式废弃并从解析链删除**（旧别名支持的代价就是上一条那句话）。同一原因，`resolvePythonCommand()` 的返回值现在带 `source`（`config`/`env-primary`/`bundled`/`conda`），设置页靠它显示"当前生效的是哪一层"（conda 那一档还会把**完整命令连 `-n`/`-p` 一起**印出来 —— 只印 `conda.exe` 的话"到底在跑哪个环境"在面板上就看不出来了）。**探测/自检的安全网已从环境变量搬进夹具的 `config.json`**：`tests/t-jmcomic.mjs` 把 `python.path` 写成一个不存在的程序（`config` 层优先级最高，比任何环境变量都硬），保证那个套件永远不真的 spawn conda 去下载漫画。**别再退回环境变量做法** —— 那会让"某台机器上有这个变量"决定套件的红绿；而且安全网死掉本身是**静默**的（真下载与"任务压根没跑"看起来一样），所以它另配了一条正向断言（任务失败文本必须含"无法启动 Python"）。
 - 旧字段 `jmcomic.pythonPath` 已并入 `python.path`，靠 `normalizeConfigShape` **迁移**（不是纯删）。这里有一条容易漏的：`updateConfig` 走 `deepMerge(getConfig(), patch)`，**只加键不删键**，所以迁移里必须显式 `delete root.jmcomic`，否则旧键会永远留在用户的 `config.json` 里——守护在 `tests/t-jmcomic.mjs` 第 4 段（去掉 `delete` 会同时打红内存与落盘两条断言）。`python.path` 为空串是**合法值**（含义是"走自动探测链"），所以 `save.js` 里不要像 `ffmpegPath` 那样兜一个非空默认值——**这条现在有机检守护**（`tests/t-panel-wiring.mjs` 的「Python 工具设置」段：兜底必须仍是 `p.path || ''`，出现非空字面量就红），因为"好心兜一个默认值"把留空变成写死路径后，症状只是搜图/漫画悄悄不可用。
 - 设置页的两个按钮（**测试解释器** / **跑一遍依赖自检**）对应 `POST /api/system/python-probe` 与 `POST /api/system/python-selfcheck`（`src/web/routes/system.ts`），逻辑在 `src/core/python-probe.ts`。三条边界：① 两个端点**只读已保存的配置、刻意忽略请求体**——接受请求体里的可执行路径等于凭空开一个"用 HTTP 启动任意本机程序"的一步接口，唯一的写入口仍是鉴权过的 `POST /api/config`（所以 UI 必须先 `saveConfig` 再探测，`t-panel-wiring.mjs` 有断言钉着这个顺序）；② 它们是**请求作用域**的短命子进程，**不进 `LONG_TERM_TASKS`**，也不碰常驻的搜图 worker 客户端单例；③ argv 里**不含任何密钥**（自检不拿 `apiKey`/`engineOptions`），与"SauceNAO 的 apiKey 绝不进 argv"是同一条不变量。自检的 409 忙等分支（`pythonSelfCheck.running`，照 `providers.ts` 的 `visionScan`）**没有行为断言**——触发它需要一次真的耗时 spawn，而测试约定不许启动真解释器，别以为它被管着。
 - 守护分布：脚本路径锚点与"两个脚本真的在同一个目录里"在 `tests/t-paths.mjs` 第 5 段（改名会红），解释器优先级/来源层级/探测与自检模块在 `tests/t-jmcomic.mjs` 第 1、1b、1c 段，端点在 `tests/t-admin.mjs` 的 D 段（把 `python.path` 配成不存在路径 → 200 + `ok:false` + 请求体里的路径被忽略），UI 接线在 `tests/t-panel-wiring.mjs`。`.gitignore` 已挡 `__pycache__/` 与 `*.pyc`——`python-tools/` 是要提交的源码，跑一次脚本就会在它旁边生成字节码缓存。

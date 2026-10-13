@@ -1,6 +1,7 @@
 {
   "name": "qq-agent",
-  "version": "0.3.0",
+  "productName": "QQ Agent",
+  "version": "1.0.0",
   "private": false,
   "description": "QQ 群 AI 机器人（桌面版）：事件驱动的无状态 Agent，接 OpenAI 兼容 API，带会话式控制台。",
   "type": "module",
@@ -17,6 +18,7 @@
     "preserver": "npm run build",
     "start": "chcp 65001 && electron .",
     "server": "node dist/web/server.js",
+    "dist:desktop": "node scripts/build-desktop.mjs",
     "test": "node tests/run.mjs",
     "test:all": "node tests/run.mjs --all"
   },

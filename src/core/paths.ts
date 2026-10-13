@@ -54,5 +54,16 @@ export const UI_DIR: string = path.join(ROOT, 'ui');
  */
 export const PYTHON_TOOLS_DIR: string = path.join(ROOT, 'python-tools');
 
+/**
+ * 随包内置的 Python 运行时目录（**可选**：只有打包时带了 `--with-python` 才有这个目录）。
+ *
+ * 目录不存在 = 没打进去，`resolvePythonCommand()` 会跳过这一层 —— 所以开发态与
+ * "没带 Python 的包"行为完全不受影响。
+ *
+ * 放在 `ROOT`（打包后 = `resources/app/`）而不是 exe 旁边：它是**程序文件**，
+ * 与 `data/`（在 exe 旁边、属于用户数据）不是一类东西，升级覆盖包时该跟着一起换。
+ */
+export const PYTHON_RUNTIME_DIR: string = path.join(ROOT, 'python-runtime');
+
 /** 配置文件。 */
 export const CONFIG_FILE: string = path.join(DATA_DIR, 'config.json');

@@ -8,9 +8,12 @@
 #
 #     <python> -m pip install -r python-tools/requirements.txt
 #
-# <python> 就是 `python.path` 里填的那个解释器；留空时按 `src/core/python-runtime.ts`
-# 的解析链回落：QQ_AGENT_PYTHON → JMCOMIC_PYTHON（已废弃）→ Windows 固定环境 →
-# conda run -n my_bot python。也可以直接在设置页「Python 工具」里填。
+# <python> 就是 `python.path` 里填的那个解释器；解析链（`src/core/python-runtime.ts`）是
+# 随包内置的运行时（打包时带了 --with-python 才有这一层，它就是
+# <安装目录>/resources/app/python-runtime/python.exe）→ python.path → QQ_AGENT_PYTHON →
+# conda run（环境在设置页「Python 工具」的 conda 环境那一栏配：环境名走 -n、环境目录走 -p）。
+# ⚠️ 有内置运行时时，`python.path` 不生效（内置那份带着装好的依赖，是唯一"确定能用"的）。
+# （更早的环境变量别名 JMCOMIC_PYTHON 已于 2026-09-29 废弃，两个工具共用一个解释器。）
 
 # 漫画下载（python-tools/jmcomic_download.py）
 jmcomic

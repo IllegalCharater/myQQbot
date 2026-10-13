@@ -19,7 +19,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { PIC_IMAGE_SEARCH_SCRIPT, resolvePythonCommand } from './python-runtime.js';
-import type { PythonCommandSource, PythonPathConfig } from './python-runtime.js';
+import type { PythonCommandSource, PythonConfig } from './python-runtime.js';
 
 /** 探测脚本。一行 JSON 到 stdout：解释器自身信息 + 两个库的版本（未安装为 `null`）。 */
 const PROBE_SCRIPT = [
@@ -172,7 +172,7 @@ function excerpt(text: string): string {
  * `ok` 的含义是"解释器回答了"，**不是"依赖齐全"** —— 依赖状态在 `interpreter.deps` 里如实列出
  * （`null` = 没装）。真正权威的依赖检查是 {@link runSelfCheck}（它会真的 import）。
  */
-export async function probePython(config: PythonPathConfig = {}, deps: ProbeDeps = {}): Promise<ProbeReport> {
+export async function probePython(config: PythonConfig = {}, deps: ProbeDeps = {}): Promise<ProbeReport> {
   const started = Date.now();
   const { command, prefix, source } = resolvePythonCommand(config);
   const spawnFn = deps.spawn ?? (spawn as unknown as SpawnLike);
@@ -211,7 +211,7 @@ export async function probePython(config: PythonPathConfig = {}, deps: ProbeDeps
  * 升级探测**（换了 PicImageSearch 版本、或改了 worker 里任何一张映射表）。取 `stderr`
  * 优先，因为 `self_check()` 全打在 stderr（库缺失时返回 2）。
  */
-export async function runSelfCheck(config: PythonPathConfig = {}, deps: ProbeDeps = {}): Promise<SelfCheckReport> {
+export async function runSelfCheck(config: PythonConfig = {}, deps: ProbeDeps = {}): Promise<SelfCheckReport> {
   const started = Date.now();
   const { command, prefix } = resolvePythonCommand(config);
   const spawnFn = deps.spawn ?? (spawn as unknown as SpawnLike);

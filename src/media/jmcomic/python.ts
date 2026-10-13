@@ -144,8 +144,8 @@ export function runPython(job: JmJob): Promise<PythonResult> {
       stderr = (stderr + chunk.toString('utf8')).slice(-50_000);
     });
     // 报出**实际用的那个命令**，而不是写死 "my_bot"。解释器可能来自 python.path /
-    // QQ_AGENT_PYTHON / Windows 固定环境 / conda 回退中的任意一条，只说 "my_bot" 会让
-    // 一个填错的 python.path 看起来像 conda 环境缺库。
+    // QQ_AGENT_PYTHON / 随包内置运行时 / conda（环境名可配）中的任意一条，只说 "my_bot"
+    // 会让一个填错的 python.path 看起来像 conda 环境缺库。
     child.on('error', (error) => finish(reject, new Error(`无法启动 Python（${command}）：${error.message}`)));
     child.on('close', (code) => {
       if (settled) return;

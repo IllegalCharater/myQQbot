@@ -355,7 +355,12 @@ export async function saveConfig({ quiet = false } = {}) {
     const p = c.python || {};
     // 空串是**合法值**，含义是"没配，走自动探测链"（见 core/python-runtime.ts），
     // 所以这里不像 ffmpegPath 那样兜一个非空默认值——兜了反而会把"留空"变成"填 ffmpeg"。
-    patch.python = { path: val('#cfg-python-path', p.path || '').trim() };
+    patch.python = {
+      path: val('#cfg-python-path', p.path || '').trim(),
+      // conda 环境名/目录：空串同样是合法值（= 不带 -n/-p，用 conda 当前环境），
+      // 所以兜底也只回退到"当前值或空"，不塞 'my_bot' 这种看似友好的默认值。
+      condaEnv: val('#cfg-python-conda-env', p.condaEnv || '').trim()
+    };
   }
 
   if (sec === 'chat') {

@@ -384,8 +384,12 @@ PDF 发出去了但没能确认是【漫画发送未确认】（那份文件很�
 }
 ```
 
-`python.path` 留空时的探测顺序：环境变量 `QQ_AGENT_PYTHON` → Windows 固定环境
-`E:\anaconda\envs\my_bot\python.exe` → `conda run -n my_bot python`。
+`python.path` 留空时的探测顺序：**随包内置的运行时**（只有打包时带了 `--with-python` 才有这一层）→
+`QQ_AGENT_PYTHON` → `conda run`（用哪个环境见下面那一栏 conda 环境：环境名走 `-n`、环境目录走 `-p`、
+留空用 conda 当前环境）。设置页的「测试解释器」会告诉你**当前生效的是哪一层**与完整命令。
+
+⚠️ **内置运行时排在链首**：包里有它时，这一页填的 `python.path` **不会生效**（内置那一份带着装好的依赖，
+是唯一"确定能用"的。要换成自己的解释器，删掉 `resources\app\python-runtime\` 目录即可）。
 
 > 旧版本用的 `jmcomic.pythonPath` 已并入 `python.path`。老配置**会自动迁移**，不必重填；
 > 首次保存设置后旧键会从 `config.json` 里移除。
@@ -405,6 +409,43 @@ PDF 发出去了但没能确认是【漫画发送未确认】（那份文件很�
 `npm start` 启动的桌面端带托盘运行与明暗主题；关闭窗口默认收到托盘而不是退出，退出菜单会等待后台任务
 与传输层关停完成。仅需后端时用 `npm run server`，它不依赖 Electron。
 
+⚠️ 在 VS Code 的**集成终端**里跑 `npm start` 会以 `cjsPreparseModuleExports` 的 TypeError 崩溃：
+VS Code 给终端注入了 `ELECTRON_RUN_AS_NODE=1`，Electron 于是被当成纯 Node 启动。用系统终端、双击
+`启动QQ机器人.bat`，或先 `unset ELECTRON_RUN_AS_NODE`（PowerShell：`Remove-Item Env:ELECTRON_RUN_AS_NODE`）。
+
+### 打包成桌面应用（绿色版）
+
+想把项目打成"解压即用、用户不需要装 Node"的桌面应用：
+
+```bash
+npm run dist:desktop            # 清空 dist 重新编译并打包，产物在 release/qq-agent-<版本>-<平台>-<架构>/
+npm run dist:desktop -- --zip   # 顺手压一个 zip（发给别人用）
+```
+
+产物目录里双击 `QQ Agent.exe` 就能运行：数据（含 API Key）第一次启动时自动建在 exe 旁边的 `data/`，
+备份与换机器都是整个目录搬走；**打好的包里不含任何数据与密钥**。几条约定：
+
+- **白名单打包**：只搬 `dist/ ui/ electron/ assets/ python-tools/` 与生产依赖闭包（js-yaml、node-cron、
+  undici、ws），`data/`、`snowluma/logs/`、`.env`、日志、`*.pyc` 一律进不来。
+- **不打 asar**：`python-tools/*.py` 要 `spawn` 给 Python、SnowLuma 目录里的可执行文件要拉起、
+  `ui/` 与 `data/` 必须是真文件。
+- **打完自动校验**：必需文件清单、`src/**/*.ts` ⇄ `dist/**/*.js` 对账、敏感文件扫描，再用产物里那份
+  `dist/` 真跑一遍 `createApp → start → stop`（数据目录指向临时目录，绝不碰真实 `data/`）。
+- **SnowLuma 是可选的第三方组件**（`snowluma/` 本来就被 `.gitignore` 挡着）：本机有就一起打进去，
+  没有就跳过，使用者自己放到 `resources\app\snowLuma\` 即可被识别（`--with-snowluma` 强制、
+  `--no-snowluma` 跳过）。
+- **`--with-python` 让包内自带一份最小 Python 运行时**（搜图与漫画不必让用户自己装 Python）：
+  默认从 python-build-standalone 拉一份当前平台的最小发行版、剪掉 test/tkinter 之类无关的东西，
+  再 `pip install -r python-tools/requirements.txt` 装进**那一份**里（装不上只警告，使用说明里给了补装命令）。
+  解析顺序是「**内置运行时 > 用户配的 `python.path` > `QQ_AGENT_PYTHON` > 本机 conda 回退**」——
+  带了内置运行时的包里，设置页那一栏填什么都不生效（它带着装好的依赖，是唯一"确定能用"的那一份；
+  要换成自己的解释器就删掉 `resources\app\python-runtime\` 目录）。离线打包用
+  `--python-dist <本机目录或压缩包>`，装依赖用 `--python-no-deps` 跳过。
+- exe 的文件图标仍是 Electron 的（换 PE 资源图标需要 rcedit，脚本不做）；窗口与托盘图标用的是
+  `assets/icon.png`，不受影响。
+
+完整选项见 `node scripts/build-desktop.mjs --help`。
+
 ## 开发与验证
 
 改了源码要重新编译（开发时建议开 watch，它会一直盯着 `src/`）：
@@ -416,12 +457,14 @@ npm run build        # 编译一次
 npm run check        # typecheck + 分层检查 + 全部测试套件
 npm test             # 先 build，再跑 tests/ 下的断言套件
 npm run test:all     # 含打印式诊断套件
+npm run dist:desktop # 打包成绿色版桌面应用（见上一节）
 ```
 
 `npm test` 加载的是 `dist/`，所以别拿未 build 的结果判断源码行为。
 
-依赖：Node ≥ 20，`npm ci` 需要能访问 npm 源（会装 Electron，约 300MB）。制作仅运行后端的发布目录时，
-应先执行 `npm run build`，再在发布目录使用 `npm ci --omit=dev`；TypeScript 只参与构建，不需要随运行包安装。
+依赖：Node ≥ 20，`npm ci` 需要能访问 npm 源（会装 Electron，约 300MB）。打包桌面版用
+`npm run dist:desktop`（它会替你把生产依赖与 Electron 运行时一起搬进产物）；只想手工做一个仅运行后端的
+发布目录时，才需要自己 `npm run build` 后在发布目录 `npm ci --omit=dev`。
 
 完整的调用链、提示词结构、上下文语义与维护约束见 [当前架构与维护指南](docs/ts-migration-plan.md)；
 事件、端口与长期任务的设计见 [注册层设计](docs/global-registry-design.md)。

@@ -9,7 +9,7 @@
 // 所以 media/ 下的任何工具都能安全引用，不会制造反向依赖。
 import fs from 'node:fs';
 import path from 'node:path';
-import { PYTHON_TOOLS_DIR } from './paths.js';
+import { PYTHON_RUNTIME_DIR, PYTHON_TOOLS_DIR } from './paths.js';
 
 /** 漫画下载脚本。 */
 export const JMCOMIC_SCRIPT: string = path.join(PYTHON_TOOLS_DIR, 'jmcomic_download.py');
@@ -42,7 +42,7 @@ export const PYTHON_ENV_VAR = 'QQ_AGENT_PYTHON';
  * ⚠️ 这里是**字面量联合**而不是展示串：中文文案属于 UI（`ui/js/views/settings/index.js`），
  * core 层不该长出用户可见的话术。
  */
-export type PythonCommandSource = 'config' | 'env-primary' | 'windows-direct' | 'conda';
+export type PythonCommandSource = 'config' | 'env-primary' | 'bundled' | 'conda';
 
 /** 解析结果。`prefix` 是交给 `spawn` 的前置参数（conda 那条路要用）。 */
 export interface PythonCommand {
@@ -52,43 +52,84 @@ export interface PythonCommand {
 }
 
 /**
- * 只需要 `python.path` 这一小块，所以参数用**结构化窄类型**而不是整个 `AppConfig`。
- * 这样调用方可以只递它真正要的那几个字段，测试也不必凑一份完整配置。
+ * 只需要 `python` 这一小块（解释器路径 + conda 环境），所以参数用**结构化窄类型**而不是
+ * 整个 `AppConfig`。这样调用方可以只递它真正要的那几个字段，测试也不必凑一份完整配置。
  */
-export interface PythonPathConfig {
-  python?: { path?: unknown };
+export interface PythonConfig {
+  python?: { path?: unknown; condaEnv?: unknown };
 }
 
-/** Windows 上优先直用的固定环境（存在才用，不存在则退回 conda）。 */
-const WINDOWS_DIRECT_PYTHON = 'E:\\anaconda\\envs\\my_bot\\python.exe';
+/** `resolvePythonCommand()` 的可选项。 */
+export interface PythonResolveOptions {
+  /**
+   * 内置运行时的目录，默认 {@link PYTHON_RUNTIME_DIR}。
+   *
+   * 存在的唯一理由是**可测**：内置层要么命中要么跳过，全看那个目录在不在，而它由 ROOT 算出、
+   * 生产代码里改不了。没有这个参数，套件就只能往仓库根目录里放一个假 `python.exe` 再删掉
+   * （污染工作区，且进程中途死掉就留下垃圾），或者干脆不测。
+   */
+  bundledDir?: string;
+}
 
-/** conda 环境名。与 `python-tools/jmcomic_download.py` 里的报错文案是同一个。 */
-const CONDA_ENV = 'my_bot';
+/** 内置运行时里解释器的相对位置（官方 Windows 发行版与 POSIX 布局不同）。 */
+function bundledPythonExe(dir: string): string {
+  return process.platform === 'win32' ? path.join(dir, 'python.exe') : path.join(dir, 'bin', 'python3');
+}
 
 /**
  * 按优先级解析出该用哪个 Python 解释器。
  *
- * 1. `config.python.path` —— 设置页「Python 工具」里填的那个（唯一的配置入口）
- * 2. `QQ_AGENT_PYTHON`
- * 3. Windows：固定环境存在则直用，否则 `conda.exe run -n my_bot python`
- * 4. 其它平台：`conda run -n my_bot python`
+ * 1. **随包内置的运行时**（`PYTHON_RUNTIME_DIR`，只有打包时带了 `--with-python` 才存在）
+ * 2. `config.python.path` —— 设置页「Python 工具」里填的解释器（`DEFAULT_CONFIG` 里是空串）
+ * 3. `QQ_AGENT_PYTHON`
+ * 4. `conda run …`（环境由 `config.python.condaEnv` 决定，见下）
  *
- * 第 1 步空值（`''`、纯空白、非字符串）一律视为"没配"，继续往下走 ——
- * 设置页把输入框清空时存的就是 `''`，那种情况必须回落而不是当成一个空路径去 spawn。
+ * ⚠️ **内置层排在最前面是有意的**（2026-10-13 定）：它是我们自己装好依赖、跟着包一起发出去的
+ * 那一份，也是唯一"确定能用"的解释器；后面三层都是**这台机器上的猜测**（用户随手填的路径、
+ * 环境变量、conda 回退）。带了内置运行时的包 = 开箱可用，不该被机器上恰好设过的某个变量改写。
  *
- * 返回值里的 `source` 就是上面命中的那一级（1 → `config`、2 → `env-primary`、
- * 3 → `windows-direct`、4 → `conda`），供设置页显示与测试断言。
+ * 代价必须说清，因为它正是本项目最忌讳的那类故障（填了、面板看着生效、实际用的却是别的）：
+ * **包里有内置运行时时，设置页填的 `python.path` 不会生效**。所以设置页那一栏的提示与使用说明
+ * 都写明了这句话，并给出两条出路：删掉 `resources/app/python-runtime/` 这个目录，或者换一个
+ * 不带 `--with-python` 打的包。
+ *
+ * 2–4 层的相对顺序不变（配置 > 环境变量 > conda），且它们**必须**排在 conda 之前：conda 那一级
+ * 选出来的 `command` 是一个未必存在的命令名（`conda` / `conda.exe`），解析这一步永远不会因此失败
+ * ——失败发生在 `spawn` 那一刻，于是排在它之后的层在"这台机器上真的什么都没装"时永远不会被用到。
+ *
+ * 第 2 步的空值（`''`、纯空白、非字符串）一律视为"没配"，继续往下走 —— 设置页把输入框清空时
+ * 存的就是 `''`，那种情况必须回落而不是当成一个空路径去 spawn。
+ *
+ * 返回值里的 `source` 就是命中的那一级（`bundled` / `config` / `env-primary` / `conda`），
+ * 供设置页显示与测试断言。
+ *
+ * conda 那一级的 `prefix` 由 `python.condaEnv` 决定，三种形态：
+ *   • 环境名（`my_bot`）→ `conda run --no-capture-output -n my_bot python`
+ *   • 环境目录（含 `\` 或 `/`）→ `-p <目录>`。**这不是猜测**：设置页上面那栏的占位符就是
+ *     一个环境目录的形状（`…\envs\my_bot\python.exe`），用户把目录填进这一栏是很自然的动作，
+ *     而 `-n <一个目录>` 只会得到 `EnvironmentNameNotFound`；conda 自己的 `-p` 正好表达它。
+ *   • 留空 → 两个都不带（`conda run --no-capture-output python`），含义是"用 conda 当前环境"。
+ *     出厂值（`my_bot`）在 `core/config.ts` 的 `DEFAULT_CONFIG.python.condaEnv`：**配置项的
+ *     定义处就是它的定义处**，这里只负责"拿到什么用什么"。
+ *
+ * 历史：conda 那一级以前是**一行写死的绝对路径** `E:\anaconda\envs\my_bot\python.exe`（存在就直用，
+ * 否则退回 conda）。它只对作者的机器成立，换环境只能改代码；现在整级交给配置。
  */
-export function resolvePythonCommand(config: PythonPathConfig = {}): PythonCommand {
+export function resolvePythonCommand(
+  config: PythonConfig = {},
+  options: PythonResolveOptions = {}
+): PythonCommand {
+  // 内置层：目录在，就用它；不在（没带 --with-python，或用户自己删了）就当作没有这一层。
+  const bundled = bundledPythonExe(options.bundledDir ?? PYTHON_RUNTIME_DIR);
+  if (fs.existsSync(bundled)) return { command: bundled, prefix: [], source: 'bundled' };
+
   const configured = typeof config.python?.path === 'string' ? config.python.path.trim() : '';
   if (configured) return { command: configured, prefix: [], source: 'config' };
 
   if (process.env[PYTHON_ENV_VAR]) return { command: process.env[PYTHON_ENV_VAR]!, prefix: [], source: 'env-primary' };
 
-  const condaArgs = ['run', '--no-capture-output', '-n', CONDA_ENV, 'python'];
-  if (process.platform === 'win32') {
-    if (fs.existsSync(WINDOWS_DIRECT_PYTHON)) return { command: WINDOWS_DIRECT_PYTHON, prefix: [], source: 'windows-direct' };
-    return { command: 'conda.exe', prefix: condaArgs, source: 'conda' };
-  }
-  return { command: 'conda', prefix: condaArgs, source: 'conda' };
+  const envValue = typeof config.python?.condaEnv === 'string' ? config.python.condaEnv.trim() : '';
+  const selector = envValue ? (/[\\/]/.test(envValue) ? ['-p', envValue] : ['-n', envValue]) : [];
+  const condaArgs = ['run', '--no-capture-output', ...selector, 'python'];
+  return { command: process.platform === 'win32' ? 'conda.exe' : 'conda', prefix: condaArgs, source: 'conda' };
 }

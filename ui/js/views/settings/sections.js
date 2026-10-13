@@ -679,9 +679,25 @@ export function renderPythonSection(c) {
         <code>&lt;上面的路径&gt; -m pip install -r python-tools/requirements.txt</code>
       </div>
       <div class="hint">
-        留空时的探测顺序：环境变量 <code>QQ_AGENT_PYTHON</code> → Windows 固定环境
-        <code>E:\\anaconda\\envs\\my_bot\\python.exe</code> → <code>conda run -n my_bot python</code>。
-        依赖缺失时搜图 worker 会在启动日志里给出确切的安装命令。
+        ⚠️ <strong>如果这个包里带了内置 Python 运行时（用 <code>--with-python</code> 打的包），
+        它以<u>内置那一份</u>为准，这里填的路径不会生效</strong>——内置运行时带着装好的依赖，是唯一
+        "确定能用"的那一份。要换成自己的解释器：删掉
+        <code>resources\\app\\python-runtime\\</code> 这个目录，或换一个不带
+        <code>--with-python</code> 打的包。
+      </div>
+      <div class="hint">
+        没带内置运行时时，这里的路径优先于下面的一切；留空则按 <code>QQ_AGENT_PYTHON</code> →
+        <code>conda run</code>（环境见下一栏）的顺序回落。依赖缺失时搜图 worker 会在启动日志里
+        给出确切的安装命令。
+      </div>
+    </div>
+    <div class="field"><label>conda 环境（自动探测的最后一步）</label>
+      <input type="text" id="cfg-python-conda-env" value="${esc(p.condaEnv ?? 'my_bot')}"
+        placeholder="留空 = 用 conda 当前环境；也可以直接填环境目录" />
+      <div class="hint">
+        只有前面几层都没命中时才会走到这一栏。<strong>填环境名</strong>（如 <code>my_bot</code>）走
+        <code>conda run -n</code>；<strong>填环境目录</strong>（如 <code>E:\\anaconda\\envs\\my_bot</code>）走
+        <code>conda run -p</code>（conda 自己就能按路径找环境）；留空则不带选择器，用 conda 当前环境。
       </div>
       <div class="hint">
         下面两个按钮都<strong>先保存本页、再按已保存的值探测</strong>（所以填完直接点即可）。

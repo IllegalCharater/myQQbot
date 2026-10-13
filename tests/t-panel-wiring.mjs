@@ -111,21 +111,50 @@ ok('设置侧栏有独立的 Python 工具入口并接到渲染函数',
   /\['python', 'Python 工具'\]/.test(js)
   && /python: \(\) => renderPythonSection\(c\)/.test(js));
 for (const id of [
-  'cfg-python-path', 'cfg-python-test', 'cfg-python-selfcheck',
+  'cfg-python-path', 'cfg-python-conda-env', 'cfg-python-test', 'cfg-python-selfcheck',
   'cfg-python-test-result', 'cfg-python-selfcheck-output'
 ]) {
   ok(`#${id} 已加入设置模板`, new RegExp(`id="${id}"`).test(js));
   ok(`#${id} 可解析`, resolves(id));
 }
 const pythonSave = seg("if (sec === 'python')", "if (sec === 'chat')");
+// 把 `val('#id', <实参>)` 的**实参**单独取出来再判，不直接对整段做"有没有非空字面量"的扫描。
+//
+// 为什么要多这一步（实测踩到的）：先前那两条反向断言写的是 `![^)]*'[^']+'`，而 `[^']+` **能吃掉
+// `)`** —— 它一路啃到后面某个成对的引号上就成立了。老代码里它看着是绿的，只是因为段尾恰好没有
+// 下一个引号；段里一旦多出一个引号（比如注释里写个 `'my_bot'` 举例），它立刻假红，而**被验的
+// 性质其实没变**。判据必须是"实参长什么样"，不是"整段里有没有引号"。
+const pyArg = (id) => {
+  const m = new RegExp(`val\\('#${id}',([^)]*)\\)`).exec(pythonSave);
+  return m ? m[1] : '';
+};
+const noLiteralDefault = (arg) => /p\.\w+ \|\| ''/.test(arg) && !/'[^']+'/.test(arg) && !/"[^"]+"/.test(arg);
 ok('Python 保存分支生成 patch.python.path',
-  /patch\.python = \{ path: val\('#cfg-python-path'/.test(pythonSave));
+  /patch\.python = \{[\s\S]*?path: val\('#cfg-python-path'/.test(pythonSave));
 // 空串是合法值（含义是"没配，走自动探测链"，见 core/python-runtime.ts）。兜一个
 // 非空默认值会把"留空"变成"填一个写死的路径"，而用户根本看不出自己没配。
 ok('python.path 的兜底必须仍是空串：不许出现非空字符串默认值',
-  /val\('#cfg-python-path', p\.path \|\| ''\)/.test(pythonSave)
-  && !/val\('#cfg-python-path',[^)]*'[^']+'/.test(pythonSave)
-  && !/val\('#cfg-python-path',[^)]*"[^"]+"/.test(pythonSave));
+  noLiteralDefault(pyArg('cfg-python-path')),
+  `实参是 ${JSON.stringify(pyArg('cfg-python-path'))}`);
+ok('Python 保存分支生成 patch.python.condaEnv（conda 那一级的环境可配置）',
+  /patch\.python = \{[\s\S]*?condaEnv: val\('#cfg-python-conda-env'/.test(pythonSave));
+// 同上：conda 环境栏的空串**也是合法语义**（= 不带 -n/-p，用 conda 当前环境），
+// 所以兜底只能是"当前值或空"，不能塞 'my_bot'——那会把"留空"悄悄变成"指定 my_bot"。
+ok('python.condaEnv 的兜底同样是空串：不许出现非空字符串默认值',
+  noLiteralDefault(pyArg('cfg-python-conda-env')),
+  `实参是 ${JSON.stringify(pyArg('cfg-python-conda-env'))}`);
+// 出厂默认值是**跨边界的两份字面量**：后端那份（`core/config.ts` 的 DEFAULT_CONFIG）是权威，
+// UI 这份只是模板里的兜底。漂移的表现是"面板显示 A、后端实际用 B"，而没人会去逐字核对两个
+// 文件 —— 所以钉死，失败时把两个值都印出来（同 TEST_QUERY_DEFAULT 那条的待遇）。
+{
+  const beConda = (/condaEnv:\s*'([^']+)'/.exec(readSrc('core/config.js')) || [])[1];
+  const uiConda = (/id="cfg-python-conda-env" value="\$\{esc\(p\.condaEnv \?\? '([^']+)'\)\}"/.exec(readUI('js/views/settings/sections.js')) || [])[1];
+  ok('conda 环境名的出厂默认值在 core 与 UI 两边逐字相同',
+    Boolean(beConda) && beConda === uiConda, `后端 ${beConda} / 前端 ${uiConda}`);
+}
+// 删除回潮：那一行写死的 `E:\anaconda\envs\my_bot\python.exe` 与它对应的来源档位都不该再出现。
+ok('设置页不再有「Windows 固定环境」那一档（源码里那行写死的绝对路径已删除）',
+  !/windows-direct/.test(js) && !js.includes('Windows 固定环境'));
 
 const pythonBlock = segmentOf(settingsJs, '// ── Python 工具：解释器探测 / 依赖自检 ──', '// ── 每日热搜播报 ──');
 ok('「测试解释器」按钮绑了 click 监听',

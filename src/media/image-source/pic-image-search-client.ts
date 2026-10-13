@@ -129,8 +129,9 @@ const DEFAULT_PROBE_TIMEOUT_MS = 5000;
  * 预热（`start()`）的预算，**刻意比探活大一个量级**。
  *
  * 冷启动要付两笔不相干的钱：解释器自己的启动，和 `import PicImageSearch`（连带 httpx）。
- * 而本项目默认走的是 `conda run -n my_bot python`（见 `core/python-runtime.ts` 的解析链），
- * conda 本身启动就要几秒 —— 实测那条链明显慢于直接调 `python.exe`。用 5s 去预热会在
+ * 而**没有内置运行时、也没填 `python.path` 的机器**会落到解析链的末级 conda
+ * （`conda run -n <python.condaEnv> python`，见 `core/python-runtime.ts`），conda 本身启动
+ * 就要几秒 —— 实测那条链明显慢于直接调 `python.exe`。用 5s 去预热会在
  * "配置完全正确、只是慢"的机器上失败，而失败长得跟"没装库"一模一样，排查方向会完全错。
  * 宁可等得久一点：这一步在启动路径上，不在任何人的请求路径上。
  */

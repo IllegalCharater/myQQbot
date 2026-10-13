@@ -29,7 +29,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { checker, dataDir } from './lib/harness.mjs';
-import { BASE_URL, load } from './lib/src.mjs';
+import { BASE_URL, load, readSrc, stripComments } from './lib/src.mjs';
 
 const DATA = dataDir('qqagent-jmcomic-');
 const { ok, done } = checker();
@@ -102,7 +102,14 @@ const savedJobs = () => JSON.parse(fs.readFileSync(JOBS_FILE, 'utf8')).jobs;
 // ── 1. 真跑一次上传：完成后记录必须留在 jobs.json 里 ──
 const jmcomic = await load('media/jmcomic/index.js');
 const { DEFAULT_CONFIG } = await load('core/config.js');
-const { resolvePythonCommand } = await load('core/python-runtime.js');
+const { resolvePythonCommand: resolveRaw } = await load('core/python-runtime.js');
+
+// 本套件里凡"期望命中后面几级"的调用都**显式顶掉内置层**。内置运行时现在排在解析链**链首**，
+// 而"仓库根有没有 `python-runtime/` 目录"是这台机器的事实 —— 不顶的话，谁往那儿放一份运行时
+// （开发时想试内置层是很自然的动作），这些断言就退化成"看那台机器的目录在不在"。
+// 本项目对夹具的硬要求：条件必须显式钉死，不能靠"运行到这里时恰好没有"。
+const NO_RUNTIME = { bundledDir: path.join(DATA, 'no-such-runtime') };
+const resolvePythonCommand = (config, options = NO_RUNTIME) => resolveRaw(config, options);
 
 // 解释器解析链。两个 Python 工具（漫画下载、搜图 worker）共用这一条，所以它归
 // core/python-runtime.ts；这里验的是"两个入口的优先级 + 旧名字不再生效"。
@@ -134,8 +141,10 @@ try {
   setPythonEnv('QQ_AGENT_PYTHON', undefined);
   setPythonEnv('JMCOMIC_PYTHON', ENV_PRIMARY);
   const byLegacy = resolvePythonCommand({ python: { path: '' } });
-  ok('已删除的旧环境变量 JMCOMIC_PYTHON 不再生效（只设它要回落到固定环境/conda，而不是拿它当解释器）',
-    byLegacy.command !== ENV_PRIMARY && ['windows-direct', 'conda'].includes(byLegacy.source),
+  ok('已删除的旧环境变量 JMCOMIC_PYTHON 不再生效（只设它要回落到 conda/内置运行时，而不是拿它当解释器）',
+    // `bundled` 也在这里：本机若在仓库根放了一份随包运行时（`python-runtime/`），它会先命中。
+    // 这一条要守的是"旧别名不再生效"，不是"必须落到 conda"，所以把内置层一并接受。
+    byLegacy.command !== ENV_PRIMARY && ['bundled', 'conda'].includes(byLegacy.source),
     `拿到 ${byLegacy.command} / ${byLegacy.source}`);
 
   // ④ 两个变量都在时以 QQ_AGENT_PYTHON 为准（旧名字不参与，这条确认它不会抢戏）
@@ -153,7 +162,7 @@ try {
     `空白→${byBlank.command} / 非字符串→${byWrongType.command}`);
 
   // ⑥ 默认配置里的 `python.path` 必须是空串。给它兜一个"看起来方便"的默认路径，会让**所有
-  // 没配过的人**都被那个路径顶掉（环境变量、固定环境、conda 全轮不到），症状是"我这台机器
+  // 没配过的人**都被那个路径顶掉（环境变量、内置运行时、conda 全轮不到），症状是"我这台机器
   // 明明能用，换台机器就一直说找不到解释器"。
   const byDefault = resolvePythonCommand(DEFAULT_CONFIG);
   ok('DEFAULT_CONFIG 的 python.path 是空串，真实配置才能正常回落到环境变量',
@@ -181,15 +190,129 @@ try {
     srcConfig === 'config' && srcPrimary === 'env-primary',
     `拿到 ${srcConfig} / ${srcPrimary} —— 全报同一个值时` +
     '「我填了路径但没生效」在面板上就看不出来了');
-  // 末两级与平台有关：本机固定环境存在则直用（windows-direct），否则走 conda。
-  // 断言写成"来源与 command 自洽"，这样在装了那个环境的机器与没装的机器上都成立。
+  // 末级：conda。内置层已被 NO_RUNTIME 顶掉，所以这里必然是 conda —— 断言写成"来源与 command
+  // 自洽"而不是硬编码平台差异（Windows 是 conda.exe、其它平台是 conda）。
   const isConda = fallback.command === 'conda.exe' || fallback.command === 'conda';
-  ok('无配置无环境变量时，来源与 command 自洽（conda ↔ conda，否则 windows-direct）',
-    fallback.source === (isConda ? 'conda' : 'windows-direct'),
+  ok('无配置无环境变量、也没有内置运行时时落到末级 conda（command 是命令名而不是路径）',
+    isConda && fallback.source === 'conda',
     `拿到 ${fallback.source} / ${fallback.command}`);
 } finally {
   setPythonEnv('QQ_AGENT_PYTHON', savedPythonEnv.QQ_AGENT_PYTHON);
   setPythonEnv('JMCOMIC_PYTHON', savedPythonEnv.JMCOMIC_PYTHON);
+}
+
+// ── 1b-2. 随包内置的运行时（`bundled` 层）──
+//
+// 它排在**链首**（2026-10-13 定）：内置那一份是我们自己装好依赖、跟着包发出去的，是唯一
+// "确定能用"的解释器，而后面三层都是这台机器上的猜测。所以**带内置运行时的包里，设置页填的
+// `python.path` 不生效** —— 这一段的两条断言就是钉这件事的（代价与两条出路写在
+// `python-runtime.ts` 顶部、以及设置页那一栏的提示里）。
+//
+// 目录由 `bundledDir` 顶替（生产代码里它由 ROOT 算出，测试改不了它；在这条链上放一个假的
+// `python.exe` 才是能判别的夹具 —— 往仓库根目录里写文件会污染工作区）。
+{
+  const fakeDir = path.join(DATA, 'bundled-runtime');
+  const exeRel = process.platform === 'win32' ? 'python.exe' : path.join('bin', 'python3');
+  const fakeExe = path.join(fakeDir, exeRel);
+  const opts = { bundledDir: fakeDir };
+  fs.mkdirSync(fakeDir, { recursive: true });
+  try {
+    setPythonEnv('QQ_AGENT_PYTHON', undefined);
+    setPythonEnv('JMCOMIC_PYTHON', undefined);
+    // 目录在、解释器不在：必须当作"没有这一层"，否则一个空目录就会把后面所有回退顶掉。
+    const emptyDir = resolvePythonCommand({ python: { path: '' } }, opts);
+    ok('内置目录里还没有解释器时跳过这一层（空目录不能顶掉后面的回退）',
+      emptyDir.source !== 'bundled', `拿到 ${emptyDir.source} / ${emptyDir.command}`);
+
+    fs.writeFileSync(fakeExe, '');
+    const byBundle = resolvePythonCommand({ python: { path: '' } }, opts);
+    ok('内置运行时存在时命中 bundled（command 是绝对路径、不带 conda 前缀）',
+      byBundle.source === 'bundled' && byBundle.command === fakeExe && byBundle.prefix.length === 0,
+      `拿到 ${byBundle.source} / ${byBundle.command}`);
+
+    // 链首的含义：它**压过** python.path 与环境变量。这是有意的取舍，不是漏判 ——
+    // 断言写成"配置在，但结果仍是 bundled"，这样哪天有人"顺手"把内置层挪回后面就会红。
+    setPythonEnv('QQ_AGENT_PYTHON', ENV_PRIMARY);
+    const beatsBoth = resolvePythonCommand({ python: { path: CONFIGURED_PATH } }, opts);
+    setPythonEnv('QQ_AGENT_PYTHON', undefined);
+    ok('内置运行时压过 python.path 与 QQ_AGENT_PYTHON（它在链首，这是有意为之）',
+      beatsBoth.source === 'bundled' && beatsBoth.command === fakeExe,
+      `拿到 ${beatsBoth.source} / ${beatsBoth.command} —— 若这里变成 config，说明内置层被挪到配置之后了`);
+
+    // 反面：**没有**内置运行时时（目录里没有解释器），配置与环境变量照旧各就各位。
+    const byCfg = resolvePythonCommand({ python: { path: CONFIGURED_PATH } }, NO_RUNTIME);
+    setPythonEnv('QQ_AGENT_PYTHON', ENV_PRIMARY);
+    const byEnv = resolvePythonCommand({ python: { path: '' } }, NO_RUNTIME);
+    setPythonEnv('QQ_AGENT_PYTHON', undefined);
+    ok('没有内置运行时时配置 > 环境变量（内置层只是插在最前面，不改后三层的相对顺序）',
+      byCfg.source === 'config' && byCfg.command === CONFIGURED_PATH && byEnv.source === 'env-primary',
+      `配置→${byCfg.source} / 环境变量→${byEnv.source}`);
+  } finally {
+    fs.rmSync(fakeDir, { recursive: true, force: true });
+  }
+}
+
+// ── 1b-3. conda 那一级的环境是**配置出来的**（`python.condaEnv`）──
+//
+// 以前这里是一行写死的绝对路径（`E:\\anaconda\\envs\\my_bot\\python.exe`）：只对作者的机器成立，
+// 别人要换环境只能改源码。现在整条 conda 回退由配置决定，三种形态各有用处、也各有各的坑：
+//   • 环境名 → `-n <名字>`
+//   • 环境目录 → `-p <目录>`（设置页上面那栏的占位符就是目录形状，用户把目录填进这一栏很自然，
+//     而 `-n <一个目录>` 只会得到 `EnvironmentNameNotFound`）
+//   • 留空 → 两个都不带（用 conda 当前环境）—— 这个分支必须有断言，否则"留空"哪天退化成
+//     `-n ''` 时没有任何东西会红。
+//
+// 每条都显式顶掉内置层（`bundledDir` 指向一个不存在的目录）：不顶的话，谁往仓库根放一份
+// 随包运行时，这一段的红绿就变成"看那台机器的目录在不在"。
+{
+  const noRuntime = { bundledDir: path.join(DATA, 'no-such-runtime') };
+  const condaCase = (python) => {
+    setPythonEnv('QQ_AGENT_PYTHON', undefined);
+    return resolvePythonCommand({ python }, noRuntime);
+  };
+  try {
+    // 出厂值从 `DEFAULT_CONFIG` 取（配置项的定义处就是它的定义处），并把它**钉成字面量**：
+    // 它必须仍是 `my_bot`，否则升级就等于替用户换了环境。
+    const DEFAULT_ENV = DEFAULT_CONFIG.python.condaEnv;
+    const named = condaCase({ path: '', condaEnv: DEFAULT_ENV });
+    ok('conda 环境名走 `-n`（prefix 里带名字，且不与 `-p` 同时出现）',
+      named.source === 'conda'
+      && named.prefix.join(' ') === `run --no-capture-output -n ${DEFAULT_ENV} python`,
+      `拿到 ${named.command} ${named.prefix.join(' ')} / 默认名 ${DEFAULT_ENV}`);
+    ok('condaEnv 的出厂值仍是 my_bot（升级本身不改变既有机器上的行为）',
+      DEFAULT_ENV === 'my_bot',
+      `拿到 ${JSON.stringify(DEFAULT_ENV)} —— 改这个值等于在所有没配过的人那里换环境`);
+
+    const custom = condaCase({ path: '', condaEnv: 'another_env' });
+    ok('换一个环境名就真的换（源码里不再有任何写死的 my_bot）',
+      custom.prefix.includes('another_env') && !custom.prefix.includes('my_bot'),
+      `拿到 ${custom.prefix.join(' ')}`);
+
+    const byDir = condaCase({ path: '', condaEnv: 'E:\\anaconda\\envs\\some_env' });
+    ok('填的是环境目录时走 `-p` 而不是 `-n`',
+      byDir.prefix.join(' ').includes('-p E:\\anaconda\\envs\\some_env') && !byDir.prefix.includes('-n'),
+      `拿到 ${byDir.prefix.join(' ')}`);
+
+    const blank = condaCase({ path: '', condaEnv: '   ' });
+    ok('留空 = 不带选择器（`conda run --no-capture-output python`），不是 `-n \'\'`',
+      blank.source === 'conda' && blank.prefix.join(' ') === 'run --no-capture-output python',
+      `拿到 ${blank.prefix.join(' ')}`);
+
+    const byDefault = condaCase({ ...DEFAULT_CONFIG.python, path: '' });
+    ok('真配置（DEFAULT_CONFIG）走到的就是这个环境名，且不依赖任何机器相关的绝对路径',
+      byDefault.prefix.join(' ') === `run --no-capture-output -n ${DEFAULT_ENV} python`,
+      `拿到 ${byDefault.prefix.join(' ')}`);
+
+    // 反向断言：那行写死的固定环境（`E:\anaconda\envs\my_bot\python.exe` + `WINDOWS_DIRECT_PYTHON`）
+    // 不许回来。**必须先剥注释** —— 新注释里正记着"以前这里是那行路径"这件事，不剥的话
+    // 文档会把"代码已经删掉了"伪装成"它还在"（本仓库踩过这个坑，见 AGENTS.md 的 stripComments 条）。
+    const runtimeSrc = stripComments(readSrc('core/python-runtime.js'));
+    ok('那行写死的固定环境已从源码里删除（注释里提到它只是记教训）',
+      !/WINDOWS_DIRECT_PYTHON/.test(runtimeSrc) && !/anaconda/i.test(runtimeSrc),
+      '源码里仍有固定环境的痕迹 —— 它会让"换台机器就找不到解释器"，且只能改代码才能换');
+  } finally {
+    setPythonEnv('QQ_AGENT_PYTHON', savedPythonEnv.QQ_AGENT_PYTHON);
+  }
 }
 
 // ── 1c. 探测 / 自检模块（`core/python-probe.ts`）──
@@ -265,7 +388,7 @@ function fakeSpawn(spec) {
     `拿到 ${JSON.stringify(report.interpreter)}`);
 }
 
-// ③ 回退两级：command 不是绝对路径（conda）或指向固定环境，解析链的前缀必须原样带上
+// ③ 回退到最后一级：command 不是绝对路径（conda），解析链的前缀必须原样带上
 {
   const spawnFn = fakeSpawn({ stdout: '{"exe": "x", "version": "3.9.0", "deps": {}}\n' });
   let report;
@@ -275,9 +398,11 @@ function fakeSpawn(spec) {
   } finally {
     setPythonEnv('QQ_AGENT_PYTHON', savedPythonEnv.QQ_AGENT_PYTHON);
   }
-  const levels = ['windows-direct', 'conda'];
+  // 末级：conda（仓库根若放了一份随包运行时，`bundled` 会先命中；两者都是绝对路径）。
+  // 断言写成"来源与 command 自洽"，这样在任何机器上都成立。
+  const levels = ['bundled', 'conda'];
   const isConda = report.command === 'conda.exe' || report.command === 'conda';
-  ok('回退两级：conda 形态的 exists 是 null（不是路径，无从判），固定环境形态是 true（能走这一支就因为文件在），且 prefix 原样转发',
+  ok('回退到 conda 时 exists 是 null（不是路径，无从判；bundled 才是 true），且 prefix 原样转发',
     levels.includes(report.source) && report.exists === (isConda ? null : true) &&
     report.prefix.join(' ') === spawnFn.seen[0].args.slice(0, report.prefix.length).join(' '),
     `拿到 ${JSON.stringify({ source: report.source, command: report.command, exists: report.exists, prefix: report.prefix })}`);

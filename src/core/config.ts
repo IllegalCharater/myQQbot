@@ -339,10 +339,16 @@ export const DEFAULT_CONFIG = {
   // **两个工具只有一个入口**：漫画下载（jmcomic_download.py）与搜图 worker
   // （pic_image_search_worker.py）都从 `python.path` 读解释器。原先是钉在漫画那一段里的
   // `jmcomic.pythonPath`，已经搬到这里并迁移（见 normalizeConfigShape）。
-  // 留空时按 core/python-runtime.ts 的解析链回落：QQ_AGENT_PYTHON → Windows 固定环境 →
-  // conda my_bot（旧的 JMCOMIC_PYTHON 别名已废弃删除）。依赖装法见 python-tools/requirements.txt。
+  // 解析链在 core/python-runtime.ts：**随包内置的运行时（打包时带了 --with-python 才有）→
+  // python.path → QQ_AGENT_PYTHON → conda（环境由下面的 condaEnv 决定；旧的 JMCOMIC_PYTHON
+  // 别名已废弃删除）**。注意第一层：带内置运行时的包里 `python.path` **不生效**（那是有意的，
+  // 见 python-runtime.ts 里那段）。依赖装法见 python-tools/requirements.txt。
   python: {
-    path: ''
+    path: '',
+    // conda 回退用哪个环境：环境名（`-n <名字>`）或环境目录（`-p <目录>`），留空 = 不带选择器、
+    // 用 conda 当前环境。**出厂值就是原来写死在源码里的那个 my_bot**，所以升级这件事本身
+    // 不改变任何机器上的既有行为（那行写死的绝对路径已删除，见 python-runtime.ts）。
+    condaEnv: 'my_bot'
   },
   // 主动开话题（可选）
   proactive: {
@@ -434,23 +440,23 @@ export const DEFAULT_CONFIG = {
 export type AppConfig = Omit<typeof DEFAULT_CONFIG,
   'providers' | 'dshProviderKeys' | 'store' | 'digest' | 'memory' |
   'hotSearchTargetGroupIds' | 'hotSearchPlatformFilter'> & {
-  memberNotes?: Record<string, string>;
-  modelVision?: Record<string, { providerId?: string; model?: string; verdict?: string; note?: string; httpStatus?: number | null; latencyMs?: number | null; source?: string; checkedAt?: number }>;
-  dshProviderKeys: Record<string, string>;
-  providers: Array<{ id: string; displayName?: string; baseURL?: string; apiKey?: string; models: string[]; [key: string]: unknown }>;
-  hotSearchTargetGroupIds: string[];
-  hotSearchPlatformFilter: string[];
-  store: typeof DEFAULT_CONFIG.store & { groupSliderPos: Record<string, number> };
-  digest: typeof DEFAULT_CONFIG.digest & {
-    perChat: Record<string, Partial<Pick<typeof DEFAULT_CONFIG.digest, 'injectEveryRound' | 'merge' | 'maxChars'>>>;
+    memberNotes?: Record<string, string>;
+    modelVision?: Record<string, { providerId?: string; model?: string; verdict?: string; note?: string; httpStatus?: number | null; latencyMs?: number | null; source?: string; checkedAt?: number }>;
+    dshProviderKeys: Record<string, string>;
+    providers: Array<{ id: string; displayName?: string; baseURL?: string; apiKey?: string; models: string[];[key: string]: unknown }>;
+    hotSearchTargetGroupIds: string[];
+    hotSearchPlatformFilter: string[];
+    store: typeof DEFAULT_CONFIG.store & { groupSliderPos: Record<string, number> };
+    digest: typeof DEFAULT_CONFIG.digest & {
+      perChat: Record<string, Partial<Pick<typeof DEFAULT_CONFIG.digest, 'injectEveryRound' | 'merge' | 'maxChars'>>>;
+    };
+    memory: typeof DEFAULT_CONFIG.memory & {
+      consolidateMinImpressions?: number;
+      maxImpressionsPerMember?: number;
+      discoverMinMessages?: number;
+      discoverMaxMembers?: number;
+    };
   };
-  memory: typeof DEFAULT_CONFIG.memory & {
-    consolidateMinImpressions?: number;
-    maxImpressionsPerMember?: number;
-    discoverMinMessages?: number;
-    discoverMaxMembers?: number;
-  };
-};
 type ConfigPatch = Record<string, unknown>;
 
 function deepMerge<T>(base: T, override: unknown): T {
@@ -848,7 +854,13 @@ function normalizeConfigShape<T>(input: T): T {
   // 留着（`deepMerge` 把 override 的所有键都抄进去，包括它不认识的）。
   const python = root.python;
   if (python && typeof python === 'object' && !Array.isArray(python)) {
-    (python as Record<string, unknown>).path = String((python as Record<string, unknown>).path ?? '').trim();
+    const py = python as Record<string, unknown>;
+    py.path = String(py.path ?? '').trim();
+    // conda 环境：**只在键存在时归一化**。无脑写一个 `''` 会把它变成"显式配置"，于是
+    // `deepMerge(DEFAULT_CONFIG, parsed)` 里那个出厂值就再也落不下去——老配置一升级就从
+    // my_bot 悄悄变成"conda 当前环境"，而没有任何地方会提这件事。截断是纯防御：这个值
+    // 会进 argv，超长的名字只会得到一条看不懂的 conda 报错。
+    if ('condaEnv' in py) py.condaEnv = String(py.condaEnv ?? '').trim().slice(0, 120);
   }
   const legacyJmcomic = root.jmcomic;
   if (legacyJmcomic && typeof legacyJmcomic === 'object' && !Array.isArray(legacyJmcomic)) {
@@ -857,7 +869,10 @@ function normalizeConfigShape<T>(input: T): T {
       ? String((python as Record<string, unknown>).path ?? '').trim()
       : '';
     // 两边都有时以新字段为准（用户已经自己填过新位置，不要用旧的把它盖回去）。
-    if (legacyPath && !currentPath) root.python = { path: legacyPath };
+    // 展开旧对象再覆盖 path：只写 `{ path }` 会把同一段里的 condaEnv 一起抹掉。
+    if (legacyPath && !currentPath) {
+      root.python = { ...(python && typeof python === 'object' && !Array.isArray(python) ? python : {}), path: legacyPath };
+    }
     delete root.jmcomic;
   }
 

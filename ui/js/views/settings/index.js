@@ -192,8 +192,8 @@ export function bindSettingsEvents(c) {
   const pySourceNames = {
     config: '本页填写的路径（python.path）',
     'env-primary': '环境变量 QQ_AGENT_PYTHON',
-    'windows-direct': 'Windows 固定环境',
-    conda: 'conda run -n my_bot python'
+    bundled: '随包内置的 Python 运行时',
+    conda: 'conda run（用哪个环境看下面的完整命令）'
   };
   const pythonTest = $('#cfg-python-test');
   if (pythonTest) pythonTest.addEventListener('click', async () => {
@@ -207,7 +207,9 @@ export function bindSettingsEvents(c) {
     }
     try {
       const r = await api('/api/system/python-probe', { method: 'POST', body: '{}' });
-      const parts = [`来源：${pySourceNames[r.source] || r.source}`, `命令：${r.command}`];
+      // 命令**连 prefix 一起显示**：conda 那一路真正的信息（-n 的名字 / -p 的目录）全在 prefix 里，
+      // 只印 `conda.exe` 的话"到底在跑哪个环境"在面板上就看不出来了。
+      const parts = [`来源：${pySourceNames[r.source] || r.source}`, `命令：${[r.command, ...(r.prefix || [])].join(' ')}`];
       if (r.exists === false) parts.push('⚠️ 这个路径下没有文件');
       const dep = (name) => (r.interpreter?.deps?.[name] ? `${name} ${r.interpreter.deps[name]}` : `${name} 未安装`);
       if (r.interpreter) parts.push(`Python ${r.interpreter.version}`, dep('PicImageSearch'), dep('jmcomic'));

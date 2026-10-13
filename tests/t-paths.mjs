@@ -87,4 +87,38 @@ ok('依赖清单与脚本同目录，且只此一份',
   fs.existsSync(path.join(paths.PYTHON_TOOLS_DIR, 'requirements.txt')),
   `缺少 ${path.join(paths.PYTHON_TOOLS_DIR, 'requirements.txt')}`);
 
+// ── 6. 桌面打包脚本的白名单与仓库实际目录对得上 ──
+//
+// `scripts/build-desktop.mjs` 是**白名单**打包：只搬 APP_ENTRIES 里点名的目录。白名单的
+// 好处是 data/、日志、.env 天然进不来；代价是"目录改了名 / 搬了家"不会有任何编译错误 ——
+// 等打包时才发现的话，用户拿到的是一个跑不起来的包。所以这里把它与仓库对一次账。
+//
+// 射程要说清：这一段只证明**名字是真的、目录真的在**。"包里到底有没有漏文件"由打包脚本
+// 自己的校验负责（必需文件清单 + src↔dist 对账 + 启动冒烟）——那一步要拷 276MB，
+// 不能放进套件里。两处都要有，缺哪一处这类错误都会静默抵达用户。
+const packText = fs.readFileSync(path.join(REPO_DIR, 'scripts', 'build-desktop.mjs'), 'utf8');
+const entriesBlock = packText.match(/const APP_ENTRIES = \[([\s\S]*?)\];/);
+// 只取每一对的第一个元素：描述文本也是单引号字符串，裸取会让断言在写错名字时照样绿。
+const entryNames = entriesBlock ? [...entriesBlock[1].matchAll(/\[\s*'([^']+)'\s*,/g)].map((m) => m[1]) : [];
+ok('打包脚本里找得到 APP_ENTRIES 白名单',
+  entriesBlock !== null && entryNames.length >= 5,
+  `匹配到 ${entriesBlock ? entryNames.length : 0} 个条目（名字：${entryNames.join(', ') || '无'}）`);
+ok('白名单里点名的每个目录都真的在仓库里',
+  entryNames.length > 0 && entryNames.every((n) => fs.existsSync(path.join(REPO_DIR, n))),
+  `缺：${entryNames.filter((n) => !fs.existsSync(path.join(REPO_DIR, n))).join(', ') || '无'}`);
+ok('白名单覆盖了运行期真要用的那几样（dist / ui / electron / assets / python-tools）',
+  ['dist', 'ui', 'electron', 'assets', 'python-tools'].every((n) => entryNames.includes(n)),
+  `白名单：${entryNames.join(', ')}`);
+
+const rootPkg = JSON.parse(fs.readFileSync(path.join(REPO_DIR, 'package.json'), 'utf8'));
+ok('package.json 有 dist:desktop 入口，且指向打包脚本',
+  String(rootPkg.scripts?.['dist:desktop'] ?? '').includes('build-desktop.mjs')
+  && fs.existsSync(path.join(REPO_DIR, 'scripts', 'build-desktop.mjs')),
+  `拿到 ${JSON.stringify(rootPkg.scripts?.['dist:desktop'])}`);
+// exe 与产物目录的名字都取自 productName：没有它，打出来的是「electron.exe」
+// （用户双击一个叫 electron 的东西，且单实例锁/任务栏归组也跟着变）。
+ok('package.json 有 productName（产物里 exe 的名字来源）',
+  typeof rootPkg.productName === 'string' && rootPkg.productName.trim() !== '',
+  `拿到 ${JSON.stringify(rootPkg.productName)}`);
+
 process.exit(done() ? 0 : 1);
