@@ -101,21 +101,21 @@ export interface OrchestratorDependencies {
   imageGen?: Pick<ImageGenQueue, 'enqueue'>;
   hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
   /**
-   * **工具表的来源**，每次运行现读一次（缺省 = 纯内置 `buildToolDefs()`）。
+   * **工具表的来源**，每次运行现读一次（缺省 = 纯内置 `buildToolDefs()`）。参数是**会话标识**：
+   * 扩展的装载是全局的，但**接管按会话隔离** —— 被接管的那个会话只剩接管者的工具。
    *
    * 由 `web/app.ts` 递进来，而不是本层去 import `extra/` —— `extra` 的层级比 `agent` 高，
    * 反向依赖会被 `scripts/check-layers.mjs` 拦下（agent 对 extra 一无所知，这是有意的）。
    *
-   * **为什么是函数而不是数组**：扩展由 `/能力` 命令装载/卸载，而**未装载的扩展工具不在表里**
-   * （"禁止模型自行加载"那条取舍）。`agent-runner` 在每次运行开头读一次 `host.toolDefs`，
-   * 所以语义是"装载后下一次运行生效"。可选：不传就是纯内置工具集，既有测试构造点一行都不用改。
+   * **为什么是函数而不是数组**：装载/接管都由人在运行期改变，而 `agent-runner` 在每次运行
+   * 开头读一次，所以语义是"**下一次运行生效**"。可选：不传就是纯内置工具集。
    */
-  toolDefs?: () => readonly ToolDefinition[];
+  toolDefs?: (chatKey: string) => readonly ToolDefinition[];
   /**
    * 扩展的提示词计划（system prompt 的追加/覆盖/接管）。同样每次运行现读一次 ——
-   * 它取决于**此刻装载了哪些扩展**。缺省 = 没有扩展参与。
+   * 它取决于**这个会话**此刻的状态。缺省 = 没有扩展参与。
    */
-  extraPrompt?: () => PromptPlan;
+  extraPrompt?: (chatKey: string) => PromptPlan;
 }
 
 export interface PromptContext extends TriggerContext, Record<string, unknown> {

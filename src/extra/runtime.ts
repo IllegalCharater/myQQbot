@@ -8,11 +8,15 @@
 //
 // ── 三张表各自的筛选条件（别把它们"顺手统一"掉）──
 //
-//   • `toolDefs()`    —— 附加模式：**已装载**的扩展；接管模式：**只有接管者**的。
+// **三张表都按会话算**（`chatKey` 参数）：附加模式的那部分是全局的，而**接管按会话隔离** ——
+// 同一个进程里 A 群可以让位而 B 群照常。这是全仓库唯一"按会话不同"的地方。
+//
+//   • `toolDefs(chatKey)`    —— 接管中：**只有接管者**的；否则：**已装载**的附加扩展。
 //     模型的入口只该看到"此刻真正可用的能力"。
-//   • `commandDefs()` —— 附加模式：**已启用**的扩展；接管模式：**只有接管者**的。
-//     命令的入口是人（判据按 spec 静态，敲得到），执行时才把扩展拉起来。
-//   • `promptPlan()`  —— 只算**已装载**扩展的贡献（"随装载状态变化"那条取舍的落点）。
+//   • `commandDefs(chatKey)` —— 接管中：**只有接管者**的；否则：**已启用**的附加扩展
+//     （**接管模式的命令不外泄**：别的会话敲不到它）。命令的入口是人（判据按 spec 静态），
+//     执行时才把扩展拉起来。
+//   • `promptPlan(chatKey)`  —— 接管中：它的 body；否则：已装载附加扩展的 append/override。
 //
 // ── 与仓库两条禁令的关系（写下来免得下一个人以为禁令被推翻了）──
 //
@@ -58,6 +62,21 @@ interface LoadedSlot {
   /** 在途调用数。**大于 0 时绝不 dispose** —— 那是"任务跑一半被抽掉子进程"的成因。 */
   inFlight: number;
   timer: ReturnType<typeof setTimeout> | null;
+  /**
+   * 这一格是**附加模式装载**（`/能力 加载`）拉起来的吗？
+   *
+   * 接管模式的实现**不由它自己的计时器管**：它的生命是它那些会话绑定的并集 ——
+   * 最后一个绑定到期就释放。两种模式的释放时机因此不同，用一个字段分开记。
+   */
+  attach: boolean;
+}
+
+/** 一个会话的接管绑定。 */
+interface OverrideBinding {
+  /** 接管的扩展 id。 */
+  id: string;
+  /** 生命时间到点的句柄（`idleUnloadMs === 0` 时为 null = 永不自动交还）。 */
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 /** 一次可能被拒的执行。装载被拒、扩展没装载都会走到 `ok:false`。 */
@@ -70,6 +89,8 @@ export interface ExtraListRow {
   mode: ExtraMode;
   enabled: boolean;
   loaded: boolean;
+  /** 正被它接管的会话（接管是**按会话**的，所以是列表不是一个布尔值）。 */
+  overrides: string[];
 }
 
 export interface ExtraActionResult { ok: boolean; note: string }
@@ -142,20 +163,22 @@ export function validateRegistry(
     }
 
     for (const spec of entry.commands ?? []) {
-      const name = String(spec.name ?? '');
-      if (!name) { problems.push(`${id}: 有一个命令没写 name`); continue; }
-      if (typeof spec.match !== 'function') problems.push(`${id}.${name}: match 不是函数`);
-      // 命令词与别名不许重复（**跨扩展也要查**）：重了的话"先匹配到的先处理"会静默地
-      // 决定谁赢，而两个命令的作者都以为自己的那个会被执行。
-      for (const word of [name, ...(spec.aliases ?? [])]) {
+      const names = spec.names ?? [];
+      if (!Array.isArray(names) || !names.length) {
+        problems.push(`${id}: 有一条命令没写 names（第一个是主命令词）`);
+        continue;
+      }
+      // 命令词**共用一个命名空间**（同一个扩展内、跨扩展都一样）：重了的话"先匹配到的先处理"
+      // 会静默地决定谁赢，而两个命令的作者都以为自己的那个会被执行。
+      for (const word of names) {
         const text = String(word ?? '');
         if (!text.startsWith('/')) {
-          problems.push(`${id}.${name}: 命令词「${text}」必须带斜杠开头（别名也一样）`);
+          problems.push(`${id}.${names[0]}: 命令词「${text}」必须带斜杠开头`);
           continue;
         }
-        if (/\s/.test(text)) problems.push(`${id}.${name}: 命令词「${text}」不能含空白`);
+        if (/\s/.test(text)) problems.push(`${id}.${names[0]}: 命令词「${text}」不能含空白`);
         const owner = seenCommands.get(text);
-        if (owner) problems.push(`${id}: 命令词/别名 ${text} 与 ${owner} 重复`);
+        if (owner) problems.push(`${id}: 命令词 ${text} 与 ${owner} 重复`);
         else seenCommands.set(text, id);
       }
     }
@@ -180,7 +203,7 @@ export function checkRuntimeShape(entry: ExtraEntry, rt: ExtraRuntime): string |
   if (undeclaredTools.length) return `实现了却没有声明：${undeclaredTools.join('、')}`;
 
   // 命令同一套两个方向。没声明命令时 `commandHandlers` 允许缺席。
-  const declaredCommands = (entry.commands ?? []).map((spec) => spec.name);
+  const declaredCommands = (entry.commands ?? []).map((spec) => spec.names?.[0]);
   const commandHandlers = isRecord(rt.commandHandlers) ? rt.commandHandlers : {};
   const missingCommands = declaredCommands.filter((name) => typeof commandHandlers[name] !== 'function');
   if (missingCommands.length) return `命令声明了却没有实现：${missingCommands.join('、')}`;
@@ -210,6 +233,14 @@ export class ExtrasRuntime {
   readonly #registry: readonly ExtraEntry[];
   readonly #entries = new Map<string, ExtraEntry>();
   readonly #loaded = new Map<string, LoadedSlot>();
+  /**
+   * **接管绑定：会话 → 谁来接管**。这是全仓库唯一"按会话隔离"的东西。
+   *
+   * 两个来源：① `extras.runtime.start()` 从配置 `extras.override` 播种（静态、重启生效）；
+   * ② 群里敲 `/能力 加载 <接管扩展>` 在**当前会话**建一条（内存，不落盘）。
+   * 目标是让"A 群换了副脑子、B 群照常"可以表达 —— 附加模式的扩展则是全局的。
+   */
+  readonly #overrides = new Map<string, OverrideBinding>();
   readonly #deps: ExtrasDeps;
   /**
    * 装载闸门。**实例级字段、跨调用累积**（同 `agent/tools/shared.ts` 的 `webBudget`）：
@@ -243,16 +274,16 @@ export class ExtrasRuntime {
    * 模型可见的工具表。**未装载的扩展，工具不在表里** —— 这是"禁止模型自行加载"那条取舍的落点：
    * 模型的入口只该看到此刻真正可用的能力，它连"有这么个能力"都看不到，更没有"调用即加载"这条路。
    *
-   * ⚠️ 表随装载状态变化 ⇒ 工具表是请求前缀的一部分，装载/卸载各打散一次提示词缓存。
-   * 但装载由**人**通过 `/能力` 触发（频次很低），这正是这条设计换来的东西。
+   * **按会话算**：接管是唯一按会话隔离的东西 —— 被接管的那个会话只剩接管者的工具，
+   * 别的会话照常。调用方（`web/app.ts`）按 `isOverridden(chatKey)` 决定要不要把内置那部分拼进来。
+   *
+   * ⚠️ 表随装载/接管变化 ⇒ 工具表是请求前缀的一部分，装卸各打散一次提示词缓存。
+   * 但两者都由**人**触发（频次很低），这正是这条设计换来的东西。
    */
-  toolDefs(): ToolDefinition[] {
-    const override = this.#overrideEntry();
+  toolDefs(chatKey: string): ToolDefinition[] {
     const config = this.#deps.getConfig();
     const out: ToolDefinition[] = [];
-    for (const entry of this.#registry) {
-      if (override && entry.id !== override.id) continue;       // 接管中：只有接管者的
-      if (!override && !this.#loaded.has(entry.id)) continue;   // 附加：只含已装载的
+    for (const entry of this.#activeEntries(chatKey)) {
       if (!isExtraEnabled(entry, config)) continue;
       for (const spec of entry.tools) {
         out.push({
@@ -267,24 +298,31 @@ export class ExtrasRuntime {
   }
 
   /**
-   * 群友敲得到的扩展命令。判据来自 spec（**启用即可敲，不必先装载**），执行时才把扩展拉起来。
+   * 这个会话敲得到的扩展命令。判据来自 spec（**启用即可敲，不必先装载**），执行时才把扩展拉起来。
    *
    * **为什么这里按"已启用"而 `toolDefs()` 按"已装载"** —— 两个入口的人不同：命令的入口是**人**，
    * 工具的入口是**模型**。人有权决定要用什么，模型只该看到此刻可用的东西。别把这条不对称统一掉。
+   *
+   * 被接管的会话只有接管者的命令（**外加永远在的 `/能力`**，那在命令层拼，不在这里）。
    */
-  commandDefs(): ExtraCommand[] {
-    const override = this.#overrideEntry();
+  commandDefs(chatKey: string): ExtraCommand[] {
+    const override = this.#overrideEntry(chatKey);
     const config = this.#deps.getConfig();
     const out: ExtraCommand[] = [];
     for (const entry of this.#registry) {
-      if (override && entry.id !== override.id) continue;
       if (!isExtraEnabled(entry, config)) continue;
+      if (override) {
+        if (entry.id !== override.id) continue;          // 接管中：只有接管者的
+      } else if (entry.mode === 'override') {
+        // **接管模式的命令不在这里出现**：它只属于被它接管的那些会话。
+        // 漏了这一条的话，B 会话也敲得到 `/接管命令`，而它一执行就会撞上"接管要指定会话"
+        // —— 一条永远失败的提示，还让群友以为那个能力在这个群里可用。
+        continue;
+      }
       for (const spec of entry.commands ?? []) {
         out.push({
-          name: spec.name,
-          aliases: spec.aliases,
-          match: spec.match,
-          run: (input) => this.#runCommand(entry.id, spec.name, input)
+          names: spec.names,
+          run: (input) => this.#runCommand(entry.id, spec.names[0], input)
         });
       }
     }
@@ -296,8 +334,8 @@ export class ExtrasRuntime {
    * 装载后出现、卸载后消失。它不改"一次运行内不变"这条性质（`runAgent` 开头拼一次，
    * 之后整个工具循环都用它），所以真实语义是"**装载后，下一次运行开始生效**"。
    */
-  promptPlan(): PromptPlan {
-    const override = this.#overrideEntry();
+  promptPlan(chatKey: string): PromptPlan {
+    const override = this.#overrideEntry(chatKey);
     if (override) {
       const slot = this.#loaded.get(override.id);
       const body = readContribution(slot?.rt, this.#deps)?.body ?? [];
@@ -305,9 +343,11 @@ export class ExtrasRuntime {
     }
     const append: string[] = [];
     const merged: Record<string, string> = {};
-    for (const [id, slot] of this.#loaded) {
-      const contribution = readContribution(slot.rt, this.#deps);
+    for (const entry of this.#activeEntries(chatKey)) {
+      const slot = this.#loaded.get(entry.id);
+      const contribution = readContribution(slot?.rt, this.#deps);
       if (!contribution) continue;
+      const id = entry.id;
       for (const text of contribution.append ?? []) {
         const value = String(text);
         if (value.trim()) append.push(value);
@@ -333,7 +373,9 @@ export class ExtrasRuntime {
       displayDesc: entry.displayDesc,
       mode: entry.mode ?? 'attach',
       enabled: isExtraEnabled(entry, config),
-      loaded: this.#loaded.has(entry.id)
+      loaded: this.#loaded.has(entry.id),
+      // 接管是**按会话**的，所以这里列出"哪些会话正被它接管"，而不是一个布尔值。
+      overrides: [...this.#overrides.entries()].filter(([, b]) => b.id === entry.id).map(([chatKey]) => chatKey)
     }));
   }
 
@@ -342,66 +384,69 @@ export class ExtrasRuntime {
   }
 
   /**
-   * 是否处于接管模式（有一个 `mode: 'override'` 的扩展装着）。
+   * **这个会话**是否处于接管模式。
    *
-   * 主流程的命令表按它决定让不让位 —— **但 `/能力` 永远留着**，它是卸载接管者的唯一入口
-   * （见 `slash-commands.ts` 的 `OVERRIDE_KEPT_COMMANDS`）。少了它，装上一个接管扩展之后
-   * 就再没有任何办法卸掉它。
+   * 主流程的工具表 / 命令表 / 提示词都按它决定让不让位 —— **但 `/能力` 永远留着**，它是解除接管的
+   * 唯一入口（见 `slash-commands.ts` 的 `OVERRIDE_KEPT_COMMANDS`）。少了它，让一个会话被接管之后
+   * 就再没有任何办法交还。
    */
-  isOverridden(): boolean {
-    return this.#overrideEntry() !== null;
+  isOverridden(chatKey: string): boolean {
+    return this.#overrideEntry(chatKey) !== null;
+  }
+
+  /** `/能力` 列表用：当前所有接管绑定（配置播种的 + 群里临时建立的）。 */
+  overrideBindings(): Array<{ chatKey: string; extraId: string; fromConfig: boolean }> {
+    const configured = this.#deps.getConfig().extras?.override ?? {};
+    return [...this.#overrides.entries()].map(([chatKey, binding]) => ({
+      chatKey, extraId: binding.id, fromConfig: configured[chatKey] === binding.id
+    }));
   }
 
   // ── 装载/卸载（**只有那条 `/能力` 命令与扩展自己的命令调它们**）──
 
   /**
-   * 装载一个扩展。**模型侧没有调用者** —— 这是这一轮设计的核心。
+   * 装载一个扩展。**模型侧没有调用者** —— 这是这套设计的核心。
    *
-   * 装载一个 `mode: 'override'` 的扩展 = 它随即接管（不需要额外参数）。
-   * 同一时刻只允许一个接管者：已经有一个在接管时，第二次接管被拒。
+   * 两种模式的生命周期不同：
+   *   • **附加**（`chatKey` 与它无关）：全局装载，空闲 `idleUnloadMs` 后自动卸载。
+   *   • **接管**：**按会话**。`/能力 加载 <接管扩展>` 在哪个会话敲，就只接管那个会话
+   *     （内存绑定，不落盘；重启后回到配置 `extras.override` 里写的那一份）。
+   *     生命时间同样是 `idleUnloadMs`，到点**该会话交还主流程**。
+   *
+   * **接管是唯一按会话隔离的东西** —— 所以"A 群换了副脑子、B 群照常"是可以表达的。
    */
-  async load(id: string, reason = 'command'): Promise<ExtraActionResult> {
+  async load(id: string, reason = 'command', chatKey = ''): Promise<ExtraActionResult> {
     const entry = this.#entries.get(id);
     if (!entry) return { ok: false, note: `没有这个扩展：${id}` };
-    if (this.#loaded.has(id)) return { ok: false, note: `「${entry.title}」已经加载过了` };
     if (!isExtraEnabled(entry, this.#deps.getConfig())) {
       return { ok: false, note: `「${entry.title}」在设置里是关闭的，先把它打开（改完要重启）` };
     }
-    if (entry.mode === 'override') {
-      const current = this.#overrideEntry();
-      if (current) return { ok: false, note: `当前由「${current.title}」接管，先卸载它：/能力 卸载 ${current.id}` };
-    }
+    if (entry.mode === 'override') return this.#bindOverride(entry, chatKey, reason);
+    if (this.#loaded.has(id)) return { ok: false, note: `「${entry.title}」已经加载过了` };
     const refusal = this.#takeLoadBudget(id);
     if (refusal) return { ok: false, note: refusal };
-
-    let rt: ExtraRuntime;
-    try {
-      rt = await entry.load();
-    } catch (error) {
-      return { ok: false, note: `「${entry.title}」加载失败：${errorMessage(error)}` };
-    }
-    const problem = checkRuntimeShape(entry, rt);
-    if (problem) {
-      void this.#dispose(rt, id);
-      return { ok: false, note: `「${entry.title}」不可用（${problem}）` };
-    }
-    const slot: LoadedSlot = { rt, inFlight: 0, timer: null };
-    this.#loaded.set(id, slot);
-    this.#deps.log(`[extras] 已加载 ${id}（${reason}）`);
-    // 接管者不 arm 计时器 ⇒ 常驻不卸载，见 `#armTimer`。
-    this.#armTimer(id, slot);
-    return {
-      ok: true,
-      note: entry.mode === 'override'
-        ? `已加载「${entry.title}」，从现在起由它接管（下一轮运行生效）`
-        : `已加载「${entry.title}」`
-    };
+    const loaded = await this.#loadImpl(entry, true);
+    if (!loaded.ok) return loaded;
+    return { ok: true, note: `已加载「${entry.title}」` };
   }
 
-  /** 卸载。接管者被卸载 = 主流程立刻交还（下一轮运行生效）。 */
-  async unload(id: string): Promise<ExtraActionResult> {
+  /**
+   * 卸载。
+   *   • 附加：全局卸载实现。
+   *   • 接管：**解除这个会话的接管**（其他会话若也绑着它，实现留着）。
+   */
+  async unload(id: string, chatKey = ''): Promise<ExtraActionResult> {
     const entry = this.#entries.get(id);
     if (!entry) return { ok: false, note: `没有这个扩展：${id}` };
+    if (entry.mode === 'override') {
+      const binding = this.#overrides.get(chatKey);
+      if (!binding || binding.id !== id) return { ok: false, note: `这个会话当前没有由「${entry.title}」接管` };
+      if (binding.timer) { clearTimeout(binding.timer); binding.timer = null; }
+      this.#overrides.delete(chatKey);
+      this.#deps.log(`[extras] ${chatKey} 交还主流程（手动卸载 ${id}）`);
+      await this.#releaseIfUnused(id);
+      return { ok: true, note: `已解除「${entry.title}」对这个会话的接管` };
+    }
     const slot = this.#loaded.get(id);
     if (!slot) return { ok: false, note: `「${entry.title}」当前没有加载` };
     if (slot.inFlight > 0) return { ok: false, note: `「${entry.title}」正在执行中，等它跑完再卸载` };
@@ -409,28 +454,46 @@ export class ExtrasRuntime {
     if (slot.timer) { clearTimeout(slot.timer); slot.timer = null; }
     await this.#dispose(slot.rt, id);
     this.#deps.log(`[extras] 已卸载 ${id}`);
-    return {
-      ok: true,
-      note: entry.mode === 'override' ? `已卸载「${entry.title}」，主流程交还` : `已卸载「${entry.title}」`
-    };
+    return { ok: true, note: `已卸载「${entry.title}」` };
   }
 
   /**
-   * 装配清单的 start。**它不预加载任何东西**（装载的入口是人，不是启动），
-   * 只做一件真实的事：把装载状态清干净 —— 于是 `app.stop()` 之后再 `app.start()`，
-   * 拿到的是一张空的装载表，而不是上一轮遗留的槽位。
+   * 装配清单的 start：清空装载表，然后按配置 `extras.override` **播种接管绑定**。
    *
-   * 注册表自检在构造函数里（见 `validateRegistry` 的说明），所以这里不重复。
+   * 播种要真的把实现拉起来（否则那个会话只会退回主流程，而用户写的配置看起来生效了 ——
+   * 这是本仓库最忌讳的那类故障）。加载失败只记日志、不抛：一个扩展坏了不该把整个
+   * `app.start()` 掀翻（同 `initPicImageSearch` 的先例），那一轮该会话退回主流程并留下日志。
+   *
+   * `start()` 因此是 **async**：`LifecycleDeps.extras.start` 允许返回 Promise，清单会 await 它。
    */
-  start(): void {
+  async start(): Promise<void> {
     for (const [, slot] of this.#loaded) {
       if (slot.timer) { clearTimeout(slot.timer); slot.timer = null; }
     }
+    for (const [, binding] of this.#overrides) {
+      if (binding.timer) { clearTimeout(binding.timer); binding.timer = null; }
+    }
     this.#loaded.clear();
+    this.#overrides.clear();
+
+    for (const [chatKey, extraId] of Object.entries(this.#deps.getConfig().extras?.override ?? {})) {
+      const entry = this.#entries.get(extraId);
+      if (!entry) { this.#deps.log(`[extras] 配置里 ${chatKey} 绑了不存在的扩展 ${extraId}，忽略`); continue; }
+      if (entry.mode !== 'override') {
+        this.#deps.log(`[extras] 配置里 ${chatKey} 绑了「${entry.title}」，但它不是接管模式，忽略`);
+        continue;
+      }
+      if (!isExtraEnabled(entry, this.#deps.getConfig())) {
+        this.#deps.log(`[extras] 配置里 ${chatKey} 绑了「${entry.title}」，但它在设置里是关闭的，忽略`);
+        continue;
+      }
+      const result = await this.#bindOverride(entry, chatKey, 'config');
+      if (!result.ok) this.#deps.log(`[extras] ${chatKey} 的接管未生效：${result.note}`);
+    }
   }
 
   /**
-   * 关停：清掉全部空闲计时器，并逐个 `dispose()` 已装载的扩展。
+   * 关停：清掉全部空闲计时器与接管绑定，并逐个 `dispose()` 已装载的扩展。
    *
    * 逆序拆清单时这条排最后 ⇒ 它**第一个**被收掉，不会拖着 OneBot 传输层一起等。
    * 幂等：第二次调用看到的是空表。**在途调用不做特殊处理** —— 走到这里说明
@@ -439,6 +502,10 @@ export class ExtrasRuntime {
   async stop(): Promise<void> {
     const slots = [...this.#loaded.entries()];
     this.#loaded.clear();
+    for (const [, binding] of this.#overrides) {
+      if (binding.timer) { clearTimeout(binding.timer); binding.timer = null; }
+    }
+    this.#overrides.clear();
     await Promise.all(slots.map(([id, slot]) => {
       if (slot.timer) { clearTimeout(slot.timer); slot.timer = null; }
       return this.#dispose(slot.rt, id);
@@ -447,16 +514,107 @@ export class ExtrasRuntime {
 
   // ── 内部 ──
 
-  /**
-   * 当前接管者（`mode: 'override'` 且**已装载**的那个）。**最多一个** —— 第二个接管者的装载
-   * 在 `load()` 里就被拒了，所以这里 `for...of` 拿到第一个就是它。
-   */
-  #overrideEntry(): ExtraEntry | null {
-    for (const id of this.#loaded.keys()) {
-      const entry = this.#entries.get(id);
-      if (entry?.mode === 'override') return entry;
+  /** 把实现拉起来（真正的 `import()` + 名字对账）。`attach` 决定它由谁的生命周期管。 */
+  async #loadImpl(entry: ExtraEntry, attach: boolean): Promise<ExtraActionResult> {
+    let rt: ExtraRuntime;
+    try {
+      rt = await entry.load();
+    } catch (error) {
+      return { ok: false, note: `「${entry.title}」加载失败：${errorMessage(error)}` };
     }
-    return null;
+    const problem = checkRuntimeShape(entry, rt);
+    if (problem) {
+      void this.#dispose(rt, entry.id);
+      return { ok: false, note: `「${entry.title}」不可用（${problem}）` };
+    }
+    const slot: LoadedSlot = { rt, inFlight: 0, timer: null, attach };
+    this.#loaded.set(entry.id, slot);
+    this.#deps.log(`[extras] 已加载 ${entry.id}${attach ? '' : '（接管用）'}`);
+    if (attach) this.#armIdleTimer(entry.id, slot);
+    return { ok: true, note: '' };
+  }
+
+  /** 建立/刷新一个会话的接管绑定。同一个会话同时只允许一个接管者。 */
+  async #bindOverride(entry: ExtraEntry, chatKey: string, reason: string): Promise<ExtraActionResult> {
+    if (!chatKey) {
+      return { ok: false, note: `「${entry.title}」是接管模式，要指定会话（在群里敲 /能力 加载 就会用当前会话）` };
+    }
+    const current = this.#overrides.get(chatKey);
+    if (current?.id === entry.id) return { ok: false, note: `这个会话已经由「${entry.title}」接管了` };
+    if (current) {
+      const other = this.#entries.get(current.id);
+      return {
+        ok: false,
+        note: `这个会话当前由「${other?.title ?? current.id}」接管，先解除它：/能力 卸载 ${current.id}`
+      };
+    }
+    if (!this.#loaded.has(entry.id)) {
+      const refusal = this.#takeLoadBudget(entry.id);
+      if (refusal) return { ok: false, note: refusal };
+      const loaded = await this.#loadImpl(entry, false);
+      if (!loaded.ok) return loaded;
+    }
+    const binding: OverrideBinding = { id: entry.id, timer: null };
+    this.#overrides.set(chatKey, binding);
+    this.#armBindingTimer(chatKey, binding);
+    this.#deps.log(`[extras] ${chatKey} 由 ${entry.id} 接管（${reason}）`);
+    return { ok: true, note: `「${entry.title}」已接管这个会话（下一轮运行生效）` };
+  }
+
+  /** 生命时间：与附加模式的空闲卸载**共用同一个数**（`0` = 不自动交还）。 */
+  #lifetimeMs(): number {
+    return Math.max(0, Math.trunc(Number(this.#deps.getConfig().extras?.idleUnloadMs)) || 0);
+  }
+
+  #armBindingTimer(chatKey: string, binding: OverrideBinding): void {
+    const ms = this.#lifetimeMs();
+    if (ms <= 0) return;
+    binding.timer = setTimeout(() => this.#onBindingExpired(chatKey, binding), ms);
+    binding.timer.unref?.();
+  }
+
+  /**
+   * 接管到点 ⇒ **这个会话交还主流程**。
+   *
+   * 与附加模式的区别只在"释放的是什么"：附加释放实现，接管释放**这个会话的绑定**
+   * （实现由别的绑定或附加装载继续养着，最后一个绑定走掉时才 dispose）。
+   */
+  #onBindingExpired(chatKey: string, binding: OverrideBinding): void {
+    binding.timer = null;
+    if (this.#overrides.get(chatKey) !== binding) return;   // 已经被 unload/stop 换掉了
+    this.#overrides.delete(chatKey);
+    this.#deps.log(`[extras] ${chatKey} 的接管到期，交还主流程`);
+    void this.#releaseIfUnused(binding.id);
+  }
+
+  /** 没人用了就释放实现（附加装载的那份由它自己的空闲计时器管）。 */
+  async #releaseIfUnused(id: string): Promise<void> {
+    const slot = this.#loaded.get(id);
+    if (!slot || slot.attach) return;
+    if ([...this.#overrides.values()].some((binding) => binding.id === id)) return;
+    // 在途就先留着：`#withExtra` 出账时会再判一次（那时已经没人用了才收）。
+    if (slot.inFlight > 0) return;
+    this.#loaded.delete(id);
+    await this.#dispose(slot.rt, id);
+  }
+
+  /**
+   * 这个会话的接管者（`mode: 'override'` 且**已装载**）。没有绑定、或绑定指向的实现没装载起来
+   * （比如配置播种时加载失败）时返回 null —— 那时这个会话**退回主流程**，
+   * 而不是变成"什么工具都没有"。
+   */
+  #overrideEntry(chatKey: string): ExtraEntry | null {
+    const binding = this.#overrides.get(chatKey);
+    if (!binding) return null;
+    if (!this.#loaded.has(binding.id)) return null;
+    return this.#entries.get(binding.id) ?? null;
+  }
+
+  /** 这个会话里可用的扩展：接管时只有接管者，否则是**附加装载**的那些。 */
+  #activeEntries(chatKey: string): ExtraEntry[] {
+    const override = this.#overrideEntry(chatKey);
+    if (override) return [override];
+    return this.#registry.filter((entry) => this.#loaded.get(entry.id)?.attach === true);
   }
 
   /**
@@ -466,13 +624,13 @@ export class ExtrasRuntime {
    * 工具路径为假（未装载的扩展工具根本不在表里；这里为假是**第二道**，
    * 防的是"运行开始时装着、跑到一半被空闲卸载了"那种竞态）。
    */
-  async #withExtra<T>(id: string, autoLoad: boolean, use: (rt: ExtraRuntime) => Promise<T>): Promise<Attempt<T>> {
+  async #withExtra<T>(id: string, chatKey: string, autoLoad: boolean, use: (rt: ExtraRuntime) => Promise<T>): Promise<Attempt<T>> {
     const entry = this.#entries.get(id);
     if (!entry) return { ok: false, reason: `扩展 ${id} 未注册` };
     let slot = this.#loaded.get(id);
     if (!slot) {
       if (!autoLoad) return { ok: false, reason: `「${entry.title}」当前没有加载，让群友先 /能力 加载 ${id}` };
-      const result = await this.load(id, 'command');
+      const result = await this.load(id, 'command', chatKey);
       if (!result.ok) return { ok: false, reason: result.note };
       slot = this.#loaded.get(id);
       if (!slot) return { ok: false, reason: `「${entry.title}」装载失败` };
@@ -484,13 +642,18 @@ export class ExtrasRuntime {
       return { ok: true, value: await use(slot.rt) };
     } finally {
       slot.inFlight -= 1;
-      // 只有"还挂在表里的那一格"才重新起表：期间可能被 unload()/stop() 收掉、也可能已到点卸载。
-      if (this.#loaded.get(id) === slot && slot.inFlight === 0) this.#armTimer(id, slot);
+      if (this.#loaded.get(id) === slot && slot.inFlight === 0) {
+        // 只有"还挂在表里的那一格"才重新起表：期间可能被 unload()/stop() 收掉、也可能已到点卸载。
+        // 接管用的实现**不起空闲计时器**（它的生命由会话绑定管），但要在这里补判一次
+        // "绑定是不是都已经走光了" —— 否则在途期间到期的那个会话会把实现漏在内存里。
+        if (slot.attach) this.#armIdleTimer(id, slot);
+        else void this.#releaseIfUnused(id);
+      }
     }
   }
 
   async #runTool(id: string, name: string, ctx: ToolContext, args: ToolArguments): Promise<ToolResult> {
-    const attempt = await this.#withExtra(id, false, async (rt) => {
+    const attempt = await this.#withExtra(id, '', false, async (rt) => {
       const handler = rt.handlers[name];
       if (typeof handler !== 'function') throw new Error(`扩展「${id}」没有工具「${name}」`);
       return handler(ctx, args);
@@ -504,7 +667,7 @@ export class ExtrasRuntime {
    * 的外壳会把 `error.message` 原样发进群，那正是我们想要的（可执行的下一步）。
    */
   async #runCommand(id: string, name: string, input: ExtraCommandInput): Promise<string | null> {
-    const attempt = await this.#withExtra(id, true, async (rt) => {
+    const attempt = await this.#withExtra(id, input.chatKey, true, async (rt) => {
       const handler = rt.commandHandlers?.[name];
       if (typeof handler !== 'function') throw new Error(`扩展「${id}」没有命令「${name}」`);
       return handler(input);
@@ -525,13 +688,14 @@ export class ExtrasRuntime {
     }
   }
 
-  #armTimer(id: string, slot: LoadedSlot): void {
-    const entry = this.#entries.get(id);
-    // **接管者常驻**：它是一次明确的状态切换，静默变回去会让群友看到 bot 的人格与能力突然改了，
-    // 而没有任何人做过什么。要交还只能用 `/能力 卸载`。
-    if (entry?.mode === 'override') return;
+  /**
+   * 附加装载的空闲计时器。**只有附加模式走这里** —— 接管模式的生命是它那些会话绑定的并集
+   * （见 `#armBindingTimer`），给接管者也 arm 一个的话，它会因为"没人用过"而把自己的
+   * 接管悄悄撤掉，而那正是我们要避免的"群友看到 bot 的人格突然改了"。
+   */
+  #armIdleTimer(id: string, slot: LoadedSlot): void {
     // 0 = 常驻不卸载（与仓库"0 = 不限"的惯例一致）。
-    const ms = Math.max(0, Math.trunc(Number(this.#deps.getConfig().extras?.idleUnloadMs)) || 0);
+    const ms = this.#lifetimeMs();
     if (ms <= 0) return;
     slot.timer = setTimeout(() => this.#onIdle(id, slot), ms);
     // 别让一个空闲计时器把进程钉住 —— 与 price-feed / 历史压缩巡检同一条姿态。
@@ -541,7 +705,7 @@ export class ExtrasRuntime {
   #onIdle(id: string, slot: LoadedSlot): void {
     slot.timer = null;
     if (this.#loaded.get(id) !== slot) return;                     // 已经被 unload()/stop() 换掉了
-    if (slot.inFlight > 0) { this.#armTimer(id, slot); return; }    // 在途，推迟到下次空闲
+    if (slot.inFlight > 0) { this.#armIdleTimer(id, slot); return; }  // 在途，推迟到下次空闲
     this.#loaded.delete(id);
     this.#deps.log(`[extras] 空闲卸载 ${id}`);
     void this.#dispose(slot.rt, id);

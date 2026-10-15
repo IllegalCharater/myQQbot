@@ -32,12 +32,13 @@ export interface WakeSchedulerDependencies {
   onebot: OneBotClient;
   windows: ContextWindowRegistry;
   /**
-   * 工具表的**来源**（每次运行现读一次）。是函数而不是数组：扩展由 `/能力` 命令装载/卸载，
-   * 而**未装载的扩展工具不在表里** —— 见 `extra/runtime.ts` 与 `OrchestratorDependencies.toolDefs`。
+   * 工具表的**来源**（每次运行现读一次，参数是会话标识）。是函数而不是数组：扩展由 `/能力`
+   * 命令装载/卸载，而**接管还按会话隔离** —— 见 `extra/runtime.ts` 与
+   * `OrchestratorDependencies.toolDefs`。
    */
-  toolDefs: () => readonly ToolDefinition[];
-  /** 扩展的提示词计划（可选）。同样每次运行现读 —— 它取决于此刻装载了哪些扩展。 */
-  extraPrompt?: () => PromptPlan;
+  toolDefs: (chatKey: string) => readonly ToolDefinition[];
+  /** 扩展的提示词计划（可选）。同样每次运行现读 —— 它取决于这个会话此刻的状态。 */
+  extraPrompt?: (chatKey: string) => PromptPlan;
   emit: AppEmit;
   getChatName(groupId: string | number): Promise<string>;
   maybeConsolidateMemory(chatKey: string): void;
@@ -87,19 +88,19 @@ export class WakeScheduler {
   }
 
   /**
-   * 工具表。**getter 而不是字段**：扩展由 `/能力` 命令装载/卸载，而**未装载的扩展工具不在表里**
-   * （"禁止模型自行加载"那条取舍）。`agent-runner` 在每次运行开头读一次这里，所以语义是
-   * "装载后下一次运行生效" —— 而不是"对话中途变"。
+   * 工具表。**方法而不是字段**：扩展由 `/能力` 命令装载/卸载，而**接管按会话隔离**
+   * （被接管的那个会话只剩接管者的工具）。`agent-runner` 在每次运行开头读一次这里，
+   * 所以语义是"**下一次运行生效**" —— 而不是"对话中途变"。
    *
-   * 代价知情：工具表是请求前缀的一部分，装载/卸载各打散一次提示词缓存。频次由人控制。
+   * 代价知情：工具表是请求前缀的一部分，装卸各打散一次提示词缓存。频次由人控制。
    */
-  get toolDefs(): ToolDefinition[] {
-    return [...this.deps.toolDefs()];
+  toolDefsFor(chatKey: string): ToolDefinition[] {
+    return [...this.deps.toolDefs(chatKey)];
   }
 
   /** 扩展的提示词计划（缺省 = 没有扩展参与）。每次运行开头现读一次。 */
-  get extraPrompt(): (() => PromptPlan) | undefined {
-    return this.deps.extraPrompt;
+  promptPlanFor(chatKey: string): PromptPlan | null {
+    return this.deps.extraPrompt ? this.deps.extraPrompt(chatKey) : null;
   }
 
   get aborted(): boolean {

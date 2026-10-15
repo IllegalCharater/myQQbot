@@ -74,6 +74,8 @@ async function flush(times = 8) {
 }
 
 const DEFAULT_EXTRAS = { enabled: {}, idleUnloadMs: 600000, maxLoadsPerHour: 20 };
+/** 本套件用的会话标识。**接管按会话隔离**，所以三张表都要带上它。 */
+const G = 'group:1';
 
 function makeRuntime(registry, extrasConfig, builtinToolNames = []) {
   return createExtrasRuntime(registry, {
@@ -86,7 +88,7 @@ function makeRuntime(registry, extrasConfig, builtinToolNames = []) {
 /** 一条假工具声明（纯数据）。 */
 const spec = (name) => ({ name, description: `${name} 的说明`, parameters: { type: 'object', properties: {}, required: [] } });
 /** 一条假命令声明（纯数据，判据是纯函数）。 */
-const cmd = (name) => ({ name, match: (text) => String(text).startsWith(name) });
+const cmd = (name) => ({ names: [name] });
 
 /**
  * 一个可观察的假扩展：记录 load / dispose / 工具调用 / 命令调用四个计数。
@@ -140,38 +142,38 @@ function makeFakeEntry(id, names, {
 
   const off = makeRuntime(EXTRA_REGISTRY, { ...DEFAULT_EXTRAS, enabled: { clock: false } });
   ok('enabled 显式关掉 → 它的工具不进工具表',
-    off.toolDefs().length === 0, `实际 ${off.toolDefs().length} 个`);
+    off.toolDefs(G).length === 0, `实际 ${off.toolDefs(G).length} 个`);
 
   const on = makeRuntime(EXTRA_REGISTRY, { ...DEFAULT_EXTRAS, enabled: { clock: true } });
   ok('**启用但未装载 → 工具仍然不在表里**（模型连"有这个能力"都看不到）',
-    on.toolDefs().length === 0, JSON.stringify(on.toolDefs().map((d) => d.name)));
+    on.toolDefs(G).length === 0, JSON.stringify(on.toolDefs(G).map((d) => d.name)));
   ok('但命令敲得到（判据按 spec 静态，入口是人）',
-    on.commandDefs().length === 1 && on.commandDefs()[0].match('/时间 Asia/Tokyo'));
+    on.commandDefs(G).length === 1 && on.commandDefs(G)[0].names[0] === '/时间');
 
   // 配置里没写这个 id 时用扩展自己的 defaultEnabled —— 这是"加一个扩展不用改配置"的前提。
   const fallback = makeRuntime(EXTRA_REGISTRY, { ...DEFAULT_EXTRAS, enabled: {} });
   ok('配置里没写这个 id → 用 defaultEnabled 兜底（命令表它就在，工具表仍然不在）',
-    fallback.commandDefs().length === (clock.defaultEnabled ? 1 : 0)
-    && fallback.toolDefs().length === 0);
+    fallback.commandDefs(G).length === (clock.defaultEnabled ? 1 : 0)
+    && fallback.toolDefs(G).length === 0);
 }
 
 // ── 2. 装载/卸载：工具表随之增减 ─────────────────────────────────────────────
 {
   const { entry, counters } = makeFakeEntry('lazy', ['lazy_tool'], { commands: ['/lazy'] });
   const runtime = makeRuntime([entry], DEFAULT_EXTRAS);
-  ok('装载之前 toolDefs() 里没有它', runtime.toolDefs().length === 0);
+  ok('装载之前 toolDefs() 里没有它', runtime.toolDefs(G).length === 0);
   ok('装载之前 isLoaded 是 false', runtime.isLoaded('lazy') === false && counters.load === 0);
 
   const loaded = await runtime.load('lazy', 'test');
   ok('load() 成功并真的跑了一次 import()', loaded.ok === true && counters.load === 1, JSON.stringify(loaded));
-  ok('装载之后工具进表了', runtime.toolDefs().map((d) => d.name).join() === 'lazy_tool');
+  ok('装载之后工具进表了', runtime.toolDefs(G).map((d) => d.name).join() === 'lazy_tool');
 
   const again = await runtime.load('lazy');
   ok('重复装载被拒（不重复 import）', again.ok === false && counters.load === 1, JSON.stringify(again));
 
   const gone = await runtime.unload('lazy');
   ok('unload() 成功、调了 dispose、工具表空了',
-    gone.ok === true && counters.dispose === 1 && runtime.toolDefs().length === 0, JSON.stringify(gone));
+    gone.ok === true && counters.dispose === 1 && runtime.toolDefs(G).length === 0, JSON.stringify(gone));
   const gone2 = await runtime.unload('lazy');
   ok('重复卸载被拒', gone2.ok === false, JSON.stringify(gone2));
   const unknown = await runtime.load('nope');
@@ -187,14 +189,14 @@ function makeFakeEntry(id, names, {
 {
   const { entry, counters } = makeFakeEntry('viacmd', ['t'], { commands: ['/go'] });
   const runtime = makeRuntime([entry], DEFAULT_EXTRAS);
-  const command = runtime.commandDefs()[0];
+  const command = runtime.commandDefs(G)[0];
   ok('命令在扩展**未装载**时就敲得到', !!command && counters.load === 0);
 
   const receipt = await command.run({ chatKey: 'group:1', senderId: '5', text: '/go', media: [], replyToMessageId: null });
   ok('敲命令把扩展拉起来了（装载入口是人，不是模型）',
     receipt === 'viacmd 的命令回执' && counters.load === 1 && counters.command === 1,
     `${receipt} / load=${counters.load}`);
-  ok('命令跑完之后工具表里也有它了', runtime.toolDefs().length === 1);
+  ok('命令跑完之后工具表里也有它了', runtime.toolDefs(G).length === 1);
 }
 
 // ── 4. TTL：空闲到点真的 dispose；在途不卸载 ─────────────────────────────────
@@ -212,13 +214,13 @@ await withFakeTimers(async (timers) => {
   timers.advance(1);
   await flush();
   ok('到点调了 dispose 并从装载表里删掉', counters.dispose === 1 && !runtime.isLoaded('ttl'));
-  ok('卸载之后工具表里也没了', runtime.toolDefs().length === 0);
+  ok('卸载之后工具表里也没了', runtime.toolDefs(G).length === 0);
 
   await runtime.load('ttl', 'test');
   ok('卸载之后再装载会重新 import（不是拿旧的）', counters.load === 2);
 
   // **每次执行都刷新空闲窗口**（滑动窗口，不是从装载时刻起算的固定租期）。
-  const tool = runtime.toolDefs()[0];
+  const tool = runtime.toolDefs(G)[0];
   timers.advance(4000);
   await tool.execute({}, {});
   timers.advance(4000);
@@ -239,7 +241,7 @@ await withFakeTimers(async (timers) => {
   });
   const runtime = makeRuntime([entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 1000 });
   await runtime.load('inflight', 'test');
-  const pendingCall = runtime.toolDefs()[0].execute({}, {});
+  const pendingCall = runtime.toolDefs(G)[0].execute({}, {});
   await flush();
   ok('调用还在飞', counters.run === 1 && typeof release === 'function');
 
@@ -301,32 +303,32 @@ await withFakeTimers(async (timers) => {
     makeFakeEntry('c1', [], { commands: ['/重复'] }).entry,
     makeFakeEntry('c2', [], { commands: ['/重复'] }).entry
   ], DEFAULT_EXTRAS));
-  ok('命令名跨扩展重复 → 构造函数抛错', !!dupCmd && dupCmd.includes('命令词/别名'), String(dupCmd));
+  ok('命令词跨扩展重复 → 构造函数抛错', !!dupCmd && dupCmd.includes('重复'), String(dupCmd));
 
-  // 别名与主命令词**共用一个命名空间**：重了的话"先匹配到的先处理"会静默地决定谁赢，
-  // 而两个命令的作者都以为自己的那个会被执行。
+  // **所有词形共用一个命名空间**（自己内部、跨扩展都一样）：重了的话"先匹配到的先处理"
+  // 会静默地决定谁赢，而两个命令的作者都以为自己的那个会被执行。
   const aliasClash = throws(() => makeRuntime([
     makeFakeEntry('a1', [], { commands: ['/天气'] }).entry,
-    { ...makeFakeEntry('a2', [], { commands: ['/查天气'] }).entry, commands: [{ name: '/查天气', aliases: ['/天气'], match: () => true }] }
+    { ...makeFakeEntry('a2', [], { commands: ['/查天气'] }).entry, commands: [{ names: ['/查天气', '/天气'] }] }
   ], DEFAULT_EXTRAS));
-  ok('别名与别的扩展的主命令词重复 → 构造函数抛错',
-    !!aliasClash && aliasClash.includes('命令词/别名'), String(aliasClash));
+  ok('词形与别的扩展的主命令词重复 → 构造函数抛错',
+    !!aliasClash && aliasClash.includes('重复'), String(aliasClash));
 
   const aliasSelfClash = throws(() => makeRuntime([
-    { ...makeFakeEntry('a3', [], { commands: ['/x'] }).entry, commands: [{ name: '/x', aliases: ['/x'], match: () => true }] }
+    { ...makeFakeEntry('a3', [], { commands: ['/x'] }).entry, commands: [{ names: ['/x', '/x'] }] }
   ], DEFAULT_EXTRAS));
-  ok('别名与自己的主命令词重复 → 构造函数抛错',
-    !!aliasSelfClash && aliasSelfClash.includes('命令词/别名'), String(aliasSelfClash));
+  ok('同一个命令里词形重复 → 构造函数抛错',
+    !!aliasSelfClash && aliasSelfClash.includes('重复'), String(aliasSelfClash));
 
   const badAlias = throws(() => makeRuntime([
-    { ...makeFakeEntry('a4', [], { commands: ['/x'] }).entry, commands: [{ name: '/x', aliases: ['time'], match: () => true }] }
+    { ...makeFakeEntry('a4', [], { commands: ['/x'] }).entry, commands: [{ names: ['/x', 'time'] }] }
   ], DEFAULT_EXTRAS));
-  ok('别名不带斜杠开头 → 构造函数抛错', !!badAlias && badAlias.includes('必须带斜杠'), String(badAlias));
+  ok('词形不带斜杠开头 → 构造函数抛错', !!badAlias && badAlias.includes('必须带斜杠'), String(badAlias));
 
   const spaceAlias = throws(() => makeRuntime([
-    { ...makeFakeEntry('a5', [], { commands: ['/x'] }).entry, commands: [{ name: '/x', aliases: ['/两 个字'], match: () => true }] }
+    { ...makeFakeEntry('a5', [], { commands: ['/x'] }).entry, commands: [{ names: ['/x', '/两 个字'] }] }
   ], DEFAULT_EXTRAS));
-  ok('别名含空白 → 构造函数抛错', !!spaceAlias && spaceAlias.includes('不能含空白'), String(spaceAlias));
+  ok('词形含空白 → 构造函数抛错', !!spaceAlias && spaceAlias.includes('不能含空白'), String(spaceAlias));
 
   // 与内置工具重名最阴：`defs.find()` 取的是**内置那个**，扩展从此静默失效。
   const clash = throws(() => makeRuntime([makeFakeEntry('z', ['send_message']).entry], DEFAULT_EXTRAS, ['send_message']));
@@ -354,10 +356,10 @@ await withFakeTimers(async (timers) => {
 
   const badMatch = throws(() => makeRuntime([{
     id: 'badcmd', title: 'badcmd', displayDesc: 'x', defaultEnabled: true,
-    tools: [], commands: [{ name: '/x', match: 'not-a-function' }],
+    tools: [], commands: [{ names: [] }],
     async load() { return { handlers: {} }; }
   }], DEFAULT_EXTRAS));
-  ok('命令的 match 不是函数 → 构造函数抛错', !!badMatch && badMatch.includes('match 不是函数'), String(badMatch));
+  ok('命令没写 names（或空数组）→ 构造函数抛错', !!badMatch && badMatch.includes('没写 names'), String(badMatch));
 }
 
 // ── 7. 声明 ⇄ 实现对账（这套设计唯一的真实漂移点）────────────────────────────
@@ -373,7 +375,7 @@ await withFakeTimers(async (timers) => {
   const runtime = makeRuntime([mismatch], DEFAULT_EXTRAS);
   const result = await runtime.load('mismatch');
   ok('工具：声明了却没实现 → 拒绝装载', result.ok === false && String(result.note).includes('没有实现'), JSON.stringify(result));
-  ok('被拒之后没有留在装载表里（下次还能再试）', !runtime.isLoaded('mismatch') && runtime.toolDefs().length === 0);
+  ok('被拒之后没有留在装载表里（下次还能再试）', !runtime.isLoaded('mismatch') && runtime.toolDefs(G).length === 0);
 
   const extraImpl = {
     id: 'extra_impl', title: 'extra_impl', displayDesc: 'x', defaultEnabled: true,
@@ -420,100 +422,132 @@ await withFakeTimers(async (timers) => {
   const { entry } = makeFakeEntry('talk', ['t'], { prompt: { append: ['【提醒】记住我很啰嗦。'] } });
   const runtime = makeRuntime([entry], DEFAULT_EXTRAS);
   ok('未装载 → 计划里没有它的贡献',
-    JSON.stringify(runtime.promptPlan()) === JSON.stringify({ mode: 'attach', append: [], override: {} }),
-    JSON.stringify(runtime.promptPlan()));
+    JSON.stringify(runtime.promptPlan(G)) === JSON.stringify({ mode: 'attach', append: [], override: {} }),
+    JSON.stringify(runtime.promptPlan(G)));
 
   await runtime.load('talk');
   ok('装载后 → 追加段落出现在计划里',
-    runtime.promptPlan().mode === 'attach' && runtime.promptPlan().append.includes('【提醒】记住我很啰嗦。'),
-    JSON.stringify(runtime.promptPlan()));
+    runtime.promptPlan(G).mode === 'attach' && runtime.promptPlan(G).append.includes('【提醒】记住我很啰嗦。'),
+    JSON.stringify(runtime.promptPlan(G)));
 
   await runtime.unload('talk');
   ok('卸载后 → 贡献又消失（这就是"随装载状态变化"）',
-    runtime.promptPlan().append.length === 0, JSON.stringify(runtime.promptPlan()));
+    runtime.promptPlan(G).append.length === 0, JSON.stringify(runtime.promptPlan(G)));
 }
 
-// ── 10. 接管模式 ────────────────────────────────────────────────────────────
+// ── 10. 接管模式：**按会话隔离**，且同样受生命时间约束 ──────────────────────
+//
+// 这一段的两个性质都**不会报错地坏掉**：接管偷偷变成全局的，表现只是"B 群也忽然变了个人"；
+// 生命时间对附加生效、对继承不生效，表现只是"接管永远不撒手"。所以逐条钉。
 {
   const attach = makeFakeEntry('atta', ['attach_tool'], { commands: ['/atta'] });
   const over = makeFakeEntry('over', ['over_tool'], { mode: 'override', commands: ['/over'], prompt: { body: ['你是另一个东西。'] } });
   const runtime = makeRuntime([attach.entry, over.entry], DEFAULT_EXTRAS);
+  const A = 'group:100';
+  const B = 'group:200';
 
   await runtime.load('atta');
   ok('接管之前：附加扩展的工具在表里、isOverridden 为假',
-    runtime.toolDefs().map((d) => d.name).join() === 'attach_tool' && runtime.isOverridden() === false);
+    runtime.toolDefs(A).map((d) => d.name).join() === 'attach_tool' && runtime.isOverridden(A) === false);
 
-  const loaded = await runtime.load('over');
-  ok('装载接管扩展 = 接管生效（不需要额外参数）',
-    loaded.ok === true && runtime.isOverridden() === true && String(loaded.note).includes('接管'), JSON.stringify(loaded));
+  ok('接管模式的扩展不带会话装载 → 被拒（它按会话隔离，必须指定）',
+    (await runtime.load('over')).ok === false);
 
-  ok('接管后工具表**只剩接管者的**（附加扩展的工具也让位）',
-    runtime.toolDefs().map((d) => d.name).join() === 'over_tool',
-    JSON.stringify(runtime.toolDefs().map((d) => d.name)));
-  ok('接管后命令表也只剩接管者的',
-    runtime.commandDefs().map((c) => c.name).join() === '/over',
-    JSON.stringify(runtime.commandDefs().map((c) => c.name)));
-  ok('接管后提示词计划是 override 形态，正文来自它',
-    runtime.promptPlan().mode === 'override' && runtime.promptPlan().body.join() === '你是另一个东西。',
-    JSON.stringify(runtime.promptPlan()));
+  const loaded = await runtime.load('over', 'test', A);
+  ok('在 A 会话装载接管扩展 = **只有 A 会话**被它接管',
+    loaded.ok === true && runtime.isOverridden(A) === true && String(loaded.note).includes('接管'), JSON.stringify(loaded));
 
-  // 同一时刻只允许一个接管者。
+  ok('B 会话照常（附加扩展的工具还在）',
+    runtime.isOverridden(B) === false
+    && runtime.toolDefs(B).map((d) => d.name).join() === 'attach_tool',
+    JSON.stringify(runtime.toolDefs(B).map((d) => d.name)));
+  ok('A 会话的工具表只剩接管者的（附加扩展也让位）',
+    runtime.toolDefs(A).map((d) => d.name).join() === 'over_tool',
+    JSON.stringify(runtime.toolDefs(A).map((d) => d.name)));
+  ok('A 会话的命令表只剩接管者的',
+    runtime.commandDefs(A).map((c) => c.names[0]).join() === '/over',
+    JSON.stringify(runtime.commandDefs(A).map((c) => c.names[0])));
+  ok('B 会话的命令表照常（附加扩展的命令还在）',
+    runtime.commandDefs(B).map((c) => c.names[0]).join() === '/atta',
+    JSON.stringify(runtime.commandDefs(B).map((c) => c.names[0])));
+  ok('A 会话的提示词计划是 override 形态，正文来自它',
+    runtime.promptPlan(A).mode === 'override' && runtime.promptPlan(A).body.join() === '你是另一个东西。',
+    JSON.stringify(runtime.promptPlan(A)));
+  ok('B 会话的提示词计划照常是 attach 形态',
+    runtime.promptPlan(B).mode === 'attach', JSON.stringify(runtime.promptPlan(B)));
+
+  // 同一个会话同时只允许一个接管者；**不同会话互不相干**。
   const over2 = makeFakeEntry('over2', ['over2_tool'], { mode: 'override' });
   const runtime2 = makeRuntime([over.entry, over2.entry], DEFAULT_EXTRAS);
-  await runtime2.load('over');
-  const second = await runtime2.load('over2');
-  ok('已经有一个接管者时，第二个接管装载被拒（并告诉你怎么解）',
-    second.ok === false && String(second.note).includes('先卸载它'), JSON.stringify(second));
+  await runtime2.load('over', 'test', A);
+  const clash2 = await runtime2.load('over2', 'test', A);
+  ok('同一个会话已经有接管者时，第二个接管被拒（并告诉你怎么解）',
+    clash2.ok === false && String(clash2.note).includes('先解除它'), JSON.stringify(clash2));
+  ok('换个会话就能接管（两个会话各自一份，互不相干）',
+    (await runtime2.load('over2', 'test', B)).ok === true && runtime2.isOverridden(B) === true);
 
-  const back = await runtime.unload('over');
-  ok('卸载接管者 = 主流程交还（工具表回到附加扩展）',
-    back.ok === true && runtime.isOverridden() === false
-    && runtime.toolDefs().map((d) => d.name).join() === 'attach_tool', JSON.stringify(back));
+  const back = await runtime.unload('over', A);
+  ok('解除接管 = 那个会话交还主流程（工具表回到附加扩展）',
+    back.ok === true && runtime.isOverridden(A) === false
+    && runtime.toolDefs(A).map((d) => d.name).join() === 'attach_tool', JSON.stringify(back));
 }
 
-// 接管者**不被空闲卸载**：它是明确的状态切换，静默变回去会让群友看到 bot 的人格与能力
-// 突然改了，而没有任何人做过什么。要交还只能用 `/能力 卸载`。
+// 生命时间：**两种模式都受它约束**（配置里同一个数）。到点后附加的卸载实现、接管的交还主流程。
 await withFakeTimers(async (timers) => {
-  const over = makeFakeEntry('pin', ['pin_tool'], { mode: 'override' });
-  const normal = makeFakeEntry('normal', ['normal_tool']);
+  const over = makeFakeEntry('ttl_ov', ['ov_tool'], { mode: 'override' });
+  const normal = makeFakeEntry('ttl_at', ['at_tool']);
   const runtime = makeRuntime([over.entry, normal.entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 1000 });
-  await runtime.load('pin');
-  await runtime.load('normal');
-  ok('接管者不 arm 空闲计时器（只有附加扩展那一个）', timers.count() === 1, `实际 ${timers.count()} 个`);
+  await runtime.load('ttl_ov', 'test', G);
+  await runtime.load('ttl_at');
+  ok('接管绑定与附加装载各有一个计时器', timers.count() === 2, `实际 ${timers.count()} 个`);
 
-  timers.advance(60000);
+  timers.advance(1000);
   await flush();
-  ok('推进一整个窗口：附加扩展被卸载了，接管者还在',
-    over.counters.dispose === 0 && normal.counters.dispose === 1 && runtime.isOverridden() === true,
+  ok('到点：附加的**卸载实现**、接管的**交还主流程**（两种模式都受生命时间约束）',
+    normal.counters.dispose === 1 && runtime.isOverridden(G) === false && over.counters.dispose === 1,
     `over=${over.counters.dispose} normal=${normal.counters.dispose}`);
+  await runtime.stop();
+});
 
-  await runtime.unload('pin');
-  ok('`/能力 卸载` 才把接管者收掉', over.counters.dispose === 1 && runtime.isOverridden() === false);
+// 两个会话绑同一个接管扩展：实现只装载一次，其中一个到期时另一个照旧。
+await withFakeTimers(async (timers) => {
+  const over = makeFakeEntry('shared', ['shared_tool'], { mode: 'override' });
+  const runtime = makeRuntime([over.entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 1000 });
+  await runtime.load('shared', 'test', 'group:1');
+  await runtime.load('shared', 'test', 'group:2');
+  ok('两个会话绑同一个接管扩展：实现只 import 一次', over.counters.load === 1, `load=${over.counters.load}`);
+  ok('两个会话都被接管', runtime.isOverridden('group:1') && runtime.isOverridden('group:2'));
+
+  timers.advance(1000);
+  await flush();
+  ok('两个绑定一起到期 → 都交还主流程，实现也释放掉',
+    !runtime.isOverridden('group:1') && !runtime.isOverridden('group:2') && over.counters.dispose === 1,
+    `dispose=${over.counters.dispose}`);
   await runtime.stop();
 });
 
 // ── 11. 真实现跑一遍：声明与实现确实对得上，工具与命令都真的能算 ──────────────
 {
   const runtime = makeRuntime(EXTRA_REGISTRY, { ...DEFAULT_EXTRAS, enabled: { clock: true } });
-  ok('未装载时工具表是空的', runtime.toolDefs().length === 0);
+  ok('未装载时工具表是空的', runtime.toolDefs(G).length === 0);
 
   // 命令路径：装起来 + 真的算一次。
-  const receipt = await runtime.commandDefs()[0].run({
+  const receipt = await runtime.commandDefs(G)[0].run({
     chatKey: 'group:1', senderId: '5', text: '/时间 UTC', media: [], replyToMessageId: null
   });
   ok('真扩展：敲 `/时间 UTC` 把它装载起来并真的算了', String(receipt).includes('UTC'), String(receipt));
-  ok('装载后工具进表', runtime.toolDefs().map((d) => d.name).join() === 'get_current_time');
-  ok('别名随 spec 一路交到命令表（分发层靠它认 `/time`）',
-    (runtime.commandDefs()[0].aliases ?? []).includes('/time'),
-    JSON.stringify(runtime.commandDefs()[0].aliases));
+  ok('装载后工具进表', runtime.toolDefs(G).map((d) => d.name).join() === 'get_current_time');
+  ok('词形列表随 spec 一路交到命令表（分发层靠它认 `/time`）',
+    (runtime.commandDefs(G)[0].names ?? []).includes('/time'),
+    JSON.stringify(runtime.commandDefs(G)[0].names));
 
-  const tool = runtime.toolDefs()[0];
+  const tool = runtime.toolDefs(G)[0];
   const bad = await tool.execute({}, { timeZone: 'Not/AZone' });
   ok('时区填错返回可读错误而不是乱算', bad.isError === true && String(bad.content).includes('不认识的时区'), String(bad.content));
   const dflt = await tool.execute({}, {});
   ok('不填时区用默认时区', !dflt.isError && String(dflt.content).includes('Asia/Shanghai'), String(dflt.content));
 
-  ok('真扩展的提示词计划里有那一段追加', runtime.promptPlan().append.length === 1, JSON.stringify(runtime.promptPlan()));
+  ok('真扩展的提示词计划里有那一段追加', runtime.promptPlan(G).append.length === 1, JSON.stringify(runtime.promptPlan(G)));
   await runtime.stop();
 }
 
@@ -585,6 +619,52 @@ await withFakeTimers(async (timers) => {
   ok('extra/prompts.ts 是叶子模块：里面没有任何相对 import（那条例外的全部依据）',
     !/^\s*import\b[^\n]*['"]\./m.test(promptsSrc),
     '加了一条 import 就可能成环 —— 先读那个文件顶部的说明');
+}
+
+// ── 15. 配置：接管绑定是**静态数据**，启动时按它播种 ────────────────────────
+//
+// 绑定写在 `data/config.json` 的 `extras.override`（会话 → 扩展 id），改完重启生效。
+// 群里敲 `/能力 加载` 建的那一份**不落盘**，重启后回到配置里写的这一份。
+{
+  const { updateConfig, getConfig } = await load('core/config.js');
+  const next = updateConfig({
+    extras: {
+      override: {
+        'group:123': 'clock',
+        'private:456': 'clock',
+        '不是会话键': 'clock',      // 丢：键必须形如 group:/private:
+        'group:789': '   ',         // 丢：空值
+        'group:999': 'clock'
+      }
+    }
+  });
+  ok('接管绑定只留形如 group:/private: 的键与非空值（脏值静默丢，不报错）',
+    JSON.stringify(next.extras.override) === JSON.stringify({
+      'group:123': 'clock', 'private:456': 'clock', 'group:999': 'clock'
+    }), JSON.stringify(next.extras.override));
+  ok('它落进 getConfig()（静态数据，重启后还在）', getConfig().extras.override['group:123'] === 'clock');
+}
+
+// start() 按配置播种：**要真的把实现拉起来**，否则那个会话只会静默退回主流程，
+// 而用户写的配置看起来生效了 —— 本仓库最忌讳的那类故障。
+{
+  const ov = makeFakeEntry('seeded', ['seeded_tool'], { mode: 'override' });
+  const runtime = makeRuntime([ov.entry], { ...DEFAULT_EXTRAS, override: { 'group:5': 'seeded' } });
+  await runtime.start();
+  ok('start() 把配置里的接管播种下去，并真的装载了实现',
+    runtime.isOverridden('group:5') === true && ov.counters.load === 1, `load=${ov.counters.load}`);
+  ok('没绑的会话不受影响', runtime.isOverridden('group:6') === false);
+  await runtime.stop();
+
+  // 写错的绑定只记日志、不抛：一个扩展坏了不该把 app.start() 掀翻（同 initPicImageSearch 的先例）。
+  const attachOnly = makeFakeEntry('attach_only', ['t']);
+  const bad1 = makeRuntime([attachOnly.entry], { ...DEFAULT_EXTRAS, override: { 'group:5': 'attach_only' } });
+  await bad1.start();
+  ok('配置里绑了一个**非接管模式**的扩展 → 忽略（不抛、不生效）',
+    bad1.isOverridden('group:5') === false);
+  const bad2 = makeRuntime([ov.entry], { ...DEFAULT_EXTRAS, override: { 'group:5': '不存在' } });
+  await bad2.start();
+  ok('配置里绑了不存在的扩展 → 忽略（不抛）', bad2.isOverridden('group:5') === false);
 }
 
 process.exit(done() ? 0 : 1);

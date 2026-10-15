@@ -177,10 +177,22 @@ export const DEFAULT_CONFIG = {
     // 空闲多久后调用扩展自己的 dispose() 释放重资源。**0 = 常驻不卸载**（同仓库"0 = 不限"的惯例）。
     // 注意：卸载释放的是**扩展自己持有的东西**（子进程/socket/大缓存）；模块代码不会被卸载
     // （Node ESM 没有模块卸载），没有 dispose() 的扩展卸载后等于什么都没发生。
+    //
+    // 它同时是**接管的生命时间**：到点后该会话交还主流程（见下面 override）。
     idleUnloadMs: 10 * 60 * 1000,
     // 装载闸门：同一个扩展每小时的装载次数上限，防"模型反复起停同一个子进程"。
     // 全局每天那一档按这个数线性外推（24×）—— 它是一个**速率**问题，不是总量问题，所以只有一个旋钮。
-    maxLoadsPerHour: 20
+    maxLoadsPerHour: 20,
+    // **哪些会话由哪个扩展接管**（静态数据，改完重启生效）。键是会话标识 `group:<群号>` /
+    // `private:<QQ号>`，值是声明了 `mode: 'override'` 的扩展 id。
+    //
+    // **接管是唯一按会话隔离的东西**：附加模式的扩展是全局的（`enabled` + `/能力 加载`），
+    // 而接管只作用于它绑定的那个会话 —— 所以"A 群换了副脑子、B 群照常"是可以表达的。
+    // 群里敲 `/能力 加载 <接管扩展>` 会在**当前会话**建立同样的绑定（内存，不落盘；
+    // 重启后回到这里写的这一份）。
+    //
+    // 到点了（`idleUnloadMs`）该会话交还主流程；`0` 表示不自动交还。
+    override: {} as Record<string, string>
   },
   imageSource: {
     enabled: false,
@@ -668,6 +680,19 @@ function normalizeConfigShape<T>(input: T): T {
     // 0 = 常驻不卸载，所以下界是 0 而不是某个最小等待。
     e.idleUnloadMs = Math.round(clamp(e.idleUnloadMs, 0, 24 * 60 * 60 * 1000, 10 * 60 * 1000));
     e.maxLoadsPerHour = Math.round(clamp(e.maxLoadsPerHour, 1, 200, 20));
+    // 接管绑定：只留形如 `group:<数字>` / `private:<数字>` 的键与非空字符串值。
+    // **不校验 id 是否存在**（那是注册表的事，配置层不认识它）；未知 id 由运行期判为"不接管"，
+    // 并在 `/能力` 的列表里如实反映，而不是在这里静默丢掉 —— 丢掉的话用户看不出自己写错了。
+    const rawOverride = e.override;
+    const override: Record<string, string> = {};
+    if (rawOverride && typeof rawOverride === 'object' && !Array.isArray(rawOverride)) {
+      for (const [chatKey, extraId] of Object.entries(rawOverride as Record<string, unknown>)) {
+        if (!/^(?:group|private):\S+$/.test(chatKey)) continue;
+        const id = String(extraId ?? '').trim();
+        if (id) override[chatKey] = id;
+      }
+    }
+    e.override = override;
   }
   // ── 网页收藏夹 + 搜索调用阀门 ──
   //

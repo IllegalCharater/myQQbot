@@ -29,8 +29,11 @@ const readSource = (rel) => fs.readFileSync(path.join(ROOT, 'src', rel), 'utf8')
 ok('认命令：`/词` 后面跟空白或直接结束',
   isSlashCommand('/转写 https://example.com/a.mp4') && isSlashCommand('/画 一只猫')
   && isSlashCommand('/画') && isSlashCommand('/转写') && isSlashCommand('/漫画 12345') && isSlashCommand('/漫画'));
-ok('认命令：`/转写` + 视频段时渲染出的 `/转写[视频]` 也算（不带这个分支就永远认不出）',
-  isSlashCommand('/转写[视频]'));
+ok('认命令：**文本紧贴媒体段**时照样认得出（`segmentsToText` 用 join(\'\')，占位符是贴上来的）',
+  isSlashCommand('/转写[视频]') && isSlashCommand('/画[图片]')
+  && isSlashCommand('/漫画[图片]') && isSlashCommand('/能力[图片]'));
+ok('不认：`@` 不算边界（`/画@某人` 更像误触，没有放宽到"任何非字母数字"）',
+  !isSlashCommand('/画@某人') && !isSlashCommand('/转写@某人'));
 ok('不认：关键词连在一起的（`/画xx`、`/转写啦`、`/漫画123` 都不是命令）',
   !isSlashCommand('/画xx') && !isSlashCommand('/转写啦') && !isSlashCommand('/漫画123'));
 ok('不认：没有斜杠、或斜杠不在开头（普通消息绝不能被当成命令）',
@@ -125,6 +128,18 @@ const input = (text, extra = {}) => ({
 }
 
 {
+  // `/转写[视频]` 是**非首位的词形**，所以这条同时钉住"规范化真的做了"：不换回 `/转写` 的话，
+  // 解析器认不出这个词，会走成一句用法提示（命令被认出来了、却什么都入不了队）。
+  const { deps: d, log } = deps();
+  await handleSlashCommand(input('/转写[视频]', {
+    media: [{ kind: 'video', url: 'https://cdn.example.com/b.mp4' }]
+  }), d);
+  ok('`/转写[视频]`（文本化产生的渲染形态）照样能执行 —— 命中非首位词形后规范回 `/转写`',
+    log.enqueued.length === 1 && log.enqueued[0].url === 'https://cdn.example.com/b.mp4',
+    JSON.stringify({ enqueued: log.enqueued, sent: log.sent }));
+}
+
+{
   const { deps: d, log } = deps();
   await handleSlashCommand(input('/转写 http://127.0.0.1/x.mp4'), d);
   ok('`/转写` 的内网地址被解析层拒绝时，那句可执行的提示原样进群（不是"命令执行失败"）',
@@ -192,8 +207,7 @@ console.log('\n── 扩展命令与接管模式 ──');
 
   const extraCommands = {
     '/天气': {
-      name: '/天气',
-      match: (text) => /^\/天气(?:\s|$)/u.test(text),
+      names: ['/天气'],
       run: async (input) => `天气：${input.text.slice(3).trim() || '（没说地方）'}`
     }
   };
@@ -217,7 +231,7 @@ console.log('\n── 扩展命令与接管模式 ──');
     const throwing = createSlashCommands(() => ({
       override: false,
       commands: [{
-        name: '/爆炸', match: (text) => /^\/爆炸(?:\s|$)/u.test(text),
+        names: ['/爆炸'],
         run: async () => { throw new Error('用法：/爆炸 <参数>'); }
       }]
     }), extrasPort);
@@ -229,7 +243,7 @@ console.log('\n── 扩展命令与接管模式 ──');
   // 内置命令在前 ⇒ 扩展声明同样的文案也遮蔽不了它（那条扩展命令是死代码，而不是覆盖）。
   const shadow = createSlashCommands(() => ({
     override: false,
-    commands: [{ ...extraCommands['/天气'], name: '/画', match: (text) => /^\/画(?:\s|$)/u.test(text) }]
+    commands: [{ ...extraCommands['/天气'], names: ['/画'] }]
   }), extrasPort);
   {
     const { deps: d3, log: log3 } = deps();
@@ -238,13 +252,36 @@ console.log('\n── 扩展命令与接管模式 ──');
       log3.enqueued.length === 1 && log3.enqueued[0].via === 'imageGen', JSON.stringify(log3.enqueued));
   }
 
-  // 接管模式：主流程三条命令让位，**但 `/能力` 必须留着** —— 它是卸载接管者的唯一入口。
+  // 接管模式：主流程三条命令让位，**但 `/能力` 必须留着** —— 它是解除接管的唯一入口。
   const override = createSlashCommands(() => ({ override: true, commands: [] }), extrasPort);
   ok('接管模式：主流程的三条功能命令让位',
     override.isSlashCommand('/转写 https://e.com/a.mp4') === false
     && override.isSlashCommand('/画 一只猫') === false
     && override.isSlashCommand('/漫画 12345') === false);
   ok('接管模式：`/能力` 仍然认（否则装得上、卸不掉）', override.isSlashCommand('/能力') === true);
+  {
+    // **接管按会话隔离**：同一个进程里，A 群让位而 B 群照常。判据按会话取，所以两边看的是
+    // 两张不同的表 —— 漏了这一步的表现是"接管变成了全局的"，谁也不报错。
+    const perChat = createSlashCommands((chatKey) => ({ override: chatKey === 'group:100', commands: [] }), extrasPort);
+    ok('接管按会话隔离：A 群让位、B 群照常（`/能力` 两边都在）',
+      perChat.isSlashCommand('/画 一只猫', 'group:100') === false
+      && perChat.isSlashCommand('/画 一只猫', 'group:200') === true
+      && perChat.isSlashCommand('/能力', 'group:100') === true
+      && perChat.isSlashCommand('/能力', 'group:200') === true);
+  }
+  {
+    // `/能力 加载` 必须把**敲命令的那个会话**传下去 —— 接管按会话隔离，少了它就装不上。
+    const seen = [];
+    const port = {
+      ...extrasPort,
+      load: async (id, reason, chatKey) => { seen.push([id, chatKey]); return { ok: true, note: 'ok' }; }
+    };
+    const { deps: dLoad } = deps();
+    const cmds = createSlashCommands(() => ({ override: false, commands: [] }), port);
+    await cmds.handleSlashCommand(input('/能力 加载 x', { chatKey: 'group:777' }), dLoad);
+    ok('`/能力 加载` 把敲命令的那个会话传给运行时（接管按会话隔离）',
+      JSON.stringify(seen) === JSON.stringify([['x', 'group:777']]), JSON.stringify(seen));
+  }
   {
     const { deps: d4, log: log4 } = deps();
     await override.handleSlashCommand(input('/能力 卸载 anything'), d4);
@@ -298,20 +335,18 @@ console.log('\n── 扩展命令与接管模式 ──');
     const withAlias = createSlashCommands(() => ({
       override: false,
       commands: [{
-        name: '/天气',
-        aliases: ['/weather', '/tq'],
-        match: (text) => /^\/天气(?:\s|$)/u.test(text),
+        names: ['/天气', '/weather', '/tq'],
         // 只认主命令词 —— 别名若没被规范回来，这里会拿到 `/weather 北京`、参数解析不出来。
         run: async (inputText) => `主词=${inputText.text.slice(0, 3)} 参数=${inputText.text.replace(/^\/天气/u, '').trim()}`
       }]
     }), extrasPort);
-    ok('扩展命令：声明的别名被认出来',
+    ok('扩展命令：声明的词形都被认出来',
       withAlias.isSlashCommand('/weather 北京') === true && withAlias.isSlashCommand('/tq 北京') === true
       && withAlias.isSlashCommand('/weather') === true);
-    ok('扩展命令：别名同样要跟边界（`/weatherx`、`/tqx` 都不是命令）',
+    ok('扩展命令：词形同样要跟边界（`/weatherx`、`/tqx` 都不是命令）',
       withAlias.isSlashCommand('/weatherx') === false && withAlias.isSlashCommand('/tqx') === false);
     await withAlias.handleSlashCommand(input('/weather 北京'), d);
-    ok('扩展命令：命中别名时把开头那个词换成主命令词再交给处理函数',
+    ok('扩展命令：命中非首位的词形时，把开头那个词换成主命令词再交给处理函数',
       String(log.sent.at(-1)?.message) === '主词=/天气 参数=北京', JSON.stringify(log.sent));
   }
 }
@@ -324,11 +359,17 @@ console.log('\n── 扩展命令与接管模式 ──');
     !ingestSrc.includes('^\\/画') && !ingestSrc.includes('^\\/转写')
     && !ingestSrc.includes('isDrawCommand') && !ingestSrc.includes('isTranscriptionCommand'),
     'ingest.ts 里又长出了命令判据 —— 两份判据漂移时不会有任何报错');
-  ok('slash-commands.ts 里两条命令的判据都在（`[视频]` 那条分支也还在）',
-    commandsSrc.includes('^\\/转写') && commandsSrc.includes('^\\/画') && commandsSrc.includes('\\[视频\\]'));
+  ok('slash-commands.ts 里两条命令的词形都在，且**不再为渲染形态单开特例**',
+    /names:\s*\[\s*'\/转写'\s*\]/.test(commandsSrc) && /names:\s*\[\s*'\/画'\s*\]/.test(commandsSrc)
+    && !commandsSrc.includes('/转写[视频]'),
+    '`/转写[视频]` 又回到词形列表里了 —— 边界统一之后它是多余的（见 startsWithWord）');
+  // **判据只有一份**的可机检形态：命令对象上不许再有 `match` 这类第二种判据 ——
+  // 它曾经与 `name` / `aliases` 三份并存（正则里也写着 `/画`），改一处忘一处不会有任何报错。
+  ok('命令对象上不再有第二种判据（只有 `names`，没有 `match`）',
+    !/\bmatch\s*:/.test(commandsSrc), '`match` 回来了 —— 判据又变成两份了');
   ok('ingest.ts 只用同一个判据决定 wakeEligible（命令 → 已读历史，不进窗口）',
     /wakeEligible: !slashCommand/.test(ingestSrc)
-    && /const slashCommand = commands\.isSlashCommand\(commandText\)/.test(ingestSrc));
+    && /const slashCommand = commands\.isSlashCommand\(commandText, chatKey\)/.test(ingestSrc));
   ok('命令表存的是**函数引用**，没有按键分发（与装配清单同一形态）',
     !/COMMANDS\[/.test(commandsSrc) && !/COMMANDS\.get\(/.test(commandsSrc));
 }

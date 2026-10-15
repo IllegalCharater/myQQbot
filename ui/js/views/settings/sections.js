@@ -741,6 +741,13 @@ export function renderExtrasSection(c) {
       装载之后空闲超过下面那个秒数会自动卸载（释放它自己持有的子进程、连接、大缓存），
       之后再用会重新加载 —— 这一来一回对模型是全透明的。
     </div>
+    <div class="hint" style="margin-bottom:10px">
+      <strong>接管模式</strong>的扩展（下面标着「接管模式」的那些）装载后会让<strong>那个会话</strong>的
+      模型侧整体让位：工具表、斜杠命令、系统提示词都换成它的（安全规则与工具调用协议两段保留）。
+      <strong>接管按会话隔离</strong> —— 在哪个群敲 <code>/能力 加载</code> 就只接管哪个群。
+      想让它开机就接管某些会话，写进 <code>data/config.json</code> 的
+      <code>"extras": { "override": { "group:123456": "扩展id" } }</code>（改完重启）。
+    </div>
     ${rows}
     <div class="field-row" style="margin-top:10px">
       <div class="field"><label>空闲卸载（秒）</label>

@@ -147,6 +147,8 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     builtinToolNames: buildToolDefs().map((def) => def.name),
     log
   });
+  // 内置工具表算一次就够（它是常量，只有扩展那部分是变的）—— 上面那次调用只是为了拿名字。
+  const BUILTIN_TOOLS = buildToolDefs();
 
   const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log, deliverTranscript });
   const imageGen = new ImageGenQueue({ sender, getConfig, log, deliverImageResult });
@@ -157,12 +159,15 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   const orchestrator = new Orchestrator({
     store, memory, stickers, sender, sessions, onebot, emit,
     transcription, imageGen, hotSearch: hotSearchScheduler,
-    // 工具表**是函数**：扩展由 `/能力` 命令装载/卸载，而**未装载的扩展工具不在表里**
-    // （"禁止模型自行加载"那条取舍）。`runAgent` 每次运行开头读一次，所以语义是
-    // "装载后下一次运行生效"。内置那部分仍然逐字来自 `buildToolDefs()`。
-    toolDefs: () => [...buildToolDefs(), ...extras.toolDefs()],
-    // 提示词计划同理，每次运行现读：它取决于此刻装载了哪些扩展。
-    extraPrompt: () => extras.promptPlan()
+    // 工具表**是按会话算的函数**：扩展由 `/能力` 命令装载/卸载，而**未装载的扩展工具不在表里**；
+    // **接管还按会话隔离** —— 被接管的那个会话只剩接管者的工具（内置那部分整体让位），
+    // 别的会话照常。`runAgent` 每次运行开头读一次，所以语义是"下一次运行生效"。
+    toolDefs: (chatKey) => {
+      const mine = extras.toolDefs(chatKey);
+      return extras.isOverridden(chatKey) ? mine : [...BUILTIN_TOOLS, ...mine];
+    },
+    // 提示词计划同理，每次运行现读：它取决于这个会话此刻的状态。
+    extraPrompt: (chatKey) => extras.promptPlan(chatKey)
   });
   const hotSearch = createHotSearchAdminActions(hotSearchScheduler);
 
@@ -184,12 +189,13 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // 命令表**是 provider 而不是数组**：扩展命令与"是否接管中"都会在运行期变（`/能力` 装载/卸载）。
   // `/能力` 那条主流程命令拿到的是 `extras` 的三个口子，与 `/漫画` 只拿 `enqueue` 同形。
   const commands = createSlashCommands(
-    () => ({ override: extras.isOverridden(), commands: extras.commandDefs() }),
-    // `/能力` 的三个口子。装载/卸载只在这里接出去 —— **模型侧没有任何口子**。
+    (chatKey) => ({ override: extras.isOverridden(chatKey), commands: extras.commandDefs(chatKey) }),
+    // `/能力` 的几个口子。装载/卸载只在这里接出去 —— **模型侧没有任何口子**；
+    // `load`/`unload` 带上会话，是因为**接管按会话隔离**（附加模式用不到它）。
     {
       list: () => extras.list(),
-      load: (id, reason) => extras.load(id, reason ?? 'command'),
-      unload: (id) => extras.unload(id)
+      load: (id, reason, chatKey) => extras.load(id, reason ?? 'command', chatKey ?? ''),
+      unload: (id, chatKey) => extras.unload(id, chatKey ?? '')
     }
   );
 

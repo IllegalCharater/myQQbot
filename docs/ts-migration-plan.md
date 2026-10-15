@@ -222,9 +222,9 @@ UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词
 
 `src/extra/prompts.ts` 留在 `src/extra/` 里，代价是 `core/prompt-catalog.ts → extra/prompts.js` 成为**全仓库唯一一条低层 import 高层**——它登记在 `scripts/check-layers.mjs` 的 `LAYER_ALLOW` 里，且闸门自带守卫：这条例外的目标必须是叶子模块（出现任何相对 import 直接报错）。那条依赖之所以不成环，全靠这一点。
 
-扩展的**装载入口是人**（群里的 `/能力` 命令），模型一个装载入口都没有 —— 未装载的扩展，它的工具不在工具表里。所以 `host.toolDefs` 是 getter（每次运行现读），语义是"装载后下一次运行生效"；命令表则按"已启用"（判据是 spec 里的静态纯函数，`isSlashCommand()` 不可能去问异步的装载表）。这条不对称是刻意的，完整推导见 `docs/extras-design.md` §2。
+扩展的**装载入口是人**（群里的 `/能力` 命令），模型一个装载入口都没有 —— 未装载的扩展，它的工具不在工具表里。所以 `toolDefs` / `commandDefs` / `promptPlan` 都是**按会话取**的函数（`host.toolDefsFor(chatKey)`），语义是"下一次运行生效"；命令表则按"已启用"（判据是 spec 里的静态纯函数，`isSlashCommand()` 不可能去问异步的装载表）。**接管（`spec.mode: 'override'`）是唯一按会话隔离的东西**：三张表都随会话变，同一个进程里 A 群可以让位而 B 群照常。这条不对称是刻意的，完整推导见 `docs/extras-design.md` §2 与 §6。
 
-斜杠命令支持**可选别名**（`aliases`，内置与扩展都有）；判定与**规范化**都在 `web/onebot/slash-commands.ts` 一处 —— 命中别名时把开头那个词换成主命令词再交给处理函数，于是每个解析器只认识自己那一个词。**`SlashCommand.name` 因此必须是真能敲的那个词**（`/转写`），不能是内部标签。见 `docs/extras-design.md` §3.3。
+斜杠命令只声明**一个词形列表** `names`（第一个是主命令词），判定、规范化与日志标签**三样都从它派生** —— 没有第二种判据（曾经是 `name` + `aliases` + 一个 `match` 正则，三份）。命中非首位词形时把开头那个词换成 `names[0]` 再交给处理函数，于是每个解析器只认识自己那一个词。判定的边界是**一条**：`词` 后面跟空白、**`[`**、或直接结束 —— `[` 也算边界，是因为协议端把媒体段渲染成紧贴着的占位符（`segmentsToText` 用 `out.join('')`），"发视频 + 打 `/转写`"送来的就是 `/转写[视频]`；统一成边界规则之后，原先为它单开的那条 `/转写[视频]` 词形被删掉了。见 `docs/extras-design.md` §3.3–§3.4。
 
 工具**结果**串通常是动态返回值（含错误文案），留在各自工具文件里；唯一例外是
 `transcribe_video` 的回执话术（`TOOL_PROMPT_TEXT.transcribe_video.receipt`）：它没有任何动态成分，

@@ -69,7 +69,7 @@ export class Orchestrator implements AgentControlPort {
     this.emit = emit;   // S10d：不再兜底建空总线，缺了编译不过（见 shared/types.ts 的说明）
     // 工具表**不在这里建数组**了，只把"从哪儿取"递给下面的 WakeScheduler（它是 `AgentRunnerHost`，
     // `runAgent(this, …)` 里的 `host` 就是 scheduler，不是本类）。
-    // `toolDefs` 由 `web/app.ts` 递进来（扩展装载后工具表会变）—— 本层不 import `extra/`，
+    // `toolDefs` 由 `web/app.ts` 递进来（扩展装载/接管后工具表会变）—— 本层不 import `extra/`，
     // 见 `OrchestratorDependencies.toolDefs` 的说明。缺省是纯内置那份，既有无参构造点不受影响。
     const toolDefsSource = toolDefs ?? (() => buildToolDefs());
 

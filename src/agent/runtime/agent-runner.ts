@@ -52,10 +52,13 @@ export interface AgentRunnerHost {
   sessions: SessionRegistry;
   onebot: OneBotClient;
   windows: ContextWindowRegistry;
-  /** 工具表。宿主可以是 getter —— 扩展装载/卸载会让它变（见 wake-scheduler 的说明）。 */
-  toolDefs: ToolDefinition[];
-  /** 扩展的提示词计划（可选，缺省 = 没有扩展参与）。 */
-  extraPrompt?: () => PromptPlan;
+  /**
+   * 这个会话的工具表。是方法不是字段：扩展装载/卸载会让它变，而**接管按会话隔离**
+   * （被接管的那个会话只剩接管者的工具）。
+   */
+  toolDefsFor(chatKey: string): ToolDefinition[];
+  /** 这个会话的扩展提示词计划（可选，缺省 = 没有扩展参与）。 */
+  promptPlanFor?(chatKey: string): PromptPlan | null;
   aborted: boolean;
   emit: AppEmit;
   getChatName(groupId: string | number): Promise<string>;
@@ -111,7 +114,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       bookmarkSites: bookmarkList(),
       // 扩展的提示词计划（追加 / 按段名覆盖 / 接管）。**每次运行现读一次** ——
       // 它取决于此刻装载了哪些扩展；一次运行内不会变，所以语义是"装载后下一次运行生效"。
-      extraPrompt: host.extraPrompt?.() ?? null
+      extraPrompt: host.promptPlanFor?.(chatKey) ?? null
     });
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,
@@ -170,7 +173,7 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     // 判定同源，不各写一份（否则环境变量注入的启用会被这里悄悄判成关闭）。
     const transcriptionEnabled = resolveTranscriptionConfig(cfg).enabled;
     const imageGenEnabled = resolveImageGenConfig(cfg).enabled;
-    const toolDefs = host.toolDefs.filter((d) => {
+    const toolDefs = host.toolDefsFor(chatKey).filter((d) => {
       if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
       if (!transcriptionEnabled && d.name === 'transcribe_video') return false;

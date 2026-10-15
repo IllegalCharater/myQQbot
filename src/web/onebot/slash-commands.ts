@@ -85,8 +85,12 @@ export interface SlashCommandDeps {
    */
   extras?: {
     list(): ExtraListRow[];
-    load(id: string, reason?: string): Promise<ExtraActionResult>;
-    unload(id: string): Promise<ExtraActionResult>;
+    /**
+     * 装载。`chatKey` 只有**接管模式**用得上（接管按会话隔离）；附加模式忽略它。
+     * `/能力` 把"敲命令的那个会话"传下去，于是 `/能力 加载 <接管扩展>` 只接管当前会话。
+     */
+    load(id: string, reason?: string, chatKey?: string): Promise<ExtraActionResult>;
+    unload(id: string, chatKey?: string): Promise<ExtraActionResult>;
   };
   sender: Pick<SendQueue, 'sendTextBatch'>;
   log: (...args: unknown[]) => void;
@@ -94,24 +98,20 @@ export interface SlashCommandDeps {
 
 interface SlashCommand {
   /**
-   * **命令词本身**（如 `/转写`、`/能力`、扩展声明的 `/时间`）。
+   * **所有命令词。第一个是主命令词**（`names[0]`）。
    *
-   * 两份用途：日志标签（失败时那句 `[/转写] task=… code=…`），以及**别名规范化**的目标 ——
-   * 命中别名时把它换成这个名字再交给 `run`。所以它必须是**真的能敲的那个词**，
-   * 不能只是一个内部标识（曾经内置命令写的是 `'transcribe'` 这类标签，别名一接上就规范成了
-   * `transcribe …`，解析器认不出来）。
-   */
-  name: string;
-  /**
-   * 可选的**别名**（另一批命令词）。判定规矩与 `name` 一样：词后面跟空白或直接结束。
+   * - **判定**：任何一个词打头都算这条命令。词后面必须跟空白或直接结束（`/画像` 不是 `/画`）
+   *   —— 这条边界是唯一的判据，中文没有分词，放宽成 `includes` 会把 `/画廊今天开了吗`
+   *   认成 `/画` 命令。
+   * - **规范化**：命中非首位的词时，把开头那个词换成 `names[0]` 再交给 `run`，于是每个命令的
+   *   解析器只需要认识一个词（`/时间` 的解析不必知道有人用 `/time` 叫它）。
+   * - 首位那个同时是**日志标签**（失败时那句 `[/转写] task=… code=…`）。
    *
-   * 命中别名时，分发层会把开头那个词**换成 `name`** 再交给 `run` —— 于是每个命令的解析器
-   * 只需要认识自己那一个词（`/时间` 的解析不必知道有人用 `/time` 叫它）。
-   * 判据见 `matchesCommand` / `canonicalize`。
+   * ⚠️ 这里曾经是 `name` + `aliases` 两份，外加一个 `match(text)` 正则 —— 同一件事写三遍
+   * （正则里也写着 `/画`）。合并之后**没有第二种判据**：一个词列不出来的形态
+   * （比如 `/转写` 那个由文本化产生的 `/转写[视频]`）也是往这个数组里加一条。
    */
-  aliases?: readonly string[];
-  /** 认命令：`/词` 后面跟空白或直接结束（`/画像` 不是 `/画`）。 */
-  match(text: string): boolean;
+  names: readonly string[];
   run(input: SlashCommandInput, deps: SlashCommandDeps): Promise<void>;
 }
 
@@ -137,12 +137,12 @@ const NO_EXTRAS: SlashCommandExtraSource = { override: false, commands: [] };
 // ── 主流程命令 ──
 
 const transcribeCommand: SlashCommand = {
-  name: '/转写',
-  // `[视频]` 那个分支不是笔误：消息是 `/转写` + 一个视频段时，通用文本化会渲染成
-  // `/转写[视频]`，不带这个分支就认不出命令。
-  match: (text) => /^\/转写(?:\s|\[视频\]|$)/u.test(text),
+  // "发一个视频 + 打一句 `/转写`"送来的文本是 `'/转写[视频]'`（占位符紧贴着，没有空格）。
+  // 这里**不需要**为它单开一个词形：`[` 算边界（见 `startsWithWord`），所以 `/转写` 本身就认得出，
+  // 而 `parseTranscriptionCommand` 拿到原样的 `'/转写[视频]'` 会从 media 里取到那个视频。
+  names: ['/转写'],
   async run({ chatKey, text, media, replyToMessageId }, { transcription, sender, log }) {
-    await runCommand('transcribe', { sender, log }, chatKey, replyToMessageId, async () => {
+    await runCommand('/转写', { sender, log }, chatKey, replyToMessageId, async () => {
       const url = parseTranscriptionCommand(text, media);
       if (!url) return null;
       const job = transcription.enqueue({ chatKey, url, replyToMessageId });
@@ -152,10 +152,9 @@ const transcribeCommand: SlashCommand = {
 };
 
 const drawCommand: SlashCommand = {
-  name: '/画',
-  match: (text) => /^\/画(?:\s|$)/u.test(text),
+  names: ['/画'],
   async run({ chatKey, text, media, replyToMessageId }, { imageGen, sender, log }) {
-    await runCommand('draw', { sender, log }, chatKey, replyToMessageId, async () => {
+    await runCommand('/画', { sender, log }, chatKey, replyToMessageId, async () => {
       const prompt = parseDrawCommand(text);
       if (!prompt) return null;
       imageGen.enqueue({
@@ -178,13 +177,12 @@ const drawCommand: SlashCommand = {
 };
 
 const jmcomicCommand: SlashCommand = {
-  name: '/漫画',
+  names: ['/漫画'],
   // `/漫画 12345`：只做"下载"这一件事 —— **搜索仍只由模型用 search_jmcomic 做**
   // （那是刻意的两条路：搜索廉价可反复，下载要拉全本、导出 PDF、传群文件且不可撤销）。
   // 敲命令的人已经明确给出了 ID，等于自己走完了"先搜、再挑、再确认"那道人工闸门。
-  match: (text) => /^\/漫画(?:\s|$)/u.test(text),
   async run({ chatKey, text, senderId, replyToMessageId }, { jmcomic, sender, log }) {
-    await runCommand('jmcomic', { sender, log }, chatKey, replyToMessageId, async () => {
+    await runCommand('/漫画', { sender, log }, chatKey, replyToMessageId, async () => {
       const comicId = parseJmcomicCommand(text);
       if (!comicId) return null;
       const [kind, chatId] = String(chatKey).split(':');
@@ -215,12 +213,10 @@ const jmcomicCommand: SlashCommand = {
  * 给模型一个装载工具等于把这条边界拆掉。
  */
 const capabilitiesCommand: SlashCommand = {
-  name: '/能力',
-  // 别名只是"另一个叫法"，语义完全一样（命中别名时会被规范回主命令词再解析）。
-  aliases: ['/扩展'],
-  match: (text) => /^\/能力(?:\s|$)/u.test(text),
+  // `/扩展` 只是"另一个叫法"，语义完全一样（命中它时会被规范回 `/能力` 再解析）。
+  names: ['/能力', '/扩展'],
   async run({ chatKey, text, replyToMessageId }, { extras, sender, log }) {
-    await runCommand('capabilities', { sender, log }, chatKey, replyToMessageId, async () => {
+    await runCommand('/能力', { sender, log }, chatKey, replyToMessageId, async () => {
       if (!extras) return '扩展能力不可用（这一侧没有装上扩展运行时）';
       const match = /^\/能力(?:\s+(\S+))?(?:\s+(\S+))?/u.exec(text.trim());
       const action = match?.[1] ?? '';
@@ -230,7 +226,9 @@ const capabilitiesCommand: SlashCommand = {
         return '用法：/能力（看列表）、/能力 加载 <id>、/能力 卸载 <id>';
       }
       if (!id) return `用法：/能力 ${action} <扩展 id>（id 见 /能力 列表）`;
-      const result = action === '加载' ? await extras.load(id) : await extras.unload(id);
+      // **把敲命令的这个会话传下去**：接管模式按会话隔离，所以 `/能力 加载 <接管扩展>`
+      // 只接管当前会话；附加模式用不到它。
+      const result = action === '加载' ? await extras.load(id, 'command', chatKey) : await extras.unload(id, chatKey);
       return `${result.ok ? '✅' : '⚠️'} ${result.note}`;
     });
   }
@@ -247,45 +245,62 @@ const BUILTIN_COMMANDS: readonly SlashCommand[] = [transcribeCommand, drawComman
 const OVERRIDE_KEPT_COMMANDS: readonly SlashCommand[] = [capabilitiesCommand];
 
 export interface SlashCommands {
-  /** 归一化后认命令。导出给 ingest：它要用**同一个判据**决定 `wakeEligible` 与要不要并入引用附件。 */
-  isSlashCommand(text: unknown): boolean;
+  /**
+   * 归一化后认命令。导出给 ingest：它要用**同一个判据**决定 `wakeEligible` 与要不要并入引用附件。
+   *
+   * **要传会话标识**：被接管的会话里，主流程命令让位、只剩接管者的那些命令
+   * （`/能力` 例外，它永远在）。
+   */
+  isSlashCommand(text: unknown, chatKey: string): boolean;
   /** 处理一条斜杠命令。**返回是否已接管**（`false` = 不是命令，调用方照常走 LLM 路径）。 */
   handleSlashCommand(input: SlashCommandInput, deps: SlashCommandDeps): Promise<boolean>;
 }
 
 /**
- * `词` 后面跟**空白或直接结束** —— 别名与主判据共用同一条规矩（`/画像` 不是 `/画`）。
+ * `词` 后面跟**空白、`[`、或直接结束** —— 所有词形共用这一条边界判定。
  *
- * 中文没有分词，这条判据是"前缀 + 边界"能做到的极限；再放宽（比如 `includes`）会把
+ * 中文没有分词，这是"前缀 + 边界"能做到的全部；再放宽（比如 `includes`）会把
  * `/画廊今天开了吗` 认成 `/画` 命令。
+ *
+ * **为什么 `[` 也算边界**：协议端把媒体/卡片段渲染成**紧贴着**的占位符（`segmentsToText` 用
+ * `out.join('')`，没有分隔符），所以"发一个视频 + 打一句 `/转写`"送来的文本是
+ * `'/转写[视频]'` —— 中间没有空格。不放宽这一条的话，这一类消息**根本认不出来**：
+ * 它会当成普通消息进 LLM（`wakeEligible` 也跟着变 true，白多花一次模型调用），而**不报任何错**。
+ * 曾经的写法是给 `/转写` 单开一个 `/转写[视频]` 词形绕过它 —— 那是**同一个规则的特例**，
+ * 而特例每多一个渲染形态就要多一条。现在统一成一条边界：`[` 是占位符的固定开头，
+ * `/画[图片]`、`/漫画[图片]` 这些同形的（文本紧贴媒体段）也一并认出来了（它们会回一句
+ * 用法提示，比默默进 LLM 好）。
+ *
+ * ⚠️ 只放宽到 `[`，**不是**"任何非字母数字"：`@`（@ 段也紧贴）不在此列，因为
+ * `/画@某人` 这种更像误触；再宽一点就会把 `/画xx` 那类既要拦住的也放进来。
  */
 function startsWithWord(text: string, word: string): boolean {
   if (!word || !text.startsWith(word)) return false;
   const rest = text.slice(word.length);
-  return rest === '' || /^\s/u.test(rest);
+  return rest === '' || /^[\s[]/u.test(rest);
 }
 
 /**
- * 一条命令认不认这句话：主判据 `match` **或**任一别名。
+ * 一条命令认不认这句话：**名字列表里有任何一个词打头就算**。没有第二种判据。
  *
  * ⚠️ `isSlashCommand` 与 `handleSlashCommand` 必须都走这一个函数 —— 分成两份时的表现是
  * "命令没被认出来、消息进了 LLM"或"同一条消息被处理两次"，两种都不报错。
  */
 function matchesCommand(command: SlashCommand, text: string): boolean {
-  if (command.match(text)) return true;
-  return (command.aliases ?? []).some((alias) => startsWithWord(text, alias));
+  return command.names.some((word) => startsWithWord(text, word));
 }
 
 /**
- * 命中别名时，把开头那个词换成**主命令词**再交给 `run`。
+ * 命中**非首位**的词形时，把开头那个词换成主命令词再交给 `run`。
  *
- * 不做这一步的话，每个命令的解析器都得自己认识全部别名 —— 内置命令的解析散在 `media/` 下各能力的
- * commands.ts 里，扩展的在 `impl.ts` 里，加一个别名要改三处，而漏改的表现是
+ * 不做这一步的话，每个命令的解析器都得自己认识全部词形 —— 内置命令的解析散在 `media/` 下
+ * 各能力的 commands.ts 里，扩展的在 `impl.ts` 里，加一个词形要改三处，而漏改的表现是
  * "命令被认出来了、但解析不出参数"（`/time` 交给只认 `^/时间` 的解析器 → 返回用法提示）。
  */
 function canonicalize(command: SlashCommand, text: string): string {
-  for (const alias of command.aliases ?? []) {
-    if (startsWithWord(text, alias)) return command.name + text.slice(alias.length);
+  const canonical = command.names[0] ?? '';
+  for (const word of command.names) {
+    if (word !== canonical && startsWithWord(text, word)) return canonical + text.slice(word.length);
   }
   return text;
 }
@@ -299,11 +314,9 @@ function canonicalize(command: SlashCommand, text: string): string {
  */
 function adaptExtraCommand(command: ExtraCommand): SlashCommand {
   return {
-    name: command.name,
-    aliases: command.aliases,
-    match: command.match,
+    names: command.names,
     run: (input, deps) => runCommand(
-      command.name, deps, input.chatKey, input.replyToMessageId, () => command.run(input)
+      command.names[0] ?? '', deps, input.chatKey, input.replyToMessageId, () => command.run(input)
     )
   };
 }
@@ -311,7 +324,8 @@ function adaptExtraCommand(command: ExtraCommand): SlashCommand {
 /**
  * 建一套命令分发器。
  *
- * @param source 每次调用现读一次（**扩展命令与接管状态都会在运行期变**）。
+ * @param source 每次调用现读一次，**参数是会话标识** —— 扩展命令与接管状态都会在运行期变，
+ *   而**接管按会话隔离**（被接管的那个会话只剩接管者的命令）。
  * @param extras `/能力` 用的三个口子。在这里收下（而不是每回都让调用方塞进 `deps`），
  *   是为了让 `createIngest` 那一侧不必认识扩展 —— 它只管把命令交给分发器。
  *
@@ -319,23 +333,23 @@ function adaptExtraCommand(command: ExtraCommand): SlashCommand {
  * （某个扩展声明了 `/画`，那条匹配永远轮不到它，是死代码而不是覆盖）。
  */
 export function createSlashCommands(
-  source: () => SlashCommandExtraSource = () => NO_EXTRAS,
+  source: (chatKey: string) => SlashCommandExtraSource = () => NO_EXTRAS,
   extras?: SlashCommandDeps['extras']
 ): SlashCommands {
-  const tableFor = (): ReadonlyArray<SlashCommand> => {
-    const current = source();
+  const tableFor = (chatKey: string): ReadonlyArray<SlashCommand> => {
+    const current = source(chatKey);
     const builtin = current.override ? OVERRIDE_KEPT_COMMANDS : BUILTIN_COMMANDS;
     return [...builtin, ...current.commands.map(adaptExtraCommand)];
   };
 
   return {
-    isSlashCommand(text) {
+    isSlashCommand(text, chatKey) {
       const value = String(text ?? '').trim();
-      return tableFor().some((command) => matchesCommand(command, value));
+      return tableFor(chatKey).some((command) => matchesCommand(command, value));
     },
     async handleSlashCommand(input, deps) {
       const text = String(input.text ?? '').trim();
-      const command = tableFor().find((item) => matchesCommand(item, text));
+      const command = tableFor(input.chatKey).find((item) => matchesCommand(item, text));
       if (!command) return false;
       // 走的是**别名**的话，把开头那个词规范回主命令词：解析器只认识一个词。
       await command.run({ ...input, text: canonicalize(command, text) }, { ...deps, extras });
@@ -349,7 +363,7 @@ function renderCapabilityList(rows: ExtraListRow[]): string {
   if (!rows.length) return '这个版本没有注册任何扩展。';
   const line = (row: ExtraListRow) => {
     const state = row.loaded
-      ? (row.mode === 'override' ? '✅ 接管中' : '✅ 已加载')
+      ? (row.mode === 'override' ? `✅ 已加载（接管中：${row.overrides.join('、') || '无'}）` : '✅ 已加载')
       : (row.enabled ? '○ 未加载' : '✖ 设置里关着');
     const tip = row.loaded ? '' : `　→ /能力 加载 ${row.id}`;
     return `- ${row.title}（${row.id}）${state}${tip}`;
@@ -358,7 +372,9 @@ function renderCapabilityList(rows: ExtraListRow[]): string {
     '扩展能力（✅ 已加载 / ○ 可用但未加载 / ✖ 停用）：',
     ...rows.map(line),
     '',
-    '用法：/能力 加载 <id>、/能力 卸载 <id>'
+    '用法：/能力 加载 <id>、/能力 卸载 <id>',
+    '（接管模式的扩展：在本群敲加载 = 只接管**本群**；别的群要各自敲一次，'
+      + '也可以写进设置文件让它开机就接管）'
   ].join('\n');
 }
 
