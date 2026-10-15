@@ -20,12 +20,19 @@
 // ⚠️ 另一条不变量：**改本文件（增删扩展）要重启才生效**。工具表是请求前缀的一部分，
 // 运行期增删会打散提示词缓存；设置页那个开关（`extras.enabled`）同理。
 import { clockSpec } from './clock/spec.js';
+import { trpgSpec } from './trpg/spec.js';
 import type { ExtraEntry } from './types.js';
 
 export const EXTRA_REGISTRY: readonly ExtraEntry[] = [
   {
     ...clockSpec,
     load: () => import('./clock/impl.js').then((m) => m.createRuntime())
+  },
+  {
+    // **顺序是语义**：`/能力` 的列表、以及套件里"命令表第 0 条是谁"都按注册表顺序。
+    // 新扩展加在末尾（clock 是参考实现，一直在最前）。
+    ...trpgSpec,
+    load: () => import('./trpg/impl.js').then((m) => m.createRuntime())
   }
 ];
 

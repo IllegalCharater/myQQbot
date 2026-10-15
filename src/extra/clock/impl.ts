@@ -71,8 +71,11 @@ export function createRuntime(): ExtraRuntime {
     /**
      * 往 system prompt 追加一段 —— **只在本扩展装载后才生效**（"随装载状态变化"那条取舍）。
      * 文案取自 `extra/prompts.ts`（模型可见的固定指令的唯一落点），这里只负责"什么时候给"。
+     *
+     * ⚠️ 收下 `chatKey` 但**不用它**：clock 的贡献与是哪个群无关。要按会话渲染的扩展（跑团那种）
+     * 才需要它 —— 见 `ExtraRuntime.prompt` 的说明。
      */
-    prompt() {
+    prompt(_chatKey) {
       return { append: [...EXTRA_PROMPT_SECTIONS.clock.append] };
     },
     dispose() {

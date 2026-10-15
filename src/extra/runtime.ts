@@ -241,7 +241,9 @@ export function checkRuntimeShape(entry: ExtraEntry, rt: ExtraRuntime): string |
   // 所以在这里拦下来（框架契约段也不许动，见 SYSTEM_FRAMEWORK_SECTIONS）。
   let contribution;
   try {
-    contribution = rt.prompt?.();
+    // 空着会话调一次：这里只做**段落名对账**，不看正文。所以扩展的 `prompt()` 必须是全函数
+    // ——`chatKey === ''` 也要给出一份合法的贡献（跑团那种"按会话渲染"的实现要能应付空会话）。
+    contribution = rt.prompt?.('');
   } catch (error) {
     return `prompt() 抛错：${errorMessage(error)}`;
   }
@@ -365,7 +367,7 @@ export class ExtrasRuntime {
     const override = this.#overrideEntry(chatKey);
     if (override) {
       const slot = this.#loaded.get(override.id);
-      const body = readContribution(slot?.rt, this.#deps)?.body ?? [];
+      const body = readContribution(slot?.rt, this.#deps, chatKey)?.body ?? [];
       return {
         mode: 'override',
         body: body.map(String).filter((text) => text.trim()),
@@ -379,7 +381,7 @@ export class ExtrasRuntime {
     const merged: Record<string, string> = {};
     for (const entry of this.#activeEntries(chatKey)) {
       const slot = this.#loaded.get(entry.id);
-      const contribution = readContribution(slot?.rt, this.#deps);
+      const contribution = readContribution(slot?.rt, this.#deps, chatKey);
       if (!contribution) continue;
       const id = entry.id;
       for (const text of contribution.append ?? []) {
@@ -409,7 +411,11 @@ export class ExtrasRuntime {
       enabled: isExtraEnabled(entry, config),
       loaded: this.#loaded.has(entry.id),
       // 接管是**按会话**的，所以这里列出"哪些会话正被它接管"，而不是一个布尔值。
-      overrides: [...this.#overrides.entries()].filter(([, b]) => b.id === entry.id).map(([chatKey]) => chatKey)
+      // 只列**真的在接管**的那些（`#overrideEntry` 会滤掉"绑定还在但扩展已被关掉"的会话），
+      // 否则 `/能力` 会显示"接管中：group:1"，而那个群其实已经退回主流程了。
+      overrides: [...this.#overrides.entries()]
+        .filter(([chatKey, binding]) => binding.id === entry.id && this.#overrideEntry(chatKey) !== null)
+        .map(([chatKey]) => chatKey)
     }));
   }
 
@@ -633,15 +639,28 @@ export class ExtrasRuntime {
   }
 
   /**
-   * 这个会话的接管者（`mode: 'override'` 且**已装载**）。没有绑定、或绑定指向的实现没装载起来
-   * （比如配置播种时加载失败）时返回 null —— 那时这个会话**退回主流程**，
-   * 而不是变成"什么工具都没有"。
+   * 这个会话的接管者（`mode: 'override'` 且**已装载**、且**此刻仍然启用**的那个）。
+   *
+   * 三种情况下返回 `null`，三种都是"**这个会话退回主流程**"：
+   *   • 没有绑定；
+   *   • 绑定指向的实现没装载起来（比如配置播种时加载失败）；
+   *   • **扩展在设置里被关掉了**。
+   *
+   * ⚠️ 第三条是实打实踩出来的：`extras.enabled` 虽然在设置页写着"改完要重启"，但判据
+   * `isExtraEnabled` 是**每次现读**的 —— 于是"把这个扩展关掉、但不重启"会造出一个
+   * **静默的坏状态**：会话仍被算作接管（`app.ts` 因此不拼内置工具），而扩展的工具被
+   * `toolDefs()` 的启用闸门滤掉 ⇒ 模型手里**一个工具都没有**，却还拿着一份"接管"的
+   * 系统提示。表现是**那个群彻底不说话了，日志里一条线索都没有**。
+   * 判据由"装没装"扩成"装没装且还能不能用"，这个会话就干净地退回主流程了。
+   * （绑定本身留着：重新打开开关，接管就回来。）
    */
   #overrideEntry(chatKey: string): ExtraEntry | null {
     const binding = this.#overrides.get(chatKey);
     if (!binding) return null;
     if (!this.#loaded.has(binding.id)) return null;
-    return this.#entries.get(binding.id) ?? null;
+    const entry = this.#entries.get(binding.id) ?? null;
+    if (entry && !isExtraEnabled(entry, this.#deps.getConfig())) return null;
+    return entry;
   }
 
   /** 这个会话里可用的扩展：接管时只有接管者，否则是**附加装载**的那些。 */
@@ -768,10 +787,10 @@ export class ExtrasRuntime {
 }
 
 /** 读一次扩展的提示词贡献，任何异常都吞掉（它只是"加不加一段话"，不该掀翻整轮运行）。 */
-function readContribution(rt: ExtraRuntime | undefined, deps: ExtrasDeps) {
+function readContribution(rt: ExtraRuntime | undefined, deps: ExtrasDeps, chatKey: string) {
   if (!rt || typeof rt.prompt !== 'function') return null;
   try {
-    return rt.prompt() ?? null;
+    return rt.prompt(chatKey) ?? null;
   } catch (error) {
     deps.log(`[extras] prompt() 抛错，本轮忽略它的提示词贡献：${errorMessage(error)}`);
     return null;

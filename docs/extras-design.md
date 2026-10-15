@@ -40,19 +40,28 @@ src/extra/
 ├─ prompts.ts        扩展的固定指令 EXTRA_PROMPT_TEXT / EXTRA_PROMPT_SECTIONS —— **必须无 import**（§7）
 ├─ registry.ts       静态清单 EXTRA_REGISTRY，每行 { ...xSpec, load }
 ├─ runtime.ts        ExtrasRuntime：装载表 + 由它派生的三张表 + 校验
-└─ <x>/
-   ├─ spec.ts        纯数据（id / title / displayDesc / mode / defaultEnabled / 工具与命令声明）
-   └─ impl.ts        export function createRuntime(): ExtraRuntime（重东西全在这里）
+├─ clock/            参考扩展（attach）：把整条链跑起来并可观察，刻意只有最小形态
+└─ trpg/             第一个功能完整的**接管**扩展（override）。目录内部按职责分：
+   ├─ spec.ts        纯数据（7 个工具 + 2 条命令 + overrideTools）
+   ├─ impl.ts        createRuntime()：只做接线（handlers / commandHandlers / prompt）
+   ├─ state.ts       状态层：上限、归一化、读写（`data/trpg/<会话>.json`）
+   ├─ render.ts      展示层：给模型的状态段 / 给群友的状态卡 / 掷骰与检定的结果格式
+   ├─ tools.ts       7 个工具的实现（校验 → 改状态 → 把"发生了什么"回给模型）
+   ├─ types.ts       领域类型（**不 import 本模块任何文件**，防成环）
+   └─ rules/         纯函数规则引擎（dice.ts / check.ts），**与对话链完全无关**
 ```
 
 ```ts
 // registry.ts —— 与 web/runtime/lifecycle.ts 的装配清单同一形态：存函数引用、只 for...of、无按键分发
 export const EXTRA_REGISTRY: readonly ExtraEntry[] = [
-  { ...clockSpec, load: () => import('./clock/impl.js').then((m) => m.createRuntime()) }
+  { ...clockSpec, load: () => import('./clock/impl.js').then((m) => m.createRuntime()) },
+  { ...trpgSpec,  load: () => import('./trpg/impl.js').then((m) => m.createRuntime()) }
 ];
 ```
 
-**加一个扩展 = 建一个目录 + 在本文件加一行。**
+**加一个扩展 = 建一个目录 + 在本文件加一行。** **顺序是语义**（`/能力` 的列表与"命令表第 0 条是谁"都按注册表顺序），新扩展加在末尾。
+
+**接管扩展多写一个字段**：`overrideTools: { sendTool, finishTool }`（见 §5）。**attach 模式写了它会被拒绝装载** —— 没有任何地方读它。
 
 ### 3.1 声明与实现分开
 
@@ -190,6 +199,20 @@ export const SYSTEM_FRAMEWORK_SECTIONS = ['security', 'toolProtocol'] as const;
 
 文案只许写在 `extra/prompts.ts`（模型可见的固定指令的唯一落点）：`EXTRA_PROMPT_TEXT` 按**工具名**索引、`EXTRA_PROMPT_SECTIONS` 按**扩展 id** 索引，两张表各自与注册表**两个方向**对账。群友可见的文案（命令用法、回执）**不在这里** —— 它们跟命令的实现放在一起。
 
+### 5.1 `prompt(chatKey)`：按会话渲染，且必须是全函数
+
+（2026-10-15 补，随跑团一起落地。）签名是 `prompt?(chatKey: string): ExtraPromptContribution`。
+
+**为什么要 `chatKey`**：接管是**按会话**的，同一个扩展完全可能同时接管好几个群，而各自的内容不一样 —— 跑团的状态卡就是那个例子（A 群的战役与 B 群的战役毫无关系）。没有这个参数，"按会话渲染"根本无从谈起。
+
+**为什么必须是全函数**：装载时 `checkRuntimeShape` 会**空着会话调它一次**，只做段落名对账。`chatKey === ''` 抛错就等于**拒绝装载**，而症状会表现成"这个扩展装不上"，与提示词毫无关系 —— 那是最难查的一类因果错位。跑团的做法是让 `store.read('')` 返回 `null`、渲染出"还没有开局"那段，于是空会话也拿到一份合法贡献。没有按会话需求的扩展（clock）照旧写 `prompt(_chatKey)`。
+
+**两个形状上的坑**：
+
+- `body` 的**每个元素是一个段落**，而**空串会被滤掉**（`promptPlan()` 的 `.filter(text => text.trim())`）。想在段内留空行，要写成一整块带 `
+` 的字符串，**不能**用 `''` 占位。
+- **顺序即缓存**：稳定的部分（人格）放前面、每轮都变的部分（状态）放后面，system prompt 的公共前缀才能命中到变化点之前。反过来的话，同一场会话连着跑几轮会让**整段**系统提示每轮失效。这与 user prompt 的"稳定度降序"是同一条纪律。
+
 ## 6. 接管模式（**唯一按会话隔离的东西**）
 
 `spec.mode: 'override'` 的扩展被装载后，**那个会话**的模型侧整体让位：工具表只剩它的、命令表只剩它的（**外加永远在的 `/能力`**）、system prompt 换成"框架契约 + 它的 body"。
@@ -268,12 +291,14 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 
 | 套件 | 管什么 |
 |---|---|
-| `tests/t-extras.mjs`（107 条） | **模型零装载入口**、装载/卸载改变工具表、命令触发装载、**接管按会话隔离**（同一进程里 A 让位 B 照常）、**生命时间对两种模式都生效**、多会话共用一个实现、配置播种（含脏值忽略）、TTL 与在途、`stop()` 幂等与超时、注册表自检、名字对账（工具 + 命令两个方向）、提示词覆盖段名校验（含框架契约**不许覆盖** / `capabilityProtocol` **可以**覆盖）、**`overrideTools` 三条**（接管必须声明 `sendTool` / 名字必须真的在 `tools` 里 / 附加模式不许写）、提示词计划随装载状态、真实现跑一遍、`buildToolDefs()` 默认行为逐字不变、两张提示词表与注册表两个方向对账、源级断言（`registry.ts` 的 load 是字面量 import 且无静态 impl import；各 `spec.ts` 不 import impl；`prompts.ts` 无 import） |
+| `tests/t-extras.mjs`（115 条 —— 注册表多一个扩展就多一条"spec.ts 不 import 实现"的源级断言） | **模型零装载入口**、装载/卸载改变工具表、命令触发装载、**接管按会话隔离**（同一进程里 A 让位 B 照常）、**生命时间对两种模式都生效**、多会话共用一个实现、配置播种（含脏值忽略）、TTL 与在途、`stop()` 幂等与超时、注册表自检、名字对账（工具 + 命令两个方向）、提示词覆盖段名校验（含框架契约**不许覆盖** / `capabilityProtocol` **可以**覆盖）、**`overrideTools` 三条**（接管必须声明 `sendTool` / 名字必须真的在 `tools` 里 / 附加模式不许写）、提示词计划随装载状态、真实现跑一遍、`buildToolDefs()` 默认行为逐字不变、两张提示词表与注册表两个方向对账、源级断言（`registry.ts` 的 load 是字面量 import 且无静态 impl import；各 `spec.ts` 不 import impl；`prompts.ts` 无 import） |
 | `tests/t-reply.mjs`（66 条） | **system 段序 + 段分隔符 + 空计划是空操作 + 覆盖不可碰框架契约 + 接管只留框架契约 + 接管时能力段（含其中的工具名）一概不注入 + 框架段的工具名跟着接管者走（`sendTool` 换名、`finishTool: null` 不提）** |
 | `tests/t-slash-commands.mjs` | `/能力` 的用法与失败话术、扩展命令走同一只 `runCommand` 外壳、扩展遮蔽不了内置、接管时主流程命令让位而 `/能力` 保留 |
 | `tests/t-tool-protocol.mjs` | 协议纠正；`capabilityProtocol` 里那条漫画规则；**`recordSent` 真的记账 + 真的发 `session-update`**（缺 `at` 时不写 `"undefined"`） |
 | `tests/t-lifecycle.mjs` / `t-tasks.mjs` | `extras.runtime` 的 id 对账与 entry 顺序 |
 | `tests/t-admin.mjs` | 真起 app 验 `/api/extras`（含 `mode`）与 `extras` 配置回显 |
+| `tests/t-trpg.mjs`（80 条） | **第一个功能完整的接管扩展**：状态层的上限与归一化、7 个工具的正反路径、两条命令（含「非法表达式**抛**出去让外壳原样发进群」）、`prompt(chatKey)` 的人格前/状态后、以及**真起 `createApp()` 的端到端**（接管会话只剩跑团那 7 个工具、system prompt 是跑团人格且不含主人格、能力段让位、`say` 那一轮真的被判成 `done`、对照组是没被接管的群照常） |
+| `tests/t-trpg-rules.mjs`（45 条） | 与对话链无关的纯函数规则引擎（见 `docs/ts-migration-plan.md`） |
 
 **证伪探针实测过十一条**（不是推断）：`toolDefs()` 去掉装载门 → `t-extras` 红 6 条；`join('\n\n')` 改回 `join('\n')` → `t-reply` **只在补了分隔符那条断言之后**才红（补之前 59 条全绿 —— 那正是这条断言的成因）；`extras.runtime` 从 `LIFECYCLE` 删掉 → `t-lifecycle` 红 6 条；去掉别名规范化 → `t-slash-commands` 红 2 条；**把边界从"空白/`[`/结束"收回成"空白/结束" → `t-slash-commands` 红 2 条**（含一条端到端的：`/转写[视频]` 什么都不入队）；**把 `#overrideEntry` 退回全局（不理会话键）→ `t-extras` 红 4 条**（表现就是"B 群也忽然变了个人"，谁也不报错）；**让接管绑定不起计时器 → `t-extras` 红 3 条**（表现是"接管永远不撒手"）。
 
@@ -284,4 +309,8 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 | 把 `capabilityProtocol` 也列进 `SYSTEM_FRAMEWORK_SECTIONS` | `t-reply` 红 1 条（"接管时能力段一概不注入"） |
 | 去掉 `prompt-builder` 里 `sendTool` 的透传（退回硬编码） | `t-reply` 红 3 条（三条工具名断言） |
 | `recordSent` 里的 `session.sent.push(...)` 注释掉 | `t-tool-protocol` 红 2 条，**其中一条是既有的端到端用例**：`send_message` 那条路径当场报 `{"status":"noreply","sent":[]}` —— 正是文档里说的那个症状 |
-| 删掉 `validateRegistry` 里"接管必须声明 `sendTool`" | `t-extras` 红 1 条 |
+| 删掉 `validateRegistry` 里那条「接管必须声明 `sendTool`」 | `t-extras` 红 1 条 |
+| 把 `web/app.ts` 的 `isOverridden(chatKey) ? mine : [...BUILTIN_TOOLS, ...mine]` 改成总是拼上内置工具 | **除 `t-trpg.mjs` 外全部套件照绿** —— 它报出的是「接管会话拿到 25 个内置工具 + 7 个跑团工具」。这一行是「接管时内置工具让位」的唯一实现处，而 `extras.toolDefs()` 那一层的断言看不见它（那一层只管扩展自己那几个） |
+| 去掉跑团 `say` 里的 `recordSent` | `t-trpg` 红 6 条，含端到端那条（会话被记成 `noreply`） |
+| 把跑团 `prompt(chatKey)` 的 body 顺序倒过来（状态在前、人格在后） | `t-trpg` 红 3 条 |
+| 去掉 `#overrideEntry` 里那条"扩展被关掉就不算接管" | `t-extras` 红 3 条。**这条探针暴露的是跑团落地时抓到的真 bug**：关掉扩展（不重启）之后，被接管的会话会拿到"接管人格 + **零工具**"，而 `toolDefs()` 那条断言**照样绿**（它按启用闸门过滤，本来就返回 0）—— 红的只有 `isOverridden` 那条。这正是那个 bug 之所以静默的原因 |

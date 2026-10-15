@@ -558,6 +558,46 @@ await withFakeTimers(async (timers) => {
     && runtime.toolDefs(A).map((d) => d.name).join() === 'attach_tool', JSON.stringify(back));
 }
 
+// ── 10b. 运行期把扩展关掉：接管必须**干净地退回主流程** ─────────────────────
+//
+// `extras.enabled` 在设置页写着"改完要重启"，但判据 `isExtraEnabled` 是**每次现读**的 ——
+// 于是"关掉、不重启"这条路上有个静默的坏状态：会话仍被算作接管（`app.ts` 因此不拼内置工具），
+// 而扩展的工具被启用闸门滤掉 ⇒ 模型手里**一个工具都没有**，却还拿着一份"接管"的系统提示。
+// 表现是**那个群彻底不说话了，日志里一条线索都没有**。这一段的每一条都在钉它。
+{
+  const over = makeFakeEntry('live', ['live_tool'], {
+    mode: 'override', overrideTools: { sendTool: 'live_tool' }
+  });
+  // `getConfig` 回的是同一个 `extrasConfig` 引用，所以直接改它 = 模拟设置页保存。
+  const config = { ...DEFAULT_EXTRAS, enabled: { live: true } };
+  const runtime = makeRuntime([over.entry], config);
+  await runtime.load('live', 'test', G);
+
+  ok('接管生效时：工具在表里、isOverridden 为真',
+    runtime.isOverridden(G) === true
+    && runtime.toolDefs(G).map((d) => d.name).join() === 'live_tool');
+
+  config.enabled.live = false;   // 设置页保存 —— 但没重启
+
+  ok('**关掉之后那个会话退出接管**（而不是"接管人格 + 零工具"）',
+    runtime.isOverridden(G) === false, String(runtime.isOverridden(G)));
+  ok('工具表不再只剩接管者那一个（调用方会照常拼上内置那部分）',
+    runtime.toolDefs(G).length === 0, JSON.stringify(runtime.toolDefs(G).map((d) => d.name)));
+  ok('提示词计划退成 attach（系统提示回到主人格）',
+    runtime.promptPlan(G).mode === 'attach', JSON.stringify(runtime.promptPlan(G)));
+  ok('命令表也交还（不让被关掉的扩展还占着命令词）',
+    runtime.commandDefs(G).length === 0, JSON.stringify(runtime.commandDefs(G).map((c) => c.names)));
+  ok('`/能力` 的列表如实反映：不再说它在接管这个群',
+    (runtime.list().find((row) => row.id === 'live')?.overrides ?? ['x']).length === 0,
+    JSON.stringify(runtime.list()));
+
+  config.enabled.live = true;    // 重新打开
+  ok('重新打开开关，接管就回来（绑定一直留着，不用重新加载）',
+    runtime.isOverridden(G) === true
+    && runtime.toolDefs(G).map((d) => d.name).join() === 'live_tool');
+  await runtime.stop();
+}
+
 // 生命时间：**两种模式都受它约束**（配置里同一个数）。到点后附加的卸载实现、接管的交还主流程。
 await withFakeTimers(async (timers) => {
   const over = makeFakeEntry('ttl_ov', ['ov_tool'], {
