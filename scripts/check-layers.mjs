@@ -5,16 +5,40 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = path.join(ROOT, 'src');
+// `extra`（扩展能力）插在 agent 与 web 之间，web 因此从 4 顶到 5。三条推论都由这张表自动给出：
+//   • `extra → {core, media, chat, qq, agent}` 合法（扩展要工具契约、媒体助手、存档、事件发射器）；
+//   • `web → extra` 合法（组装根 import 注册表）；
+//   • **`extra → web` 被拦** —— 扩展不认识 web。组装是 web 的活，这条同时排除了 web ↔ extra 成环。
+// 反方向同理：`agent → extra` 也是反向依赖，所以扩展工具的 schema 由 web/app.ts 递进 Orchestrator，
+// `buildToolDefs(extra)` 只负责拼 —— agent 层对 extra 一无所知。
 const LEVEL = new Map([
   ['core', 0],
   ['llm', 1], ['chat', 1], ['qq', 1], ['media', 1],
   ['stickers', 2],
   ['agent', 3],
-  ['web', 4]
+  ['extra', 4],
+  ['web', 5]
 ]);
 
 // T1 领域默认彼此隔离。若将来确有必要，只能登记精确的“源文件 -> 目标文件”。
 const T1_ALLOW = new Set([]);
+
+// **低层 import 高层的具名例外**（精确到"源文件 -> 目标文件"）。默认一望而知的规则是
+// "依赖只能从高层指向低层"，这条清单是它唯一的出口，所以每加一条都要有理由，且理由写在下面。
+//
+// 目前只有一条：`core/prompt-catalog.ts` 要**转发** `extra/prompts.ts` 里那张扩展提示词表
+// （模型可见的固定指令仍集中在目录里，只是扩展那一块单独一个文件；见 AGENTS.md「扩展能力（extra）」）。
+//
+// ⚠️ 这条例外的安全性**全靠目标是个叶子模块**：`extra/prompts.ts` 自己不 import 任何东西，
+// 所以"core 依赖 extra"这件事不会成环（core/prompt-catalog → extra/prompts → 无）。
+// 哪天有人往那个文件里加一句 import，环就可能成立，而 tsc 与运行期都不一定报错 ——
+// 所以下面有一条专门的断言：**登记为例外目标的文件里不许出现任何相对 import**。
+//
+// ⚠️ 键的写法照**报错原文**：右边用的是 **import 说明符**（`.js`），不是源文件名（`.ts`）。
+// 两个理由：报错可以直接照抄进这张表；而且这里的判据本来就是"哪一条 import"，不是"哪个文件"。
+const LAYER_ALLOW = new Set([
+  'core/prompt-catalog.ts -> extra/prompts.js'
+]);
 const SOURCE_EXT = /\.(?:js|ts)$/;
 const SPECIFIER = /\bfrom\s*['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]|\bimport\s*['"]([^'"]+)['"]/g;
 
@@ -119,13 +143,37 @@ for (const source of files) {
 
     const sourceLevel = LEVEL.get(sourceDomain);
     const targetLevel = LEVEL.get(targetDomain);
-    if (targetLevel > sourceLevel) {
-      errors.push(`${sourceRel} -> ${targetRel}: T${sourceLevel} 不得反向依赖 T${targetLevel}`);
+    if (targetLevel > sourceLevel && !LAYER_ALLOW.has(`${sourceRel} -> ${targetRel}`)) {
+      errors.push(`${sourceRel} -> ${targetRel}: T${sourceLevel} 不得反向依赖 T${targetLevel}`
+        + '（确有必要时只能登记进 LAYER_ALLOW，见那里的说明）');
       continue;
     }
     if (sourceLevel === 1 && targetLevel === 1 && !T1_ALLOW.has(`${sourceRel} -> ${targetRel}`)) {
       errors.push(`${sourceRel} -> ${targetRel}: T1 领域间引用未登记精确白名单`);
     }
+  }
+}
+
+// ── 具名例外的自带守卫：登记进 LAYER_ALLOW 的目标必须是**叶子模块** ──
+// 一次"低层 import 高层"之所以不成环，靠的就是目标自己不 import 任何东西。
+// 往那个文件里加一句 import，环就可能成立（core → extra → core），而 tsc 不一定报错、
+// 运行期也只在特定加载顺序下才炸。所以这条例外必须由它自己守着，不能靠人记。
+for (const pair of LAYER_ALLOW) {
+  // 键右边是 import 说明符（`.js`），落到磁盘上的源文件是 `.ts`。
+  const targetRel = (pair.split(' -> ')[1] || '').replace(/\.js$/, '.ts');
+  const target = path.join(SRC, targetRel);
+  if (!fs.existsSync(target)) {
+    errors.push(`LAYER_ALLOW 里的目标文件不存在：${targetRel}（例外应当随目标一起删掉）`);
+    continue;
+  }
+  const text = fs.readFileSync(target, 'utf8');
+  SPECIFIER.lastIndex = 0;
+  const relatives = [...text.matchAll(SPECIFIER)]
+    .map((m) => m[1] || m[2] || m[3])
+    .filter((specifier) => specifier && specifier.startsWith('.'));
+  if (relatives.length) {
+    errors.push(`${targetRel}: 它是 LAYER_ALLOW 的例外目标（低层要 import 它），`
+      + `因此必须是叶子模块，但里面出现了相对 import：${relatives.join('、')}`);
   }
 }
 

@@ -51,6 +51,7 @@ const ASSERT = [
   't-jmcomic-callback.mjs',// 漫画 Python 结果帧与上传完成后的 Agent 回流
   't-jmcomic-upload.mjs',  // 漫画上传超时/重启恢复只核验，不盲目重传
   't-lifecycle.mjs',       // 注册层执行侧（关停路径、装配清单、清单与描述表对账）
+  't-extras.mjs',          // 扩展能力（声明静态进工具表、实现按需加载、空闲卸载）
   't-ui-modules.mjs',      // 原生 ES Module 入口、依赖图与资源完整性
   't-admin.mjs',           // 管理接口
   't-ui-render.mjs',       // UI 领域模块在假 DOM 下真跑一遍看 HTML

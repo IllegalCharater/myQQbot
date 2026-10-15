@@ -11,7 +11,8 @@
 // 沉睡/唤醒/等待机制（由编排器的"已读/未读驱动"取代）。
 
 import { getConfig, digestConfigForChat } from '../../core/config.js';
-import { PROMPT_CATALOG } from '../../core/prompt-catalog.js';
+import { PROMPT_CATALOG, SYSTEM_FRAMEWORK_SECTIONS, SYSTEM_SECTION_IDS } from '../../core/prompt-catalog.js';
+import type { PromptPlan, SystemSectionId } from '../../core/prompt-catalog.js';
 import { formatFullTime, formatShortTime } from '../../core/util.js';
 import { buildStickerContext, buildStickerStrategyHint } from '../../stickers/stickers.js';
 import type { AppConfig } from '../../core/config.js';
@@ -28,7 +29,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 // ── 系统提示 ─────────────────────────────────────────────────────────────
 
 /** 组装系统提示。 */
-export function buildSystemPrompt({ persona, capabilities = {}, bookmarkSites = [] }: {
+export function buildSystemPrompt({ persona, capabilities = {}, bookmarkSites = [], extraPrompt = null }: {
   persona?: AppConfig['persona'];
   capabilities?: { vision?: boolean; search?: boolean };
   /**
@@ -37,42 +38,65 @@ export function buildSystemPrompt({ persona, capabilities = {}, bookmarkSites = 
    * 三项都要：枚举值给模型回传、域名让它知道实际在哪个站搜、用途是选站依据。
    */
   bookmarkSites?: Array<{ key: string; host: string; purpose: string }>;
+  /**
+   * 扩展的提示词计划。由 `web/app.ts` 递进来 —— 本层**不许** import `extra/`
+   * （`agent(3) → extra(4)` 是反向依赖），所以扩展的贡献只能由组装根注入。
+   *
+   * 缺省 `null` = 没有扩展参与，输出与加这个参数之前**逐字相同**。
+   */
+  extraPrompt?: PromptPlan | null;
 } = {}): string {
   const cfg = persona ?? getConfig().persona;
   const appCfg = getConfig();
   const stickerLevel = Math.min(3, Math.max(0, Number(appCfg.sticker?.encourage) || 0));
   const vision = capabilities.vision ?? appCfg.api?.vision !== false;
   const search = capabilities.search ?? appCfg.webSearch?.enabled !== false;
-  const parts = [
-    PROMPT_CATALOG.system.identity(cfg.botName),
-    '',
-    ...(cfg.roleText && String(cfg.roleText).trim()
-      ? [PROMPT_CATALOG.system.personaHeading, String(cfg.roleText).trim(), '']
-      : []),
-    PROMPT_CATALOG.system.securityRules(),
-    '',
-    PROMPT_CATALOG.system.toolProtocol(),
-    '',
-    PROMPT_CATALOG.system.antiAiFlavor(),
-    '',
-    PROMPT_CATALOG.system.speakOrNot(cfg.participation),
-    '',
-    PROMPT_CATALOG.system.humanRhythm(),
-    '',
-    PROMPT_CATALOG.system.quoteAndAt(),
-    '',
-    PROMPT_CATALOG.system.memoryRules(),
-    '',
-    PROMPT_CATALOG.system.stickerRules(buildStickerStrategyHint(stickerLevel)),
-    '',
-    PROMPT_CATALOG.system.qqSceneRules({ vision, search, bookmarkSites }),
-    '',
-    PROMPT_CATALOG.system.reportBan()
-  ];
-  if (cfg.customRules && String(cfg.customRules).trim()) {
-    parts.push('', PROMPT_CATALOG.system.customRulesHeading, String(cfg.customRules).trim());
+  const roleText = String(cfg.roleText ?? '').trim();
+  const customRules = String(cfg.customRules ?? '').trim();
+
+  // ── 段名 → 正文 ──
+  //
+  // 判据是 `SYSTEM_SECTION_IDS`（core 里那张表）：**段序即数组顺序**，缺席的段用空串表示、
+  // 最后统一滤掉。这比"往数组里塞 '' 当分隔符"多一样东西 —— 段有了名字，扩展才能按名字覆盖。
+  const sections: Record<SystemSectionId, string> = {
+    identity: PROMPT_CATALOG.system.identity(cfg.botName),
+    persona: roleText ? `${PROMPT_CATALOG.system.personaHeading}\n${roleText}` : '',
+    security: PROMPT_CATALOG.system.securityRules(),
+    toolProtocol: PROMPT_CATALOG.system.toolProtocol(),
+    antiAiFlavor: PROMPT_CATALOG.system.antiAiFlavor(),
+    speakOrNot: PROMPT_CATALOG.system.speakOrNot(cfg.participation),
+    humanRhythm: PROMPT_CATALOG.system.humanRhythm(),
+    quoteAndAt: PROMPT_CATALOG.system.quoteAndAt(),
+    memoryRules: PROMPT_CATALOG.system.memoryRules(),
+    stickerRules: PROMPT_CATALOG.system.stickerRules(buildStickerStrategyHint(stickerLevel)),
+    qqSceneRules: PROMPT_CATALOG.system.qqSceneRules({ vision, search, bookmarkSites }),
+    reportBan: PROMPT_CATALOG.system.reportBan(),
+    customRules: customRules ? `${PROMPT_CATALOG.system.customRulesHeading}\n${customRules}` : ''
+  };
+
+  // ── 接管模式：主流程的模型侧让位 ──
+  // 只有框架契约两段（安全规则 + 工具协议）强制保留 —— 它们不是"功能"，是运行契约，
+  // 没有它们这个 agent 循环当场失效。其余段落一概不注入，由扩展的 body 顶上去。
+  if (extraPrompt?.mode === 'override') {
+    return [
+      ...SYSTEM_FRAMEWORK_SECTIONS.map((id) => sections[id]),
+      ...extraPrompt.body.map(String)
+    ].filter((text) => text.trim()).join('\n\n');
   }
-  return parts.join('\n');
+
+  // ── 附加模式：内置全段 + 按段名覆盖 + 末尾追加 ──
+  const attach = extraPrompt?.mode === 'attach' ? extraPrompt : null;
+  for (const [id, text] of Object.entries(attach?.override ?? {})) {
+    // 未知段名与框架契约段都在**装载时**就被拒了（`ExtrasRuntime` 的校验）；这里是第二道，
+    // 因为"覆盖一个不存在的段落"不会有任何报错，表现是"配了、什么都没发生"。
+    if (!(SYSTEM_SECTION_IDS as readonly string[]).includes(id)) continue;
+    if (SYSTEM_FRAMEWORK_SECTIONS.includes(id as SystemSectionId)) continue;
+    sections[id as SystemSectionId] = text == null ? '' : String(text);
+  }
+  return [
+    ...SYSTEM_SECTION_IDS.map((id) => sections[id]),
+    ...(attach?.append ?? []).map(String)
+  ].filter((text) => text.trim()).join('\n\n');
 }
 
 // ── 用户消息 ─────────────────────────────────────────────────────────────

@@ -17,7 +17,10 @@ import { ROOT, load, stripComments } from './lib/src.mjs';
 dataDir('qqagent-slash-');
 const { ok, done } = checker();
 
-const { isSlashCommand, handleSlashCommand } = await load('web/onebot/slash-commands.js');
+const { createSlashCommands } = await load('web/onebot/slash-commands.js');
+// 命令分发器现在是**工厂**：命令表里还有扩展贡献的命令，而"谁在里面"会随装载/接管状态变，
+// 所以要现算。本段先用一张**只有主流程命令**的表 —— 扩展那部分在第 4 段单独验。
+const { isSlashCommand, handleSlashCommand } = createSlashCommands();
 
 /** 读**源码**（不是 dist 产物）。 */
 const readSource = (rel) => fs.readFileSync(path.join(ROOT, 'src', rel), 'utf8');
@@ -173,7 +176,147 @@ ok('命令表按顺序匹配、先命中的先处理（`isSlashCommand` 与 `han
   isSlashCommand('/画 一只猫') === true
   && isSlashCommand('/转写 https://example.com/a.mp4') === true);
 
-// ── 3. 判据只有一份（这条是这一层唯一能被机检的结构性质）─────────
+// ── 4. 扩展命令：走同一只外壳，且遮蔽不了内置；接管时主流程命令让位但 `/能力` 留着 ──
+//
+// 这一段的每一件事都**不会报错**地坏掉：外壳漏了 → 回执发不出去；顺序反了 → 内置被遮蔽；
+// 接管时把 `/能力` 一起换掉 → 装得上、卸不掉（死锁）。所以逐条钉。
+console.log('\n── 扩展命令与接管模式 ──');
+{
+  const extrasPort = {
+    rows: [{ id: 'fake', title: '假扩展', displayDesc: '', mode: 'attach', enabled: true, loaded: false }],
+    loads: [], unloads: [],
+    list() { return this.rows; },
+    async load(id) { this.loads.push(id); return { ok: true, note: `已加载「${id}」` }; },
+    async unload(id) { this.unloads.push(id); return { ok: true, note: `已卸载「${id}」` }; }
+  };
+
+  const extraCommands = {
+    '/天气': {
+      name: '/天气',
+      match: (text) => /^\/天气(?:\s|$)/u.test(text),
+      run: async (input) => `天气：${input.text.slice(3).trim() || '（没说地方）'}`
+    }
+  };
+
+  const { deps: d, log } = deps();
+  const attach = createSlashCommands(() => ({ override: false, commands: [extraCommands['/天气']] }), extrasPort);
+  ok('附加模式：扩展命令被认出来，且走的是同一个 runCommand 外壳（回执由命令层发出）',
+    attach.isSlashCommand('/天气 北京') === true
+    && await attach.handleSlashCommand(input('/天气 北京'), d) === true
+    && String(log.sent.at(-1)?.message) === '天气：北京',
+    JSON.stringify(log.sent));
+
+  {
+    const { deps: d2 } = deps({ failSend: true });
+    let threw = false;
+    try { await attach.handleSlashCommand(input('/天气 北京'), d2); } catch { threw = true; }
+    ok('扩展命令的回执发送失败**也不抛**（与内置命令同一只外壳）', threw === false);
+  }
+  {
+    const { deps: dThrow, log: logThrow } = deps();
+    const throwing = createSlashCommands(() => ({
+      override: false,
+      commands: [{
+        name: '/爆炸', match: (text) => /^\/爆炸(?:\s|$)/u.test(text),
+        run: async () => { throw new Error('用法：/爆炸 <参数>'); }
+      }]
+    }), extrasPort);
+    await throwing.handleSlashCommand(input('/爆炸'), dThrow);
+    ok('扩展命令抛出的中文**原样**进群（不吞成"命令执行失败"）',
+      String(logThrow.sent.at(-1)?.message) === '用法：/爆炸 <参数>', JSON.stringify(logThrow.sent));
+  }
+
+  // 内置命令在前 ⇒ 扩展声明同样的文案也遮蔽不了它（那条扩展命令是死代码，而不是覆盖）。
+  const shadow = createSlashCommands(() => ({
+    override: false,
+    commands: [{ ...extraCommands['/天气'], name: '/画', match: (text) => /^\/画(?:\s|$)/u.test(text) }]
+  }), extrasPort);
+  {
+    const { deps: d3, log: log3 } = deps();
+    await shadow.handleSlashCommand(input('/画 一只猫'), d3);
+    ok('扩展遮蔽不了内置：`/画` 仍然走内置那条（入队而不是回一句扩展文案）',
+      log3.enqueued.length === 1 && log3.enqueued[0].via === 'imageGen', JSON.stringify(log3.enqueued));
+  }
+
+  // 接管模式：主流程三条命令让位，**但 `/能力` 必须留着** —— 它是卸载接管者的唯一入口。
+  const override = createSlashCommands(() => ({ override: true, commands: [] }), extrasPort);
+  ok('接管模式：主流程的三条功能命令让位',
+    override.isSlashCommand('/转写 https://e.com/a.mp4') === false
+    && override.isSlashCommand('/画 一只猫') === false
+    && override.isSlashCommand('/漫画 12345') === false);
+  ok('接管模式：`/能力` 仍然认（否则装得上、卸不掉）', override.isSlashCommand('/能力') === true);
+  {
+    const { deps: d4, log: log4 } = deps();
+    await override.handleSlashCommand(input('/能力 卸载 anything'), d4);
+    ok('接管模式下 `/能力 卸载` 真的调到了扩展运行时',
+      extrasPort.unloads.includes('anything'), JSON.stringify(extrasPort.unloads));
+    ok('`/能力 加载/卸载` 的回执把运行时那句话原样带回群里',
+      String(log4.sent.at(-1)?.message).includes('已卸载'), JSON.stringify(log4.sent));
+  }
+  {
+    const { deps: d5, log: log5 } = deps();
+    await override.handleSlashCommand(input('/能力'), d5);
+    ok('`/能力` 无子命令时列出注册表与装载状态',
+      String(log5.sent.at(-1)?.message).includes('假扩展'), JSON.stringify(log5.sent));
+  }
+  {
+    const { deps: d6, log: log6 } = deps();
+    await override.handleSlashCommand(input('/能力 加载'), d6);
+    ok('`/能力 加载` 没给 id 时只回用法（不去调运行时）',
+      String(log6.sent.at(-1)?.message).includes('用法'), JSON.stringify(log6.sent));
+  }
+  {
+    const { deps: d7, log: log7 } = deps();   // 注意：这份 deps 里没有 extras
+    const bare = createSlashCommands();
+    await bare.handleSlashCommand(input('/能力'), d7);
+    ok('没有扩展运行时端口时 `/能力` 如实说不可用，不假装成功',
+      String(log7.sent.at(-1)?.message).includes('不可用'), JSON.stringify(log7.sent));
+  }
+
+  // ── 别名（可选）：命中别名时，分发层把开头那个词换成主命令词再交给处理函数 ──
+  {
+    const before = extrasPort.unloads.length;
+    const { deps: dAlias, log: logAlias } = deps();
+    const plain = createSlashCommands(() => ({ override: false, commands: [] }), extrasPort);
+    ok('内置命令的别名被认出来（`/能力` 的另一个叫法）',
+      plain.isSlashCommand('/扩展') === true && plain.isSlashCommand('/扩展 加载 x') === true);
+    await plain.handleSlashCommand(input('/扩展 卸载 anything'), dAlias);
+    ok('内置命令命中别名后**照样解析得出子命令**（说明被规范回了主命令词）',
+      extrasPort.unloads.length === before + 1, JSON.stringify(extrasPort.unloads));
+    ok('别名同样要跟边界（`/扩展包` 不是命令）', plain.isSlashCommand('/扩展包') === false);
+  }
+  {
+    // 用法提示里印的仍是主命令词 —— 别名只是"另一个叫法"，提示该给一个肯定能用的写法。
+    const { deps: dUsage, log: logUsage } = deps();
+    const plain = createSlashCommands(() => ({ override: false, commands: [] }), extrasPort);
+    await plain.handleSlashCommand(input('/扩展 加载'), dUsage);
+    ok('用法提示里印的是主命令词 `/能力`（别名不改文案）',
+      String(logUsage.sent.at(-1)?.message).includes('/能力 加载'), JSON.stringify(logUsage.sent));
+  }
+  {
+    const { deps: d, log } = deps();
+    const withAlias = createSlashCommands(() => ({
+      override: false,
+      commands: [{
+        name: '/天气',
+        aliases: ['/weather', '/tq'],
+        match: (text) => /^\/天气(?:\s|$)/u.test(text),
+        // 只认主命令词 —— 别名若没被规范回来，这里会拿到 `/weather 北京`、参数解析不出来。
+        run: async (inputText) => `主词=${inputText.text.slice(0, 3)} 参数=${inputText.text.replace(/^\/天气/u, '').trim()}`
+      }]
+    }), extrasPort);
+    ok('扩展命令：声明的别名被认出来',
+      withAlias.isSlashCommand('/weather 北京') === true && withAlias.isSlashCommand('/tq 北京') === true
+      && withAlias.isSlashCommand('/weather') === true);
+    ok('扩展命令：别名同样要跟边界（`/weatherx`、`/tqx` 都不是命令）',
+      withAlias.isSlashCommand('/weatherx') === false && withAlias.isSlashCommand('/tqx') === false);
+    await withAlias.handleSlashCommand(input('/weather 北京'), d);
+    ok('扩展命令：命中别名时把开头那个词换成主命令词再交给处理函数',
+      String(log.sent.at(-1)?.message) === '主词=/天气 参数=北京', JSON.stringify(log.sent));
+  }
+}
+
+// ── 5. 判据只有一份（这条是这一层唯一能被机检的结构性质）─────────
 {
   const ingestSrc = stripComments(readSource('web/onebot/ingest.ts'));
   const commandsSrc = stripComments(readSource('web/onebot/slash-commands.ts'));
@@ -184,7 +327,8 @@ ok('命令表按顺序匹配、先命中的先处理（`isSlashCommand` 与 `han
   ok('slash-commands.ts 里两条命令的判据都在（`[视频]` 那条分支也还在）',
     commandsSrc.includes('^\\/转写') && commandsSrc.includes('^\\/画') && commandsSrc.includes('\\[视频\\]'));
   ok('ingest.ts 只用同一个判据决定 wakeEligible（命令 → 已读历史，不进窗口）',
-    /wakeEligible: !slashCommand/.test(ingestSrc) && /const slashCommand = isSlashCommand\(commandText\)/.test(ingestSrc));
+    /wakeEligible: !slashCommand/.test(ingestSrc)
+    && /const slashCommand = commands\.isSlashCommand\(commandText\)/.test(ingestSrc));
   ok('命令表存的是**函数引用**，没有按键分发（与装配清单同一形态）',
     !/COMMANDS\[/.test(commandsSrc) && !/COMMANDS\.get\(/.test(commandsSrc));
 }

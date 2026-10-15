@@ -209,7 +209,8 @@ const EXPECTED_ENTRY_IDS = [
   ['jmcomic.cleanup', 'jmcomic.worker'],
   ['transcription.worker'],
   ['image-source.pic-worker'],
-  ['image-gen.worker']
+  ['image-gen.worker'],
+  ['extras.runtime']
 ];
 ok('清单的 entry 顺序与 id 归属（手工登记：**改这里的顺序就是改行为**）',
   JSON.stringify(LIFECYCLE.map((e) => e.ids)) === JSON.stringify(EXPECTED_ENTRY_IDS),
@@ -218,8 +219,8 @@ ok('手工登记的序列长度与清单一致（新增 entry 必须同步登记
   EXPECTED_ENTRY_IDS.length === LIFECYCLE.length,
   `清单 ${LIFECYCLE.length} 条、登记 ${EXPECTED_ENTRY_IDS.length} 条`);
 
-const EXPECTED_START = ['onebot.connect', 'hotSearch.start', 'proactive.start', 'compact.start', 'priceFeed.init', 'jmcomic.init', 'transcription.start', 'imageSource.start', 'imageGen.start'];
-const EXPECTED_STOP = ['imageGen.stop', 'imageSource.stop', 'transcription.stop', 'jmcomic.stop', 'priceFeed.stop', 'compact.stop', 'proactive.stop', 'hotSearch.stop', 'onebot.close'];
+const EXPECTED_START = ['onebot.connect', 'hotSearch.start', 'proactive.start', 'compact.start', 'priceFeed.init', 'jmcomic.init', 'transcription.start', 'imageSource.start', 'imageGen.start', 'extras.start'];
+const EXPECTED_STOP = ['extras.stop', 'imageGen.stop', 'imageSource.stop', 'transcription.stop', 'jmcomic.stop', 'priceFeed.stop', 'compact.stop', 'proactive.stop', 'hotSearch.stop', 'onebot.close'];
 
 function spyDeps(config, seq) {
   return {
@@ -245,7 +246,8 @@ function spyDeps(config, seq) {
     transcription: { start: () => seq.push('transcription.start'), stop: () => seq.push('transcription.stop') },
     imageGen: { start: () => seq.push('imageGen.start'), stop: () => seq.push('imageGen.stop') },
     hotSearch: { start: () => seq.push('hotSearch.start'), stop: () => seq.push('hotSearch.stop') },
-    imageSource: { start: () => seq.push('imageSource.start'), stop: () => seq.push('imageSource.stop') }
+    imageSource: { start: () => seq.push('imageSource.start'), stop: () => seq.push('imageSource.stop') },
+    extras: { start: () => seq.push('extras.start'), stop: () => seq.push('extras.stop') }
   };
 }
 
@@ -281,7 +283,7 @@ ok('spy deps 与 lifecycle.ts 真正读的 `deps.*` 逐一对得上（写错属�
 const allOn = { proactive: { enabled: true }, compact: { enabled: true }, api: { priceRemoteUrl: 'http://x/p.json' }, imageSource: { enabled: true } };
 const seq = [];
 await startLifecycle(spyDeps(allOn, seq));
-ok('startLifecycle 按清单顺序启动（connect → 热搜 → 冒泡 → 压缩 → 价格表 → jmcomic → 转写 → 搜图 worker → 出图）',
+ok('startLifecycle 按清单顺序启动（connect → 热搜 → 冒泡 → 压缩 → 价格表 → jmcomic → 转写 → 搜图 worker → 出图 → 扩展运行时）',
   JSON.stringify(seq) === JSON.stringify(EXPECTED_START),
   `实际 ${JSON.stringify(seq)}`);
 ok('全开时每一条 entry 都真的被调用（不是"顺序对但漏了谁"）',
@@ -298,8 +300,8 @@ ok('onebot.close() 是逆序里最后一个（"停长期任务排在 onebot.clos
 
 const seqOff = [];
 await startLifecycle(spyDeps({ proactive: { enabled: false }, compact: { enabled: false }, api: {} }, seqOff));
-ok('闸门关着的那三条不进启动序列，恒真的六条照常（imageSource 这里缺席 = undefined，也不许开）',
-  JSON.stringify(seqOff) === JSON.stringify(['onebot.connect', 'hotSearch.start', 'priceFeed.init(空 URL)', 'jmcomic.init', 'transcription.start', 'imageGen.start']),
+ok('闸门关着的那三条不进启动序列，恒真的七条照常（imageSource 这里缺席 = undefined，也不许开）',
+  JSON.stringify(seqOff) === JSON.stringify(['onebot.connect', 'hotSearch.start', 'priceFeed.init(空 URL)', 'jmcomic.init', 'transcription.start', 'imageGen.start', 'extras.start']),
   `实际 ${JSON.stringify(seqOff)}`);
 
 // 接线事实（文本）。函数体按 `\n  }` 收尾切：start/stop 都嵌在 createApp 里，本体缩进更深。

@@ -32,6 +32,13 @@ src/
 │  ├─ tools/         工具统一入口、领域分组与执行
 │  ├─ maintenance/   主动冒泡、历史压缩与记忆整理
 │  └─ shared/        Agent 内共享类型与解析器
+├─ extra/      扩展能力：声明静态、按需装载、空闲 dispose（不识别 web）
+│  ├─ types.ts        扩展契约（ExtraSpec / ExtraRuntime / ExtraCommandSpec / ExtraPromptContribution），纯类型
+│  ├─ prompts.ts      扩展的固定指令（EXTRA_PROMPT_TEXT 按工具名 / EXTRA_PROMPT_SECTIONS 按扩展 id）
+│  │                  —— **必须无 import**，是全仓库唯一的反向依赖例外（见 §2 下方）
+│  ├─ registry.ts     静态清单，每行 { ...xSpec, load: () => import('./x/impl.js') }
+│  ├─ runtime.ts      ExtrasRuntime：装载表 + 工具表/命令表/提示词计划三张派生表 + 校验
+│  └─ clock/          参考扩展：spec.ts（纯数据，含一条 `/时间` 命令）+ impl.ts（按需加载的实现）
 └─ web/        组装根、HTTP/SSE 表面、领域路由、OneBot 接入侧与长期任务
    ├─ app.ts            组装根：建对象图、接 OneBot 入站回调、起 HTTP/SSE、启停长期任务
    ├─ server.ts         headless 入口（带副作用：import 即建 app、起服务、装信号处理器）
@@ -43,7 +50,7 @@ src/
    │  ├─ http.ts           请求/响应原语
    │  ├─ router.ts         路由匹配与分发
    │  └─ static-files.ts   静态文件服务
-   ├─ routes/           领域路由（8 个领域 + index）
+   ├─ routes/           领域路由（9 个领域 + index）
    ├─ onebot/           OneBot 接入侧（"那个 OneBot 端"自己的状态，与 `src/qq/` 的传输客户端分开）
    │  ├─ snowluma.ts    SnowLuma 程序目录、子进程、日志环形缓冲、端口探活与 WebUI 地址
    │  ├─ tokens.ts      令牌桥：候选收集、401 轮换、限频与去重签名
@@ -72,10 +79,14 @@ stickers
   ↓
 agent
   ↓
+extra
+  ↓
 web
 ```
 
 `scripts/check-layers.mjs` 会阻止反向依赖。领域共享类型分别放在各自的 `types.ts` 中，不建立全局巨型类型文件。
+
+`extra` 插在 `agent` 与 `web` 之间（2026-10-15 加的档，`web` 因此从 4 顶到 5），于是机检自动给出三条规则：`extra → {core, media, chat, qq, agent}` 合法；`web → extra` 合法（组装根 import 注册表）；**`extra → web` 被拦**（扩展不认识 web，组装是 web 的活，这条同时排除了 web ↔ extra 成环）。反方向同理：`agent → extra` 也是反向依赖，所以扩展工具的 schema 由 `web/app.ts` 递进 `Orchestrator`（`OrchestratorDependencies.extraToolDefs`），`buildToolDefs(extra)` 只负责拼。完整设计见 `docs/extras-design.md`。
 
 ### Python 工具（仓库根 `python-tools/`）
 
@@ -204,6 +215,16 @@ OneBot 入站事件
 system/user 固定段、工具及参数 description、历史压缩和记忆整理指令；
 `src/agent/prompting/prompt-builder.ts` 只负责动态变量、聊天记录格式化、条件选择与预算裁剪。
 UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词目录。
+
+工具 description 在这份目录里分成**两块**：`TOOL_PROMPT_TEXT`（每一项对应 `agent/tools/index.ts` 里内置拼装的一个工具，名字与顺序是硬约束）与 `src/extra/prompts.ts` 的 `EXTRA_PROMPT_TEXT`（`src/extra/` 的扩展工具，随时可加）。`TOOL_PROMPT_TEXT` 里为扩展留的那几行是**转发到 `EXTRA_PROMPT_TEXT` 的同一个对象引用**，于是 `PROMPT_CATALOG.tools.<工具名>` 对两类工具是同一条取法。完整理由见 `docs/extras-design.md` §3.1 与 §5。
+
+**system prompt 现在是"段名 → 正文"**：段名与段序由 `SYSTEM_SECTION_IDS` 定（在 `prompt_catalog.ts`，agent 与 extra 都 import 得到），段落之间用一个空行分隔。这样扩展才能**按段名覆盖**某一段。两段**框架契约**（`security` 安全规则、`toolProtocol` 工具调用协议）任何模式下都不许被扩展覆盖，接管模式下也只有它们强制保留 —— 它们不是"功能"，是运行契约。⚠️ 段序断言（`indexOf` 递增）**证明不了分隔符**：实测把 `join('\n\n')` 改成 `join('\n')` 之后 59 条断言全绿，所以另有一条专钉分隔符的断言。
+
+`src/extra/prompts.ts` 留在 `src/extra/` 里，代价是 `core/prompt-catalog.ts → extra/prompts.js` 成为**全仓库唯一一条低层 import 高层**——它登记在 `scripts/check-layers.mjs` 的 `LAYER_ALLOW` 里，且闸门自带守卫：这条例外的目标必须是叶子模块（出现任何相对 import 直接报错）。那条依赖之所以不成环，全靠这一点。
+
+扩展的**装载入口是人**（群里的 `/能力` 命令），模型一个装载入口都没有 —— 未装载的扩展，它的工具不在工具表里。所以 `host.toolDefs` 是 getter（每次运行现读），语义是"装载后下一次运行生效"；命令表则按"已启用"（判据是 spec 里的静态纯函数，`isSlashCommand()` 不可能去问异步的装载表）。这条不对称是刻意的，完整推导见 `docs/extras-design.md` §2。
+
+斜杠命令支持**可选别名**（`aliases`，内置与扩展都有）；判定与**规范化**都在 `web/onebot/slash-commands.ts` 一处 —— 命中别名时把开头那个词换成主命令词再交给处理函数，于是每个解析器只认识自己那一个词。**`SlashCommand.name` 因此必须是真能敲的那个词**（`/转写`），不能是内部标签。见 `docs/extras-design.md` §3.3。
 
 工具**结果**串通常是动态返回值（含错误文案），留在各自工具文件里；唯一例外是
 `transcribe_video` 的回执话术（`TOOL_PROMPT_TEXT.transcribe_video.receipt`）：它没有任何动态成分，

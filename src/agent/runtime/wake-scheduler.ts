@@ -9,6 +9,7 @@ import { errorMessage } from '../shared/json-parse.js';
 import { RuntimeStateRegistry } from './runtime-state.js';
 import type { AgentRunOptions } from './agent-runner.js';
 import type { AppEmit, SessionEndStatus } from '../../core/events.js';
+import type { PromptPlan } from '../../core/prompt-catalog.js';
 import type { ChatMessage, SessionRecord } from '../../chat/types.js';
 import type { ChatStore } from '../../chat/store.js';
 import type { MemoryStore } from '../../chat/memory.js';
@@ -30,7 +31,13 @@ export interface WakeSchedulerDependencies {
   sessions: SessionRegistry;
   onebot: OneBotClient;
   windows: ContextWindowRegistry;
-  toolDefs: ToolDefinition[];
+  /**
+   * 工具表的**来源**（每次运行现读一次）。是函数而不是数组：扩展由 `/能力` 命令装载/卸载，
+   * 而**未装载的扩展工具不在表里** —— 见 `extra/runtime.ts` 与 `OrchestratorDependencies.toolDefs`。
+   */
+  toolDefs: () => readonly ToolDefinition[];
+  /** 扩展的提示词计划（可选）。同样每次运行现读 —— 它取决于此刻装载了哪些扩展。 */
+  extraPrompt?: () => PromptPlan;
   emit: AppEmit;
   getChatName(groupId: string | number): Promise<string>;
   maybeConsolidateMemory(chatKey: string): void;
@@ -50,7 +57,6 @@ export class WakeScheduler {
   readonly sessions: SessionRegistry;
   readonly onebot: OneBotClient;
   readonly windows: ContextWindowRegistry;
-  readonly toolDefs: ToolDefinition[];
   readonly emit: AppEmit;
   readonly transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
   readonly imageGen?: Pick<ImageGenQueue, 'enqueue'>;
@@ -72,13 +78,28 @@ export class WakeScheduler {
     this.sessions = deps.sessions;
     this.onebot = deps.onebot;
     this.windows = deps.windows;
-    this.toolDefs = deps.toolDefs;
     this.emit = deps.emit;
     this.transcription = deps.transcription;
     this.imageGen = deps.imageGen;
     this.hotSearch = deps.hotSearch;
     this.runtimeState = new RuntimeStateRegistry(this.sender);
     this.chatStates = this.runtimeState.states;
+  }
+
+  /**
+   * 工具表。**getter 而不是字段**：扩展由 `/能力` 命令装载/卸载，而**未装载的扩展工具不在表里**
+   * （"禁止模型自行加载"那条取舍）。`agent-runner` 在每次运行开头读一次这里，所以语义是
+   * "装载后下一次运行生效" —— 而不是"对话中途变"。
+   *
+   * 代价知情：工具表是请求前缀的一部分，装载/卸载各打散一次提示词缓存。频次由人控制。
+   */
+  get toolDefs(): ToolDefinition[] {
+    return [...this.deps.toolDefs()];
+  }
+
+  /** 扩展的提示词计划（缺省 = 没有扩展参与）。每次运行开头现读一次。 */
+  get extraPrompt(): (() => PromptPlan) | undefined {
+    return this.deps.extraPrompt;
   }
 
   get aborted(): boolean {

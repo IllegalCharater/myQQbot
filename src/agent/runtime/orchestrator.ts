@@ -59,7 +59,7 @@ export class Orchestrator implements AgentControlPort {
   /** 群名缓存：groupId -> name，只有 `getChatName` / `#chatName` 用，不对类外暴露。 */
   #chatNameCache = new Map<string, string>();
 
-  constructor({ store, memory, stickers, sender, sessions, onebot, emit, windows = null, transcription, imageGen, hotSearch }: OrchestratorDependencies) {
+  constructor({ store, memory, stickers, sender, sessions, onebot, emit, windows = null, transcription, imageGen, hotSearch, toolDefs, extraPrompt }: OrchestratorDependencies) {
     this.store = store;
     this.memory = memory;
     this.stickers = stickers;
@@ -67,9 +67,11 @@ export class Orchestrator implements AgentControlPort {
     this.sessions = sessions;
     this.onebot = onebot;
     this.emit = emit;   // S10d：不再兜底建空总线，缺了编译不过（见 shared/types.ts 的说明）
-    // 工具定义只在这里建一次、只递给下面的 WakeScheduler（它是 `AgentRunnerHost`，
-    // `runAgent(this, …)` 里的 `host` 就是 scheduler，不是本类）。所以它不需要是字段。
-    const toolDefs = buildToolDefs();
+    // 工具表**不在这里建数组**了，只把"从哪儿取"递给下面的 WakeScheduler（它是 `AgentRunnerHost`，
+    // `runAgent(this, …)` 里的 `host` 就是 scheduler，不是本类）。
+    // `toolDefs` 由 `web/app.ts` 递进来（扩展装载后工具表会变）—— 本层不 import `extra/`，
+    // 见 `OrchestratorDependencies.toolDefs` 的说明。缺省是纯内置那份，既有无参构造点不受影响。
+    const toolDefsSource = toolDefs ?? (() => buildToolDefs());
 
     // jmcomic 队列不在构造函数里启动（S10b）：长期任务一律在 app.start() 起、app.stop() 停，
     // 见 src/web/app.ts 与 AGENTS.md「事件与长期任务边界」。
@@ -109,7 +111,8 @@ export class Orchestrator implements AgentControlPort {
       sessions: this.sessions,
       onebot: this.onebot,
       windows: this.windows,
-      toolDefs,
+      toolDefs: toolDefsSource,
+      extraPrompt,
       emit: (event, payload) => this.emit(event, payload),
       getChatName: (groupId) => this.getChatName(groupId),
       // 群友印象自动整理：触发条件是"印象条数超过阈值 **且** 距上次整理超过冷却时间"，

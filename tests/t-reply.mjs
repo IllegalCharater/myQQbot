@@ -76,6 +76,79 @@ const sp = buildSystemPrompt();
 ok('系统提示写明"没有 #数字 的消息引用不了"', /没有 #数字 的引用不了/.test(sp));
 ok('系统提示明确禁止拿别的消息的 id 凑', /不要拿别的消息的 #数字 去凑/.test(sp));
 ok('系统提示点名拍一拍就是这类', /拍一拍/.test(sp) && /根本没有消息 id/.test(sp));
+
+// ── system prompt 的**段名与段序**（外加扩展的提示词计划）─────────────────────
+// 这一轮把 `buildSystemPrompt` 从"匿名数组 + '' 分隔"改成了"段名 → 正文"，扩展才能按名字覆盖。
+// 改法是否等价**靠这几条守着**：段序固定、空计划是**彻底的空操作**、框架契约段动不了。
+// （与改动前逐字一致的对照在改造当次用一次性脚本跑过 8 组配置，全等 —— 那是一次性探针，不进套件。）
+{
+  const { SYSTEM_SECTION_IDS, SYSTEM_FRAMEWORK_SECTIONS } = await load('core/prompt-catalog.js');
+
+  ok('不带 extraPrompt 与带一张空计划，输出逐字相同（空计划是彻底的空操作）',
+    buildSystemPrompt() === buildSystemPrompt({ extraPrompt: { mode: 'attach', append: [], override: {} } }));
+
+  // 段序：拿每段里一个稳定的特征串，断言它们在输出里的下标严格递增。
+  // 特征串是各段的**标题行**（`【…】`），它们只在对应那一段里出现。
+  const markers = [
+    ['identity', '你是「'],
+    ['persona', '【角色设定'],
+    ['security', '【安全规则'],
+    ['toolProtocol', '【工作方式'],
+    ['antiAiFlavor', '【反 AI 味'],
+    ['speakOrNot', '【该说/不该说】'],
+    ['humanRhythm', '【像真人一样】'],
+    ['quoteAndAt', '【引用与点名'],
+    ['memoryRules', '【轻量记忆'],
+    ['stickerRules', '【表情包策略'],
+    ['qqSceneRules', '【QQ 场景规则】'],
+    ['reportBan', '【发送与汇报禁令']
+  ];
+  const positions = markers.map(([, marker]) => sp.indexOf(marker));
+  ok('system prompt 的段序与 SYSTEM_SECTION_IDS 一致（各段特征串的下标递增）',
+    positions.every((at) => at >= 0) && positions.every((at, i) => i === 0 || at > positions[i - 1]),
+    JSON.stringify(markers.map(([id], i) => [id, positions[i]])));
+
+  // ⚠️ 上面那条**只证明顺序**，证明不了分隔符 —— 把 `join('\n\n')` 改成 `join('\n')`，
+  // `indexOf` 照样递增（实测：那一改之下本文件 59 条断言全绿）。所以分隔符必须单独钉：
+  // 它是提示词的形状本身，改掉之后所有段挤成一坨，而**没有任何行为断言会红**。
+  ok('段与段之间是**空行**分隔（改掉分隔符会让所有段挤成一坨，且不报任何错）',
+    ['【角色设定', '【安全规则', '【工作方式', '【QQ 场景规则】', '【发送与汇报禁令']
+      .every((marker) => sp.includes(`\n\n${marker}`)),
+    '分隔符不是空行了 —— 段序断言用的是 indexOf 递增，单换行照样通过');
+  ok('框架契约两段（安全规则 / 工具协议）都在段名表里',
+    SYSTEM_FRAMEWORK_SECTIONS.every((id) => SYSTEM_SECTION_IDS.includes(id)));
+
+  // 附加模式：追加段落接在**末尾**（这样前缀缓存能命中到追加点之前）。
+  const appended = buildSystemPrompt({ extraPrompt: { mode: 'attach', append: ['【尾巴】就这一句。'] } });
+  ok('扩展的追加段落接在末尾，且原有内容一字不动',
+    appended.endsWith('【尾巴】就这一句。') && appended.startsWith(sp), String(appended.slice(-40)));
+
+  // 附加模式：按段名覆盖。
+  const overridden = buildSystemPrompt({ extraPrompt: { mode: 'attach', override: { reportBan: '【换掉了】' } } });
+  ok('按段名覆盖：那一段被换掉，其余一字不动',
+    overridden.includes('【换掉了】') && !overridden.includes('举报') && overridden.startsWith('你是「'),
+    String(overridden.slice(-60)));
+
+  // 框架契约段**不许**被覆盖（装载时已经拒过一次，这里是第二道 —— 万一计划是别处拼出来的）。
+  const hacked = buildSystemPrompt({
+    extraPrompt: { mode: 'attach', override: { security: '【我说了算】', toolProtocol: '【也算】' } }
+  });
+  ok('框架契约段即使塞进计划里也覆盖不了（安全规则与工具协议原样保留）',
+    hacked === sp, '安全规则/工具协议被改了 —— 那是运行契约，不是功能');
+
+  ok('未知段名被忽略（不会凭空多出一段）',
+    buildSystemPrompt({ extraPrompt: { mode: 'attach', override: { 不存在的段: '【凭空】' } } }) === sp);
+
+  // 接管模式：主流程的模型侧让位，**只剩框架契约两段 + 扩展给的主体**。
+  const takeover = buildSystemPrompt({ extraPrompt: { mode: 'override', body: ['【你现在是别的】'] } });
+  ok('接管模式：只剩框架契约两段 + 扩展的主体',
+    takeover.includes('【安全规则') && takeover.includes('【工作方式') && takeover.endsWith('【你现在是别的】'),
+    takeover.slice(0, 80));
+  ok('接管模式：主流程的其余段落一概不注入（identity 的自我介绍也走了）',
+    !takeover.includes('你是「') && !takeover.includes('【管理员附加规则】'),
+    takeover.slice(0, 120));
+}
+
 const up = buildUserPrompt({
   chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
   triggerEntries: [store.recent(KEY, { limit: 1 })[0]], store, memory: { formatForPrompt: () => '' },

@@ -15,6 +15,10 @@ const {
 const { isBilibiliUrl, bilibiliUrlFromCandidates } = await load('media/media-source/parsers/bilibili.js');
 const { cardPayloadCandidates, xmlPayloadCandidates } = await load('media/media-source/providers/card-payload.js');
 const { DEFAULT_CONFIG, updateConfig } = await load('core/config.js');
+const { createSlashCommands } = await load('web/onebot/slash-commands.js');
+// ingest 现在从 deps 拿命令分发器（命令表里可能有扩展贡献的命令，装哪个要现算）。
+// 本套件只关心转写与卡片，用一张**只有主流程命令**的表即可。
+const commands = createSlashCommands();
 
 const rejected = [
   'file:///etc/passwd', 'data:text/plain,hello', 'ftp://example.com/a.mp4',
@@ -118,6 +122,7 @@ const forwardedToAgent = [];
 const commandConfig = structuredClone(DEFAULT_CONFIG);
 commandConfig.allowAllWhenEmpty = true;
 const ingest = createIngest({
+  commands,
   onebot: { selfId: '999999' },
   store: commandStore,
   sender: { sendTextBatch: async (...args) => { commandReplies.push(args); return {}; } },
@@ -162,6 +167,7 @@ const bilibiliCardUrl = 'https://b23.tv/fixture-card';
 const cardCommands = [];
 const cardReplies = [];
 const cardIngest = createIngest({
+  commands,
   onebot: {
     selfId: '999999',
     getMsg: async () => ({
@@ -209,6 +215,7 @@ async function replyIngestFor(groupId, { replyId = '789', getMsg, segments }) {
   const store = new ChatStore();
   const forwarded = [];
   const ingest = createIngest({
+    commands,
     onebot: { selfId: '999999', getMsg },
     store,
     sender: { sendTextBatch: async () => ({}) },
@@ -258,16 +265,17 @@ ok('引用预览按上限截断，不把整段正文搬进每一条引用它的�
 // 这三种形态的差异只在"链接藏在哪个字段/哪种段里"（老卡片 jumpUrl / 小程序 qqdocurl / xml 正文），
 // 对下游（媒体别名 → /转写 与 transcribe_video）应当是同一件事。
 async function cardIngestFor(groupId, rawSegments) {
-  const commands = [];
+  const enqueued = [];
   const replies = [];
   const ingest = createIngest({
+    commands,
     onebot: { selfId: '999999', getMsg: async () => ({ sender: { nickname: '卡片发送者' }, message: rawSegments }) },
     store: new ChatStore(),
     sender: { sendTextBatch: async (...args) => { replies.push(args); return {}; } },
     orchestrator: { onIncoming: () => { throw new Error('显式转写命令不应进入 Agent'); } },
     transcription: {
       enqueue: (input) => {
-        commands.push(input);
+        enqueued.push(input);
         return { id: 'card-task-fixture', chatKey: input.chatKey, status: 'queued', createdAt: 1, updatedAt: 1 };
       }
     },
@@ -280,7 +288,7 @@ async function cardIngestFor(groupId, rawSegments) {
     message_id: 791, sender: { user_id: 456, nickname: '测试者' },
     message: [{ type: 'reply', data: { id: '789' } }, { type: 'text', data: { text: '/转写' } }]
   });
-  return { commands, replies };
+  return { commands: enqueued, replies };
 }
 
 const miniappCard = await cardIngestFor(124, [{
@@ -317,6 +325,7 @@ let releaseReply;
 const replyGate = new Promise((resolve) => { releaseReply = resolve; });
 const orderedForwarded = [];
 const orderedIngest = createIngest({
+  commands,
   onebot: {
     selfId: '999999',
     getMsg: async () => replyGate

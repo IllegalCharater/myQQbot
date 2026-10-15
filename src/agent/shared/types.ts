@@ -9,6 +9,7 @@ import type { OneBotClient } from '../../qq/onebot.js';
 import type { SessionRegistry } from '../../chat/sessions.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
 import type { AppEmit } from '../../core/events.js';
+import type { PromptPlan } from '../../core/prompt-catalog.js';
 import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
 import type { ImageGenQueue } from '../../media/image-gen/index.js';
 import type { HotSearchScheduler } from '../../media/hot-search/scheduler.js';
@@ -99,6 +100,22 @@ export interface OrchestratorDependencies {
   transcription?: Pick<VideoTranscriptionQueue, 'enqueue'>;
   imageGen?: Pick<ImageGenQueue, 'enqueue'>;
   hotSearch?: Pick<HotSearchScheduler, 'readTopics'>;
+  /**
+   * **工具表的来源**，每次运行现读一次（缺省 = 纯内置 `buildToolDefs()`）。
+   *
+   * 由 `web/app.ts` 递进来，而不是本层去 import `extra/` —— `extra` 的层级比 `agent` 高，
+   * 反向依赖会被 `scripts/check-layers.mjs` 拦下（agent 对 extra 一无所知，这是有意的）。
+   *
+   * **为什么是函数而不是数组**：扩展由 `/能力` 命令装载/卸载，而**未装载的扩展工具不在表里**
+   * （"禁止模型自行加载"那条取舍）。`agent-runner` 在每次运行开头读一次 `host.toolDefs`，
+   * 所以语义是"装载后下一次运行生效"。可选：不传就是纯内置工具集，既有测试构造点一行都不用改。
+   */
+  toolDefs?: () => readonly ToolDefinition[];
+  /**
+   * 扩展的提示词计划（system prompt 的追加/覆盖/接管）。同样每次运行现读一次 ——
+   * 它取决于**此刻装载了哪些扩展**。缺省 = 没有扩展参与。
+   */
+  extraPrompt?: () => PromptPlan;
 }
 
 export interface PromptContext extends TriggerContext, Record<string, unknown> {

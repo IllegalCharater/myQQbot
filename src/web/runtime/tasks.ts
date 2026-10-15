@@ -45,7 +45,7 @@ export interface TaskEntry {
    * - `'Orchestrator'` / `'OneBotClient'` → 类方法，套件在原型或真实例上解析；
    * - `'price-feed'` / `'jmcomic'` / `'pic-image-search'` → 模块导出；其余名字 → 类方法。
    */
-  on: 'Orchestrator' | 'OneBotClient' | 'VideoTranscriptionQueue' | 'ImageGenQueue' | 'HotSearchScheduler' | 'price-feed' | 'jmcomic' | 'pic-image-search';
+  on: 'Orchestrator' | 'OneBotClient' | 'VideoTranscriptionQueue' | 'ImageGenQueue' | 'HotSearchScheduler' | 'ExtrasRuntime' | 'price-feed' | 'jmcomic' | 'pic-image-search';
   kind: 'method' | 'export';
   name: string;
 }
@@ -88,7 +88,8 @@ export interface LongTermTask {
 }
 
 /**
- * 10 个长期任务（原有 6 个 + 视频转写 worker + 每日热搜播报 + 搜图常驻 worker + 图像生成 worker）。**不含** `wake.debounce`：那是每会话的唤醒防抖，按 §6.1 的分界线
+ * 11 个长期任务（原有 6 个 + 视频转写 worker + 每日热搜播报 + 搜图常驻 worker + 图像生成 worker +
+ * 扩展运行时）。**不含** `wake.debounce`：那是每会话的唤醒防抖，按 §6.1 的分界线
  * （生命周期是否长于一次请求或一次会话）属于局部计时器，`tests/t-tasks.mjs` 有一条
  * 反向断言专门钉它不在表内——设计稿 §6.3 的表里把它列为第 7 行"排除"是清点时的写法，
  * 不是表的一行。
@@ -278,5 +279,35 @@ export const LONG_TERM_TASKS: LongTermTask[] = [
       '总任务预算）。stop() 清 wake、把尚未开跑的任务判失败（errorCode SHUTDOWN）、abort 在途请求，' +
       '并等 worker 收尾与临时目录清理；运行中持有进程，避免无信号退出时静默丢任务。' +
       '队列本身不持有任何计时器之外的东西（不 spawn 子进程），所以没有"孤儿进程"那类代价。'
+  },
+  {
+    id: 'extras.runtime',
+    // owner 是**实际持有那些空闲计时器的文件**（`t-tasks.mjs` 会读它、要求里面有调度调用）：
+    // TTL 的 `setTimeout` 在 `src/extra/runtime.ts` 里，不在桶/注册表里。
+    owner: 'src/extra/runtime.ts',
+    label: '扩展能力运行时（模型首次调用工具时懒加载实现，空闲到点后 dispose 释放重资源）',
+    // 无条件装配：**空载时它不持有任何东西**（没有装载中的扩展就没有计时器、没有子进程），
+    // 与 `image-gen.worker` 同一条取舍。把闸门提到这里反而会让"扩展关着"报成"扩展服务未启动"。
+    // 配置里的 `extras.enabled` 管的是**工具声明进不进工具表**（在 web/app.ts 建工具表时判），
+    // 那是另一件事，不是这个任务的开关。
+    enabledBy: null,
+    configRefresh: 'not-applicable',
+    // 空闲计时器不该把进程钉住 —— 与 price-feed / 历史压缩巡检同一姿态。
+    unref: true,
+    start: { on: 'ExtrasRuntime', kind: 'method', name: 'start' },
+    stop: { on: 'ExtrasRuntime', kind: 'method', name: 'stop' },
+    // stop 清的就是那些 TTL 句柄（`#loaded` 里每一格的 `timer`），所以"已排定但尚未触发的那一次"
+    // 真的取消得掉。**注意它不保证在途调用被中断**：走到 stop 时 `abortAll()` 已经跑完，
+    // 不会再有新的模型轮次，所以在途计数只会是 0。
+    stopCancelsPending: true,
+    conformance: 'full',
+    note: '扩展（`src/extra/`）是"声明静态、实现懒加载"的一类可选能力：工具声明由 `EXTRA_REGISTRY` 的 ' +
+      'spec 静态提供（工具表因此恒定，不打散提示词缓存），实现在模型首次调用那个工具时才 `import()`。' +
+      '空闲超过 `extras.idleUnloadMs` 就调扩展自己的 `dispose()` 放掉重资源，**工具仍留在工具表里**，' +
+      '下次调用只是再加载一次 —— 卸载对模型完全透明。' +
+      '**这张表里看不到任何扩展自己的重资源**：它们由各自的 `dispose()` 释放，而 `dispose()` 由本行 ' +
+      '这个运行时统一调度（这就是"只有一行"的原因，不是遗漏）。' +
+      '**已知边界**：Node ESM 没有模块卸载，所以卸载释放的是扩展持有的东西 + 我们持有的引用，' +
+      '模块代码本身仍在内存里 —— 没有 `dispose()` 的扩展，卸载等于什么都没做。'
   }
 ];

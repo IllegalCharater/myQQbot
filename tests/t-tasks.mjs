@@ -2,7 +2,7 @@
 //
 // 这张表的价值全在"它说的和现实是不是一回事"。所以本套件不检查表自身的形状，而是拿表里的
 // 每一条声明**去现实里核对**：
-//   1. 10 行齐全，id 集合固定（手工登记，同 t-ports 的 PORT_METHODS 模式）；
+//   1. 11 行齐全，id 集合固定（手工登记，同 t-ports 的 PORT_METHODS 模式）；
 //   2. 每行 owner 文件真实存在，且里面确实有调度调用（防"表里躺着一个不存在的任务"）；
 //   3. **[反向] 局部计时器不在表内** —— 这是设计稿 §6.1 分界线的守护，也是本套件最重要的一段：
 //      最容易犯的错就是把 LLM 超时、重试退避、单次扫图 flush 这些也算成"长期任务"收进表，
@@ -28,7 +28,7 @@ const { getConfig } = await load('core/config.js');
 const EXPECTED_IDS = [
   'proactive.bubble', 'compact.sweep', 'price.feed',
   'jmcomic.cleanup', 'jmcomic.worker', 'transcription.worker', 'image-gen.worker', 'onebot.reconnect',
-  'hot-search.daily-broadcast', 'image-source.pic-worker'
+  'hot-search.daily-broadcast', 'image-source.pic-worker', 'extras.runtime'
 ];
 
 // 只含局部计时器的文件（设计稿附录 B 点名排除的那些局部计时器的宿主）。它们**不许**作为任何一行的 owner——
@@ -50,7 +50,7 @@ const LOCALTIMER_ONLY_FILES = [
 ];
 
 const ids = LONG_TERM_TASKS.map((t) => t.id).sort();
-ok('任务表恰好是这 10 个 id（不多不少）',
+ok('任务表恰好是这 11 个 id（不多不少）',
   ids.length === EXPECTED_IDS.length && ids.every((id, i) => id === [...EXPECTED_IDS].sort()[i]),
   `表里是 ${ids.join('、')}；清单是 ${[...EXPECTED_IDS].sort().join('、')}`);
 
@@ -144,12 +144,16 @@ const { VideoTranscriptionQueue } = await load('media/transcription/index.js');
 const { ImageGenQueue } = await load('media/image-gen/index.js');
 const { HotSearchScheduler } = await load('media/hot-search/scheduler.js');
 const picImageSearch = await load('media/image-source/pic-image-search-client.js');
+const { ExtrasRuntime } = await load('extra/runtime.js');
 const RESOLVERS = {
   Orchestrator: () => Orchestrator.prototype,
   OneBotClient: () => OneBotClient.prototype,
   VideoTranscriptionQueue: () => VideoTranscriptionQueue.prototype,
   ImageGenQueue: () => ImageGenQueue.prototype,
   HotSearchScheduler: () => HotSearchScheduler.prototype,
+  // 扩展运行时是**类**而不是模块级单例：一个 app 一个实例（`web/app.ts` 里 createExtrasRuntime
+  // 建它），所以与上面那四个类同形，在 prototype 上解析即可。
+  ExtrasRuntime: () => ExtrasRuntime.prototype,
   'price-feed': () => priceFeed,
   jmcomic: () => jmcomic,
   'pic-image-search': () => picImageSearch

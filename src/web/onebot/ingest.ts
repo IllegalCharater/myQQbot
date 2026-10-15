@@ -21,8 +21,7 @@ import {
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { OneBotEvent } from '../../qq/types.js';
 import type { SendQueue } from '../../qq/sender.js';
-import { handleSlashCommand, isSlashCommand } from './slash-commands.js';
-import type { SlashCommandDeps } from './slash-commands.js';
+import type { SlashCommandDeps, SlashCommands } from './slash-commands.js';
 import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
 import type { ImageGenQueue } from '../../media/image-gen/index.js';
 // ⚠️ 别名不是洁癖：`qq/onebot.js` 已经导出一个同名的 `extractMediaFromSegments`（那是
@@ -92,7 +91,7 @@ export interface Ingest {
   handle(event: OneBotEvent): Promise<void>;
 }
 
-export function createIngest({ onebot, store, sender, orchestrator, transcription, imageGen, jmcomic, emit, getConfig, log }: {
+export function createIngest({ onebot, store, sender, orchestrator, transcription, imageGen, jmcomic, commands, emit, getConfig, log }: {
   onebot: OneBotClient;
   store: ChatStore;
   sender: Pick<SendQueue, 'sendTextBatch'>;
@@ -102,6 +101,11 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
   imageGen: Pick<ImageGenQueue, 'enqueue'>;
   /** 斜杠命令层的漫画下载端口（`onebot/sender/store` 由装配根在绑定处补齐）。 */
   jmcomic: SlashCommandDeps['jmcomic'];
+  /**
+   * 斜杠命令分发器。**由装配根建好递进来**，而不是这里 import 那两个模块级函数 ——
+   * 命令表里现在还有扩展贡献的命令，而那张表要按装载状态现算（见 `slash-commands.ts`）。
+   */
+  commands: SlashCommands;
   emit: AppEmit;
   getConfig: () => AppConfig;
   log: (...args: unknown[]) => void;
@@ -274,7 +278,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     // 判定、解析、入队与即时回执**全在 `web/onebot/slash-commands.ts` 一处**（那张表是唯一事实源），
     // 这里只用同一个判据决定两件事：要不要并入引用附件、要不要落成已读历史。
     // 判据若在这里另写一份，漂移的表现是"命令没被认出来、消息进了 LLM"，不报任何错。
-    const slashCommand = isSlashCommand(commandText);
+    const slashCommand = commands.isSlashCommand(commandText);
     if (slashCommand && repliedMedia.length) {
       // 引用的那条消息里的附件要并进来：`/转写` 靠它取引用视频，`/画` 靠它取参考图（图生图）。
       media.push(...repliedMedia);
@@ -298,7 +302,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     // 命令消息到此为止：它已经作为**已读存档**留在会话里了，处理完就返回、不惊动模型。
     // 出图/转写这类要几十秒的活由各自的单并发后台队列接着干，不占住 OneBot 的入站处理链。
     if (slashCommand) {
-      await handleSlashCommand(
+      await commands.handleSlashCommand(
         {
           chatKey,
           // 用 `commandText` 而不是 `text`：后者可能已被合并转发展开整份替换过。

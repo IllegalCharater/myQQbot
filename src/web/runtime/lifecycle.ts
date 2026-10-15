@@ -75,6 +75,11 @@ export interface LifecycleDeps {
    * 不该让 `startLifecycle` 抛出去把整个 `app.start()` 掀翻。
    */
   imageSource: { start(): void | Promise<void>; stop(): void | Promise<void> };
+  /**
+   * 扩展运行时（`src/extra/runtime.ts`）。`start` 不预加载任何东西（懒加载就是要等模型开口），
+   * 只把装载状态清干净；`stop` 清掉全部空闲计时器并 dispose 每个已装载的扩展。
+   */
+  extras: { start(): void | Promise<void>; stop(): void | Promise<void> };
 }
 
 export interface LifecycleEntry {
@@ -104,11 +109,11 @@ const ALWAYS = () => true;
 
 /**
  * 装配清单，**按 S11c 之前 `app.start()` 里的真实启动顺序**排列：
- * connect → 热搜 → 冒泡 → 压缩 → 价格表 → jmcomic → 视频转写 → 搜图 worker → 图像生成。
- * 前五个是 S11c 收口的原顺序；转写、搜图 worker 与图像生成是后加的三个，都排在最后，
+ * connect → 热搜 → 冒泡 → 压缩 → 价格表 → jmcomic → 视频转写 → 搜图 worker → 图像生成 → 扩展运行时。
+ * 前五个是 S11c 收口的原顺序；转写、搜图 worker、图像生成与扩展运行时是后加的，都排在最后，
  * 于是停止时它们**最先**被收掉，不会拖着 OneBot 传输层一起等。
  *
- * 停止时逆序：图像生成 → 搜图 worker → 视频转写 → jmcomic → 价格表 → 压缩 → 冒泡 → 热搜 → `onebot.close()`。
+ * 停止时逆序：扩展运行时 → 图像生成 → 搜图 worker → 视频转写 → jmcomic → 价格表 → 压缩 → 冒泡 → 热搜 → `onebot.close()`。
  * 与 S11c 之前相比唯一调换的一对是"价格表 ↔ jmcomic"（原先 `stopPriceFeed()` 在前）：
  * 两者互不依赖，属**可观察但良性**的变化，已记入设计稿 §8.2 与真机冒烟清单。
  */
@@ -199,6 +204,18 @@ export const LIFECYCLE: readonly LifecycleEntry[] = [
     enabled: ALWAYS,
     start: (deps) => deps.imageGen.start(),
     stop: (deps) => deps.imageGen.stop()
+  },
+  {
+    // 扩展运行时排在**最后** —— 与转写/搜图/出图同一条先例：逆序停止时它最先被收掉，
+    // 于是"扩展自己的空闲计时器与 dispose 不会拖着 OneBot 传输层一起等"。
+    //
+    // 与 image-source 那条**不同**：这里不加 `enabled` 闸门。空载时它不持有任何东西（没有装载中的
+    // 扩展就没有计时器），而 `extras.enabled` 管的是"工具声明进不进工具表"，那是 web/app.ts 建
+    // 工具表时判的另一件事 —— 把闸门提到这里会让"扩展全关着"报成"扩展服务未启动"。
+    ids: ['extras.runtime'],
+    enabled: ALWAYS,
+    start: (deps) => deps.extras.start(),
+    stop: (deps) => deps.extras.stop()
   }
 ];
 

@@ -27,12 +27,16 @@ import { createSnowlumaController } from './onebot/snowluma.js';
 import { createTokenBridge } from './onebot/tokens.js';
 import type { OneBotRuntime } from './onebot/tokens.js';
 import { createIngest } from './onebot/ingest.js';
+import { createSlashCommands } from './onebot/slash-commands.js';
 import { createConsole } from './http/console.js';
 import { errorMessage, isRecord } from './http/http.js';
 import type { AppHandle, CreateAppOptions } from './types.js';
 import { HotSearchScheduler } from '../media/hot-search/scheduler.js';
 import { createHotSearchAdminActions } from '../media/hot-search/admin-actions.js';
 import { initPicImageSearch, closePicImageSearchClient } from '../media/image-source/index.js';
+import { buildToolDefs } from '../agent/tools/index.js';
+import { createExtrasRuntime } from '../extra/runtime.js';
+import { EXTRA_REGISTRY } from '../extra/registry.js';
 
 export type { AppHandle, CreateAppOptions } from './types.js';
 
@@ -131,6 +135,19 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     deliverAsyncResult(chatKey, store.appendImageResult(chatKey, { prompt, status, reason }));
   }
 
+  // 扩展运行时（`src/extra/`）：工具**声明**在这里静态拼进工具表，**实现**等模型首次调用那个
+  // 工具时才 `import()`；空闲超过 `extras.idleUnloadMs` 就 dispose 掉重资源（工具仍留在表里）。
+  //
+  // 为什么在组装根建：它同时要 `getConfig`、要"内置工具名"（查重用）、要把工具表递给 Orchestrator，
+  // 还要进装配清单的启停 —— 它**就是共享组件图**，按"只碰共享图的不搬"的判据留在 app.ts。
+  // `builtinToolNames` 用 `buildToolDefs()` 再算一次是刻意的：这样 extra 层不必认识 agent 层
+  // （反向依赖会被 check-layers 拦），而这里的两次调用共用同一份无参语义，不会漂移。
+  const extras = createExtrasRuntime(EXTRA_REGISTRY, {
+    getConfig,
+    builtinToolNames: buildToolDefs().map((def) => def.name),
+    log
+  });
+
   const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log, deliverTranscript });
   const imageGen = new ImageGenQueue({ sender, getConfig, log, deliverImageResult });
   const hotSearchScheduler = new HotSearchScheduler({ getConfig, updateConfig, sender, log });
@@ -139,7 +156,13 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // （`AgentRunnerHost`）→ ToolContext 透传的。
   const orchestrator = new Orchestrator({
     store, memory, stickers, sender, sessions, onebot, emit,
-    transcription, imageGen, hotSearch: hotSearchScheduler
+    transcription, imageGen, hotSearch: hotSearchScheduler,
+    // 工具表**是函数**：扩展由 `/能力` 命令装载/卸载，而**未装载的扩展工具不在表里**
+    // （"禁止模型自行加载"那条取舍）。`runAgent` 每次运行开头读一次，所以语义是
+    // "装载后下一次运行生效"。内置那部分仍然逐字来自 `buildToolDefs()`。
+    toolDefs: () => [...buildToolDefs(), ...extras.toolDefs()],
+    // 提示词计划同理，每次运行现读：它取决于此刻装载了哪些扩展。
+    extraPrompt: () => extras.promptPlan()
   });
   const hotSearch = createHotSearchAdminActions(hotSearchScheduler);
 
@@ -157,12 +180,25 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   tokens.watch();
 
 
+  // ── 斜杠命令 ──
+  // 命令表**是 provider 而不是数组**：扩展命令与"是否接管中"都会在运行期变（`/能力` 装载/卸载）。
+  // `/能力` 那条主流程命令拿到的是 `extras` 的三个口子，与 `/漫画` 只拿 `enqueue` 同形。
+  const commands = createSlashCommands(
+    () => ({ override: extras.isOverridden(), commands: extras.commandDefs() }),
+    // `/能力` 的三个口子。装载/卸载只在这里接出去 —— **模型侧没有任何口子**。
+    {
+      list: () => extras.list(),
+      load: (id, reason) => extras.load(id, reason ?? 'command'),
+      unload: (id) => extras.unload(id)
+    }
+  );
+
   // ── 入站事件处理 ──
   // 白名单判断、@ 名字解析、引用预览、合并转发展开与拍一拍都在 `web/onebot/ingest.ts`
   // 里（`atNameCache` 与引用预览上限是摄取器自己的状态，组装根不需要知道）。
   // 组装根只把 OneBot 的入站回调接到 `ingest.handle()` 上。
   const ingest = createIngest({
-    onebot, store, sender, orchestrator, transcription, imageGen, emit, getConfig, log,
+    onebot, store, sender, orchestrator, transcription, imageGen, commands, emit, getConfig, log,
     // `/漫画 <ID>` 只拿到"入队"这一个口子；`onebot/sender/store` 在这里补齐 ——
     // 漫画队列的运行时依赖本来就是这么绑的（与工具路径同一个 `enqueueJmcomicDownload`）。
     jmcomic: {
@@ -231,7 +267,9 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       imageGen: { start: () => imageGen.start(), stop: () => imageGen.stop() },
       hotSearch: { start: () => hotSearchScheduler.start(), stop: () => hotSearchScheduler.stop() },
       // 搜图 worker 自己吞掉预热失败（没装库不该掀翻 app.start()），所以这里直接递真函数即可。
-      imageSource: { start: initPicImageSearch, stop: () => closePicImageSearchClient() }
+      imageSource: { start: initPicImageSearch, stop: () => closePicImageSearchClient() },
+      // 扩展运行时：start 只清装载状态（懒加载不预加载），stop 清空闲计时器并 dispose 全部已装载项。
+      extras: { start: () => extras.start(), stop: () => extras.stop() }
     };
   }
 

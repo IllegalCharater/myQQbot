@@ -13,7 +13,10 @@ export const state = {
   stickerOwned: 0, stickerMaxKeep: 0, stickerCacheNote: '',
   stickerSelectedId: null, stickerBusy: false, chatQuery: '',
   chatDigests: null, chatDigestOpen: true, chatDigestSig: '', memQuery: '',
-  consolidating: {}, consolidateResult: {}, usageRange: '7'
+  consolidating: {}, consolidateResult: {}, usageRange: '7',
+  // 扩展能力：注册表由 GET /api/extras 提供（ui/ 够不着 src/，只能经端点拿）。
+  // 它只是"有哪些扩展"的列表，开关值与两个数字在 state.config.extras 里。
+  extras: []
 };
 
 export const TOOL_META = {

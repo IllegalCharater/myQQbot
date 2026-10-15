@@ -67,8 +67,16 @@ stickers
   ↓
 agent
   ↓
+extra
+  ↓
 web
 ```
+
+**`extra`（扩展能力，`src/extra/`）插在 agent 与 web 之间**，`web` 因此从 4 顶到 5（2026-10-15 加的一档）。三条推论都由 `LEVEL` 表自动给出：`extra → {core, media, chat, qq, agent}` 合法（扩展要工具契约、媒体助手、存档、事件发射器）；`web → extra` 合法（组装根 import 注册表）；**`extra → web` 被拦** —— 扩展不认识 web，组装是 web 的活。反方向同理：`agent → extra` 也是反向依赖，所以扩展工具的 schema 由 `web/app.ts` 递进 `Orchestrator`（`OrchestratorDependencies.extraToolDefs`），`buildToolDefs(extra)` 只负责拼，agent 层对 extra 一无所知。
+
+**唯一的例外是 `LAYER_ALLOW`**（`scripts/check-layers.mjs`）：一张精确到"`源文件 -> import 说明符`"的白名单，低层只能靠它 import 高层。目前只有一条 —— `core/prompt-catalog.ts -> extra/prompts.js`，让扩展的提示词有一个单独的文件管（见「扩展能力（extra）」）。**它的安全性全靠目标是个叶子模块**（`extra/prompts.ts` 自己不 import 任何东西，所以不成环），而闸门有一条断言专门扫这一点：**登记为例外目标的文件里一旦出现相对 import 就直接报错**。实测过这条守卫的价值：往里加一句 `import` 之后，`check-layers` 报错，而 `t-extras.mjs` 因为成环直接 TDZ 崩掉。
+
+扩展的完整设计（声明静态、实现懒加载、空闲 dispose、装载闸门、四条已知代价）见 `docs/extras-design.md`；加一个扩展 = 建一个目录 + 在 `src/extra/registry.ts` 加一行。
 
 `scripts/check-layers.mjs` 会检查这条规则。不要为了方便制造 `core → agent`、`chat → web` 等反向依赖。
 
@@ -238,6 +246,8 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 所有模型可见的固定指令（内置 persona、system/user 固定段、工具 description、历史压缩与记忆整理指令）只允许写在 `src/core/prompt-catalog.ts`，业务模块引用其中的 `PROMPT_CATALOG`；`src/agent/prompting/prompt-builder.ts` 只负责动态变量、聊天记录格式化、条件选择与预算裁剪。UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词目录。
 
+工具 description 在这份目录里分成**两块**：`TOOL_PROMPT_TEXT`（内置工具，其名字与顺序是硬约束）与 `src/extra/prompts.ts` 的 `EXTRA_PROMPT_TEXT`（扩展工具，随时可加；由本目录 import 并转发）。扩展的 `spec.ts` 只许引用后者，且 `TOOL_PROMPT_TEXT` 里那一行必须是**同一个对象引用**（转发），不是拷贝 —— 详见「扩展能力（extra）」一节。**`src/extra/prompts.ts` 是这份目录唯一一个住在别处的部分，也是 `LAYER_ALLOW` 里唯一那条反向依赖例外，它必须保持无 import。** 扩展往 system prompt 里追加/覆盖的段落另有一张表 `EXTRA_PROMPT_SECTIONS`（按**扩展 id** 索引，与注册表对账），同样在那个文件里。
+
 工具**结果**串一般留在各自工具文件里（它带动态数据或错误文案）；唯一的例外是 `transcribe_video` 的回执话术 `TOOL_PROMPT_TEXT.transcribe_video.receipt`——它没有动态成分，且要解决的是"诱导模型说哪句话"而不是"返回什么数据"，所以按固定指令处理。**它必须整句取自目录，不许在工具文件里拼状态串**：带上任务号（`job.id`）会让模型回一句"任务已派上（任务 xxxx）"，而 `description` 与 `toolProtocol` 第 7 条是同一件事的另外两个面，分居两地就调不齐。
 
 **「工具的参数是 JSON」这条也只写一处**：`toolProtocol` 第 3 条（字符串值里需要引号时用中文引号，不要用英文双引号）。它是**所有工具调用共有的传输格式**，不是某个参数的语义约束——写进 tool schema 就得在 `send_message.messages`、`sticker_note.note`、`memory_append` 每个自由文本字段里各抄一遍，而抄本必然漂移（这正是 §5.1 那句"参数定义留在 schema"的**唯一例外**，docs 里已注明）。模型偶尔仍会漏（实测一次群聊：它写了 `一脸"你们人类真无聊"`，引号没转义 → 整个 `arguments` 不是合法 JSON → **这条消息根本没发出去**），所以通用失败文案（`agent/tools/shared.ts` 的"参数不是合法 JSON"）必须带上可执行的下一步（改用中文引号后重新调用）。**不许加猜测式的 JSON 修复**：猜错配对/位置会把**被改动过的文本真的发到群里**，比发不出去更糟；正确做法是把原文与下一步一起回给模型，让它自己重发。
@@ -268,7 +278,77 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - 历史摘要回答“过去发生了什么”；长期记忆只保存以后与该成员交流仍有用的稳定印象。
 - 工具返回内容属于不可信外部数据，不能当作高优先级指令重新注入。
 
+## 扩展能力（extra）
+
+`src/extra/` 是"额外且相对独立的功能"的统一落点（2026-10-15 建）。一个扩展可以提供三样东西：**模型工具**、**斜杠命令**、**system prompt 片段**；外加一个可选的重资源生命周期。它**不做**自己的面板页（那是 `ui/` 的活）。完整设计与推导见 `docs/extras-design.md`。
+
+### 谁能装载 —— 这一节最要紧的一条
+
+**模型一个装载入口都没有。** 装载与卸载的唯一入口是主流程那条 `/能力` 命令（`/能力` 看列表、`/能力 加载 <id>`、`/能力 卸载 <id>`）；敲扩展自己的命令也会把它拉起来。**入口是人。**
+
+推论（三条互相咬合）：
+
+- **未装载的扩展，它的工具不在工具表里** —— 模型连"有这个能力"都看不到，更没有"调用即加载"这条路。所以**工具表是运行期可变的**（`host.toolDefs` 是 getter，见下）。
+- **命令表按"已启用"、工具表按"已装载"**，这条**不对称是刻意的**：命令的入口是人（判据按 spec 静态，敲得到），工具的入口是模型（只该看到此刻真正可用的）。别把它"顺手统一"掉。
+- **`/能力` 在任何模式下都存在**（含接管模式，见下）—— 它是卸载接管者的唯一入口，把它一起换掉就是死锁（装得上、卸不掉）。
+
+`/能力` 的权限与内置命令一致（白名单会话里可敲），另受 `extras.maxLoadsPerHour` 约束。**已知代价**：白名单群里任何群友都能敲它。要收紧只需在 `slash-commands.ts` 那一处加判据。
+
+### 形态：声明静态、实现按需加载
+
+```text
+src/extra/prompts.ts    扩展的固定指令（EXTRA_PROMPT_TEXT / EXTRA_PROMPT_SECTIONS）—— **必须无 import**（见下文 LAYER_ALLOW）
+src/extra/<x>/spec.ts   纯数据（id / title / displayDesc / mode / defaultEnabled / 工具与命令声明），**重东西一个字都不许有**
+src/extra/<x>/impl.ts   createRuntime(): ExtraRuntime，重东西全在这里
+src/extra/registry.ts   静态清单，每行 { ...xSpec, load: () => import('./x/impl.js')… }
+```
+
+**加一个扩展 = 建一个目录 + 在 `registry.ts` 加一行。** 工具 description 仍然只在提示词目录里写（模型可见的固定指令的唯一落点），但扩展那一块**单独一个文件**：`src/extra/prompts.ts` 的 `EXTRA_PROMPT_TEXT`，由 `core/prompt-catalog.ts` import 并**原样转发**进 `TOOL_PROMPT_TEXT`（同一个对象引用，不是拷贝 —— 拷贝会各自漂移），于是 `PROMPT_CATALOG.tools.<工具名>` 这条统一路径对内置与扩展一样成立。**加扩展不要往 `TOOL_PROMPT_TEXT` 加新键**，去 `extra/prompts.ts` 加。两份表分开的理由是**权威来源不同**：`TOOL_PROMPT_TEXT` 的每一项对应 `agent/tools/index.ts` 里内置拼装的一个工具（名字与顺序是硬约束、逐字钉着），而扩展随时可加。**⚠️ `extra/prompts.ts` 必须保持叶子模块（不许有 import）**，它是 `LAYER_ALLOW` 那条例外的全部依据。
+
+- **命令的判据留在 `spec.ts`**（`match(text)` 纯函数）：`isSlashCommand()` 是同步的、且在入站热路径上被调（决定 `wakeEligible` 与要不要并入引用附件），它**不可能**去问一个异步的装载表。判据静态 + 执行时装载，这条矛盾就没了。
+- **别名是分发层的事，不是每个命令自己的事**（`aliases?: readonly string[]`，内置与扩展都有）：判定规矩与主命令词一样（词后面跟空白或结束），**命中别名时把开头那个词换成主命令词再交给 `run`**。不做这一步的话，每个解析器都得认识全部别名 —— 内置的解析散在 `media/` 各能力里、扩展的在 `impl.ts` 里，加一个别名要改三处，而漏改的表现是"命令认出来了、参数解析不出来"。**推论：`SlashCommand.name` 必须是真能敲的那个词**（`/转写`），不能只是内部标签 —— 曾经内置写的是 `'transcribe'`，别名一接上就规范成了 `transcribe …`，解析器当场认不出来（实测踩到）。别名与主命令词**共用一个命名空间**，注册表自检会拒绝重复（跨扩展也查）。
+- **工具表从此不恒定**（代价知情）：`agent-runner` 每次运行开头读一次 `host.toolDefs`（`WakeScheduler` 上是 getter），所以装载/卸载的语义是"**下一次运行生效**"。tools 是请求前缀的一部分，装卸各打散一次提示词缓存 —— 但频次由**人**控制，这正是这条设计换来的东西。
+- **`extras.enabled` 改动要重启生效**，`idleUnloadMs` / `maxLoadsPerHour` 每次现读、热生效。与 `python.path`（"spawn 时读取，改它需要重启"）同一取舍，**设置页必须把这句话写在明面上**（有断言钉着）—— 不说就是仓库最忌讳的"填了、看着生效、实际用的是别的"。
+- **空闲卸载释放的是扩展自己持有的东西，不是模块。** Node ESM 没有模块卸载，`import()` 缓存永驻：`dispose()` 之后那份代码仍在内存里。**没有 `dispose()` 的扩展，空闲卸载等于什么都没做** —— 这句话写在 `ExtraRuntime.dispose` 的注释里，因为它是写扩展的人唯一会记错的事。
+- **在途调用期间绝不 dispose**（按 `inFlight` 计数推迟；`/能力 卸载` 也会被拒），且 `dispose()` 有等待上限（卡住的扩展不该挂死 `stopLifecycle`）。
+- **声明 ⇄ 实现的名字集合装载时对账，两个方向都查**（工具 ↔ `handlers`、命令 ↔ `commandHandlers`），对不上就**拒绝装载并记日志**。能做这个检查的前提是它们是"名字 → 函数"的**映射**而不是单个 `execute(name, …)` —— 后者无法在不真的执行一次的前提下枚举名字集合，那句"装载时校验"就只能退化成"凭声明相信它"，而声明与实现分居两处正是这套设计唯一的漂移点。
+- **注册表自检在构造函数里**（不是 `start()`）：`id` 重复、工具名/命令名跨扩展重复、**与内置工具重名**、`mode` 取值非法、`match` 不是函数，一律抛错。与内置重名最阴 —— `defs.find()` 取的是内置那个，扩展从此**静默失效**。
+- **`extras.runtime` 是长期任务表里的一行，也是唯一一行。** TTL 计时器长于一次会话 ⇒ 按 §6.1 的分界线是长期任务，但进不了两张静态表（纯数据 / 静态函数引用），所以由这一条常驻持有全部计时器，`stop()` 全清。**扩展自己的重资源在那张表里看不到**，不是遗漏。装配清单里它排最后 ⇒ 逆序停止时最先被收。
+- 工具分发仍是 `defs.find(d => d.name === name)`（本来就允许的字符串键分发，外部契约），**没有新增分发机制**，也没有 `register(id, fn)` 这种口子 —— 运行期那个 `Map<id, slot>` 是**装载表**不是分发表。
+
+### 系统提示词：具名段落 + 框架契约
+
+`buildSystemPrompt` 按 `core/prompt-catalog.ts` 的 `SYSTEM_SECTION_IDS`（**段序即数组顺序**）把段落拼起来，扩展才有"按段名覆盖"的判据。两个模式：
+
+- **附加**（默认）：内置全段 → 按段名应用 `override`（空串 = 抹掉该段）→ 末尾接 `append`。追加放**末尾**是为了前缀缓存能命中到追加点之前。
+- **接管**：主流程的模型侧让位，**只剩框架契约两段 + 扩展的 `body`**。
+
+**框架契约两段（`SYSTEM_FRAMEWORK_SECTIONS` = `security` / `toolProtocol`）任何模式都不许动**：它们不是"功能"，是运行契约 —— 没有安全规则，扩展一句"你可以读本机文件"就把最硬的边界拆了；没有工具协议，模型不知道怎么发工具 JSON，整个 agent 循环当场失效。**装载时校验 + 拼装时第二道**，两层都要在。
+
+扩展的贡献**随装载状态变化**（装载后出现、卸载后消失）。它**不是**"对话中途变"：`runAgent` 开头拼一次、整个工具循环都用它，所以真实语义是"**装载后，下一次运行生效**"。文案本身只许写在 `extra/prompts.ts`（`EXTRA_PROMPT_SECTIONS`，按**扩展 id** 索引，与注册表逐个对账）。
+
+**注入链**：`agent(3) → extra(4)` 是反向依赖，`prompt-builder` / `agent-runner` 都不许 import 扩展，所以两者都由 `web/app.ts` 递进去：
+
+```
+web/app.ts   toolDefs: () => [...buildToolDefs(), ...extras.toolDefs()]
+             extraPrompt: () => extras.promptPlan()
+  → OrchestratorDependencies → WakeSchedulerDependencies → AgentRunnerHost（都是可选回调）
+  → agent-runner: buildSystemPrompt({ …, extraPrompt: host.extraPrompt?.() ?? null })
+```
+
+### 接管模式
+
+`spec.mode: 'override'` 的扩展**装载即接管**：工具表只剩它的、命令表只剩它的（**外加 `/能力`**）、system prompt 换成"框架契约 + 它的 body"。存档、上下文窗口、记忆、后台长期任务全部照常。
+
+- **同一时刻只允许一个接管者**（第二个接管装载被拒，回话里带怎么解）。
+- **接管者不被空闲卸载**：接管是一次明确的状态切换，静默变回去会让群友看到 bot 的人格与能力突然改了而没人做过什么。要交还只能 `/能力 卸载`。
+- **接管模式下其他附加扩展不生效**（接管者的提示词与工具集是一套自洽的东西）。
+
+- 守护：`tests/t-extras.mjs`（**模型零装载入口**、装载/卸载改变工具表、命令触发装载、TTL 与在途、`stop()` 幂等与超时、注册表自检、名字对账两个方向、接管模式、框架契约不可覆盖、提示词计划随装载状态、提示词两张表与注册表两个方向逐个对上 + `prompts.ts` 仍是叶子模块、源级断言）、`t-reply.mjs`（**system 段序 + 段分隔符 + 空计划是空操作 + 接管只留框架契约**）、`t-slash-commands.mjs`（`/能力` 的用法与失败话术、扩展命令走同一只 `runCommand` 外壳、扩展遮蔽不了内置、接管时主流程命令让位而 `/能力` 保留）、`t-lifecycle.mjs` / `t-tasks.mjs`（`extras.runtime` 的 id 对账与顺序）、`t-admin.mjs`（真起 app 验 `/api/extras` 与 `extras` 配置回显）。
+
 ## 事件与长期任务边界
+
+
 
 - **注册层的实际形态是四件产物的合称，不是一个对象**（S11c 起，详见设计稿 §0.1）：事件腿 `core/events.ts` 词表、方法腿 `AgentControlPort` 端口、任务**描述**腿 `web/runtime/tasks.ts`（纯数据）、任务**执行**腿 `web/runtime/lifecycle.ts`（有序的函数引用数组）。四件都不是注册表，合起来才是；任何把它们收进一个 `register(...)` 的尝试都会撞上跨层反向依赖与字符串式动态调用两条禁令。事件是散布的 `emit(EVENTS.xxx, payload)`，长期任务各自持有计时器句柄。设计、清点与分步迁移方案见 `docs/global-registry-design.md`（S0–S9 已落地，**S10+ 已全部落地**：S10a 收下 `price.feed`、S10b 收下两个 jmcomic、S10c 收下 `onebot.reconnect`、S10d 删掉 `Orchestrator` 的兜底事件总线并把 `emit` 改成必填；**S11a–c 已落地**：S11a 收口无头入口的退出路径——`src/web/runtime/shutdown.ts`，`SIGINT`/`SIGTERM` 都走同一个幂等关停，重复信号立即强退、`stop()` 抛错也照常退出；S11b 端点热生效；S11c 装配清单；**S11d 收死代码与空转事件**——`core/config.ts` 的 `scheduleConfigSave`/`saveTimers`、`agent/shared/types.ts` 的 `AgentEventMap`、`MemoryConsolidatorDependencies.emit`（连同 `orchestrator.ts` 的传参）、`vision-scan` 整条事件（词表键 + 载荷类型 + 两个发射点 + `/api/vision/scan` 的 emit 传参）。**注意它删的是事件，不是 `providers.ts` 里那个同名的 `visionScan` 局部对象**——那个是活的，别当残留一起删掉；**S11e 让桌面端的退出也等关停落地**——`electron/main.js` 的 `before-quit` 是 `quitting = true` → `if (stopping) return;` → `event.preventDefault()` → `Promise.resolve().then(() => core.stop()).catch(...).finally(() => app.quit())`。**三条不变量缺了都会挂，改动它之前先读那一段的注释**：`quitting` 必须先置位（退出期间关窗会缩托盘，把退出挂住）、`stopping` 守卫（第二次 `app.quit()` 会再进这个处理器，缺了它 `preventDefault` 拦下自己 → 死循环）、`.finally` 里必须自己再退一次（`preventDefault` 之后没人再退 → **应用永远不退**）。前两者与后者都**没有任何行为套件看得见**（`electron/main.js` import 不了），只有 `t-lifecycle.mjs` 第 5 段那 6 条文本断言守着）。S10+ 解除了"改启动/配置刷新/退出流程"与"动定时器生命周期"两条禁令，**但只为"让长期任务能被显式启停"**；其余禁令（不替换事件总线、不建字符串式注册表、不动 `src/qq` 入站解析）照旧。**注意 S10c 动的是 `src/qq/onebot.ts` 的 `close()`/`connect()`/`reconnect()`，不是入站事件解析**——后者仍在禁令内；S10d 删的是 `Orchestrator` 自建的那条兜底总线，`core/util.ts` 的 `createEventBus()` 本体保留（`app.ts` 照旧用它）。
 - 事件名与载荷类型**只在 `src/core/events.ts`**（`EVENTS` + `AppEventMap`）。新增事件必须同时加常量与载荷类型，否则编译期护栏会报错。词表放 `core` 是因为生产者散在 agent/llm/qq，而层级检查禁反向依赖；代价是载荷只能用基础类型，不能引用 `chat/` 或 `agent/` 的领域类型。
@@ -282,7 +362,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 - 不为业务方法引入字符串式动态调用或运行时热替换。仓库里仅有的三处字符串键分发（工具分发、OneBot `call`、HTTP 路由）都是外部契约，保持原样。
 - **跨模块方法面走端口，不走注册表**：`web/` 与 `electron/main.js` 只能依赖 `src/agent/runtime/control-port.ts` 的 `AgentControlPort`（`Orchestrator implements` 它），不许直接依赖 `Orchestrator` 具体类。往端口加成员是个**有意的动作**：接口、`METHOD_CATALOG`、`tests/t-ports.mjs` 里那份手工清单三处要同时改（`tsc` 会拦下前两处，第三处由套件拦）。端口里**不得**出现 `instanceof` 检查、`Symbol` 品牌或运行期校验——那会打碎 `t-orch`/`t-vision-log` 用普通对象字面量充当依赖的构造策略。`METHOD_CATALOG` 只作文档与测试引用，**`src/` 里除定义处外不许引用它**（一旦参与分发就是被禁的字符串式注册表，套件会扫出来）。
 - 动手改端口相关代码前先读 `src/agent/runtime/control-port.ts` 顶部注释：`implements` 那一行**删掉不报任何错**，端口会静默退化成注释——`tests/t-ports.mjs` 第 1 段就是为此存在的文本扫描。
-- **长期任务用 `src/web/runtime/tasks.ts` 的 `LONG_TERM_TASKS` 登记**（当前 10 行：S9 的 6 行 + `transcription.worker` + `hot-search.daily-broadcast` + `image-source.pic-worker` + `image-gen.worker`）。这张表是**纯数据**：不得触发任何 `start`/`stop`、不得在文件里放调度调用，`src/` 里除定义处外也不许引用它（三条都有断言守，见 `tests/t-tasks.mjs`）。写法上有两条硬约束：
+- **长期任务用 `src/web/runtime/tasks.ts` 的 `LONG_TERM_TASKS` 登记**（当前 11 行：S9 的 6 行 + `transcription.worker` + `hot-search.daily-broadcast` + `image-source.pic-worker` + `image-gen.worker` + `extras.runtime`）。这张表是**纯数据**：不得触发任何 `start`/`stop`、不得在文件里放调度调用，`src/` 里除定义处外也不许引用它（三条都有断言守，见 `tests/t-tasks.mjs`）。写法上有两条硬约束：
   - `start`/`stop` 存的是**入口的名字**（`{ on, kind, name }`），不是函数引用——存引用的话套件只能自己验自己，存名字才能拿到真对象/真模块上解析。
   - `conformance` 的判定规则写在文件头部注释里（`full ⇒ start && stop && stopCancelsPending`；`partial ⇒ (start && !stop) || (stop && !stopCancelsPending)`；`none ⇒ !start`），套件按同一条规则断言；**改规则要同时改两处**。做不到的不许写成能力，只能如实标 `partial`/`none` 并在 `note` 里写清"接管它需要做什么"。
 - **局部计时器不进任务表**：LLM/HTTP 超时、重试退避、限速与拟人停顿、唤醒防抖、单次扫描轮询、启动期端口轮询等，按"生命周期是否长于一次请求或一次会话"判定为局部计时器（**判定看的是这条界线，不是某个数字**——设计稿附录 B 里那些汇总数各条增量说明各写一次、已经漂了：2026-09-29 实测源码共 34 处调度调用点，其中属于长期任务的 9 处，其余是局部计时器（含解释器探测/自检那处硬超时，宿主 `core/python-probe.ts`）；逐条清单见 `docs/global-registry-design.md` 附录 B）。**绝不要包装 `setTimeout`/`setInterval` 全局来"顺便"收编它们**——那会把排除清单变成谎言。`tests/t-tasks.mjs` 有一条反向断言专门钉这条，设计稿里被点名排除的 `wake.debounce` 就是它的靶子。

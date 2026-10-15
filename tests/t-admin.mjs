@@ -306,6 +306,50 @@ ok('三次"回显再保存"往返后 params 仍原样（没有 has / hasHas，�
   afterRoundTrips.api_key === 'PARAM-SECRET' && afterRoundTrips['API Key'] === 'PARAM-SECRET-2'
   && !Object.keys(afterRoundTrips).some((k) => /^has/i.test(k)), JSON.stringify(afterRoundTrips));
 
+// ── 扩展能力：注册表经端点出来（设置页那一栏唯一的数据源）──
+//
+// 为什么值得在"真起 app"这一段验：`ui/js/` 是浏览器原生 ES Module，**够不着 `src/`**，
+// 所以注册表只能经 HTTP 出来。端点路径写错、形状不对、或者被配置脱敏顺手抹掉，
+// 三种都会让设置页那一栏**静默地一直空着**（面板只看到 `extras: []`），没有任何报错。
+console.log('\n-- 扩展能力：注册表端点 --');
+const extrasRes = await api('/api/extras');
+ok('/api/extras 返回 200 且带 extras 数组',
+  extrasRes.status === 200 && Array.isArray(extrasRes.body?.extras),
+  J(extrasRes));
+const clockRow = (extrasRes.body?.extras || []).find((item) => item.id === 'clock');
+ok('注册表里有参考扩展 clock，且 enabled 已经把 defaultEnabled 兜进去了',
+  !!clockRow && clockRow.title === '当前时间' && clockRow.enabled === clockRow.defaultEnabled,
+  JSON.stringify(clockRow));
+// 描述必须一起出来：面板那一行只有"标题（id）"的话，管理员看不出这个扩展是干什么的
+// —— 而它**不是**模型看到的那段工具描述，两者受众不同（见 src/extra/types.ts）。
+ok('/api/extras 带回给人看的那一句 description，且非空',
+  typeof clockRow?.description === 'string' && clockRow.description.trim().length > 0,
+  JSON.stringify(clockRow?.description));
+// mode 决定"装载它是附加还是接管"，面板要按它标注（接管模式的扩展装上去会顶掉主流程）。
+ok('/api/extras 带回 mode（attach / override）',
+  clockRow?.mode === 'attach' || clockRow?.mode === 'override', JSON.stringify(clockRow?.mode));
+
+// 配置回显：脱敏层是黑名单式的，但"__被顺手抹掉"这个风险值得钉一次 ——
+// 面板读不到这两个数就会渲染成默认值，用户改完一保存就把真实配置覆盖掉。
+const cfgRes = await api('/api/config');
+ok('GET /api/config 回显 extras 的三个字段（面板读的入口）',
+  typeof cfgRes.body?.extras?.idleUnloadMs === 'number'
+  && typeof cfgRes.body?.extras?.maxLoadsPerHour === 'number'
+  && typeof cfgRes.body?.extras?.enabled === 'object',
+  JSON.stringify(cfgRes.body?.extras));
+
+// 往返：写一个**这个版本不认识的 id**，它必须原样留着，且不能把 clock 顺带写成 false。
+// 这条同时钉两件事：未知 id 不被吃掉（旧版本页面保存不会毁掉新版本的开关）、
+// 以及 `enabled` 缺项时 `defaultEnabled` 兜底真的在端点上生效。
+await api('/api/config', { method: 'POST', body: JSON.stringify({ extras: { enabled: { ghost_extra: true } } }) });
+const afterRes = await api('/api/extras');
+const afterClock = (afterRes.body?.extras || []).find((item) => item.id === 'clock');
+const afterCfg = await api('/api/config');
+ok('未知 id 原样留着，clock 仍然按 defaultEnabled 走（不被顺手写成 false）',
+  afterCfg.body?.extras?.enabled?.ghost_extra === true && afterClock?.enabled === true,
+  `enabled=${JSON.stringify(afterCfg.body?.extras?.enabled)} clock.enabled=${afterClock?.enabled}`);
+await api('/api/config', { method: 'POST', body: JSON.stringify({ extras: { enabled: {} } }) });
+
 // ── 「请求结构」的链接测试（POST /api/search-bookmark/test-request）──
 //
 // 这一栏填的东西**除了保存没有别的验证手段**：地址拼错、占位符没填值、密钥不对、

@@ -713,6 +713,52 @@ export function renderPythonSection(c) {
     </div>`;
 }
 
+/**
+ * 扩展能力（`src/extra/`）。
+ *
+ * 列表来自 `GET /api/extras`：`ui/js/` 是浏览器原生 ES Module，**够不着 `src/`**，
+ * 注册表只能经端点出来（同 `bookmarkList()` 那条名单的处境）。所以这里读的是
+ * `state.extras`（由 `loadSettings()` 拉好），**不是** `c.extras` —— 后者只有开关值与两个数字。
+ */
+export function renderExtrasSection(c) {
+  const e = c.extras || {};
+  const list = Array.isArray(state.extras) ? state.extras : [];
+  const rows = list.length
+    ? list.map((item) => `
+      <div class="checkbox-row">
+        <input type="checkbox" data-extra-id="${esc(item.id)}" id="cfg-extra-${esc(item.id)}" ${item.enabled ? 'checked' : ''} />
+        <label for="cfg-extra-${esc(item.id)}">${esc(item.title)} <span class="muted">（${esc(item.id)}）${item.mode === 'override' ? ' · 接管模式' : ''}</span></label>
+      </div>
+      ${item.description ? `<div class="hint" style="margin:0 0 8px 24px">${esc(item.description)}</div>` : ''}`).join('')
+    : '<div class="hint">这个版本没有注册任何扩展。</div>';
+  return `
+    <h3>扩展能力</h3>
+    <div class="hint" style="margin-bottom:10px">
+      额外且相对独立的功能。这里的开关决定<strong>这个扩展能不能被加载</strong>；
+      <strong>真正装载/卸载在群里敲 <code>/能力</code> 命令</strong>（<code>/能力 加载 &lt;id&gt;</code>、
+      <code>/能力 卸载 &lt;id&gt;</code>、单敲 <code>/能力</code> 看列表）。
+      <strong>模型没有任何装载入口</strong>：未装载的扩展，它的工具根本不在模型的工具表里。
+      装载之后空闲超过下面那个秒数会自动卸载（释放它自己持有的子进程、连接、大缓存），
+      之后再用会重新加载 —— 这一来一回对模型是全透明的。
+    </div>
+    ${rows}
+    <div class="field-row" style="margin-top:10px">
+      <div class="field"><label>空闲卸载（秒）</label>
+        <input type="number" id="cfg-extras-idle-sec" value="${esc(Math.round(Number(e.idleUnloadMs ?? 600000) / 1000))}" />
+        <div class="hint">填 0 = 常驻不卸载。卸载释放的是扩展自己持有的东西（子进程、连接、大缓存）——
+          模块代码本身不会被卸载（Node 没有模块卸载），所以没有 <code>dispose()</code> 的扩展卸载后等于什么都没发生。</div>
+      </div>
+      <div class="field"><label>每小时装载上限</label>
+        <input type="number" id="cfg-extras-maxloads" value="${esc(e.maxLoadsPerHour ?? 20)}" />
+        <div class="hint">同一个扩展每小时最多被装载几次，防止反复起停同一个子进程。</div>
+      </div>
+    </div>
+    <div class="hint">
+      ⚠️ <strong>上面的开关改动需要重启才生效</strong>：工具表是每次请求前缀的一部分，
+      运行期增删会打散模型侧的提示词缓存。下面两个数字保存后即时生效。
+    </div>`;
+}
+
 // 表情包积极程度档位：[值, 显示名]
 export function renderDesktopSection(c) {
   return `

@@ -2,6 +2,7 @@ import { getConfig } from '../../core/config.js';
 import { EVENTS } from '../../core/events.js';
 import type { AppEmit } from '../../core/events.js';
 import { PROMPT_CATALOG } from '../../core/prompt-catalog.js';
+import type { PromptPlan } from '../../core/prompt-catalog.js';
 import { vendorOfConfig } from '../../llm/model-prices.js';
 import { buildSystemPrompt, buildUserPrompt } from '../prompting/prompt-builder.js';
 import { chatCompletionWithRetry, addUsage } from '../../llm/llm.js';
@@ -51,7 +52,10 @@ export interface AgentRunnerHost {
   sessions: SessionRegistry;
   onebot: OneBotClient;
   windows: ContextWindowRegistry;
+  /** 工具表。宿主可以是 getter —— 扩展装载/卸载会让它变（见 wake-scheduler 的说明）。 */
   toolDefs: ToolDefinition[];
+  /** 扩展的提示词计划（可选，缺省 = 没有扩展参与）。 */
+  extraPrompt?: () => PromptPlan;
   aborted: boolean;
   emit: AppEmit;
   getChatName(groupId: string | number): Promise<string>;
@@ -104,7 +108,10 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       // 收藏夹站点名单进 system prompt：模型要靠它才知道 `web_search.site` 能填什么。
       // 用 bookmarkList() 而不是裸配置：它把 `{key,url,purpose}` 投影成 `{key,host,purpose}`
       // （域名已从 URL 归一出来），提示词里要展示的是**实际参与检索的域名**。
-      bookmarkSites: bookmarkList()
+      bookmarkSites: bookmarkList(),
+      // 扩展的提示词计划（追加 / 按段名覆盖 / 接管）。**每次运行现读一次** ——
+      // 它取决于此刻装载了哪些扩展；一次运行内不会变，所以语义是"装载后下一次运行生效"。
+      extraPrompt: host.extraPrompt?.() ?? null
     });
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,

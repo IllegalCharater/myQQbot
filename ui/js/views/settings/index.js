@@ -11,7 +11,7 @@ import {
   renderAllowSection, renderApiSection, renderDesktopSection, renderMemorySettingsSection,
   renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderPythonSection,
   renderSearchSection, renderTranscriptionSection, renderImageSourceSection, renderImageGenSection,
-  renderBookmarkRows
+  renderBookmarkRows, renderExtrasSection
 } from './sections.js';
 import { parseList, saveConfig } from './save.js';
 import { openBlocklistModal } from '../../parts/blocklist.js';
@@ -21,18 +21,21 @@ import { openMemoryModelPicker, openModelAddModal, openModelDeleteModal, openMod
 import { openWhitelistPicker } from '../../parts/whitelist.js';
 
 export async function loadSettings() {
-  const [cfg, tplData, provData, visionData, priceData] = await Promise.all([
+  const [cfg, tplData, provData, visionData, priceData, extrasData] = await Promise.all([
     api('/api/config'),
     api('/api/persona-templates').catch(() => ({ templates: [] })),
     api('/api/providers').catch(() => ({ providers: [] })),
     api('/api/vision/results').catch(() => ({ results: {}, scanning: false })),
-    api('/api/model-prices').catch(() => ({ prices: [], current: null }))
+    api('/api/model-prices').catch(() => ({ prices: [], current: null })),
+    // 注册表由后端提供（ui/ 够不着 src/）。拿不到时退化成空列表，不影响别的区块。
+    api('/api/extras').catch(() => ({ extras: [] }))
   ]);
   state.config = cfg;
   state.providers = provData.providers || [];
   state.visionResults = visionData.results || {};
   state.visionScanning = !!visionData.scanning;
   state.modelPrices = priceData || { prices: [], current: null };
+  state.extras = extrasData.extras || [];
   state.personaTemplates = {};
   for (const t of tplData.templates || []) state.personaTemplates[t.id] = { name: t.name, text: t.text, builtin: !!t.builtin };
   renderSettings();
@@ -85,6 +88,7 @@ export function renderSettingsSidebar() {
     ['hotsearch', '每日热搜播报'],
     ['transcription', '音视频转写'],
     ['image-gen', '图像生成'],
+    ['extras', '扩展能力'],
     ['python', 'Python 工具'],
     ['chat', '聊天设置'],
     ['desktop', '桌面端'],
@@ -129,6 +133,7 @@ export function renderSettingsSection(c) {
     hotsearch: () => renderHotSearchSection(c),
     transcription: () => renderTranscriptionSection(c),
     'image-gen': () => renderImageGenSection(c),
+    extras: () => renderExtrasSection(c),
     python: () => renderPythonSection(c),
     chat: () => renderChatSection(c),
     desktop: () => renderDesktopSection(c),

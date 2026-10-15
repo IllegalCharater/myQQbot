@@ -164,6 +164,24 @@ export const DEFAULT_CONFIG = {
   security: {
     allowPrivateImageHosts: false           // true 时图片下载允许内网地址（仅本地测试/自建图床）
   },
+  // 扩展能力（src/extra/）：额外且相对独立的功能，工具声明静态进工具表、实现按需加载。
+  //
+  // ⚠️ `enabled` 的改动**要重启才生效**（与 `python.path` 同一取舍）：工具表是请求前缀的一部分，
+  // 运行期增删会打散提示词缓存。`idleUnloadMs` 与 `maxLoadsPerHour` 每次现读、即时生效。
+  // 设置页必须把"需重启"这句话写在明面上，否则就是"填了、看着生效、实际用的是别的"。
+  extras: {
+    // 扩展 id → 开关。**没出现的 id 用该扩展自己的 defaultEnabled**。
+    // 用 Record 而不是数组：它是"按 id 覆盖默认值"的语义，而数组会被整份替换、
+    // 新版本写进去的开关在旧版本页面上一保存就没了。
+    enabled: {} as Record<string, boolean>,
+    // 空闲多久后调用扩展自己的 dispose() 释放重资源。**0 = 常驻不卸载**（同仓库"0 = 不限"的惯例）。
+    // 注意：卸载释放的是**扩展自己持有的东西**（子进程/socket/大缓存）；模块代码不会被卸载
+    // （Node ESM 没有模块卸载），没有 dispose() 的扩展卸载后等于什么都没发生。
+    idleUnloadMs: 10 * 60 * 1000,
+    // 装载闸门：同一个扩展每小时的装载次数上限，防"模型反复起停同一个子进程"。
+    // 全局每天那一档按这个数线性外推（24×）—— 它是一个**速率**问题，不是总量问题，所以只有一个旋钮。
+    maxLoadsPerHour: 20
+  },
   imageSource: {
     enabled: false,
     traceMoe: { enabled: true, timeoutMs: 15000, minSimilarity: 0.87, maxResults: 3 },
@@ -627,6 +645,29 @@ function normalizeConfigShape<T>(input: T): T {
       p.maxResults = Math.round(clamp(p.maxResults, 1, 10, maxResults));
       if (name === 'sauceNao') p.apiKey = String(p.apiKey ?? '').trim();
     }
+  }
+  // ── 扩展能力（src/extra/）──
+  //
+  // 只做两件事：把 `enabled` 收成"只有布尔值的表"，把两个数钳进合法区间。**不校验 id 是否存在** ——
+  // 那个判断属于注册表（`src/extra/registry.ts`），配置层不认识它，硬编码一份 id 清单必然漂移。
+  // 未知 id 会原样留在 config.json 里，惰性、不参与任何逻辑（比"旧版本一保存就吃掉新版本的开关"好）。
+  const extras = root.extras;
+  if (extras && typeof extras === 'object' && !Array.isArray(extras)) {
+    const e = extras as Record<string, unknown>;
+    const clamp = (value: unknown, min: number, max: number, fallback: number) => {
+      const n = Number(value); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    const rawEnabled = e.enabled;
+    const enabled: Record<string, boolean> = {};
+    if (rawEnabled && typeof rawEnabled === 'object' && !Array.isArray(rawEnabled)) {
+      for (const [id, on] of Object.entries(rawEnabled as Record<string, unknown>)) {
+        if (typeof on === 'boolean') enabled[id] = on;
+      }
+    }
+    e.enabled = enabled;
+    // 0 = 常驻不卸载，所以下界是 0 而不是某个最小等待。
+    e.idleUnloadMs = Math.round(clamp(e.idleUnloadMs, 0, 24 * 60 * 60 * 1000, 10 * 60 * 1000));
+    e.maxLoadsPerHour = Math.round(clamp(e.maxLoadsPerHour, 1, 200, 20));
   }
   // ── 网页收藏夹 + 搜索调用阀门 ──
   //

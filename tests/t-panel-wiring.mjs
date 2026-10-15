@@ -721,6 +721,55 @@ console.log('\n═══ 三处手动删除与两处存储上限的接线 ══
     /不影响消息存档和记忆/.test(chatSettings));
 }
 
+console.log('\n═══ 扩展能力：设置页 ↔ 保存 ↔ 后端钳制 ═══');
+// 与上面「网页收藏夹」那几条同型：这条链的失败形态是"设置页改了没反应"，或者
+// "界面按一个数走、后端按另一个数走"，而**两边都不会报错**。所以钉三件事：
+// 控件成对存在、开关的 id 两端同形、两个数字的钳制口径前后端一致。
+const extrasSectionSrc = (() => {
+  const src = readUI('js/views/settings/sections.js');
+  const at = src.indexOf('export function renderExtrasSection');
+  if (at < 0) return '';
+  const end = src.indexOf('\nexport function ', at + 10);
+  return end < 0 ? src.slice(at) : src.slice(at, end);
+})();
+const extrasSave = seg("if (sec === 'extras')", "if (sec === 'transcription')");
+
+ok('设置侧栏有「扩展能力」入口并接到渲染函数',
+  /\['extras', '扩展能力'\]/.test(js) && /extras: \(\) => renderExtrasSection\(c\)/.test(js));
+ok('区块渲染出两个数字输入框', /id="cfg-extras-idle-sec"/.test(extrasSectionSrc) && /id="cfg-extras-maxloads"/.test(extrasSectionSrc));
+// 只列"标题（id）"是不够的：管理员看不出这个扩展是干什么的。描述来自 `/api/extras`
+// 的 `description`（它**不是**模型看到的那段工具描述，见 src/extra/types.ts），
+// 而两端有一端漏了都**不会报错** —— 面板只是少一行字。
+ok('每一行渲染了 title、id 与给人看的 description',
+  /\$\{esc\(item\.title\)\}/.test(extrasSectionSrc)
+  && /\$\{esc\(item\.id\)\}/.test(extrasSectionSrc)
+  && /\$\{esc\(item\.description\)\}/.test(extrasSectionSrc));
+// 只有 input 没有 save 时，`val()` 取到 undefined 会**静默回退成当前值** —— 用户改了没反应，且不报错。
+ok('保存分支真的读了这两个输入框', /#cfg-extras-idle-sec/.test(extrasSave) && /#cfg-extras-maxloads/.test(extrasSave));
+// 每个扩展一个开关：渲染写 `data-extra-id`，保存按同一个属性收集。两端不同形的话，
+// 开关会"保存了但其实没写进去"，或者写到了别的 id 上。
+ok('扩展开关的 id 两端同形（渲染写 data-extra-id，保存按 data-extra-id 收集）',
+  /data-extra-id=/.test(extrasSectionSrc) && /\[data-extra-id\]/.test(extrasSave));
+// "改动需重启"是这条设计知情的代价（工具表是请求前缀的一部分）。只写在源码注释里不够 ——
+// 用户看到的是一个点一下就生效的开关，不说清就是仓库最忌讳的"填了、看着生效、实际用的是别的"。
+ok('界面上写明了开关改动需要重启', /需要重启/.test(extrasSectionSrc));
+
+// 钳制口径：设置页按**秒**、后端按**毫秒**，所以不能逐字比字符串 —— 比换算后的值。
+const uiIdleSec = Number((/clampInt\(val\('#cfg-extras-idle-sec',\s*\d+\),\s*0,\s*(\d+),/.exec(extrasSave) || [])[1]);
+const beIdleExpr = (/e\.idleUnloadMs = Math\.round\(clamp\(e\.idleUnloadMs,\s*0,\s*([^,]+),/.exec(readSrc('core/config.js')) || [])[1];
+const beIdleMs = beIdleExpr ? Function(`return (${beIdleExpr});`)() : NaN;
+ok('空闲卸载的上限：设置页（秒）×1000 与后端（毫秒）指的是同一个值',
+  Number.isFinite(uiIdleSec) && Number.isFinite(beIdleMs) && uiIdleSec * 1000 === beIdleMs,
+  `设置页 ${uiIdleSec}s → ${uiIdleSec * 1000}ms，后端 ${beIdleMs}ms`);
+const uiLoads = (/clampInt\(val\('#cfg-extras-maxloads',\s*\d+\),\s*(\d+),\s*(\d+),\s*(\d+)\)/.exec(extrasSave) || []).slice(1).join(',');
+// 后端那一段是源码里的写法（`1, 200, 20`，带空格），逐字比会因空格假红 —— 去掉空白再比。
+const beLoads = ((/e\.maxLoadsPerHour = Math\.round\(clamp\(e\.maxLoadsPerHour,\s*([^)]+)\)\);/.exec(readSrc('core/config.js')) || [])[1] || '').replace(/\s+/g, '');
+ok('每小时装载上限的钳制：设置页与后端是同一组数',
+  uiLoads.length > 0 && beLoads === uiLoads, `设置页 ${uiLoads}，后端 ${beLoads}`);
+// 注册表只能经端点出来（ui/ 够不着 src/），所以这个端点不存在的话整个区块会一直是空的。
+ok('后端有 /api/extras 端点且已注册进路由表',
+  /\/api\/extras/.test(readSrc('web/routes/extras.js')) && /extrasRoutes/.test(readSrc('web/routes/index.js')));
+
 console.log('\n═══ SSE 事件名：发射端与订阅端必须同名 ═══');
 // 两边分居两层两种写法（`src/core/events.ts` 是 TS 常量表，`ui/js` 是裸字符串），
 // 改名时最容易只改一边：帧照发、面板却再也不刷新，而且**不会报任何错**。

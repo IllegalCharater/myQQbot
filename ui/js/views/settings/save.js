@@ -298,6 +298,24 @@ export async function saveConfig({ quiet = false } = {}) {
     if (enteredKey && enteredKey !== '******') patch.hotSearchApiKey = enteredKey;
   }
 
+  if (sec === 'extras') {
+    const old = c.extras || {};
+    // `enabled` 从**服务端当前那一份**起步，只覆盖这一页真正渲染出来的那几个 id。
+    // 于是"这个版本不认识的 id"（装过更新的版本、又退回旧版本）不会被一次保存动作吃掉 ——
+    // 与网页收藏夹的 `originalByKey` 是同一条手法。
+    const enabled = { ...(old.enabled || {}) };
+    document.querySelectorAll('[data-extra-id]').forEach((node) => {
+      enabled[node.dataset.extraId] = !!node.checked;
+    });
+    patch.extras = {
+      enabled,
+      // 界面上是**秒**，配置里是毫秒。0 = 常驻不卸载，所以下界是 0 而不是某个最小等待；
+      // 上下限与后端 normalizeConfigShape 里那组数**必须一致**（漂移的表现是"我填了 X 却按别的数走"）。
+      idleUnloadMs: clampInt(val('#cfg-extras-idle-sec', 600), 0, 86400, 600) * 1000,
+      maxLoadsPerHour: clampInt(val('#cfg-extras-maxloads', 20), 1, 200, 20)
+    };
+  }
+
   if (sec === 'transcription') {
     const t = c.transcription || {};
     const appId = val('#cfg-transcription-appid', t.appId || '').trim();
