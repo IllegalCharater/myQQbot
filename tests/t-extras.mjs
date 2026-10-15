@@ -95,7 +95,8 @@ const cmd = (name) => ({ names: [name] });
  * `body` 可覆盖默认的执行体（用来造"在途不卸载"那种场景）。
  */
 function makeFakeEntry(id, names, {
-  defaultEnabled = true, mode = 'attach', commands = [], body = null, dispose = null, prompt = null
+  defaultEnabled = true, mode = 'attach', commands = [], body = null, dispose = null, prompt = null,
+  overrideTools = null
 } = {}) {
   const counters = { load: 0, dispose: 0, run: 0, command: 0 };
   const entry = {
@@ -106,6 +107,7 @@ function makeFakeEntry(id, names, {
     defaultEnabled,
     tools: names.map(spec),
     ...(commands.length ? { commands: commands.map(cmd) } : {}),
+    ...(overrideTools ? { overrideTools } : {}),
     async load() {
       counters.load += 1;
       const handlers = {};
@@ -415,6 +417,65 @@ await withFakeTimers(async (timers) => {
   const legal = makeFakeEntry('goodsec', ['t'], { prompt: { override: { stickerRules: '不要发表情。' } } });
   const rt = makeRuntime([legal.entry], DEFAULT_EXTRAS);
   ok('override 一个合法段名 → 装载通过', (await rt.load('goodsec')).ok === true);
+
+  // `capabilityProtocol`（主流程那几个能力的用法）**不是**框架契约段 —— 它可以被覆盖。
+  // 这条是"拆段"那件事留下的判据：拆出去的段若被顺手也列进框架契约，接管者就甩不掉它。
+  const cap = makeFakeEntry('capseg', ['t'], { prompt: { override: { capabilityProtocol: '本模式没有那些工具。' } } });
+  const capRt = makeRuntime([cap.entry], DEFAULT_EXTRAS);
+  ok('capabilityProtocol 不是框架契约段 → 可以被覆盖',
+    (await capRt.load('capseg')).ok === true);
+}
+
+// ── 8b. overrideTools：框架契约段要引用的工具名 ──────────────────────────────
+//
+// `toolProtocol`（框架契约，接管时强制保留）第 2 条要写"要发言必须调用 X"，而接管会话里
+// 内置工具整体让位 —— 缺省那个 `send_message` 不在表里。所以接管扩展**必须**声明自己那个
+// 名字，而声明必须是**真的**。三条都拦在装配期（构造函数抛错），因为它们的症状都是安静的：
+// 缺了 → 模型调一次拿到"未知工具"再重试，群里迟一轮才见到话；写错 → 同一个症状。
+{
+  const problemsOf = (entry) => {
+    try { makeRuntime([entry], DEFAULT_EXTRAS); return ''; }
+    catch (error) { return String(error.message); }
+  };
+
+  const noSend = makeFakeEntry('ovA', ['say'], { mode: 'override' });
+  ok('接管模式没声明 overrideTools.sendTool → 装配期就拒（默认会写成 send_message，而它不在表里）',
+    /必须声明 overrideTools\.sendTool/.test(problemsOf(noSend.entry)), problemsOf(noSend.entry));
+
+  const wrongName = makeFakeEntry('ovB', ['say'], { mode: 'override', overrideTools: { sendTool: 'speak' } });
+  ok('overrideTools.sendTool 写了一个本扩展没有的工具名 → 拒（框架段会照着它写，模型一调就报未知工具）',
+    /overrideTools\.sendTool 写的是「speak」/.test(problemsOf(wrongName.entry)), problemsOf(wrongName.entry));
+
+  const wrongFinish = makeFakeEntry('ovC', ['say'], {
+    mode: 'override', overrideTools: { sendTool: 'say', finishTool: 'wrap_up' }
+  });
+  ok('overrideTools.finishTool 同样要真的存在', /overrideTools\.finishTool/.test(problemsOf(wrongFinish.entry)),
+    problemsOf(wrongFinish.entry));
+
+  const attachWith = makeFakeEntry('atD', ['t'], { overrideTools: { sendTool: 't' } });
+  ok('附加模式写了 overrideTools → 拒（没有任何地方读它，只会让人以为它生效了）',
+    /overrideTools 只有接管模式/.test(problemsOf(attachWith.entry)), problemsOf(attachWith.entry));
+
+  const good = makeFakeEntry('ovE', ['say', 'wrap'], {
+    mode: 'override', overrideTools: { sendTool: 'say', finishTool: 'wrap' }, body: ['【你是 DM】']
+  });
+  const rtGood = makeRuntime([good.entry], DEFAULT_EXTRAS);
+  ok('声明齐全（两个名字都在 tools 里）→ 通过自检', rtGood.list().some((row) => row.id === 'ovE'));
+
+  // 计划要把它**带出去** —— 否则上面那一整套校验只是自我感动（校验了却没人用）。
+  await rtGood.load('ovE', 'test', G);
+  const plan = rtGood.promptPlan(G);
+  ok('promptPlan 在接管时带出 sendTool / finishTool（框架契约段靠它俩才写得对）',
+    plan.mode === 'override' && plan.sendTool === 'say' && plan.finishTool === 'wrap', JSON.stringify(plan));
+
+  // `finishTool: null` 是**合法**取值（本扩展没有收尾工具），不能被当成"没声明"而误拦。
+  const noFinish = makeFakeEntry('ovF', ['say'], {
+    mode: 'override', overrideTools: { sendTool: 'say', finishTool: null }
+  });
+  const rtNoFinish = makeRuntime([noFinish.entry], DEFAULT_EXTRAS);
+  await rtNoFinish.load('ovF', 'test', G);
+  ok('finishTool 显式写 null → 通过自检，且计划里如实带出 null（框架段不提收尾工具）',
+    rtNoFinish.promptPlan(G).finishTool === null, JSON.stringify(rtNoFinish.promptPlan(G)));
 }
 
 // ── 9. 提示词计划随装载状态变化（"动态"那条取舍的唯一判据）────────────────────
@@ -441,7 +502,10 @@ await withFakeTimers(async (timers) => {
 // 生命时间对附加生效、对继承不生效，表现只是"接管永远不撒手"。所以逐条钉。
 {
   const attach = makeFakeEntry('atta', ['attach_tool'], { commands: ['/atta'] });
-  const over = makeFakeEntry('over', ['over_tool'], { mode: 'override', commands: ['/over'], prompt: { body: ['你是另一个东西。'] } });
+  const over = makeFakeEntry('over', ['over_tool'], {
+    mode: 'override', overrideTools: { sendTool: 'over_tool' },
+    commands: ['/over'], prompt: { body: ['你是另一个东西。'] }
+  });
   const runtime = makeRuntime([attach.entry, over.entry], DEFAULT_EXTRAS);
   const A = 'group:100';
   const B = 'group:200';
@@ -477,7 +541,9 @@ await withFakeTimers(async (timers) => {
     runtime.promptPlan(B).mode === 'attach', JSON.stringify(runtime.promptPlan(B)));
 
   // 同一个会话同时只允许一个接管者；**不同会话互不相干**。
-  const over2 = makeFakeEntry('over2', ['over2_tool'], { mode: 'override' });
+  const over2 = makeFakeEntry('over2', ['over2_tool'], {
+    mode: 'override', overrideTools: { sendTool: 'over2_tool' }
+  });
   const runtime2 = makeRuntime([over.entry, over2.entry], DEFAULT_EXTRAS);
   await runtime2.load('over', 'test', A);
   const clash2 = await runtime2.load('over2', 'test', A);
@@ -494,7 +560,9 @@ await withFakeTimers(async (timers) => {
 
 // 生命时间：**两种模式都受它约束**（配置里同一个数）。到点后附加的卸载实现、接管的交还主流程。
 await withFakeTimers(async (timers) => {
-  const over = makeFakeEntry('ttl_ov', ['ov_tool'], { mode: 'override' });
+  const over = makeFakeEntry('ttl_ov', ['ov_tool'], {
+    mode: 'override', overrideTools: { sendTool: 'ov_tool' }
+  });
   const normal = makeFakeEntry('ttl_at', ['at_tool']);
   const runtime = makeRuntime([over.entry, normal.entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 1000 });
   await runtime.load('ttl_ov', 'test', G);
@@ -511,7 +579,9 @@ await withFakeTimers(async (timers) => {
 
 // 两个会话绑同一个接管扩展：实现只装载一次，其中一个到期时另一个照旧。
 await withFakeTimers(async (timers) => {
-  const over = makeFakeEntry('shared', ['shared_tool'], { mode: 'override' });
+  const over = makeFakeEntry('shared', ['shared_tool'], {
+    mode: 'override', overrideTools: { sendTool: 'shared_tool' }
+  });
   const runtime = makeRuntime([over.entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 1000 });
   await runtime.load('shared', 'test', 'group:1');
   await runtime.load('shared', 'test', 'group:2');
@@ -648,7 +718,9 @@ await withFakeTimers(async (timers) => {
 // start() 按配置播种：**要真的把实现拉起来**，否则那个会话只会静默退回主流程，
 // 而用户写的配置看起来生效了 —— 本仓库最忌讳的那类故障。
 {
-  const ov = makeFakeEntry('seeded', ['seeded_tool'], { mode: 'override' });
+  const ov = makeFakeEntry('seeded', ['seeded_tool'], {
+    mode: 'override', overrideTools: { sendTool: 'seeded_tool' }
+  });
   const runtime = makeRuntime([ov.entry], { ...DEFAULT_EXTRAS, override: { 'group:5': 'seeded' } });
   await runtime.start();
   ok('start() 把配置里的接管播种下去，并真的装载了实现',

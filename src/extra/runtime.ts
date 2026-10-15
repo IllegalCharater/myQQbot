@@ -147,6 +147,33 @@ export function validateRegistry(
       problems.push(`${id}: mode 只能是 'attach' 或 'override'，实际是 ${String(entry.mode)}`);
     }
 
+    // ── overrideTools：框架契约段要引用的工具名 ──
+    //
+    // 这三条拦的都是**不会报错地坏掉**的形态：
+    //   • 缺 sendTool —— 框架段会照着默认的 `send_message` 写，而接管会话里那个工具不在表里。
+    //     症状是模型调一次、拿一句"未知工具"、再重试一次，群里才见到话。
+    //   • 名字写错 —— 与 `checkRuntimeShape` 拦的是同一类东西（声明与实现分居两处）。
+    //   • 非接管模式写它 —— 没有任何地方读，纯属让下一个人以为它生效了。
+    const overrideTools = entry.overrideTools;
+    if (entry.mode === 'override') {
+      const sendTool = String(overrideTools?.sendTool ?? '').trim();
+      if (!sendTool) {
+        problems.push(`${id}: 接管模式必须声明 overrideTools.sendTool —— 框架契约段要照着它写`
+          + `「要发言必须调用 X」，不声明就会写成 send_message，而那个工具在接管会话里不在表里`);
+      }
+      const own = new Set((entry.tools ?? []).map((tool) => String(tool.name ?? '')));
+      for (const [field, value] of [['sendTool', sendTool], ['finishTool', overrideTools?.finishTool]] as const) {
+        if (value === undefined || value === null || value === '') continue;
+        if (!own.has(String(value))) {
+          problems.push(`${id}: overrideTools.${field} 写的是「${String(value)}」，`
+            + `但这个扩展没有这个工具 —— 框架契约段会照着它写，模型一调就报"未知工具"`);
+        }
+      }
+    } else if (overrideTools !== undefined) {
+      problems.push(`${id}: overrideTools 只有接管模式（mode: 'override'）用得上，`
+        + `它在附加模式下没有任何地方读`);
+    }
+
     for (const spec of entry.tools ?? []) {
       const name = String(spec.name ?? '');
       if (!name) { problems.push(`${id}: 有一个工具没写 name`); continue; }
@@ -339,7 +366,14 @@ export class ExtrasRuntime {
     if (override) {
       const slot = this.#loaded.get(override.id);
       const body = readContribution(slot?.rt, this.#deps)?.body ?? [];
-      return { mode: 'override', body: body.map(String).filter((text) => text.trim()) };
+      return {
+        mode: 'override',
+        body: body.map(String).filter((text) => text.trim()),
+        // 框架契约段（永远保留）要照这两个名字写「要发言必须调用 X」。缺省是内置那两个，
+        // 而接管会话里它们**不在表里** —— 所以 `validateRegistry` 强制接管扩展声明 `sendTool`。
+        sendTool: override.overrideTools?.sendTool,
+        finishTool: override.overrideTools?.finishTool
+      };
     }
     const append: string[] = [];
     const merged: Record<string, string> = {};

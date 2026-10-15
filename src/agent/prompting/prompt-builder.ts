@@ -58,11 +58,23 @@ export function buildSystemPrompt({ persona, capabilities = {}, bookmarkSites = 
   //
   // 判据是 `SYSTEM_SECTION_IDS`（core 里那张表）：**段序即数组顺序**，缺席的段用空串表示、
   // 最后统一滤掉。这比"往数组里塞 '' 当分隔符"多一样东西 —— 段有了名字，扩展才能按名字覆盖。
+  //
+  // `Record<SystemSectionId, string>` 这个类型本身就是护栏：往段名表加一段而忘了在这里写正文，
+  // 编译不过。
   const sections: Record<SystemSectionId, string> = {
     identity: PROMPT_CATALOG.system.identity(cfg.botName),
     persona: roleText ? `${PROMPT_CATALOG.system.personaHeading}\n${roleText}` : '',
     security: PROMPT_CATALOG.system.securityRules(),
-    toolProtocol: PROMPT_CATALOG.system.toolProtocol(),
+    // 两个工具名由**接管者**决定：本段在接管模式下强制保留，而那时内置工具整体让位
+    // （`web/app.ts` 只把接管者的工具拼进表），写死 `send_message` 会让模型去调一个
+    // 不存在的工具。非接管模式一律用默认名（`send_message` / `finish`）。
+    toolProtocol: PROMPT_CATALOG.system.toolProtocol(
+      extraPrompt?.mode === 'override'
+        ? { sendTool: extraPrompt.sendTool, finishTool: extraPrompt.finishTool }
+        : {}
+    ),
+    // **不是**框架契约段：接管模式下它跟着其余段落让位（那些能力多半压根不在）。
+    capabilityProtocol: PROMPT_CATALOG.system.capabilityProtocol(),
     antiAiFlavor: PROMPT_CATALOG.system.antiAiFlavor(),
     speakOrNot: PROMPT_CATALOG.system.speakOrNot(cfg.participation),
     humanRhythm: PROMPT_CATALOG.system.humanRhythm(),

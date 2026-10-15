@@ -56,7 +56,8 @@ const ASSERT = [
   't-admin.mjs',           // 管理接口
   't-ui-render.mjs',       // UI 领域模块在假 DOM 下真跑一遍看 HTML
   't-vision-log.mjs',      // 读图 → 会话记录回填（假模型端点跑整轮）
-  't-tool-protocol.mjs'    // 工具后普通文本 → 一次协议纠正；仍可选择沉默
+  't-tool-protocol.mjs',   // 工具后普通文本 → 一次协议纠正；仍可选择沉默
+  't-trpg-rules.mjs'       // 跑团规则引擎（骰子表达式与检定，纯函数、可复现）
 ];
 
 // ── 诊断脚本：只打印行为、没有断言、永远退 0，默认不跑（--all 才带上） ──

@@ -218,7 +218,13 @@ UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词
 
 工具 description 在这份目录里分成**两块**：`TOOL_PROMPT_TEXT`（每一项对应 `agent/tools/index.ts` 里内置拼装的一个工具，名字与顺序是硬约束）与 `src/extra/prompts.ts` 的 `EXTRA_PROMPT_TEXT`（`src/extra/` 的扩展工具，随时可加）。`TOOL_PROMPT_TEXT` 里为扩展留的那几行是**转发到 `EXTRA_PROMPT_TEXT` 的同一个对象引用**，于是 `PROMPT_CATALOG.tools.<工具名>` 对两类工具是同一条取法。完整理由见 `docs/extras-design.md` §3.1 与 §5。
 
-**system prompt 现在是"段名 → 正文"**：段名与段序由 `SYSTEM_SECTION_IDS` 定（在 `prompt_catalog.ts`，agent 与 extra 都 import 得到），段落之间用一个空行分隔。这样扩展才能**按段名覆盖**某一段。两段**框架契约**（`security` 安全规则、`toolProtocol` 工具调用协议）任何模式下都不许被扩展覆盖，接管模式下也只有它们强制保留 —— 它们不是"功能"，是运行契约。⚠️ 段序断言（`indexOf` 递增）**证明不了分隔符**：实测把 `join('\n\n')` 改成 `join('\n')` 之后 59 条断言全绿，所以另有一条专钉分隔符的断言。
+**system prompt 现在是"段名 → 正文"**：段名与段序由 `SYSTEM_SECTION_IDS` 定（在 `prompt_catalog.ts`，agent 与 extra 都 import 得到），段落之间用一个空行分隔。这样扩展才能**按段名覆盖**某一段。
+
+哪些段是**框架契约**（`security` 安全规则、`toolProtocol` 工具调用协议）由"**接管时该不该让它消失**"这条判据定：它们不是"功能"，是运行契约，任何模式下都不许被扩展覆盖、接管模式下也只有它们强制保留。
+
+2026-10-15 按这条判据把"**某个能力的用法**"拆了出去 —— 漫画搜索/下载、转写、出图那四条本来挤在 `toolProtocol` 里，于是接管会话必然带着"调用 `download_jmcomic`"这类指令，而那个工具不在接管者的表里（模型调一次拿到"未知工具"，再重试一次）。现在它们住在**新段 `capabilityProtocol`**：不是框架契约 ⇒ 接管时自动让位，也因此**可以被扩展按段名覆盖**。**往 `toolProtocol` 里加"某个工具的用法"就等于把它变成框架契约，接管扩展再也甩不掉它。**
+
+同一次改动让**框架段的工具名变成参数**：`toolProtocol` 第 2 条要写"要发言必须调用 X"，而接管会话里内置工具整体让位，X 缺省那个 `send_message` 不在表里。签名因此是 `toolProtocol({ sendTool, finishTool })`，由接管扩展在 `spec.overrideTools` 里声明（`finishTool: null` = 没有收尾工具，本段就不提它）。`mode: 'override'` **必须**声明 `sendTool`，且两个名字都必须真的在该扩展的 `tools` 里 —— `validateRegistry` 在装配期拒绝装载。细节见 `docs/extras-design.md` §5。⚠️ 段序断言（`indexOf` 递增）**证明不了分隔符**：实测把 `join('\n\n')` 改成 `join('\n')` 之后 59 条断言全绿，所以另有一条专钉分隔符的断言。
 
 `src/extra/prompts.ts` 留在 `src/extra/` 里，代价是 `core/prompt-catalog.ts → extra/prompts.js` 成为**全仓库唯一一条低层 import 高层**——它登记在 `scripts/check-layers.mjs` 的 `LAYER_ALLOW` 里，且闸门自带守卫：这条例外的目标必须是叶子模块（出现任何相对 import 直接报错）。那条依赖之所以不成环，全靠这一点。
 
@@ -229,7 +235,7 @@ UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词
 工具**结果**串通常是动态返回值（含错误文案），留在各自工具文件里；唯一例外是
 `transcribe_video` 的回执话术（`TOOL_PROMPT_TEXT.transcribe_video.receipt`）：它没有任何动态成分，
 且它要解决的问题是"**诱导模型说哪句话**"而不是"返回什么数据"，所以按固定指令处理。这一条特别值得
-放在目录里，因为它是纯话术、需要反复调——它和 `description`、`toolProtocol` 第 7 条是同一件事的
+放在目录里，因为它是纯话术、需要反复调——它和 `description`、`capabilityProtocol` 第 2 条是同一件事的
 三个面，分居两地就永远调不齐。
 
 ### 5.1 System prompt
@@ -480,6 +486,8 @@ npm run dist:desktop    # 打包绿色版桌面应用（scripts/build-desktop.mj
 图像生成另有 `t-image-gen.mjs`（115 条），起一个**本地假百炼端点**（`baseUrl` 是管理员配置、不是用户输入，所以指向 127.0.0.1 是正常用法；与「请求结构」那条同一条边界），覆盖：配置归一化与钳制（含 `x` → `*`、整条 endpoint 粘进来、`DASHSCOPE_API_KEY` 回退）、请求体形状（T2I 只有 `{text}`、I2I 参考图在前、`negative_prompt` **只在 3.0 系列出现**）、**两层提示词**（风格层留空时与模型给的描述逐字相同——这条对照必须有，否则"永远拼一层空串"看不出来）、错误映射（HTTP 400、**HTTP 200 但响应体带 `code`**、无图 URL、响应体超限、超时、abort 各一条）、队列（单并发、`stop()` 取消排队中的那一个并 abort 在途、视图不含 prompt、临时文件投递后即删）、成本闸门（每会话与全局两本账、被拒的不占额度、**两条入口共用**）、`/画` 解析与参考图定位、工具侧（不代发消息、不把任务号写进结果、messageId 取不到图时列出实际附件种类），以及端到端那一条：**命令路径与工具路径拼出来的请求体逐字节相同**（两层提示词只有一份实现）。
 
 搜图另有 `t-image-source.mjs`，七段：① 通用 provider 的薄适配——参数按**位次**原样转发（含 `engineOptions` 里的 `apiKey`）、错误码原样透传（`RATE_LIMIT` / `QUOTA_EXHAUSTED` / `TIMEOUT`）、`test()` 走 `ping()` 且**从不抛**（ping 返回 `false` 或直接抛异常都收敛成 `false`）；② **服务层的分发第一次有了直接断言**——用注入的假 provider（`PicImageSearchPort` 是编译期端口，测试用对象字面量顶替，没有 `instanceof`）实测 `intent` 决定的先后顺序（`anime` 先 `trace.moe`、`manga` / `illustration` 先 `saucenao`、**`unknown` 直接走一般向兜底**）、专属引擎答不上（低于门槛 / 抛错 / 超时）之后**兜底真的被调用**、每一发的超时被夹住给后面留位置（预算不够则跳过并记 `NO_BUDGET`、一次调用都不发）、逐引擎的 `timeoutMs`/`maxResults`/`mime`、`similarity < minSimilarity` 过滤（**无置信度的结果只对没有门槛的引擎算命中**——`baidu` 那条被采用，而带门槛的引擎照样丢弃它，两条互为对照）、关闭或空 `apiKey` 的引擎被跳过，以及 `failures` 标签仍是 `trace:` / `sauce:` / `baidu:`（这条字符串会进模型可见文本）。**`unknown` 这条是补上来的缺口**：它此前没有任何断言，而模型判不出类型时填的就是它 —— 于是"当初与 `anime` 同序（理由只是'与改动前一致'）"这个缺陷在四套件全绿的情况下活了一整轮；夹具让 trace.moe 也自称命中（0.99 > 它自己的门槛 0.87）才可判别（顺序错则 trace 的假命中赢并拦住兜底）。为了让 `loadSafeImage` 真的下载到字节，这一段用**回环 HTTP 服务**（`security.allowPrivateImageHosts` 临时打开，跑完复原——先例是 `t-sticker.mjs`），因此它必须排在"被 SSRF 挡下"那条断言**之后**；③ 同一段窗口内另有**缓存**用例（共用同一个 service 实例才有缓存可言）：同引擎同图第二次不发远端调用、**换 intent 不会被另一个引擎的缓存顶替**（旧实现按图片 hash 缓存整轮结论，这条在旧实现下会红）、失败不进缓存、`maxResults` 与引擎参数指纹都进键；④ `formatImageSourceResult` 的输出形状（此前一条断言都没有）——集数与时间点彼此独立、`time === 0` 是合法值、缺失字段兜底而不是印出 `undefined`、**没有置信度时整行让位**（判据是"字段在不在"，`pct(undefined)` 印出来的是 `NaN%`）；另有两条文本断言钉住 `SearchIntent` 的取值域在**三处**（`types.ts` 的联合类型、工具 schema 的 `enum`、`prompt-catalog` 的 intent 描述）逐字一致 —— 少一处模型就永远填不出那一档，且没有任何报错；⑤ 文本断言钉住原生 fetch 已绝迹：`src/media/image-source/` 下不再出现 `saucenao.com` / `api.trace.moe` / `TraceMoeProvider` / `SauceNaoProvider` / `fetchImpl`，两个按引擎的 provider 文件不存在，服务层源码里不出现 `anime_trace`（它是 trace.moe 的别名，不许加成第三个引擎）；⑥ 引擎名是**跨进程的手工镜像**：worker 的 `ENGINE_CLASS_CANDIDATES` 键集合 ⇄ Node 的 `PIC_IMAGE_SEARCH_ENGINES` 逐字比对（`.py` 不进 `tsc`，没有别的套件会读它），另加 `MEASURED_CLASS_NAMES`（2026-09-29 实测到的 7 个类名）钉住它们在候选链里**够得着**；⑦（源码段 ⑩）扫 `python-tools/pic_image_search_worker.py` 的**源码文本**，钉住第三次实测抓到的那两个真机 bug 的修法——时间取自大写 `From`、取不到时**不写** `time` 键（写 0 会让 formatter 的"字段在不在"判据失效）、标题按 `title_chinese` → `title_native` → `title_romaji` 取实测平铺字段、`origin` 当标题的兜底不存在。**两条射程不同，别当同一条用**：键集合那条看不见候选类名的拼写（把 `BaiDu` 改回 `Baidu`，实测该套件全绿），实测名那条挡不住"库改名"——它只挡得住"把已经实测对的名字又改回去"。⑦ 那段还有一条通用教训：**取函数体时只按行丢了 `#` 注释，docstring 不是注释、丢不掉**，所以断言必须**锚定到具体调用**（`_pick(raw_item, "title_chinese")`）而不是裸字段名——初版写的是 `/title_chinese[\s\S]*title_native/`，把代码里那次调用删掉后它**照样绿**（名字原样躺在 docstring 里），是证伪探针撞出来的假绿。
+
+跑团（TRPG）的规则引擎是**纯函数**，住在 `src/extra/trpg/rules/`（`dice.ts` 骰子表达式、`check.ts` 检定）。它刻意与对话链无关：掷骰是跑团里唯一"错了会毁掉整局信任"的东西，所以它先独立稳住、再谈接入。三条设计约束：**可复现**（随机源 `DiceRng` 是参数，测试注入确定序列）、**可复核**（`DiceRoll.dice` 保留**每一颗**骰面、**含被 `kh`/`kl` 丢掉的**——只给一个总数的话玩家无从验算）、**失败可解释**（`DiceError(code, 中文文案)`，工具会把 `message` 原样回给模型，所以文案里必须带"支持的形态 + 该怎么做"）。检定这一层把"算不算成功"抽成可替换的 `CheckJudge` —— 那是**唯一与规则书绑定**的判断（COC 掷低、D&D 掷高），默认给一个保守的通用判定（`total >= target`，且**只在单颗骰时**判大成功/大失败，因为多骰下"全最大"没有公认语义）。`t-trpg-rules.mjs`（45 条）逐面核对解析与求值、`kh`/`kl` 真的留对、12 种非法输入的 `code` 与文案、200 组随机表达式的不变式（颗数 / 留下+丢掉 = 总数 / `total = Σkept + mod` / 面值落在 `[1, faces]`）、坏随机源（越界 / `NaN` / `Infinity`）被夹回合法区间、以及"同一个骰面在两种判定下结论相反"——那是"接缝真的存在"的判据。
 
 发布前执行：
 

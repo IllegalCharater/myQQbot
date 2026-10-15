@@ -149,7 +149,11 @@ app.stop()        ── 清全部计时器 + dispose 全部已装载项（每�
 `buildSystemPrompt` 按 `core/prompt-catalog.ts` 的 `SYSTEM_SECTION_IDS` 拼段落 —— **段序即数组顺序**。有了段名，扩展才能"按名字覆盖"。
 
 ```ts
-export const SYSTEM_SECTION_IDS = ['identity', 'persona', 'security', 'toolProtocol', 'antiAiFlavor', …] as const;
+export const SYSTEM_SECTION_IDS = [
+  'identity', 'persona', 'security', 'toolProtocol',
+  'capabilityProtocol',        // ← 主流程那几个能力的用法（**不是**框架契约）
+  'antiAiFlavor', …
+] as const;
 /** 框架契约段：接管模式下强制保留，且任何模式都不许被扩展 override。 */
 export const SYSTEM_FRAMEWORK_SECTIONS = ['security', 'toolProtocol'] as const;
 ```
@@ -158,6 +162,25 @@ export const SYSTEM_FRAMEWORK_SECTIONS = ['security', 'toolProtocol'] as const;
 - **接管**：只剩框架契约两段 + 扩展的 `body`。
 
 **框架契约两段为什么动不得**：它们不是"功能"，是**运行契约**。没有 `security`，扩展一句"你可以读本机文件"就把项目最硬的边界拆了（而它多半不是故意的）；没有 `toolProtocol`，模型不知道怎么发工具 JSON、怎么才算"说过话了"，整个 agent 循环当场失效。**两层守护**：装载时校验（拒绝装载）+ 拼装时跳过（第二道，防计划从别处拼出来）。
+
+**（2026-10-15 补）分段的判据是"接管时该不该让它消失"，不是"它算不算重要"**：原先把"某个**能力**的用法"（漫画搜索/下载、转写、出图四条）也塞在 `toolProtocol` 里，于是接管会话必然带着一串"调用 `download_jmcomic`"的指令，而那个工具**不在接管者的表里** —— 模型调一次、拿一句"未知工具"、再重试一次。拆出去之后：
+
+- `toolProtocol` 只讲 **agent 循环本身的协议**（无跨运行记忆 / 文本不发出去 / 参数是 JSON / 怎么算收尾），换一套人格它照样成立 ⇒ 框架契约，任何模式都保留；
+- `capabilityProtocol` 讲**主流程那几个能力**的用法 ⇒ 不是框架契约，**接管时自动让位**，也因此可以被扩展按段名覆盖（那是它的正当用法）。
+
+**往 `toolProtocol` 里加"某个工具的用法"就等于把它变成框架契约，接管扩展再也甩不掉它。** 工具用法一律进 `capabilityProtocol`。
+
+**框架段的工具名是参数**（(2026-10-15)）：`toolProtocol` 第 2 条要写「要发言必须调用 X」，而接管会话里内置工具整体让位 —— 缺省那个 `send_message` 不在表里。所以签名是 `toolProtocol({ sendTool, finishTool })`，接管扩展在 `spec.overrideTools` 里声明自己那两个工具叫什么，`ExtrasRuntime.promptPlan()` 经 `PromptPlan` 的 override 分支带进 `buildSystemPrompt`。
+
+三条判据都拦在**装配期**（`validateRegistry`，构造函数抛错），因为它们的症状都是安静的（模型调一次拿到"未知工具"再重试，群里迟一轮才见到话）：
+
+| 判据 | 为什么 |
+|---|---|
+| `mode: 'override'` **必须**声明 `overrideTools.sendTool` | 不声明就照默认的 `send_message` 写，而那个工具不在表里 —— 接管者必然说不出一句话 |
+| 声明的名字必须**真的在本扩展的 `tools` 里** | 与 `checkRuntimeShape` 同一类：声明与实现分居两处是这套设计唯一的漂移点 |
+| 非接管模式**不许**写 `overrideTools` | 没有任何地方读它，纯属让下一个人以为它生效了 |
+
+`finishTool: null` 是合法取值（本扩展没有收尾工具）—— 框架段第 5 条就不提它，**不提比提一个不存在的名字好**。
 
 **重构的安全网**：原实现是"匿名数组 + `''` 分隔 + `join('\n')`"，新实现是"段名 → 正文 + `join('\n\n')`"。两者**逐字等价**，改造当次用一次性脚本对着 HEAD 版跑过 8 组配置（缺省 / 有人设 / 有自定义规则 / 空白人设 / 能力开关 / 收藏夹 / 走配置含 sticker 档位），全部逐字相同。
 
@@ -245,10 +268,20 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 
 | 套件 | 管什么 |
 |---|---|
-| `tests/t-extras.mjs`（99 条） | **模型零装载入口**、装载/卸载改变工具表、命令触发装载、**接管按会话隔离**（同一进程里 A 让位 B 照常）、**生命时间对两种模式都生效**、多会话共用一个实现、配置播种（含脏值忽略）、TTL 与在途、`stop()` 幂等与超时、注册表自检七条、名字对账（工具 + 命令两个方向）、提示词覆盖段名校验（含框架契约）、提示词计划随装载状态、真实现跑一遍、`buildToolDefs()` 默认行为逐字不变、两张提示词表与注册表两个方向对账、源级断言（`registry.ts` 的 load 是字面量 import 且无静态 impl import；各 `spec.ts` 不 import impl；`prompts.ts` 无 import） |
-| `tests/t-reply.mjs` | **system 段序 + 段分隔符 + 空计划是空操作 + 覆盖不可碰框架契约 + 接管只留框架契约** |
+| `tests/t-extras.mjs`（107 条） | **模型零装载入口**、装载/卸载改变工具表、命令触发装载、**接管按会话隔离**（同一进程里 A 让位 B 照常）、**生命时间对两种模式都生效**、多会话共用一个实现、配置播种（含脏值忽略）、TTL 与在途、`stop()` 幂等与超时、注册表自检、名字对账（工具 + 命令两个方向）、提示词覆盖段名校验（含框架契约**不许覆盖** / `capabilityProtocol` **可以**覆盖）、**`overrideTools` 三条**（接管必须声明 `sendTool` / 名字必须真的在 `tools` 里 / 附加模式不许写）、提示词计划随装载状态、真实现跑一遍、`buildToolDefs()` 默认行为逐字不变、两张提示词表与注册表两个方向对账、源级断言（`registry.ts` 的 load 是字面量 import 且无静态 impl import；各 `spec.ts` 不 import impl；`prompts.ts` 无 import） |
+| `tests/t-reply.mjs`（66 条） | **system 段序 + 段分隔符 + 空计划是空操作 + 覆盖不可碰框架契约 + 接管只留框架契约 + 接管时能力段（含其中的工具名）一概不注入 + 框架段的工具名跟着接管者走（`sendTool` 换名、`finishTool: null` 不提）** |
 | `tests/t-slash-commands.mjs` | `/能力` 的用法与失败话术、扩展命令走同一只 `runCommand` 外壳、扩展遮蔽不了内置、接管时主流程命令让位而 `/能力` 保留 |
+| `tests/t-tool-protocol.mjs` | 协议纠正；`capabilityProtocol` 里那条漫画规则；**`recordSent` 真的记账 + 真的发 `session-update`**（缺 `at` 时不写 `"undefined"`） |
 | `tests/t-lifecycle.mjs` / `t-tasks.mjs` | `extras.runtime` 的 id 对账与 entry 顺序 |
 | `tests/t-admin.mjs` | 真起 app 验 `/api/extras`（含 `mode`）与 `extras` 配置回显 |
 
-**证伪探针实测过七条**（不是推断）：`toolDefs()` 去掉装载门 → `t-extras` 红 6 条；`join('\n\n')` 改回 `join('\n')` → `t-reply` **只在补了分隔符那条断言之后**才红（补之前 59 条全绿 —— 那正是这条断言的成因）；`extras.runtime` 从 `LIFECYCLE` 删掉 → `t-lifecycle` 红 6 条；去掉别名规范化 → `t-slash-commands` 红 2 条；**把边界从"空白/`[`/结束"收回成"空白/结束" → `t-slash-commands` 红 2 条**（含一条端到端的：`/转写[视频]` 什么都不入队）；**把 `#overrideEntry` 退回全局（不理会话键）→ `t-extras` 红 4 条**（表现就是"B 群也忽然变了个人"，谁也不报错）；**让接管绑定不起计时器 → `t-extras` 红 3 条**（表现是"接管永远不撒手"）。
+**证伪探针实测过十一条**（不是推断）：`toolDefs()` 去掉装载门 → `t-extras` 红 6 条；`join('\n\n')` 改回 `join('\n')` → `t-reply` **只在补了分隔符那条断言之后**才红（补之前 59 条全绿 —— 那正是这条断言的成因）；`extras.runtime` 从 `LIFECYCLE` 删掉 → `t-lifecycle` 红 6 条；去掉别名规范化 → `t-slash-commands` 红 2 条；**把边界从"空白/`[`/结束"收回成"空白/结束" → `t-slash-commands` 红 2 条**（含一条端到端的：`/转写[视频]` 什么都不入队）；**把 `#overrideEntry` 退回全局（不理会话键）→ `t-extras` 红 4 条**（表现就是"B 群也忽然变了个人"，谁也不报错）；**让接管绑定不起计时器 → `t-extras` 红 3 条**（表现是"接管永远不撒手"）。
+
+2026-10-15 那轮（拆 `capabilityProtocol` + 框架段工具名参数化 + `recordSent`）另实测四条：
+
+| 探针 | 结果 |
+|---|---|
+| 把 `capabilityProtocol` 也列进 `SYSTEM_FRAMEWORK_SECTIONS` | `t-reply` 红 1 条（"接管时能力段一概不注入"） |
+| 去掉 `prompt-builder` 里 `sendTool` 的透传（退回硬编码） | `t-reply` 红 3 条（三条工具名断言） |
+| `recordSent` 里的 `session.sent.push(...)` 注释掉 | `t-tool-protocol` 红 2 条，**其中一条是既有的端到端用例**：`send_message` 那条路径当场报 `{"status":"noreply","sent":[]}` —— 正是文档里说的那个症状 |
+| 删掉 `validateRegistry` 里"接管必须声明 `sendTool`" | `t-extras` 红 1 条 |

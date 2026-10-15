@@ -179,6 +179,32 @@ export interface ExtraSpec {
   displayDesc: string;
   /** 形态。缺省 `attach`（加到主流程上）；`override` = 装载后接管主流程的模型侧三样。 */
   mode?: ExtraMode;
+  /**
+   * **接管模式专用**：框架契约段要引用的工具名。
+   *
+   * ── 为什么非有这个字段不可 ──
+   *
+   * `security` 与 `toolProtocol` 两段在**任何模式下都强制保留**（`SYSTEM_FRAMEWORK_SECTIONS`），
+   * 而 `toolProtocol` 第 2 条要写一句"要发言必须调用 X"。接管会话里**内置工具整体让位**
+   * （`web/app.ts` 只把接管者的工具拼进表），所以那个默认的 X（`send_message`）**不在表里** ——
+   * 模型照着提示词一调就拿到"未知工具"，然后按它自己的经验重试，每次发言白烧一轮。
+   *
+   * 主流程的工具名是参数（`PROMPT_CATALOG.system.toolProtocol({ sendTool, finishTool })`），
+   * 接管者在这里声明自己那两个工具叫什么，`ExtrasRuntime.promptPlan()` 把它带进提示词。
+   *
+   * ⚠️ **`mode: 'override'` 的扩展必须写 `sendTool`**：装载时校验，缺了直接拒绝装载。
+   * 判据不是"风格"——"接管了一个不会说话的东西"是必然故障，而症状安静（模型输出一串
+   * 思考文本、群里什么都没有）。`finishTool` 可选，写 `null` 表示本扩展没有收尾工具，
+   * 框架段第 5 条就不提它（提一个不存在的名字比不提更坏）。
+   *
+   * 非接管模式**不许**写这个字段（写了也没有任何地方读它，只会让下一个人以为它生效了）。
+   */
+  overrideTools?: {
+    /** 发言工具名。**接管模式必填**，且必须是本扩展 `tools` 里的一个名字。 */
+    sendTool?: string;
+    /** 收尾工具名；`null` = 没有，框架段不提它。缺省 `finish`。同样必须是本扩展的工具。 */
+    finishTool?: string | null;
+  };
   /** 配置里没写这个 id 时的默认开关。 */
   defaultEnabled: boolean;
   tools: readonly ExtraToolSpec[];

@@ -94,6 +94,7 @@ ok('系统提示点名拍一拍就是这类', /拍一拍/.test(sp) && /根本没
     ['persona', '【角色设定'],
     ['security', '【安全规则'],
     ['toolProtocol', '【工作方式'],
+    ['capabilityProtocol', '【能力相关的工具规则】'],
     ['antiAiFlavor', '【反 AI 味'],
     ['speakOrNot', '【该说/不该说】'],
     ['humanRhythm', '【像真人一样】'],
@@ -147,6 +148,39 @@ ok('系统提示点名拍一拍就是这类', /拍一拍/.test(sp) && /根本没
   ok('接管模式：主流程的其余段落一概不注入（identity 的自我介绍也走了）',
     !takeover.includes('你是「') && !takeover.includes('【管理员附加规则】'),
     takeover.slice(0, 120));
+
+  // ── `capabilityProtocol` 是**非框架契约**段：接管时必须跟着走 ──
+  //
+  // 这条是本段存在的全部理由。那些能力（漫画 / 转写 / 出图）是**主流程**的工具，
+  // 接管者是一套自洽的东西、多半压根没有它们；留着这段就是给模型发一串
+  // "调用 download_jmcomic" 的指令，而那个工具不在表里 —— 模型一调就拿到"未知工具"。
+  // 判据刻意用**工具名**而不是标题行：标题行没了但句子还在，症状一模一样。
+  ok('接管模式：能力段（含其中的工具名）一概不注入 —— 那些工具不在接管者的表里',
+    !takeover.includes('【能力相关的工具规则】') && !takeover.includes('download_jmcomic')
+    && !takeover.includes('transcribe_video') && !takeover.includes('generate_image'),
+    takeover.slice(0, 200));
+  ok('对照：附加模式下能力段是**在**的（否则上一条是假绿）',
+    sp.includes('【能力相关的工具规则】') && sp.includes('download_jmcomic'));
+
+  // ── 框架契约段里的工具名跟着接管者走 ──
+  //
+  // `toolProtocol` 第 2 条要写"要发言必须调用 X"，而接管会话里内置工具整体让位 ——
+  // X 缺省那个 `send_message` 不在表里。接管扩展在 `spec.overrideTools` 里声明自己那个名字。
+  const named = buildSystemPrompt({
+    extraPrompt: { mode: 'override', body: ['【你现在是别的】'], sendTool: 'say', finishTool: null }
+  });
+  ok('接管者声明了发言工具名 → 框架契约段照着它写，且**不再出现** send_message',
+    named.includes('要发言必须调用 say。') && !named.includes('send_message'),
+    named.slice(0, 260));
+  ok('finishTool 为 null → 框架段不提任何收尾工具（提一个不存在的名字比不提更坏）',
+    !named.includes('finish'), named.slice(0, 260));
+  ok('对照：附加模式（没有接管者）下框架段用的仍是内置那两个名字',
+    sp.includes('要发言必须调用 send_message。') && /结束或调用 finish/.test(sp));
+
+  const namedFinish = buildSystemPrompt({
+    extraPrompt: { mode: 'override', body: ['x'], sendTool: 'say', finishTool: 'stop_here' }
+  });
+  ok('接管者也可以声明自己的收尾工具名', namedFinish.includes('调用 stop_here'), namedFinish.slice(0, 260));
 }
 
 const up = buildUserPrompt({

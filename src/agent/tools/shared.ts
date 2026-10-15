@@ -4,6 +4,7 @@
 //
 // 工具命名去掉了 qq_ 前缀（更短，省 token）。
 import { getConfig } from '../../core/config.js';
+import { EVENTS } from '../../core/events.js';
 import { validateImageUrl, safeFetchBinary, detectMime } from '../../media/safe-fetch.js';
 import { SlidingWindowBudget } from '../../media/call-budget.js';
 import type { ChatMessage } from '../../chat/types.js';
@@ -71,6 +72,53 @@ export function ok(payload: unknown): ToolResult {
 
 export function err(message: unknown): ToolResult {
   return { content: `错误：${message}`, isError: true };
+}
+
+/** 会话账本里的一条"真的发出去了什么"。形状与既有那两处（文本 / 表情）逐字一致。 */
+export interface SentLedgerEntry {
+  /** `'text'` | `'sticker'` | …（既有取值只有前两种，扩展自定的类型也走这个字段）。 */
+  type: string;
+  text: string;
+  /** `HH:MM:SS`；调用方给不出就不写。 */
+  at?: string;
+}
+
+/**
+ * 把"这一轮真的发出去了什么"记进**会话账本**（`ctx.session.sent`）。
+ *
+ * ⚠️ **自己实现发言工具的扩展必须调它。** 这本账不是日志，是四处判定的输入：
+ *   • `agent-runner` 的收尾状态：`session.sent.length > 0 ? 'done' : 'noreply'`
+ *   • 协议纠正的 `sentExternalAction` 与它的触发条件（"工具后普通文本只纠正一次"）
+ *   • `session-end` 载荷里的 `sentCount`（面板与用量统计都读它）
+ * 漏了它的表现是**两样都不报错**：真的说了话、会话却被记成 `noreply`（面板看着像没发过），
+ * 而且 `sentExternalAction` 一直是 false —— 模型会被追着再发一次。
+ *
+ * 一句 `await ctx.sender.sendTextBatch(...)` 只是"发出去了"；**记账是另一件事**，
+ * 两者必须成对出现。所以这条路径收敛在这里一处，`chat-actions.ts` 与扩展都调它。
+ *
+ * 没记任何东西时不发事件：一次"什么都没发出去"的调用不该让面板白刷一轮。
+ */
+export function recordSent(ctx: ToolContext, entries: readonly SentLedgerEntry[]): void {
+  if (!entries.length) return;
+  ctx.session.sent.push(...entries);
+  ctx.emit(EVENTS.sessionUpdate, { sessionId: ctx.session.id });
+}
+
+/**
+ * `SendQueue.sendTextBatch` 的返回值 → 账本条目。
+ *
+ * 单独一个函数只为一件事：那次发送的返回值是 `Array<Record<string, unknown>>`（工具与传输层
+ * 之间的宽松形状），而账本条目是窄的。这 4 行收敛在这里，扩展就不必各抄一份
+ * ——抄本会漂移，而漂移的表现是"某条消息没进账本"，正是上面那段警告里最难查的一类。
+ */
+export function sentTextEntries(
+  result: { sent: ReadonlyArray<Record<string, unknown>> }
+): SentLedgerEntry[] {
+  return result.sent.map((item) => ({
+    type: 'text',
+    text: String(item.text ?? ''),
+    at: item.at == null ? undefined : String(item.at)
+  }));
 }
 
 // read_group_notice 一次返回的正文总预算。单条上限在 onebot.js 的 NOTICE_TEXT_MAX，

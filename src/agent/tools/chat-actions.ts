@@ -1,9 +1,8 @@
-import { EVENTS } from '../../core/events.js';
 import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
 import { normalizeMessageList, unquoteJsonString } from '../../core/util.js';
 import { cachedDataUrl, isCacheFile, sendTarget } from '../../stickers/sticker-cache.js';
 import { validateImageUrl } from '../../media/safe-fetch.js';
-import { downloadImageAsDataUrl, err, errorMessage, imageParts, isRecord, midHint, memberHint, ok } from './shared.js';
+import { downloadImageAsDataUrl, err, errorMessage, imageParts, isRecord, midHint, memberHint, ok, recordSent, sentTextEntries } from './shared.js';
 import type { ToolDefinition } from '../shared/types.js';
 
 /** 发送消息、表情和拍一拍等会话动作。 */
@@ -29,8 +28,7 @@ export function chatActionTools(): ToolDefinition[] {
             replyToMessageId: args.replyToMessageId ?? null,
             atUserId: args.atUserId ?? null
           });
-          ctx.session.sent.push(...result.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
-          ctx.emit(EVENTS.sessionUpdate, { sessionId: ctx.session.id });
+          recordSent(ctx, sentTextEntries(result));
           const note = ['已发送。不要输出"已发送"类汇报，继续思考下一步或直接结束。'];
           if (result.failed.length) note.push(`（另有 ${result.failed.length} 条发送失败：${result.failed.map((f) => f.error).join('；')}——成功的不需要重发，失败的请稍后再试或减少条数）`);
           return ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), note: note.join('') });
@@ -93,8 +91,7 @@ export function chatActionTools(): ToolDefinition[] {
             result = await ctx.sender.sendSticker(ctx.chatKey, sticker, { ...options, file: sticker.url });
           }
           ctx.stickers.markUsed(sticker.id, String(ctx.session.triggerText || '').slice(0, 100));
-          ctx.session.sent.push({ type: 'sticker', text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
-          ctx.emit(EVENTS.sessionUpdate, { sessionId: ctx.session.id });
+          recordSent(ctx, [{ type: 'sticker', text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) }]);
           return ok({ sent: true, messageId: isRecord(result) ? result.message_id ?? null : null, note: '表情已发送。' });
         } catch (error) {
           return err(errorMessage(error));

@@ -45,10 +45,50 @@ const model = await fakeModelServer({ model: 'stub-tool-protocol' });
     `执行体长度 ${searchBody.length}`);
 
   // Catalog 里这一项是**函数**（拼好再返回字符串），不是常量字符串。
-  const protocol = String(PROMPT_CATALOG.system.toolProtocol());
+  //
+  // ⚠️ 规则住在 `capabilityProtocol`，**不是** `toolProtocol`：2026-10-15 把"某个能力的用法"
+  // 从框架契约段里拆了出来（接管模式下那些能力多半压根不在，留着就是让模型去调不存在的工具）。
+  // 这条断言原先读 `toolProtocol()`，拆段之后必须跟着走 —— 否则它会以"找不到这段文字"的
+  // 形式假红，而它想守的性质（这条规则确实进了 system prompt）其实完好。
+  const protocol = String(PROMPT_CATALOG.system.capabilityProtocol());
   ok('system prompt 里有"搜到之后先问用户、不要自己挑一本下载"这条规则',
     protocol.includes('search_jmcomic') && protocol.includes('不要自己挑一本下载') &&
     protocol.includes('不要编造 ID'), protocol.slice(-200));
+}
+
+// ── 会话账本：`recordSent` 是唯一的写入口 ───────────────────────────────────
+//
+// 这本账不是日志，是四处判定的输入（收尾 done/noreply、协议纠正的 sentExternalAction 与
+// 触发条件、session-end 的 sentCount）。**接管扩展自己写发言工具时必须调它**，
+// 漏了的表现是"说了话却被记成 noreply、而且模型被追着再发一次"，两样都不报错。
+// 所以这里正面钉住"它真的记账 + 真的发事件"，作为那条契约的守护。
+{
+  const { recordSent, sentTextEntries } = await load('agent/tools/shared.js');
+  const events = [];
+  const ctx = {
+    session: { id: 'sess-1', sent: [] },
+    emit: (type, payload) => events.push([type, payload])
+  };
+
+  // 没记任何东西时不该发事件：一次"什么都没发出去"的调用不该让面板白刷一轮。
+  recordSent(ctx, []);
+  ok('没记任何条目时不发事件', ctx.session.sent.length === 0 && events.length === 0);
+
+  const entries = sentTextEntries({ sent: [{ text: '好', at: '12:00:00', messageId: 7 }] });
+  ok('sentTextEntries 把传输层的宽松形状收成账本条目（text 一定是字符串）',
+    Array.isArray(entries) && entries.length === 1 && entries[0].type === 'text'
+    && entries[0].text === '好' && entries[0].at === '12:00:00', JSON.stringify(entries));
+
+  recordSent(ctx, entries);
+  ok('recordSent 把条目推进会话账本',
+    ctx.session.sent.length === 1 && ctx.session.sent[0].text === '好', JSON.stringify(ctx.session.sent));
+  ok('recordSent 同时发一次 session-update（面板要看到这条）',
+    events.length === 1 && events[0][0] === EVENTS.sessionUpdate
+    && events[0][1]?.sessionId === 'sess-1', JSON.stringify(events));
+
+  // 传输层给不出 at 时不该写成字符串 "undefined" —— 那会变成一条看着像时间的脏数据。
+  const noAt = sentTextEntries({ sent: [{ text: '嗯' }] });
+  ok('缺 at 的条目留空而不是 "undefined"', noAt[0].at === undefined, JSON.stringify(noAt));
 }
 updateConfig({
   // 两轮刚好只够“调用工具 → 错误地返回普通文本”；纠正仍应获得独立的第三轮。
