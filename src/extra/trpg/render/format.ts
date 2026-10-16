@@ -41,3 +41,47 @@ const GRADE_LABEL: Record<string, string> = {
   failure: '失败',
   fumble: '大失败'
 };
+
+/**
+ * 先攻序：`1. 阿飞 14\n2. 阿豪 12（倒下）`（P5）。
+ *
+ * 两个可选字段，判据都是**"字段在不在"**（同 `image-source` 的 `time` 与 `similarity` 两条规矩）：
+ *   • `scores` 只有**排完那一次**手里有数值（`rollInitiative` 的返回）。中途渲染手里只有一份
+ *     名字顺序，缺了就只印名字 —— **不印 `0`**：那会变成"这个人先攻是 0"，而真相是
+ *     "我们此刻不知道他的先攻"。
+ *   • `gone` 是已经动不了的人（卡没了 / 倒下了）。标出来，让"推进时会跳过谁"在文本里看得见。
+ *
+ * ⚠️ **`scores` 只该给模型看，不该进群、更不该进日志**：那个数就是卡上的属性（`DEX`），
+ * 而 `hidden: ['stats']` 存在的理由正是"藏属性"；而日志会镜像进战报（P6 要导出成文件发群）。
+ * 群友那一侧一律只传名字（`commands/combat.ts` 与 `render/players.ts` 都这么做）。
+ *
+ * 一行一个（不是 ` → ` 串起来）：这份列表会长到 20 人，横着串起来在群里折成好几屏。
+ */
+export interface InitiativeView {
+  scores?: Record<string, number>;
+  gone?: ReadonlySet<string>;
+}
+
+export function formatInitiative(order: readonly string[], view: InitiativeView = {}): string {
+  return order
+    .map((name, index) => {
+      const score = view.scores?.[name];
+      const mark = view.gone?.has(name) ? '（倒下）' : '';
+      return `${index + 1}. ${name}${score === undefined ? '' : ` ${score}`}${mark}`;
+    })
+    .join('\n');
+}
+
+/**
+ * 顺序的**紧凑写法**：`阿飞 → 阿豪（倒下） → 教授`（P5）。
+ *
+ * 与 `formatInitiative` 的分工：这一份**一行装得下**，所以它是"回执里顺带说一句现在什么局面"
+ * 与"日志里留一条记录"用的；`formatInitiative` 那份一行一个，是排完先攻时的正式公布。
+ * 两份都不印数值 —— 见 `InitiativeView` 那段（数值只给模型）。
+ *
+ * **日志那一处必须用它**：`appendLog` 的正文会镜像进战报（P6 要导出成文件发群），
+ * 而战报是**给人看的**；多行的日志正文会破掉"一条日志一行"这个形状。
+ */
+export function formatOrder(order: readonly string[], gone?: ReadonlySet<string>): string {
+  return order.map((name) => (gone?.has(name) ? `${name}（倒下）` : name)).join(' → ');
+}

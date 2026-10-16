@@ -11,6 +11,7 @@ import {
   MAX_PLAYERS, MAX_RULE_CHARS, MAX_SCENE_CHARS, MAX_SYSTEM_CHARS, MAX_TITLE_CHARS, clampInt, text
 } from './limits.js';
 import { normalizeCharacter } from './character.js';
+import { normalizeCombat } from './combat.js';
 import type { TrpgCampaign, TrpgCharacter, TrpgFlag, TrpgLogEntry, TrpgScenarioRef } from '../types.js';
 
 function normalizeLogEntry(raw: unknown): TrpgLogEntry | null {
@@ -18,12 +19,16 @@ function normalizeLogEntry(raw: unknown): TrpgLogEntry | null {
   const source = raw as Record<string, unknown>;
   const body = text(source.text, MAX_LOG_CHARS);
   if (!body) return null;
-  return {
+  const entry: TrpgLogEntry = {
     seq: clampInt(source.seq, 0, Number.MAX_SAFE_INTEGER, 0),
     ts: clampInt(source.ts, 0, Number.MAX_SAFE_INTEGER, 0),
     kind: text(source.kind, 16) || 'note',
     text: body
   };
+  // 缺省 `true`（**不写这个键**）—— 旧存档里本来就没有它，读成"可见"才与写它之前的行为一致。
+  // 判据是 `=== false` 而不是"真不真"：手改过的文件写 `visible: 0` 不该变成"藏起来"。
+  if (source.visible === false) entry.visible = false;
+  return entry;
 }
 
 /**
@@ -82,6 +87,9 @@ export function normalizeCampaign(raw: unknown, chatKey: string): TrpgCampaign |
     scenario: normalizeScenario(source.scenario),
     flags,
     characters,
+    // ⚠️ **迁移取"少做一件事"的那一边**：旧存档没有 `combat`，读成 `null`（= 没在打）。
+    // 不会拦住任何既有玩法，也不会凭空造出一场谁都没开始的战斗。
+    combat: normalizeCombat(source.combat),
     log: trimmed,
     seq: Math.max(clampInt(source.seq, 1, Number.MAX_SAFE_INTEGER, 1), maxSeq + 1),
     createdAt: clampInt(source.createdAt, 0, Number.MAX_SAFE_INTEGER, now),
@@ -163,6 +171,7 @@ export function emptyCampaign(
     scenario: { id: '', body: '' },
     flags: {},
     characters: [],
+    combat: null,
     log: [],
     seq: 1,
     createdAt: now,
@@ -175,11 +184,16 @@ export function emptyCampaign(
 /**
  * 追加一条日志并推进序号。**所有会改变状态的动作都要经过它** —— 这是"发生了什么都记得下来"
  * 的唯一入口，也是渲染层给模型看的"最近发生"。
+ *
+ * `visible = false` 表示"这一条不能进给玩家看的战报"（见 `TrpgLogEntry.visible`）。
+ * **由调用方判**：写这条日志的人此刻手里正好有"这张卡藏了没有、这条旗标是不是暗线"，
+ * 而 `mirrorLog` 与导出路径都判不出来。
  */
-export function appendLog(campaign: TrpgCampaign, kind: string, body: string): TrpgLogEntry | null {
+export function appendLog(campaign: TrpgCampaign, kind: string, body: string, visible = true): TrpgLogEntry | null {
   const line = text(body, MAX_LOG_CHARS);
   if (!line) return null;
   const entry: TrpgLogEntry = { seq: campaign.seq, ts: Date.now(), kind: text(kind, 16) || 'note', text: line };
+  if (!visible) entry.visible = false;
   campaign.seq += 1;
   campaign.log.push(entry);
   if (campaign.log.length > MAX_LOG_STORED) campaign.log.splice(0, campaign.log.length - MAX_LOG_STORED);
@@ -216,10 +230,14 @@ export interface JournalPort {
  * 是最后一步，所以两者看不出差别 —— 但那是巧合，不是契约。
  *
  * 序号单调递增（截断旧日志不会让它回退），所以 `seq >= fromSeq` 精确等于"这次新加的"。
+ *
+ * ⚠️ **`visible === false` 的那些不进战报**（见 `TrpgLogEntry.visible`）：战报会被导出成文件
+ * 发进群，而藏起来的卡与暗线在 `campaign.log` 的正文里是写着名字的。判据**只在这里一处**，
+ * 导出路径不再筛第二遍。
  */
 export function mirrorLog(campaign: TrpgCampaign, fromSeq: number, journal: JournalPort | null): void {
   if (!journal) return;
   for (const entry of campaign.log) {
-    if (entry.seq >= fromSeq) journal.append(campaign.chatKey, entry);
+    if (entry.seq >= fromSeq && entry.visible !== false) journal.append(campaign.chatKey, entry);
   }
 }

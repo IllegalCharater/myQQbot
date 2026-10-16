@@ -13,9 +13,14 @@
 // 选 jsonl 而不是一个大 JSON 数组，是因为它**只能追加**：写到一半断电，坏的是最后一行，
 // 前面每一行都还在 —— 而"整份重写"在断电时会把整个战报变成半截。
 //
-// ⚠️ **只记公开事件**：私密叙事与暗骰的结果**压根不进 `campaign.log`**（决策 7），
-// 所以 `mirrorLog` 也就带不进这里。这是这条通道能直接当"给玩家看的战报"的原因 ——
-// 不必在这里再筛一遍（再筛一遍就是第二份判据，迟早与第一份漂移）。
+// ⚠️ **只记公开事件**。这一条有两个来源，都不是在这里判的：
+//   • 私密叙事与暗骰的结果**压根不进 `campaign.log`**（决策 7），所以 `mirrorLog` 也带不进来；
+//   • 藏在 `campaign.log` 正文里的事实（"玩家尚未见过"、`隐藏：pools/notes`、暗线旗标的名字）
+//     由**写那条日志的人**标 `visible: false`（`TrpgLogEntry.visible`），`mirrorLog` 据此挡下。
+//
+// **不在这里再筛一遍** —— 再筛一遍就是第二份判据，迟早与第一份漂移（`render/journal.ts`
+// 文件头那句是同一条）。这里只做一件事：把标记**原样带回来**（`read()` 丢掉 `visible`
+// 就等于把刚挡住的那些重新放行 —— 而这个洞不会有任何报错）。
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../../../core/paths.js';
@@ -53,8 +58,9 @@ export class JournalStore {
    * 读回整份战报。坏行**跳过**（append-only 的代价是最后一行可能是半截），
    * 返回的顺序就是写入顺序。
    *
-   * 读取与渲染的其余部分（导出成 `.txt`/`.md`、面板列表）在 P6 —— 这一版只给它一个
-   * 能在不建真图解的前提下断言"写了什么"的入口。
+   * ⚠️ `visible: false` 要**原样带回来**（判据与 `normalizeLogEntry` 逐字相同：只认 `=== false`）。
+   * 丢掉它的话，被 `mirrorLog` 挡下的那些条目会在**读取这一侧**重新变成"可见"——
+   * 而 `.log export` 正是从这条路取数的，于是整条筛选机制静默失效。
    */
   read(chatKey: string): TrpgLogEntry[] {
     let raw = '';
@@ -76,17 +82,65 @@ export class JournalStore {
       const source = parsed as Record<string, unknown>;
       const body = text(source.text, MAX_LOG_CHARS);
       if (!body) continue;
-      out.push({
+      const entry: TrpgLogEntry = {
         seq: clampInt(source.seq, 0, Number.MAX_SAFE_INTEGER, 0),
         ts: clampInt(source.ts, 0, Number.MAX_SAFE_INTEGER, 0),
         kind: text(source.kind, 16) || 'note',
         text: body
-      });
+      };
+      if (source.visible === false) entry.visible = false;
+      out.push(entry);
     }
     return out;
   }
 
-  remove(chatKey: string): void {
-    try { fs.rmSync(this.file(chatKey)); } catch { /* 本来就没有 */ }
+  /**
+   * 列出磁盘上真实存在的战报（面板用）。
+   *
+   * 判据与 `ScenarioStore.list` / `RuleStore.list` 同源：**列出来的，磁盘上一定真的有**
+   * （扫目录，不拿任何名单补行 —— 补行会让面板出现"从没打过任何东西"的幽灵条目）。
+   *
+   * `id` 就是文件名去掉 `.jsonl` 的那一段，也就是 `safeName(chatKey)`；它经
+   * `commands/log.ts` 的 `.log export` 与面板删除路由**原样**用回去（`safeName` 幂等，
+   * 所以往返不丢字符）。
+   */
+  list(): Array<{ id: string; entries: number; bytes: number; updatedAt: number }> {
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(this.dir);
+    } catch {
+      return [];   // 目录还不存在 = 一份战报都没有
+    }
+    const out: Array<{ id: string; entries: number; bytes: number; updatedAt: number }> = [];
+    for (const name of names) {
+      if (!name.endsWith('.jsonl')) continue;
+      const full = path.join(this.dir, name);
+      try {
+        const stat = fs.statSync(full);
+        if (!stat.isFile()) continue;
+        // 条数按**非空行**数：一行一条，与 `read()` 的判据同形（不解析 JSON 也能给一个诚实的数）。
+        const entries = fs.readFileSync(full, 'utf8').split('\n').filter((line) => line.trim()).length;
+        out.push({ id: name.slice(0, -'.jsonl'.length), entries, bytes: stat.size, updatedAt: stat.mtimeMs });
+      } catch { /* 读不到/正被删：跳过它 */ }
+    }
+    return out.sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  /**
+   * 删掉一份战报。返回**是不是真的删掉了一份** —— 面板要靠它区分"删了"与"本来就没有"
+   * （同 `ScenarioStore.remove` / `RuleStore.remove`）。
+   *
+   * 参数收的是 `list()` 给的那个 id（`safeName(chatKey)`），`safeName` 幂等，所以往返不丢字符。
+   * 反过来说：`id` 里就算混进 `/` 或 `..`，`safeName` 也会把它清成一个落在数据目录里的名字。
+   */
+  remove(chatKey: string): boolean {
+    const file = this.file(chatKey);
+    if (!fs.existsSync(file)) return false;
+    try {
+      fs.rmSync(file);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

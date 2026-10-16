@@ -1,6 +1,6 @@
 # 跑团（TRPG）：分层重构 + 功能实现计划
 
-> **最后更新：2026-10-16**。依据：`docs/trpg-dialogue-expectations.md`（现状逐幕）与《跑团功能实现度检查报告》（31 项对照，结论 ✅6 / 🟡9 / 🔴16）。
+> **最后更新：2026-10-17**。依据：`docs/trpg-dialogue-expectations.md`（现状逐幕）与《跑团功能实现度检查报告》（31 项对照，结论 ✅6 / 🟡9 / 🔴16）。
 
 ## 实施进度
 
@@ -11,10 +11,10 @@
 | **P2** 会话与建卡 | ✅ | 状态机 + `.trpg new/join/start/end` + `.pc new/confirm/show/save` + 战报写侧 | `t-trpg` 268 → **308** |
 | **P3** 检定与暗骰 | ✅ | `sendPrivate` / `atUserId` / `.ra` / `.rh` / `.st` | `t-trpg` 308 → **332**；`t-trpg-rules` 140 → **144** |
 | **P4** 属性生成（COC7） | ✅ | `rules/chargen.ts` + `.pc roll` + 卡的 `mp/mpMax/db/build/mov` | `t-trpg` 332 → **351**；`t-trpg-rules` 144 → **166** |
-| **P5** 战斗 | ⬜ 待实施 | — | — |
-| **P6** 战报（导出） | ⬜ 待实施（**写侧已在 P2 落地**） | — | — |
+| **P5** 战斗 | ✅ | `rules/combat.ts` + `model/combat.ts` + `.combat start/next/end` + `campaign action=combat` | `t-trpg` 351 → **392**；`t-trpg-rules` 166 → **185** |
+| **P6** 战报（导出） | ✅ | `render/journal.ts` + `.log export` + 面板列出/删除 + `SendQueue.sendFile` | `t-trpg` 392 → **419** |
 
-**全量**：`npm run check` 39 个套件全绿（每阶段收尾都做过一次 `rm -rf dist && npm run build` 干净重建再复跑）。
+**全量**：`npm run check` 39 个套件全绿、`npm run test:all` 49 个套件全绿（每阶段收尾都做过一次 `rm -rf dist && npm run build` 干净重建再复跑）。
 
 ### 各阶段实际做了什么
 
@@ -23,6 +23,8 @@
 - **P2**：`preparing` / `active` 两档状态；`beginCampaign` 收一个 `status` 参数就把"人工入口"与"模型入口"分开（判据仍是一份）。战报的**写侧**先落地，理由是"记录要早于导出"——否则 P6 上线那天开始的团才有完整战报。
 - **P3**：`sendPrivate` 是宿主的口子（与 `deliverNote` 同源）；`say` 的 `atUserId` 修掉"DM 物理上无法 @ 人"；暗骰**不留痕**（不写 `campaign.log`、不进战报），那段私密叙事是独立模型调用而且**拿不到点数**。
 - **P4**：**掷法是数据、公式是代码**（`.pc roll` 只在规则表声明了 `chargen` 时才有）；派生值认死那几个属性名，改名会让那几项**派生不出来**并明说缺谁。
+- **P5**：**顺序是代码、数值是规则**（`rules/combat.ts` 只管排序与指针，命中/伤害仍走 `resolveCheck` 与 `character` 的 `hpDelta`）。战斗状态挂在 `TrpgCampaign.combat` 上，与人物卡同一份归一化（`normalizeCombat`）。**"行动即推进"**：`campaign action=combat` 的 `sub=next` 与玩家自己敲的 `.combat next` 是**同一个函数**（`advanceTurn`），区别只在谁有权敲 —— 而"谁有权"这件事**代码不拦**（决策 9，见偏差表 9）。
+- **P6**：战报**只在写入那一刻筛一次**（`TrpgLogEntry.visible`），`mirrorLog` 据此挡下；导出再按**同一条判据**挡一次（那是这条链上唯一的发布动作）。`.log export` 走宿主递进来的 `sendFile` 口子（扩展只说"给谁、叫什么名字、正文是什么"），宿主那侧是 `SendQueue.sendFile` → `upload_group_file`（**120 秒**，与转写的全文文件、漫画的 PDF 同一档超时）。
 
 ### 与本文原始设计的偏差（合并记录，免得下一个人照旧文改已经改过的地方）
 
@@ -36,19 +38,106 @@
 | 6 | P2 落地清单 25 | 只做了**收团摘要**，导出留给 P6 | 导出要 `upload_group_file` 那条链，与战报的读取/渲染一起做更整 |
 | 7 | 规则文件只有 `levels` / `requires` | 多了 **`dice`**（P3）与 **`chargen`**（P4） | `.ra` 要掷 d100 还是 d20、`.pc roll` 掷什么，都是**规则书的知识** —— 写死在代码里等于让别的规则书永远用不了这两条命令。两者都在 `compileRule` 里**编译期校验** |
 | 8 | P4 只说"`TrpgCharacter` 加 `mp`/`db`/`build`/`mov`" | 还把 **MP 接进了工具**（`mpDelta` / `mpMax` / `full` 一起回满） | 字段没有写入路径就等于没接 |
+| 9 | P5 说"伤害也放 `rules/combat.ts`（纯）" | **只放排序与指针**，伤害仍走 `character` 的 `hpDelta` | 伤害要读人物卡的钳制（`clampInt` / `hpMax`）与倒地判定，那是**领域模型**的事；在 `rules/` 里再写一份等于让"扣血"有两条实现 —— 而两条必然漂移（表现是"工具扣的和战斗扣的不是同一个数"） |
+| 10 | 规则文件只有 `dice` / `chargen` 那两栏 | 又多了 **`initiative`**（P5） | 先攻掷什么骰是规则书的知识（COC 是 `1d100`，D&D 是 `1d20+DEX`）。缺省 `1d100`，与 `dice` 同一条约定、同一处编译期校验 |
+| 11 | P5 的 `.combat start` 回执"点名该谁动了" | 回执**只印名字**，@ 不到人 | `web/onebot/commands.ts` 的 `runCommand` 只递 `{ replyToMessageId }`，命令回执没有 @ 的口子（`say` 的 `atUserId` 是**工具**那条路的口子）。要补得先给命令回执开一个 `atUserId` —— 那是另一处改动，不在 P5 的范围里 |
+| 12 | P6 说"导出成 `.txt`/`.md`" | 只有 `.md` | 两种后缀指的是同一份 Markdown（`# 标题` + 一行一条），给两个选择等于让人猜哪个是"对的那个" |
 
 ### 探针实测（每一条都是"改一处、跑一次、必须变红"，然后 `rm -rf dist && npm run build` 复原）
 
 - **P2 四条**：迁移默认值反过来（缺 `status` 读成 `preparing`）→ 红 1；`canActivate` 拆掉「逐人查确认」→ 红 2；`withCampaign` 去掉 `mirrorLog` → 红 1（**只有工具路那条红，命令路照绿** —— 两条路各写各的落盘，所以两条都要钉）；`.pc new` 不再顺手报名 → 红 1（满员那条抓住的）。
 - **P3 三条**：`.rh` 的回执换写法 → 红 1（那条断言是**整串相等**）；让 `.rh` 顺手 `appendLog` → 红 1；`compileRule` 去掉 `dice` 校验 → `t-trpg-rules` 红 1。
 - **P4 三条**：DB 表边界写成 `<` → `t-trpg-rules` 红 1（判据是**每一档的两个端点**）；**`.pc roll` 里写 `hpMax` 那一行拆掉 → 第一版断言照样全绿**，补上「派生值是按公式从刚掷出的属性算的」才红；`pools` 隐藏不再覆盖 MP → 红 1。
+- **P5 三条**：`rollInitiative` 的排序键去掉先攻值（只剩名单顺序）→ 红 **6**（顺序、给模型的那一份、工具回执、`sub=next`、以及"行动即推进"与"不是当前行动者不推"两条）；`advance` 去掉 `skip` 判断（倒下的人也占回合）→ 红 1（绕回起点那条）；`renderForPlayers` 的 `combatLines` 去掉 `seen` 过滤 → 红 1（"轮到「X」"那句把还没被玩家见过的人漏出去）。
+- **P6 五条**：`mirrorLog` 不看 `visible` → 红 **6**（含 `read()` 那条独立的"战报里没有 `visible: false`"）；`character` 建卡那条恒 `visible` → 红 2；`.log export` 去掉过滤 → 红 2；`JournalStore.read()` 丢掉 `visible` → 红 2（"原样带回来" + "手改过的文件也挡得住"）；`campaign` 删暗线那条不标 → 红 1。
 
 ⚠️ **P4 第二条是这份计划里最值得记的一课**：`> 0` 这类判据在"上游已经给过默认值"的前提下**证明不了任何事**。写断言时先问一句"**如果这一行删掉，这个数还会碰巧对吗**"。
 
-### 还没做的（P5 / P6 的入口）
+⚠️ **P6 开工时抓到的第一条**：`mirrorLog` 原本把 `campaign.log` **不过滤**地镜像进战报，而 P6 的导出会把那份文件**发进群** —— 于是暗线旗标的名字、"玩家尚未见过"、`隐藏：stats` 会一起进群。`renderForPlayers` 靠 `PLAYER_LOG_KINDS`（只印 `roll`/`check`）挡得住，但战报要的是**完整**（那是这一局唯一的完整记录），所以判据只能是**逐条**的、且必须由**写那条日志的人**在写入那一刻标 —— 见偏差表第 5 条与 `TrpgLogEntry.visible`。
 
-- **P5 战斗**：`rules/combat.ts`（先攻排序、指针推进、伤害，纯）、`model/combat.ts`（战斗状态归一化）、`commands/combat.ts`（`.combat start|next|end`）、`tools/campaign.ts` 加 `action=combat`、`ActionLedger` 的 `actor` 直接复用。**代码不拦越权行动**（决策 9）。
+⚠️ **P6 写测试时的第二个坑（当场踩到）**：`campaign action=start` 的 `title` 是**必填**，夹具漏了它之后 `start` 回一句 err，于是战报里**什么都没有** —— 那一段里六条负向断言（"暗线不进战报"之类）**全部变绿**。这正是本文第 46 行那条纪律的另一种形态：**负向断言必须配一条正向对照**（"这一条确实进了 `campaign.log`"），否则夹具一坏整段就变成假绿。同一段里另一个坑是裸下标 `sent[0].content` —— 夹具坏掉时它抛 `TypeError`，**中止整个套件**（后面的断言一次都不跑，终端上只显示"这个套件失败了"），所以取"最近一次发出去的东西"一律走 `sent.at(-1)?.content ?? ''`。
+
+### P5 / P6 的落地清单（原文那两条，逐项对照）
+
+原文（2026-10-16 版）：
+
+- **P5 战斗**：`rules/combat.ts`（先攻排序、指针推进、**伤害**，纯）、`model/combat.ts`（战斗状态归一化）、`commands/combat.ts`（`.combat start|next|end`）、`tools/campaign.ts` 加 `action=combat`、`ActionLedger` 的 `actor` 直接复用。**代码不拦越权行动**（决策 9）。
 - **P6 战报导出**：`JournalStore` 的读取已经有了（`read(chatKey)`），差渲染成 `.txt`/`.md` + `upload_group_file`（120 秒超时）+ 面板的列出/删除（与剧本、规则表同形）。
+
+实际落地（**加粗的是与原文不一致的地方**）：
+
+| 原文那一项 | 落地 | 差异 |
+| --- | --- | --- |
+| `rules/combat.ts` 含伤害 | 只有 `rollInitiative` / `clampTurn` / `advance` / `immobileNames` | **伤害不在这里**（偏差表 9） |
+| `model/combat.ts` | `normalizeCombat` / `currentActor` / `immobileNames` / `beginCombat` / `endCombat` | 归一化与 `normalizeCampaign` 同一手法（坏值夹回合法区间、旧存档缺字段取"更宽"的那一档） |
+| `commands/combat.ts` | `.combat start` / `.combat next` / `.combat end` + 裸 `.combat` 的用法 | `next` 与工具那条 `sub=next` 共用 `advanceTurn`（**同一份实现**，不是"两边各写一遍"） |
+| `campaign` 加 `action=combat` | `action=combat` + `sub=start\|next\|end` | `sub` **不是必填**（`required` 不能按 action 分支 —— 工具表那条断言钉着） |
+| `ActionLedger` 的 `actor` 复用 | ✅ 原样复用 | `combat` 的写动作按 `actor` 计额度（与 `character` / `campaign` 同一本账） |
+| 代码不拦越权行动 | ✅ 不拦 | 偏差表 9 的延伸：DM 能替任何人推指针，玩家敲 `.combat next` 也认 |
+| 渲染成 `.txt` / `.md` | 只有 `.md` | 偏差表 12 |
+| `upload_group_file`（120 秒） | ✅ | 但**不在扩展里**：扩展调宿主递进来的 `sendFile`，`SendQueue.sendFile` 才碰 `onebot.call` |
+| 面板列出 / 删除 | ✅ 第三类（`data-trpg-row="journal"`） | 与剧本、规则表同形，但 confirm 文案说的是**相反**的话（删掉就没了） |
+
+### 待修复（P0–P4 重构后的审查发现，**逐条对照过当前代码**）
+
+> 记录于 2026-10-16，P5/P6 动工之前。**除 D 类已随手修掉外，其余尚未修**（P5/P6 只动了新增代码，
+> 没有回头改 A/B/C/E 这些）。
+> 按"会不会真的把人带错"排序。每条都给了判据 —— 修完能拿它验。
+> **2026-10-17 重锚**：P5/P6 新增了 `rules/combat.ts` / `model/combat.ts` / `commands/combat.ts` /
+> `commands/log.ts` / `render/journal.ts`，下面那些**行号已按当时的代码重取过一遍**（只改行号与计数，
+> 没有一条发现被修掉）。修的时候按"位置"那一列的描述去定位，行号本身随时会再漂。
+> **2026-10-17 同批**：D2–D5 那四条是**文档漂移**，随 P5/P6 的文档更新一起修掉了（见 D 类表里的 ✅ 行）；
+> A / B / C / E 四类**一条都没动**。
+
+#### A 类：用户可见的错误输出（照做会失败 / 群里看到的字是错的）
+
+| # | 位置 | 是什么 | 判据 |
+| --- | --- | --- | --- |
+| A1 | `src/extra/trpg/commands/scenario.ts:117` | 存剧本的**回执末尾**写 `开局：.trpg start ${saved.scenario.id}` —— 而 `createStartCommand`（`commands/session.ts:124`）**带参数就拒**，剧本名是 `.trpg new` 的参数。这是**代码逐字产出**的一句错话，且紧跟在"我刚存好剧本"那一刻 | 存一份剧本，回执里那句照敲，必须真的开得了局（现在会被拒） |
+| A2 | `ui/js/views/settings/sections.js:917` | 设置页写着 `.trpg start <剧本名> [规则表 id]` | 面板文案与 `commands/session.ts` 的 `USAGE` 逐字一致 |
+| A3 | `AGENTS.md:613` | `.trpg start <剧本> [规则]` | 同上 |
+| A4 | `docs/trpg-dialogue-expectations.md:74` | 逐幕记录里 `[代码]` 那一栏写着 `开局：.trpg start 灯塔` —— 那份文档的**全部价值**就是"代码此刻逐字产出什么"，这里正好抄错了 | 重跑文末那段复核脚本，`[代码]` 字面量与实现逐字相同 |
+| A5 | `commands/mode.ts:31`、`commands/combat.ts:24`、`commands/character.ts:222`、`render/players.ts:165`、`render/status.ts:61,93,94` | **七处群友可见的回执把 Markdown 的 `**` 原样发进群**（QQ 不认 Markdown）。**不是"照做会失败"，是同属"群里看到的字是错的"** —— 2026-10-17 写逐幕文档时逐条跑命令发现的，四条（`mode` / `combat` / `status` / `scenario`）已亲眼见到。⚠️ `render/status.ts` 的 `renderScenarioList` **同时进 system prompt**（`renderBriefing`），所以不能简单删加粗 —— 要么按受众拆两份（`render.ts` 那条原则），要么统一去掉 | 跑一遍那些命令，输出里不出现 `**`；`t-trpg.mjs` 加一条扫"回执字面量里没有 `**`"的断言 |
+
+正确词形只有一条：**`.trpg new <名字> [规则表 id]`**（名字对上剧本库就用那份剧本，对不上就当标题）。
+
+#### B 类：同一条规则写了两遍（静默漂移）
+
+| # | 位置 | 是什么 | 判据 |
+| --- | --- | --- | --- |
+| B1 | `model/character.ts:87` 的 `normalizeHidden` vs `tools/shared.ts:161` 的 `readHidden` | **同一件事的两份实现**，且行为不同：`normalizeHidden` 收到标量（`"stats"`）直接返回 `[]`，`readHidden` 把它包成 `['stats']`。于是"工具写进存档的 hidden"与"存档读回来的 hidden"能不一致 —— 表现是**藏了、没藏住**，没有任何报错。另外 `readHidden` 用的是裸 `24` 而不是 `MAX_NAME_CHARS` | 两个函数对同一组输入（含标量、含大小写、含不认识的名字）给出相同结果；`readHidden` 里不出现裸数字 |
+| B2 | `scenario/parse.ts:166-168` | 裸 `60` / `64` / `400`，而 `model/limits.ts` 里有 `MAX_TITLE_CHARS` / `MAX_RULE_CHARS` / `MAX_SCENE_CHARS` 三个同名常量（同文件别处已经在 import `text`） | 源码里不出现这三个裸数；改上限时只有一处要改 |
+| B3 | `model/campaign.ts:149`、`model/session.ts:200`、`model/paths.ts:36`（默认参数）、`store/scenario-store.ts:55,67,85` | 剧本 id 的长度上限 `40` 在**六处**各写一遍（`safeFileName` 的默认值恰好也是 40，所以调用方还额外显式传一遍） | 只留一个具名常量；`safeFileName(id)` 不传第二参 |
+| B4 | `suggest.ts:50-63` 的 `suggestionContext` | 拼"在场的人"时印了 HP 与 SAN，**漏了 MP** —— 而 `render/model.ts:51` 与 `render/players.ts:35` 都印。这个函数的注释自己写着"只用已经渲染给 DM 的那几样，不另建一份世界快照"，但它已经漂了：DM 看到 MP，建议生成器看不到 | 三处对同一个角色给出的资源条一致 |
+
+#### C 类：死代码、未用参数、过时注释（不影响行为，但会误导下一个人）
+
+| # | 位置 | 是什么 |
+| --- | --- | --- |
+| C1 | `impl.ts:18` | `import { scenarioIds, usableScenarios }` —— `scenarioIds` **从未被使用**（只有 `usableScenarios` 在第 202 行用了） |
+| C2 | `commands/index.ts:90` | `.ra` 传了 `sendPrivate`，而 `createCheckCommand` 根本不读它（只有 `.rh` 的 `createSecretCheckCommand` 读） |
+| C3 | `commands/index.ts:92` | `.st` 传了 `sendPrivate` **与** `base` 里的 `rules` / `rng`，而 `createStatCommand`（`commands/check.ts:197`）只解构 `{ store, command }` |
+| C4 | `spec.ts:57` | 注释"命令表只剩跑团**那两条**" —— 现在展开后有 24 条 |
+| C5 | `model/session.ts:48` 的 `isQq` 注释 | 声称"只有这一处"，实际另有 5 处内联的 `/^\d+$/` 字面量 |
+| C6 | `render/format.ts:38` 的 `GRADE_LABEL` | 当前**不可达**：三个 `resolveCheck` 调用点全部传 `rule`（于是 `label` 恒有值），没有一处传 `judge`。它是为 `judge` 那条对外契约留的兜底 —— 要么在注释里写明"今天不可达，是给自定义 judge 的"，要么删掉 |
+| C7 | `render/format.ts:40` | `GRADE_LABEL.success = '普通成功'`，而两套内置表的 `success` 标签都是 `'成功'`。更值得注意的不是这个兜底值，而是 `formatCheck` 对**最常见的那一档**印出 `成功（成功，差 20）` —— 成功/失败说了两遍 |
+| C8 | `render/format.ts` 的 `GRADE_LABEL` 与 `coc7`/`generic` 的 label 表 | 三处都在描述"档位叫什么"，而权威只有一处（规则表）。`GRADE_LABEL` 的存在本身就在邀请人去改它（改了不生效） |
+
+#### D 类：文档漂移（`docs/ts-migration-plan.md` 的跑团那一节最严重）
+
+| # | 位置 | 是什么 |
+| --- | --- | --- |
+| D1 | `docs/ts-migration-plan.md` §跑团 | 整段还停在 P0 之前：目录写成**根下平铺**（`state.ts` / `render.ts` / `tools.ts` / `rule-store.ts` / `scenario.ts` / `mode.ts`），命令写成 `/跑团` `/开局` `/模式` `/剧本` `/掷骰`（P1 起是 `.` 前缀且已拆成独立命令），`t-trpg-rules.mjs` 写成"109 条"（现 185）。**这一节现在教人敲不存在的命令、去不存在的文件** |
+| ~~D2~~ | `README.md` | ✅ **已修**（P6 同批）：`.trpg status` 那一行改成"按上面那**八**步"，并补了 `.combat start/next/end`、`.log export` 四行命令与「跑团」面板那一栏 |
+| ~~D3~~ | `AGENTS.md` §跑团 | ✅ **已修**（P6 同批）：handler 键 **14 → 24** 条（12 条声明 / 4 条带 `subs` / 2 条裸命令）、`t-trpg.mjs` **351 → 419**、`t-trpg-rules.mjs` **166 → 185**，命令表补上 `.combat` / `.log` 六行 |
+| ~~D4~~ | `docs/trpg-dialogue-expectations.md` | ✅ **已修**（P6 同批）：新增第十幕（战斗）与第十二幕（战报），文末复核脚本补上 `sendFile` 接线与 `.combat` / `.log` 两族 |
+| ~~D5~~ | `AGENTS.md` §跑团 | ✅ **已修**（P6 同批）：新增「战斗与先攻（P5）」一节（`initiative` 规则字段、排序/指针、倒下判定、行动即推进、伤害刻意不在 `rules/`），战报一节补上 `visible` 判据（镜像按条滤 + 导出边界再查一遍 + 面板第三列）与 `sendFile` 那条口子 |
+
+#### E 类：已知缺口（P5/P6 落地时会碰到，先记在这里）
+
+- `suggest.ts` 与 `.rh` 私密叙事那两次独立 `chatCompletion` 调用**不进 token 账**（成因：它们发生在 `SessionRegistry.finish()` 之后，而 `#persist` 对已结束的会话会**重复累加** `usage-today.json`）。要补齐得给 `SessionRegistry` 加一个"只累加增量"的入口。
+- `.trpg scenario` 命令路径上"用文件名当名字"那一段**没有端到端断言**（要真下载 + 起 Python），只有 `scenarioNameFromFile` 的单元断言。
+- 换熵源（把 `secureRng` 换成 `Math.random`）**没有任何行为断言看得见**，只有源码文本断言。
 
 ## Context
 

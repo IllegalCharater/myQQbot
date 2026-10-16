@@ -1,23 +1,29 @@
-// `campaign` —— 开局 / 换场景 / 写旗标 / 揭示（从 `tools.ts` 拆出，2026-10-16）。
+// `campaign` —— 开局 / 换场景 / 写旗标 / 揭示 / 战斗（从 `tools.ts` 拆出，2026-10-16；P5 加战斗）。
 //
-// 四件事合成一个工具是有意的（见 `spec.ts` 的说明）：它们的参数互不重叠，而工具 schema 是
+// 五件事合成一个工具是有意的（见 `spec.ts` 的说明）：它们的参数互不重叠，而工具 schema 是
 // 请求前缀的一部分 —— 每多一个工具就打散一次提示词缓存。分支用 `action`，取值域在 schema 里是 `enum`。
 import { err, errorMessage, ok } from '../../../agent/tools/shared.js';
 import { MAX_FLAGS, text } from '../model/limits.js';
 import { appendLog, findCharacter } from '../model/campaign.js';
+import { advanceCombat, currentActor, endCombat, immobileNames, startCombat } from '../model/combat.js';
 import { beginCampaign } from '../model/session.js';
+import { formatInitiative, formatOrder } from '../render/format.js';
 import { changeNote } from './shared.js';
 import type { Handler, ToolGates, TrpgNote } from './shared.js';
 import type { JournalPort } from '../model/campaign.js';
+import type { DiceRng } from '../rules/dice.js';
 import type { ToolArguments, ToolContext, ToolResult } from '../../../agent/shared/types.js';
 import type { RuleStore } from '../store/rule-store.js';
 import type { ScenarioStore } from '../store/scenario-store.js';
 import type { TrpgStore } from '../store/campaign-store.js';
+import type { TrpgCampaign } from '../types.js';
 
 export interface CampaignHandlerDeps {
   store: TrpgStore;
   rules: RuleStore;
   scenarios: ScenarioStore;
+  /** **必填**：规则层没有默认随机源（见 `rules/dice.ts` 的文件头）。战斗排先攻要用它。 */
+  rng: DiceRng;
   gates: ToolGates;
   /** 把一条机器条目送进会话（落存档 + 入窗 + 通知面板）。缺省时不做任何事（测试与未接线时）。 */
   deliverNote?: (chatKey: string, note: TrpgNote) => void;
@@ -26,8 +32,8 @@ export interface CampaignHandlerDeps {
 }
 
 export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
-  const { store, rules, scenarios, gates, deliverNote, journal } = deps;
-  const { gate, withCampaign } = gates;
+  const { store, rules, scenarios, rng, gates, deliverNote, journal } = deps;
+  const { gate, settle, withCampaign } = gates;
 
   const startCampaign = (ctx: ToolContext, args: ToolArguments): ToolResult =>
     beginCampaign(ctx.chatKey, args, { store, rules, scenarios, journal });
@@ -60,12 +66,19 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
       if (blocked) return ok(blocked);
 
       const changes: string[] = [];
+      // 这一条要不要**挡在战报外面**（见 `TrpgLogEntry.visible`）。两个来源：
+      //   ① 这一批写的就是暗线（`visible: false`）；
+      //   ② **删掉**一条暗线 —— 正文里的 `旗标-：真凶是医生` 把那名字说出来了，
+      //      而它本来只该在 DM 的记账里。改值那一侧不用单判：暗线改完还是暗线，①已经盖住；
+      //      改成明线则是"揭示"，那一刻它本来就该公开（同 `reveal` 那条路）。
+      let leaked = !visible;
       for (const [key, value] of Object.entries(rawFlags as Record<string, unknown>)) {
         const label = text(key, 24);
         if (!label) continue;
         const body = text(value, 160);
         if (!body) {
           if (label in campaign.flags) {
+            if (campaign.flags[label].visible === false) leaked = true;
             delete campaign.flags[label];
             changes.push(`旗标-：${label}`);
           }
@@ -78,7 +91,7 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
         changes.push(`旗标：${label} = ${body}${visible ? '' : '（暗线）'}`);
       }
       if (!changes.length) return err('这次调用没有改变任何东西 —— flags 里的值都是空的');
-      appendLog(campaign, 'scene', changeNote(changes));
+      appendLog(campaign, 'scene', changeNote(changes), !leaked);
       return ok(`已更新：${changeNote(changes)}`);
     });
   };
@@ -146,7 +159,100 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
   };
 
   /**
-   * 战役本身：开局 / 改场景 / 写旗标 / 揭示玩家本该知道的东西。
+   * 战斗段的一行摘要：第几轮、轮到谁。
+   *
+   * ⚠️ **指针停在倒下的人身上时要明说**：`advance` 会自动跳过他们，但"自动"只在**有人动过**
+   * 的时候发生 —— DM 若整轮只在叙事里说"敌人倒了"，指针就会停在那里，而它下一轮看到的状态
+   * 里那个人还挂在"轮到"的位置上。这句话是把那件事变成可执行的一步（`sub=next`）。
+   */
+  const turnLine = (campaign: TrpgCampaign): string => {
+    const combat = campaign.combat;
+    if (!combat) return '';
+    const current = currentActor(combat);
+    const downed = immobileNames(campaign, combat).has(current);
+    return `第 ${combat.round} 轮，轮到「${current}」${downed ? '（这个人已经倒下了 —— 用 sub=next 跳过）' : ''}。`;
+  };
+
+  /**
+   * 顺序的紧凑写法（`.combat next` 那一类的回执用；`start` 那一份已经是带数值的编号列表，
+   * 不重复印）。
+   */
+  const orderLine = (campaign: TrpgCampaign): string => {
+    const combat = campaign.combat;
+    if (!combat) return '';
+    return `顺序：${formatOrder(combat.order, immobileNames(campaign, combat))}`;
+  };
+
+  /**
+   * 战斗：排先攻 / 推进指针 / 收场（P5）。
+   *
+   * ⚠️ **代码不拦越权行动**（决策 9，知情取舍）：它只管"轮到谁"，不管"这一轮该不该是他" ——
+   * 顺序错了不会有任何机制发现，只能靠 DM 照提示词走。所以回执每次都把当前行动者念出来，
+   * 让 DM 手里有一个可以对的锚。
+   *
+   * ⚠️ **`quota: false`**：指针不是任何角色的行动，它是 DM 的记账 —— 而且它还会被角色的行动
+   * **自动推进**（`tools/shared.ts` 的 `acted`）。占配额的话，DM 会刚好在"轮到某个人、该给他
+   * 记伤害"那一刻被自己的记账锁在门外。去重仍然要有（同一轮里敲两次 `next` 不该走两格），
+   * 所以这里**必须调 `settle`** —— 去重的判据正是"上一次的结果被记下来了吗"。
+   */
+  const combatAction = (ctx: ToolContext, args: ToolArguments): Promise<ToolResult> => {
+    const sub = text(args?.sub, 16).toLowerCase();
+    if (sub !== 'start' && sub !== 'next' && sub !== 'end') {
+      return Promise.resolve(err(`combat 的 sub 只能是 start / next / end，收到「${String(args?.sub ?? '')}」`
+        + '—— start 排一次先攻（再排一次 = 重排）、next 轮到下一个人、end 收场'));
+    }
+    return withCampaign(ctx, (campaign) => {
+      const blocked = gate(ctx, {
+        tool: 'campaign:combat', actor: '战斗', args, source: args?.actionSource, quota: false
+      });
+      if (blocked) return ok(blocked);
+      const done = (result: ToolResult): ToolResult =>
+        settle(ctx, 'campaign:combat', '战斗', args, result);
+
+      if (sub === 'end') {
+        if (!endCombat(campaign)) return err('现在没有在进行中的战斗 —— 不用收场。');
+        appendLog(campaign, 'state', '战斗结束');
+        return done(ok('战斗收场了。接下来照常叙事 —— 要再打就重新排一次先攻。'));
+      }
+
+      if (sub === 'next') {
+        if (!campaign.combat) return err('现在没有在进行中的战斗 —— 先用 combat（sub=start）排一次先攻。');
+        advanceCombat(campaign);
+        return done(ok(`轮到下一个了。\n${turnLine(campaign)}\n${orderLine(campaign)}`));
+      }
+
+      // sub=start：按规则表声明的属性排先攻。**规则表坏了就拒绝**，不换一套顶上去
+      // （与 `roll.ts` 那条逐字同源：静默换一套会让"同一个骰面在两局里判出不同的档"没人能解释）。
+      const lookup = rules.read(campaign.rule);
+      if (!lookup.ok) return err(lookup.message);
+      const key = lookup.rule.initiative;
+      const restarted = Boolean(campaign.combat);
+      const rolled = startCombat(campaign, { key, rng });
+      if (!rolled) {
+        return err('没有可以参战的人 —— 先攻序排的是「玩家已经见过、还站着」的人物卡，'
+          + '现在一张都没有。先用 character 的 action=create 把在场的人建出来。');
+      }
+      // 日志里只留**名字顺序**（一行、不印数值）：`appendLog` 的正文会镜像进战报，而战报是
+      // 给人看的（P6 的 `.log export` 会把它发进群）。先攻数值就是卡上的属性，
+      // 而 `hidden: ['stats']` 存在的理由正是"藏属性" —— 印进日志等于把藏起来的东西写进
+      // 一份以后要发给全群的文件里。
+      appendLog(campaign, 'state', `先攻（按 ${key}）：${formatOrder(rolled.order)}`);
+      const notes: string[] = [];
+      if (restarted) notes.push('这次是重排 —— 上一场的指针作废，从第 1 轮重新开始');
+      if (rolled.missing.length) {
+        notes.push(`${rolled.missing.join('、')} 的卡上没有 ${key}，按 0 参与排序`
+          + '（想让他们正常排，就先给卡补上这一项）');
+      }
+      return done(ok(
+        `${restarted ? '已重新排好' : '已排好'}先攻（按卡上的 ${key}）：\n`
+        + `${formatInitiative(rolled.order, { scores: rolled.scores })}\n${turnLine(campaign)}`
+        + (notes.length ? `\n（${notes.join('；')}）` : '')
+      ));
+    });
+  };
+
+  /**
+   * 战役本身：开局 / 改场景 / 写旗标 / 揭示玩家本该知道的东西 / 战斗。
    */
   return async (ctx, args) => {
     try {
@@ -155,9 +261,11 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
         case 'scene': return await setScene(ctx, args);
         case 'flag': return await setFlags(ctx, args);
         case 'reveal': return await reveal(ctx, args);
+        case 'combat': return await combatAction(ctx, args);
         default:
-          return err(`campaign 的 action 只能是 start / scene / flag / reveal，收到「${String(args?.action ?? '')}」`
-            + '—— start 开局、scene 换场景、flag 写剧情旗标（含暗线）、reveal 把藏起来的东西揭示给玩家');
+          return err(`campaign 的 action 只能是 start / scene / flag / reveal / combat，收到「${String(args?.action ?? '')}」`
+            + '—— start 开局、scene 换场景、flag 写剧情旗标（含暗线）、reveal 把藏起来的东西揭示给玩家、'
+            + 'combat 排先攻与推进战斗回合（用 sub 选 start / next / end）');
       }
     } catch (error) {
       return err(errorMessage(error));

@@ -43,6 +43,7 @@ export * from './render/model.js';
 export * from './render/players.js';
 export * from './render/status.js';
 export * from './render/format.js';
+export * from './render/journal.js';
 
 // ── 命令与工具 ──
 export * from './commands/shared.js';

@@ -73,6 +73,20 @@ export interface ExtraRuntimeDeps {
    * 代价是"从没聊过天的私聊"会出现在存档列表里。
    */
   sendPrivate?(targetUserId: string, text: string): Promise<void>;
+
+  /**
+   * **发一份文件进会话**（跑团的 `.log export` 用它）。
+   *
+   * 与前两个口子同一条理由：扩展只说"发什么"（文件名 + 正文），怎么发是宿主的事 ——
+   * 那条链要碰 `SendQueue` 与 OneBot 的 `upload_group_file`，而 `extra → web` 是反向依赖。
+   *
+   * `chatKey` 是会话键（`group:123` / `private:456`），宿主据此决定传群文件还是私聊文件 ——
+   * 扩展**不该**知道协议端有这两个不同的动作。
+   *
+   * ⚠️ **缺省时调用方要自己判**（`.log export` 就是先看它在不在）：发不出去时假装成功，
+   * 群友会一直等一个永远不来的文件。
+   */
+  sendFile?(chatKey: string, fileName: string, content: string): Promise<void>;
 }
 
 /**

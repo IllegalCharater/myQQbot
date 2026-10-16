@@ -29,8 +29,8 @@ export async function loadSettings() {
     api('/api/model-prices').catch(() => ({ prices: [], current: null })),
     // 注册表由后端提供（ui/ 够不着 src/）。拿不到时退化成空列表，不影响别的区块。
     api('/api/extras').catch(() => ({ extras: [] })),
-    // 跑团的剧本与规则表同理（它们住在数据目录里，浏览器看不到）。
-    api('/api/trpg/workshop').catch(() => ({ scenarios: [], rules: [] }))
+    // 跑团的剧本、规则表与战报同理（它们住在数据目录里，浏览器看不到）。
+    api('/api/trpg/workshop').catch(() => ({ scenarios: [], rules: [], journals: [] }))
   ]);
   state.config = cfg;
   state.providers = provData.providers || [];
@@ -38,7 +38,11 @@ export async function loadSettings() {
   state.visionScanning = !!visionData.scanning;
   state.modelPrices = priceData || { prices: [], current: null };
   state.extras = extrasData.extras || [];
-  state.trpg = { scenarios: trpgData.scenarios || [], rules: trpgData.rules || [] };
+  state.trpg = {
+    scenarios: trpgData.scenarios || [],
+    rules: trpgData.rules || [],
+    journals: trpgData.journals || []
+  };
   state.personaTemplates = {};
   for (const t of tplData.templates || []) state.personaTemplates[t.id] = { name: t.name, text: t.text, builtin: !!t.builtin };
   renderSettings();
@@ -157,18 +161,37 @@ export function bindSettingsEvents(c) {
   // ── 跑团工作台：删除剧本 / 规则表 ──
   //
   // 逐行绑（行是每次渲染新生成的，所以不会叠监听 —— 与其它按 id 取的按钮同一个写法）。
-  // 两处都必须**先 confirm**，且文案说清删的是什么、什么不受影响。
+  // 三处都必须**先 confirm**，且文案说清删的是什么、什么不受影响。
+  //
+  // ⚠️ **战报那一档的文案与另两档是反的**：剧本与规则表都能重新传/重新写，所以要说清"什么
+  // 不受影响"；战报**删掉就没了**，那句话得说这件事，不能照抄另两档。所以三档各有各的一行，
+  // 而不是"先拼一个 what、再拼一个通用 tail"。
+  const TRPG_DEL = {
+    scenario: {
+      path: 'scenarios',
+      confirm: (id) => `删除剧本「${id}」？\n\n正在跑的那一局不受影响（开局时已经把它复制进存档了），只是以后不能再用它开局。`
+    },
+    rule: {
+      path: 'rules',
+      confirm: (id) => `删除规则表「${id}」？\n\n正在跑的那一局不受影响（它记的是规则表的 id）。删掉之后引用它的局会回落成 generic。`
+    },
+    journal: {
+      path: 'journals',
+      // 唯一不可逆的一档：另外两样都能再写一份出来，战报是那一局打过的唯一完整记录。
+      confirm: (id) => `删除战报「${id}」？\n\n**这一份删掉就没了** —— 剧本与规则表都能重新传，`
+        + '战报是这一局打过的唯一完整记录（每一轮掷骰、检定与剧情都在里面）。'
+    }
+  };
   $$('[data-trpg-del]').forEach((btn) => btn.addEventListener('click', async () => {
-    const kind = btn.dataset.trpgDel === 'scenario' ? 'scenario' : 'rule';
+    const kind = btn.dataset.trpgDel;
+    const entry = TRPG_DEL[kind];
+    // 认不出的 kind 直接不动作：`data-trpg-del` 是渲染那一侧写的，两边漂移时宁可什么都不删。
+    if (!entry) return;
     const id = btn.dataset.trpgId || '';
-    const what = kind === 'scenario' ? '剧本' : '规则表';
-    const tail = kind === 'scenario'
-      ? '正在跑的那一局不受影响（开局时已经把它复制进存档了），只是以后不能再用它开局。'
-      : '正在跑的那一局不受影响（它记的是规则表的 id）。删掉之后引用它的局会回落成 generic。';
-    if (!confirm(`删除${what}「${id}」？\n\n${tail}`)) return;
+    if (!confirm(entry.confirm(id))) return;
     btn.disabled = true;
     try {
-      await api(`/api/trpg/${kind === 'scenario' ? 'scenarios' : 'rules'}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await api(`/api/trpg/${entry.path}/${encodeURIComponent(id)}`, { method: 'DELETE' });
       // 删完必须**重新拉一次**：只改内存里的 state 会让页面显示一份与服务端不一致的列表。
       await loadSettings();
     } catch (error) {

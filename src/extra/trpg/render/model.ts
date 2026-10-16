@@ -18,6 +18,8 @@
 // 反过来（状态在前）会让每一轮的**整段**系统提示都失效。这条与 user prompt 的"稳定度降序"
 // 是同一条纪律。
 import { MAX_LOG_RENDER, MAX_NOTES, MAX_STATS_PER_CHARACTER } from '../model/limits.js';
+import { currentActor, immobileNames } from '../model/combat.js';
+import { formatInitiative } from './format.js';
 import { logLine, playerSections } from './players.js';
 import type { TrpgCampaign, TrpgCharacter } from '../types.js';
 
@@ -98,6 +100,25 @@ export function renderForModel(campaign: TrpgCampaign | null): string {
     tail.push('—— 角色 ——', ...campaign.characters.map(modelCharacterLine));
   } else {
     tail.push('—— 角色 ——', '（还没有建立任何人物卡）');
+  }
+
+  // 战斗（P5）。**没有战斗时整段不出现**（不是印一句"当前没有战斗"）—— 绝大多数回合都没在打，
+  // 一句常驻的"没有战斗"每轮都进 system prompt，而它不携带任何信息。
+  if (campaign.combat) {
+    const combat = campaign.combat;
+    const gone = immobileNames(campaign, combat);
+    const current = currentActor(combat);
+    tail.push(`—— 战斗（第 ${combat.round} 轮，按 ${combat.key} 排的先攻）——`);
+    // 轮到倒下的人时要**明说怎么走**：`advance` 会自动跳过他们，但"自动"只在**有人动过**
+    // 的时候发生。这句话把"指针卡在尸体上"变成一步可执行的动作（同 `tools/campaign.ts` 的 `turnLine`）。
+    tail.push(`轮到「${current}」${gone.has(current) ? '—— 这个人已经倒下了，用 campaign 的 action=combat、sub=next 跳过' : ''}。`);
+    // **不印数值**：排先攻那一次手里的 `scores` 没有被存进战斗状态（`types.ts` 的 `TrpgCombat`
+    // 只有名字顺序），而这里也不需要 —— 上面「角色」那一段已经把每张卡的属性逐项印出来了，
+    // 模型想知道谁快，读那张卡就有。
+    tail.push(formatInitiative(combat.order, { gone }));
+    if (combat.missing.length) {
+      tail.push(`（${combat.missing.join('、')} 的卡上没有 ${combat.key}，按 0 排在后面）`);
+    }
   }
 
   const flags = Object.entries(campaign.flags);

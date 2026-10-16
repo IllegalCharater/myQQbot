@@ -749,4 +749,103 @@ const anyRng = () => 0.5;
   ok('2d6+1d4 恰好调用随机源 3 次（两组各自掷）', mbox.calls === 3 && multi.count === 3, `calls=${mbox.calls}`);
 }
 
+// ── 15. 战斗的先攻与指针（P5，纯函数）──────────────────────────────────────
+//
+// 这一段全部是**定值断言**：注入脚本化的随机源，逐面核对"谁排第几"。先攻序会直接发进群
+// （`.combat start` 的回执、玩家笔记里那一段），所以它错了是**所有人都看得见**的错。
+{
+  const { DEFAULT_INITIATIVE, advance, clampTurn, rollInitiative } = await load('extra/trpg/rules/combat.js');
+
+  ok('缺省的先攻属性是 DEX（规则表没声明 `initiative` 时的默认行为，写明的常量）',
+    DEFAULT_INITIATIVE === 'DEX');
+
+  const card = (name, initiative, hp = 5) => ({ name, initiative, hp });
+  /** 每个参战者按名单顺序取一次平手判据 —— 脚本化：第 i 个人拿到 `want[i]`。 */
+  const tiesOf = (...want) => {
+    let i = 0;
+    return () => want[i++] ?? 0.5;
+  };
+
+  // ── 主排序：先攻值降序 ──
+  {
+    const r = rollInitiative([card('阿飞', 10), card('小满', 20), card('线人', null)], () => 0.5);
+    ok('按先攻值降序排（20 → 10 → 没属性按 0）',
+      JSON.stringify(r.order) === JSON.stringify(['小满', '阿飞', '线人']), JSON.stringify(r));
+    ok('`scores` 只含**真有那个属性**的人',
+      JSON.stringify(r.scores) === JSON.stringify({ 阿飞: 10, 小满: 20 }), JSON.stringify(r.scores));
+    ok('没有那个属性的人进 `missing`（回执要靠它说出"这张卡没写 DEX"）',
+      JSON.stringify(r.missing) === JSON.stringify(['线人']), JSON.stringify(r.missing));
+  }
+
+  // ── ⚠️ `null` 与 `0` 是两件事 ──
+  {
+    // 这条是本段最要紧的一条：分不开的话，一次漏填属性会被读成"他先攻垫底" —— 那是错的方向。
+    const r = rollInitiative([card('没写', null), card('真是零', 0)], () => 0.5);
+    ok('**`null`（没写这一项）与 `0`（这一项真的是 0）分得开**',
+      r.missing.length === 1 && r.missing[0] === '没写'
+      && r.scores['真是零'] === 0 && !('没写' in r.scores),
+      JSON.stringify(r));
+    ok('两者都按 0 参与排序（都得有一个位置，否则轮到谁就断了）',
+      r.order.length === 2, JSON.stringify(r.order));
+  }
+
+  // ── 平手：靠平手判据，而不是靠名单顺序 ──
+  {
+    const r = rollInitiative([card('甲', 10), card('乙', 10)], tiesOf(0.9, 0.1));
+    ok('平手时按平手判据升序（名单在后的 `乙` 先动）',
+      JSON.stringify(r.order) === JSON.stringify(['乙', '甲']), JSON.stringify(r.order));
+    // 对照：判据也相同时退回名单顺序 —— 顺序**稳定**，不是随机的。
+    const same = rollInitiative([card('甲', 10), card('乙', 10)], () => 0.5);
+    ok('平手判据也相同时按名单顺序（顺序稳定，不是"每次开打都是同一批人先动"的反面）',
+      JSON.stringify(same.order) === JSON.stringify(['甲', '乙']), JSON.stringify(same.order));
+  }
+
+  // ── 熵量：每人一次，与有没有平手无关 ──
+  {
+    const box = counting(() => 0.5);
+    rollInitiative([card('甲', 10), card('乙', 20), card('丙', 30)], box.rng);
+    ok('随机源恰好调用**人数**次（每人取一次判据，与有没有平手无关）',
+      box.calls === 3, `calls=${box.calls}`);
+  }
+
+  // ── 坏的随机源不该毁掉排序 ──
+  {
+    const r = rollInitiative([card('甲', 10), card('乙', 20)], () => NaN);
+    ok('坏随机源（NaN）夹成 0，排序照常按先攻值走（不崩、不随机）',
+      JSON.stringify(r.order) === JSON.stringify(['乙', '甲']), JSON.stringify(r.order));
+  }
+
+  // ── 指针：夹回区间（存档可以被手改，`order[-1]` 是 `undefined`）──
+  ok('`clampTurn` 把负数夹回末尾（-1 在三个人里是第 3 个）', clampTurn(-1, 3) === 2);
+  ok('`clampTurn` 把越界夹回区间', clampTurn(5, 3) === 2 && clampTurn(3, 3) === 0);
+  ok('`clampTurn` 对空顺序与坏输入给 0', clampTurn(0, 0) === 0 && clampTurn('x', 3) === 0
+    && clampTurn(NaN, 3) === 0 && clampTurn(undefined, 3) === 0);
+
+  const ORDER = ['甲', '乙', '丙'];
+  {
+    const r = advance(ORDER, { turn: 0, round: 1 });
+    ok('推进一格（0 → 1，轮次不变）', r.turn === 1 && r.round === 1, JSON.stringify(r));
+    const wrap = advance(ORDER, { turn: 2, round: 1 });
+    ok('转回起点算一轮（2 → 0，轮次 +1）', wrap.turn === 0 && wrap.round === 2, JSON.stringify(wrap));
+  }
+  {
+    const r = advance(ORDER, { turn: 0, round: 1 }, new Set(['乙']));
+    ok('跳过动不了的人（0 → 跳过 乙 → 丙，轮次不变）',
+      r.turn === 2 && r.round === 1, JSON.stringify(r));
+    // 绕圈时也要跳：从丙出发、甲倒下了 → 先回到 0（轮次 +1），再跳过甲落到乙。
+    const wrap = advance(ORDER, { turn: 2, round: 1 }, new Set(['甲']));
+    ok('绕圈时同样跳过（2 → 回起点 轮次+1 → 跳过 甲 → 乙）',
+      wrap.turn === 1 && wrap.round === 2, JSON.stringify(wrap));
+  }
+  {
+    // ⚠️ **这条是 `advance` 里最容易写错的一处**：全员动不了时那一圈已经在循环里数过了，
+    // 再 `+1` 会让一次全员昏迷**跳掉两轮**。
+    const r = advance(['甲', '乙'], { turn: 0, round: 1 }, new Set(['甲', '乙']));
+    ok('**全员动不了时只走一圈**（回到起点，轮次 +1 而不是 +2）',
+      r.turn === 0 && r.round === 2, JSON.stringify(r));
+    const empty = advance([], { turn: 0, round: 5 }, new Set());
+    ok('空顺序原样返回（没有可推的东西）', empty.turn === 0 && empty.round === 5, JSON.stringify(empty));
+  }
+}
+
 process.exit(done() ? 0 : 1);

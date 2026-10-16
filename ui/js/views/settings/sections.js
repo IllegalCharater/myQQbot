@@ -1,4 +1,4 @@
-import { esc } from '../../dom.js';
+import { esc, fmtTime } from '../../dom.js';
 import { state } from '../../state.js';
 import { THEME_ICON, THEME_LABEL } from '../../theme.js';
 import { getThemePref } from '../../theme.js';
@@ -847,9 +847,10 @@ export function renderPersonaSaveBar() {
  * 坏文件也列出来并把问题摆在明面上 —— 跳过它只会让管理员看到"少了一个"而不知道出了什么事。
  */
 export function renderTrpgSection() {
-  const data = state.trpg || { scenarios: [], rules: [] };
+  const data = state.trpg || { scenarios: [], rules: [], journals: [] };
   const scenarios = Array.isArray(data.scenarios) ? data.scenarios : [];
   const rules = Array.isArray(data.rules) ? data.rules : [];
+  const journals = Array.isArray(data.journals) ? data.journals : [];
 
   const problemRow = (problems) => (problems?.length
     ? `<div class="hint" style="color:var(--danger,#d33)">⚠ ${esc(problems.join('；'))}</div>` : '');
@@ -883,12 +884,34 @@ export function renderTrpgSection() {
       </div>`).join('')
     : '<div class="hint">还没有任何规则表（内置的两套会在第一次用到时自动写进目录）。</div>';
 
+  // 战报的体积：这一栏唯一要给人看的量级信息。KB 以下按字节印（战报常常很小，
+  // 一律换算成 0.1 KB 反而看不出"这份是不是空的"）。
+  const sizeText = (bytes) => {
+    const value = Number(bytes) || 0;
+    return value < 1024 ? `${value} B` : `${(value / 1024).toFixed(1)} KB`;
+  };
+
+  const journalRows = journals.length
+    ? journals.map((item) => `
+      <div class="field-row" data-trpg-row="journal" style="align-items:center;gap:8px">
+        <div class="field" style="flex:1">
+          <label>${esc(item.id)} <span class="muted">· ${esc(String(item.entries ?? 0))} 条</span>
+            <span class="muted">· ${esc(sizeText(item.bytes))}</span>
+            <span class="muted">· ${esc(fmtTime(item.updatedAt))}</span></label>
+        </div>
+        <div class="field" style="flex:0 0 auto">
+          <button class="btn btn-small btn-danger" data-trpg-del="journal" data-trpg-id="${esc(item.id)}">删除</button>
+        </div>
+      </div>`).join('')
+    : '<div class="hint">还没有任何战报。在群里敲 <code>.log export</code> 会把这一局的战报发进群，'
+      + '同时它也就留在了数据目录里。</div>';
+
   return `
     <h3>跑团</h3>
     <div class="hint" style="margin-bottom:10px">
-      「跑团」扩展的<strong>剧本</strong>与<strong>检定规则表</strong>。两者都住在数据目录里，这一页只做
+      「跑团」扩展的<strong>剧本</strong>、<strong>检定规则表</strong>与<strong>战报</strong>。三者都住在数据目录里，这一页只做
       <strong>看得见、删得掉</strong> —— 编辑与上传不在这里：剧本在群里用
-      <code>.trpg scenario</code> 存（或直接放文件），规则表直接改文件。
+      <code>.trpg scenario</code> 存（或直接放文件），规则表直接改文件，战报用 <code>.log export</code> 生成。
     </div>
     <div class="hint" style="margin-bottom:10px">
       开局时用 <code>.trpg start &lt;剧本名&gt; [规则表 id]</code>（人敲，零成本），
@@ -905,6 +928,12 @@ export function renderTrpgSection() {
     <div class="hint" style="margin-bottom:6px">目录：<code>data/trpg/rules/&lt;id&gt;.json</code>。
       <strong>内置的两套也在这里，也能删</strong> —— 删掉之后引用它的那一局会回落成 generic 并在回执里说明。</div>
     ${ruleRows}
+
+    <h4 style="margin-top:14px">战报</h4>
+    <div class="hint" style="margin-bottom:6px">目录：<code>data/trpg/journal/&lt;会话&gt;.jsonl</code>。
+      一行一条、<strong>只追加</strong>（改这一局的存档不会动它）。文件名里的「会话」就是群号或 QQ 号。
+      <strong>删掉就没了</strong> —— 剧本与规则表都能重新传，战报是那一局打过的唯一完整记录。</div>
+    ${journalRows}
 
     <div class="hint" style="margin-top:10px">
       改完剧本或规则表<strong>不必重启</strong>：两者都是每次现读的（按文件修改时间缓存）。

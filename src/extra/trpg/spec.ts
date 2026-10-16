@@ -96,9 +96,12 @@ export const trpgSpec: ExtraSpec = {
         properties: {
           action: {
             type: 'string',
-            enum: ['start', 'scene', 'flag', 'reveal'],
+            enum: ['start', 'scene', 'flag', 'reveal', 'combat'],
             description: PROMPTS.campaign.action
           },
+          // 只有 `action=combat` 用它。`required` 不能按 action 分支，所以"这个 action 需要 sub"
+          // 只能靠 `PROMPTS.campaign.sub` 与 `tools/campaign.ts` 的错误文案补救（同文件头那条）。
+          sub: { type: 'string', enum: ['start', 'next', 'end'], description: PROMPTS.campaign.sub },
           title: { type: 'string', description: PROMPTS.campaign.title },
           system: { type: 'string', description: PROMPTS.campaign.system },
           // ⚠️ **不写 `enum`**：规则表是 `data/trpg/rules/` 里的数据文件，管理员随时可以加，而本
@@ -204,6 +207,16 @@ export const trpgSpec: ExtraSpec = {
     // 人物卡那一族。同样先子命令、后裸命令（顺序即行为）。
     { names: ['.pc'], subs: ['new', 'roll', 'confirm', 'show', 'save'] },
     { names: ['.pc'] },
+    // 战斗那一族（P5）。三条子命令做的是 `campaign action=combat` 那三件事，
+    // 共用 `model/combat.ts` —— 两条路（人敲的 / 模型调的）判据只有一份。
+    // 同样先子命令、后裸命令。
+    { names: ['.combat'], subs: ['start', 'next', 'end'] },
+    { names: ['.combat'] },
+    // 战报那一族（P6）。同样先子命令、后裸命令。
+    // ⚠️ 这一族**不看战役存档**：`.trpg end` 收团时删的是 `data/trpg/<会话>.json`，战报
+    // （`data/trpg/journal/<会话>.jsonl`）留着 —— "刚打完那一局想留个纪念"正是它的主要用法。
+    { names: ['.log'], subs: ['export'] },
+    { names: ['.log'] },
     // 检定与属性：参数是**技能名**，所以是普通命令（没有子命令那一族）。它们都要读卡，
     // 所以都在 `commands/check.ts` 里（`.ra` 公开、`.rh` 暗骰、`.st` 改属性）。
     { names: ['.ra'] },

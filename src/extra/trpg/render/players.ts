@@ -7,6 +7,8 @@
 // 导出 `playerSections` 与 `logLine` 是给 `render/model.ts` 复用的：模型那份要印一段
 // **「玩家已经知道的」**（它得知道玩家此刻的认知边界），用的就是同一份投影。
 import { MAX_NOTES, MAX_PLAYERS, MAX_STATS_PER_CHARACTER } from '../model/limits.js';
+import { currentActor, immobileNames } from '../model/combat.js';
+import { formatInitiative } from './format.js';
 import { playerOf } from '../model/session.js';
 import type { TrpgCampaign, TrpgCharacter } from '../types.js';
 
@@ -71,6 +73,36 @@ export function playerSections(campaign: TrpgCampaign): string[] {
 }
 
 /**
+ * 战斗那一段（P5）。没有战斗、或者**参战者全都还没被玩家见过**时返回空数组（这一段整个不出现）。
+ *
+ * ⚠️ **两条过滤，缺一都是泄漏**：
+ *   ① **顺序按 `discovered` 过滤** —— 先攻序是公开的，但"这个人存在"仍然可以是秘密
+ *      （`startCombat` 排的时候已经滤过一遍，而 DM 事后完全可能把某人改回隐藏）；
+ *   ② **轮到谁那句要跟着一起滤** —— 当前行动者若不在过滤后的名单里，那一句就不出现。
+ *      只滤名单、照印"轮到「X」"的话，等于用一个名字把刚藏起来的人说出来了，
+ *      而且**没有任何报错**（那正是 `render/model.ts` 与这里必须是两份实现的原因）。
+ *
+ * 不印先攻数值：那个数就是卡上的属性，而 `hidden: ['stats']` 存在的理由正是藏属性
+ * （同 `commands/combat.ts` 那段）。
+ *
+ * `alsoVisible` 是给 `renderForPlayer` 用的：**你自己的卡无条件可见**（那条规则见那个函数），
+ * 所以轮到你自己时不该因为卡上标着"玩家尚未见过"而被这段过滤掉。
+ */
+export function combatLines(campaign: TrpgCampaign, alsoVisible?: ReadonlySet<string>): string[] {
+  const combat = campaign.combat;
+  if (!combat) return [];
+  const seen = new Set(campaign.characters.filter((card) => card.discovered).map((card) => card.name));
+  for (const name of alsoVisible ?? []) seen.add(name);
+  const order = combat.order.filter((name) => seen.has(name));
+  if (!order.length) return [];
+  const lines = [`—— 战斗（第 ${combat.round} 轮）——`];
+  const current = currentActor(combat);
+  if (order.includes(current)) lines.push(`轮到「${current}」。`);
+  lines.push(formatInitiative(order, { gone: immobileNames(campaign, combat) }));
+  return lines;
+}
+
+/**
  * 玩家视角里**能出现**的日志类型。
  *
  * ⚠️ 这是一处**真实的泄漏**，不是洁癖：`state` / `scene` 那两类是 DM 的记账
@@ -102,6 +134,8 @@ export function renderForPlayers(campaign: TrpgCampaign | null): string {
   }
   if (campaign.scene) lines.push(`场景：${campaign.scene}`);
   lines.push('', ...playerSections(campaign));
+  const battle = combatLines(campaign);
+  if (battle.length) lines.push('', ...battle);
   const recent = campaign.log.filter((entry) => PLAYER_LOG_KINDS.has(entry.kind)).slice(-3);
   if (recent.length) lines.push('', '最近的掷骰 / 检定：', ...recent.map(logLine));
   return lines.join('\n');
@@ -133,6 +167,10 @@ export function renderForPlayer(campaign: TrpgCampaign, qq: unknown): string {
 
   const others = campaign.characters.filter((card) => card !== mine && card.discovered);
   lines.push('', '—— 场上的人 ——', ...(others.length ? others.map(renderCharacterForPlayers) : ['（还没有别人）']));
+
+  // 战斗那一段（`alsoVisible` 是你自己 —— 见 `combatLines`）。
+  const battle = combatLines(campaign, new Set(mine ? [mine.name] : []));
+  if (battle.length) lines.push('', ...battle);
 
   const flags = Object.entries(campaign.flags).filter(([, flag]) => flag.visible && flag.value);
   if (flags.length) lines.push('', '—— 你知道的事 ——', ...flags.map(([key, flag]) => `· ${key} = ${flag.value}`));

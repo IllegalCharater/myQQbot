@@ -1,19 +1,19 @@
-// 跑团工作台（剧本与规则表）的 HTTP 表面：**只读列表 + 删除**。
+// 跑团工作台（剧本 / 规则表 / 战报）的 HTTP 表面：**只读列表 + 删除**。
 //
-// ── 为什么这里能直接 new 两个 store ──
+// ── 为什么这里能直接 new 三个 store ──
 //
-// `ScenarioStore` / `RuleStore` 是**目录的薄视图**（除了一个按 mtime 的解析缓存之外没有任何状态），
-// 所以面板这一侧自己 new 一个读的就是同一批文件。另一个做法是把它们从扩展运行时里透出来 ——
-// 那要给 `ExtrasRuntime` 加一个"取某个扩展的内部对象"的口子，而那种口子一旦开了，
-// 每个扩展都会想往里塞东西。这两个 store 共享的只有缓存，各持一份没有语义差别。
+// `ScenarioStore` / `RuleStore` / `JournalStore` 是**目录的薄视图**（除了一个按 mtime 的解析缓存
+// 之外没有任何状态），所以面板这一侧自己 new 一个读的就是同一批文件。另一个做法是把它们从扩展
+// 运行时里透出来 —— 那要给 `ExtrasRuntime` 加一个"取某个扩展的内部对象"的口子，而那种口子
+// 一旦开了，每个扩展都会想往里塞东西。这三个 store 共享的只有缓存，各持一份没有语义差别。
 //
 // ── 不做的事（用户明确划的界）──
 //
 // **不能在这里编辑、也不能在这里上传**：剧本与规则表的写入路径只有两条 ——
-// 群里的命令（`/开局` / `/剧本`），以及管理员直接编辑数据目录里的文件。
-// 面板只负责"看得见有哪些、删得掉不要的"。
+// 群里的命令（`.trpg scenario` / `.trpg start`），以及管理员直接编辑数据目录里的文件。
+// 面板只负责"看得见有哪些、删得掉不要的"。战报同理：它是**导出的产物**，生成入口是 `.log export`。
 // 走**桶文件**：`web/` 是外部消费者，不该知道跑团内部怎么分目录（判据同 `media/web-search/`）。
-import { RuleStore, ScenarioStore } from '../../extra/trpg/index.js';
+import { JournalStore, RuleStore, ScenarioStore } from '../../extra/trpg/index.js';
 import { errorMessage } from '../http/http.js';
 import type { Route } from '../types.js';
 
@@ -34,14 +34,15 @@ function idFrom(match: RegExpMatchArray | null): string {
 
 export const trpgRoutes: Route[] = [
   {
-    // 设置页「跑团」那一栏的全部数据。**列表来自磁盘**（两个 store 都扫目录）——
+    // 设置页「跑团」那一栏的全部数据。**列表来自磁盘**（三个 store 都扫目录）——
     // 列出来的，一定是磁盘上真的有的。
     method: 'GET', path: '/api/trpg/workshop', async handle() {
       const rules = new RuleStore();
       const scenarios = new ScenarioStore();
+      const journals = new JournalStore();
       return {
         status: 200,
-        body: { ok: true, scenarios: scenarios.list(), rules: rules.list() }
+        body: { ok: true, scenarios: scenarios.list(), rules: rules.list(), journals: journals.list() }
       };
     }
   },
@@ -72,6 +73,23 @@ export const trpgRoutes: Route[] = [
         return removed
           ? { status: 200, body: { ok: true, id } }
           : { status: 404, body: { ok: false, error: `没有叫「${id}」的规则表` } };
+      } catch (error) {
+        return { status: 500, body: { ok: false, error: errorMessage(error) } };
+      }
+    }
+  },
+  {
+    // 删一份战报。**这是唯一一个删掉就没了的东西**（剧本与规则表都能重新传/重新写，
+    // 战报是这一局打过的唯一完整记录）—— 所以前端那句 confirm 要说清这一点。
+    // id 是 `list()` 给的那个（`safeName(chatKey)`，形如 `group_123`）。
+    method: 'DELETE', path: /^\/api\/trpg\/journals\/([^/]+)$/, async handle(_ctx, _req, match) {
+      const id = idFrom(match);
+      if (!id) return { status: 400, body: { ok: false, error: '战报 id 不能是空的' } };
+      try {
+        const removed = new JournalStore().remove(id);
+        return removed
+          ? { status: 200, body: { ok: true, id } }
+          : { status: 404, body: { ok: false, error: `没有「${id}」这份战报` } };
       } catch (error) {
         return { status: 500, body: { ok: false, error: errorMessage(error) } };
       }

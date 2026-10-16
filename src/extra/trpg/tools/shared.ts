@@ -12,6 +12,7 @@
 import { err, errorMessage } from '../../../agent/tools/shared.js';
 import { clampInt, text, MAX_STATS_PER_CHARACTER, MAX_STAT, MIN_STAT } from '../model/limits.js';
 import { mirrorLog } from '../model/campaign.js';
+import { advanceAfterActions } from '../model/combat.js';
 import { createLedger, consume, recall, remember } from '../rules/economy.js';
 import { DiceError } from '../rules/dice.js';
 import { HIDDEN_FIELDS } from '../types.js';
@@ -57,6 +58,18 @@ export function createGates(store: TrpgStore, journal: JournalPort | null = null
     if (!ledger) { ledger = createLedger(); ledgers.set(ctx, ledger); }
     return ledger;
   };
+  /**
+   * 这一轮**真的花掉了主行动**的角色名（P5：战斗指针靠它前进）。
+   *
+   * 与 `ledgers` 同一手法、同一生命周期（一次运行一个 `ctx`）。**只在配额真的被消费时记**：
+   * 被去重拦下、或被配额拒绝的那次调用什么也没做，不该让战斗往前挪一格。
+   *
+   * ⚠️ **它由 `withCampaign` 收口**（读完即清）。这不是洁癖：`gate` 目前**只被
+   * `withCampaign` 的回调调用**（四个工具都如此），所以"谁读了这份名单"只有一个答案；
+   * 漏了清空的话，一次 `roll` 留下的名字会被同一轮里**下一次** `withCampaign` 当成
+   * "他又动了"而再推一格 —— 那是"指针一次跳两格"，而它不会有任何报错。
+   */
+  const acted = new WeakMap<ToolContext, string[]>();
 
   const gate: ToolGates['gate'] = (ctx, { tool, actor, args, source, quota }) => {
     const declared = text(source, 24);
@@ -69,6 +82,9 @@ export function createGates(store: TrpgStore, journal: JournalPort | null = null
     if (quota) {
       const verdict = consume(ledger, actor, declared);
       if (!verdict.ok) return `⚠ ${verdict.reason}`;
+      // 只有**过了配额**才算这个人这一回合真的动了（被拒的那次没做事）。
+      const list = acted.get(ctx);
+      if (list) list.push(actor); else acted.set(ctx, [actor]);
     }
     return '';
   };
@@ -87,7 +103,14 @@ export function createGates(store: TrpgStore, journal: JournalPort | null = null
     }
     const beforeSeq = campaign.seq;
     const result = run(campaign);
+    // ⚠️ **无论成败都要收口**（`delete`，不是只读）：失败那次留着的话，它会跟着下一次
+    // 工具调用一起被消费掉 —— 于是"报错的那次"也推了指针，而群友只看到 DM 说"这不行"。
+    const actors = acted.get(ctx) ?? [];
+    acted.delete(ctx);
     if (!result.isError) {
+      // 战斗指针在**落盘之前**推进：它和这一轮的动作是同一件事的两半，分两次写就会留下
+      // 一个"日志里记了他打了人、指针还停在他身上"的中间态（那次写入崩了的话）。
+      advanceAfterActions(campaign, actors);
       store.write(campaign);
       // 战报在**落盘之后**镜像（见 `mirrorLog`）：被 `return err(...)` 撤销的那次调用
       // 一个字都不该进战报。

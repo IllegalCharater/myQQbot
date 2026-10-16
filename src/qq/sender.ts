@@ -5,7 +5,11 @@
 // - 发出的每一条记进 ChatStore（self=true，供下一次运行当"自己的发言"）
 import { getConfig, DEFAULT_CONFIG } from '../core/config.js';
 import { sleep, randInt, createSendChain, escapeCqText, formatClockTime } from '../core/util.js';
+import { SEGMENT_UPLOAD_TIMEOUT_MS } from './onebot.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 interface SendOptions { replyToMessageId?: unknown; atUserId?: unknown; file?: string }
 interface StickerLike extends Record<string, unknown> { id: string; url: string; desc?: string; localNote?: string }
 interface OneBotSender {
@@ -13,6 +17,14 @@ interface OneBotSender {
   sendSticker(kind: string, id: string, file: string, options: SendOptions): Promise<unknown>;
   sendImage(kind: string, id: string, file: string, options: SendOptions): Promise<unknown>;
   sendPoke(kind: string, id: string, targetUserId: unknown): Promise<unknown>;
+  /**
+   * 裸动作调用。**只有 `sendFile` 用它** —— 发文件那两条动作（`upload_group_file` /
+   * `upload_private_file`）没有对应的 `sendXxx` 方法。
+   *
+   * 它一直在真客户端上（`OneBotClient.call`），写进这个接口只是为了让两边对得上：
+   * 接口少一个方法不会报错，只会在运行期炸在"调用了一个 undefined"。
+   */
+  call(action: string, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
 }
 interface ChatStoreWriter { appendSelf(chatKey: string, input: { text: unknown; ts?: number; mid?: string | number | null }): unknown }
 type SendChain = <T>(task: () => Promise<T>) => Promise<T>;
@@ -241,6 +253,52 @@ export class SendQueue {
       this.store.appendSelf(chatKey, { text: '[图片]', ts, mid: messageId });
       this.onSent?.({ chatKey, text: '[图片]', messageId });
       return { message_id: messageId };
+    })();
+  }
+
+  /**
+   * 发送一份文件（群文件 / 私聊文件）。`content` 是文本正文，临时文件在这里建、发完就删。
+   *
+   * ⚠️ **刻意不走每会话串行链**（`#chain`），理由与 `sendImage` 逐字相同：上传是慢操作
+   * （协议端要先把文件收下来再传上去），占着链会让**正在进行的对话整体堵住** ——
+   * 而这条路的超时是 120 秒（`SEGMENT_UPLOAD_TIMEOUT_MS`），堵起来比图片那次还久。
+   *
+   * 与 jmcomic / 转写那两处上传的分工只差一点：那两处**直接 `onebot.call`**（它们不在
+   * `SendQueue` 里，也不记会话账），这里要留一条 `我：[文件:…]` 的存档 —— 否则模型下一轮
+   * 在历史里看不到自己刚发过一份文件。
+   *
+   * 失败**照常抛**（限频、上传报错、超时）：调用方（`.log export`）要把真实原因告诉群友。
+   * 这与 `sendImage` 那套"队列自己兜底"不同 —— 那条路没有人在等回执，这条路有。
+   */
+  sendFile(chatKey: string, name: string, content: string) {
+    const [kind, id] = String(chatKey).split(':');
+    if (kind !== 'group' && kind !== 'private') return Promise.reject(new Error(`非法会话 key：${chatKey}`));
+    return (async () => {
+      await this.#checkRate(chatKey);
+      await sleep(randInt(600, 1500)); // 与发表情/发图同样的真人式短暂停顿
+      let tempDir = '';
+      try {
+        // 本地文件名只用来让协议端**看得出这是什么类型**（扩展名），群文件列表里显示的是
+        // `name` 那一个。所以本地名自己拼一个，不拿 `name` 直接当路径 —— 那里面可能有
+        // `:` `?` `*` 这类在 Windows 上非法的字符（而 `name` 是给群友看的，不该被改写）。
+        const ext = /^\.[A-Za-z0-9]{1,8}$/.test(path.extname(name)) ? path.extname(name) : '.txt';
+        tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qq-agent-sendfile-'));
+        const file = path.join(tempDir, `payload${ext}`);
+        await fsp.writeFile(file, content, 'utf8');
+        const params = kind === 'group'
+          ? { group_id: Number(id), file, name }
+          : { user_id: Number(id), file, name };
+        const data = await this.onebot.call(
+          kind === 'group' ? 'upload_group_file' : 'upload_private_file', params, SEGMENT_UPLOAD_TIMEOUT_MS
+        );
+        const ts = Date.now();
+        const messageId = messageIdOf(data);
+        this.store.appendSelf(chatKey, { text: `[文件:${name}]`, ts, mid: messageId });
+        this.onSent?.({ chatKey, text: `[文件:${name}]`, messageId });
+        return { message_id: messageId };
+      } finally {
+        if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
     })();
   }
 

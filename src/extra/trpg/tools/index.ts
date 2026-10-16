@@ -61,7 +61,7 @@ export function createHandlers(deps: TrpgToolDeps): Record<string, Handler> {
   return {
     say: createSayHandler({ store, journal: deps.journal }),
     campaign: createCampaignHandler({
-      store, rules, scenarios, gates, deliverNote: deps.deliverNote, journal: deps.journal
+      store, rules, scenarios, rng, gates, deliverNote: deps.deliverNote, journal: deps.journal
     }),
     character: createCharacterHandler({ store, gates, journal: deps.journal }),
     roll: createRollHandler({ store, rules, rng, gates })

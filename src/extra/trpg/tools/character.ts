@@ -62,9 +62,12 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
     };
     campaign.characters.push(card);
     const beforeSeq = campaign.seq;
+    // 这一条的正文里写着"玩家尚未见过"与"隐藏：pools/notes" —— 那是**藏起来的事实**，
+    // 所以它不能进战报（战报会被导出成文件发进群，见 `TrpgLogEntry.visible`）。
     appendLog(campaign, 'state', `新建人物卡：${name}（${card.ownerId ? `玩家 ${card.ownerId}` : 'NPC'}）`
       + `${hpMax ? ` HP ${hpMax}` : ''}${sanMax ? ` SAN ${sanMax}` : ''}`
-      + `${card.discovered ? '' : '（玩家尚未见过）'}${card.hidden.length ? ` 隐藏：${card.hidden.join('/')}` : ''}`);
+      + `${card.discovered ? '' : '（玩家尚未见过）'}${card.hidden.length ? ` 隐藏：${card.hidden.join('/')}` : ''}`,
+      card.discovered && !card.hidden.length);
     store.write(campaign);
     mirrorLog(campaign, beforeSeq, journal ?? null);
     return ok(`已建立「${name}」：HP ${card.hp}/${card.hpMax}、SAN ${card.san}/${card.sanMax}`
@@ -77,6 +80,11 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
   ): ToolResult => {
     const changes: string[] = [];
     const before = { hp: card.hp, san: card.san, mp: card.mp };
+    // 这一条要不要**挡在战报外面**（见 `TrpgLogEntry.visible`）：正文是 `名字：HP 3→0` 这样一串，
+    // 判据因此是**逐项**的 —— 改了哪一个字段，就看那张卡把不把它藏着。
+    // 卡本身"玩家还没见过"时整条都算藏着的：一个不存在的人身上发生了什么，本身就是秘密。
+    let leaked = !card.discovered;
+    const hidden = new Set(card.hidden);
 
     if (args?.hpDelta !== undefined) {
       const delta = clampInt(args.hpDelta, -MAX_POOL, MAX_POOL, 0);
@@ -95,9 +103,25 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
       card.san = card.sanMax;
       card.mp = card.mpMax;
     }
-    if (card.hp !== before.hp) changes.push(`HP ${before.hp}→${card.hp}`);
-    if (card.san !== before.san) changes.push(`SAN ${before.san}→${card.san}`);
-    if (card.mp !== before.mp) changes.push(`MP ${before.mp}→${card.mp}`);
+    if (card.hp !== before.hp) {
+      // 刚被打趴时**顺手标一句**（P5）：战斗推进靠"这个人还站不站得住"决定跳过谁
+      // （`model/combat.ts` 的 `isMobile`），而日志是 DM 下一轮唯一的凭据 —— 只印
+      // `HP 3→0` 的话它得自己推出"所以这个人不占回合了"。
+      // ⚠️ **判据必须带 `hpMax > 0`**：`hpMax` 为 0 是"这套规则没有 HP 概念"的合法写法
+      // （见 `prompts.ts` 的 `character.hpMax`），那种卡上 `hp` 恒为 0，否则**每一张卡
+      // 一建出来就是"倒下"**，而那套规则下的先攻序会当场全灭。
+      const downed = card.hpMax > 0 && before.hp > 0 && card.hp === 0 ? '（倒下）' : '';
+      changes.push(`HP ${before.hp}→${card.hp}${downed}`);
+      if (hidden.has('pools')) leaked = true;
+    }
+    if (card.san !== before.san) {
+      changes.push(`SAN ${before.san}→${card.san}`);
+      if (hidden.has('pools')) leaked = true;
+    }
+    if (card.mp !== before.mp) {
+      changes.push(`MP ${before.mp}→${card.mp}`);
+      if (hidden.has('pools')) leaked = true;
+    }
 
     if (args?.stats !== undefined) {
       const stats = readStats(args.stats);
@@ -108,6 +132,7 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
       }
       Object.assign(card.stats, stats);
       changes.push(`属性：${keys.map((key) => `${key} ${stats[key]}`).join('、')}`);
+      if (hidden.has('stats')) leaked = true;
     }
 
     if (args?.note !== undefined) {
@@ -116,6 +141,7 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
         card.notes.push(note);
         if (card.notes.length > MAX_NOTES) card.notes.splice(0, card.notes.length - MAX_NOTES);
         changes.push(`备注+：${note}`);
+        if (hidden.has('notes')) leaked = true;
       }
     }
     if (args?.forget !== undefined) {
@@ -125,6 +151,7 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
         if (kept.length !== card.notes.length) {
           card.notes = kept;
           changes.push(`备注-：${gone}`);
+          if (hidden.has('notes')) leaked = true;
         }
       }
     }
@@ -134,19 +161,24 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
     if (args?.visible !== undefined && (args.visible !== false) !== card.discovered) {
       card.discovered = args.visible !== false;
       changes.push(card.discovered ? '对玩家可见' : '对玩家隐藏（尚未见过）');
+      // 改可见度本身就是"藏/露"的记账 —— 两种方向都不进战报：说"对玩家可见"要先说
+      // "他本来藏着"（那句话正是秘密），而"隐藏字段：（无）"这种话在玩家眼里就是
+      // "这里本来有事"（同 `render/players.ts` 里那条"一条全是问号的旗标本身就是一次泄漏"）。
+      leaked = true;
     }
     if (args?.hidden !== undefined) {
-      const hidden = readHidden(args.hidden);
-      if (hidden.join('/') !== card.hidden.join('/')) {
-        card.hidden = hidden;
-        changes.push(hidden.length ? `隐藏字段：${hidden.join('/')}` : '隐藏字段：（无）');
+      const now = readHidden(args.hidden);
+      if (now.join('/') !== card.hidden.join('/')) {
+        card.hidden = now;
+        changes.push(now.length ? `隐藏字段：${now.join('/')}` : '隐藏字段：（无）');
+        leaked = true;
       }
     }
 
     if (!changes.length) {
       return err('这次调用没有改变任何东西 —— 至少给一个 hpDelta / sanDelta / full / stats / note / forget / visible / hidden');
     }
-    appendLog(campaign, 'state', `${card.name}：${changeNote(changes)}`);
+    appendLog(campaign, 'state', `${card.name}：${changeNote(changes)}`, !leaked);
     // MP 也印（**按"字段在不在"决定**，同 HP/SAN）：漏掉它的话模型刚花掉魔法值却看不见，
     // 下一轮只会看到笔记里没变的那个数，而它没有任何线索。
     return ok(`${card.name} → HP ${card.hp}/${card.hpMax}、SAN ${card.san}/${card.sanMax}`
@@ -176,7 +208,8 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
 
       if (action === 'remove') {
         campaign.characters = campaign.characters.filter((c) => c !== card);
-        appendLog(campaign, 'state', `${card.name} 退场（人物卡已移除）`);
+        // 名字本身也判：撤掉一张**玩家还没见过**的卡，说出来的正是那个名字（战报会发进群）。
+        appendLog(campaign, 'state', `${card.name} 退场（人物卡已移除）`, card.discovered);
         return settle(ctx, `character:${action}`, card.name, args, ok(`已把「${card.name}」移出这场团。`));
       }
       if (action !== 'update') {

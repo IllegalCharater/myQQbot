@@ -179,6 +179,11 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     // 所以这里只是把它包一层 —— 扩展那一侧只说"给谁、说什么"。
     sendPrivate: async (targetUserId: string, text: string) => {
       await sender.sendTextBatch(`private:${targetUserId}`, text);
+    },
+    // 群文件投递（跑团的 `.log export`）。同一条分工：扩展只说"文件名 + 正文"，
+    // 落临时文件、`upload_*_file`、留档都在 `SendQueue` 里。
+    sendFile: async (chatKey: string, fileName: string, content: string) => {
+      await sender.sendFile(chatKey, fileName, content);
     }
   });
   // 内置工具表算一次就够（它是常量，只有扩展那部分是变的）—— 上面那次调用只是为了拿名字。

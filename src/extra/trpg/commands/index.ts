@@ -25,10 +25,13 @@ import {
   createCharacterSaveCommand, createCharacterShowCommand, createCharacterUsageCommand
 } from './character.js';
 import { createCheckCommand, createSecretCheckCommand, createStatCommand } from './check.js';
+import { createCombatCommand, createCombatUsageCommand } from './combat.js';
+import { createLogCommand, createLogUsageCommand } from './log.js';
 import { createModeCommand } from './mode.js';
 import { createScenarioCommand } from './scenario.js';
 import { createDiceCommand } from './dice.js';
 import type { CommandHandler } from './shared.js';
+import type { JournalReadPort } from './log.js';
 import type { JournalPort } from '../model/campaign.js';
 import type { DiceRng } from '../rules/dice.js';
 import type { RuleStore } from '../store/rule-store.js';
@@ -43,10 +46,15 @@ export interface CommandDeps {
   modes: TrpgModeStore;
   /** 规则层没有默认随机源，`.r` 与工具共用同一个注入点。 */
   rng: DiceRng;
-  /** 战报（写侧）。缺省不记。 */
-  journal?: JournalPort | null;
+  /**
+   * 战报。**两半都要**（`JournalStore` 一个对象同时实现它们）：写侧给其余命令记档，
+   * 读侧只给 `.log export` 用。缺省 = 没接战报。
+   */
+  journal?: (JournalPort & JournalReadPort) | null;
   /** 私聊投递（暗骰）。缺省 = 没装通道，`.rh` 会如实说一句并且**不掷**。 */
   sendPrivate?: ((targetUserId: string, text: string) => Promise<void>) | null;
+  /** 群文件投递（`.log export`）。缺省 = 没装通道，导出会如实说一句。 */
+  sendFile?: ((chatKey: string, fileName: string, content: string) => Promise<void>) | null;
 }
 
 export function createCommands(deps: CommandDeps): Record<string, CommandHandler> {
@@ -70,6 +78,14 @@ export function createCommands(deps: CommandDeps): Record<string, CommandHandler
     ['.pc show', (command) => createCharacterShowCommand({ ...base, command })],
     ['.pc save', (command) => createCharacterSaveCommand({ ...base, command })],
     ['.pc', () => createCharacterUsageCommand()],
+    // 战斗（P5）：与 `campaign action=combat` 共用 `model/combat.ts`。
+    ['.combat start', (command) => createCombatCommand({ ...base, command })],
+    ['.combat next', (command) => createCombatCommand({ ...base, command })],
+    ['.combat end', (command) => createCombatCommand({ ...base, command })],
+    ['.combat', () => createCombatUsageCommand()],
+    // 战报（P6）：导出这一局的完整记录。**不要求这一局还在**（`.trpg end` 不清战报）。
+    ['.log export', (command) => createLogCommand({ ...base, sendFile: deps.sendFile, command })],
+    ['.log', () => createLogUsageCommand()],
     // 检定与属性：都要读卡，所以都在 `commands/check.ts`。
     ['.ra', (command) => createCheckCommand({ ...base, sendPrivate: deps.sendPrivate, command })],
     ['.rh', (command) => createSecretCheckCommand({ ...base, sendPrivate: deps.sendPrivate, command })],

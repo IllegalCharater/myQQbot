@@ -21,6 +21,7 @@ import { ConditionError, compileCondition } from './condition.js';
 
 /** 没写 `dice` 时技能检定掷什么。**写明的常量**：改它等于改所有老表的默认行为。 */
 const DEFAULT_CHECK_DICE = '1d100';
+import { DEFAULT_INITIATIVE } from './combat.js';
 import { DiceError, parseDiceExpr, rollDice } from './dice.js';
 import type { ChargenSpec } from './chargen.js';
 import type { ConditionVars } from './condition.js';
@@ -85,6 +86,17 @@ export interface RuleFile {
    * 改了名不会算错 —— 那几项会**派生不出来**，并明说缺谁。
    */
   chargen?: ChargenSpec;
+  /**
+   * **排先攻用卡上哪个属性**（可选，P5）。缺省 `DEFAULT_INITIATIVE`（`DEX`）。
+   *
+   * ⚠️ 它是**属性名**，不是掷骰表达式 —— 与上面 `dice` 那一栏正好相反：先攻顺序用的是卡上
+   * 已经有的数值，不掷。所以它**不在编译期被 `parseDiceExpr` 校验**（那样会把一个合法的属性名
+   * `DEX` 判成"不是表达式"而拒绝整张表）；能校验的只有"非空字符串"，而缺省已经保证了这一条。
+   *
+   * 卡上没有这个属性的人按 0 参与排序，并被点名（`InitiativeOrder.missing`）——
+   * 改名不会算错，只会让所有人一起"垫底"并被告知缺的是哪个属性。
+   */
+  initiative?: string;
   levels: RuleLevelFile[];
 }
 
@@ -105,6 +117,8 @@ export interface CheckRule {
   dice: string;
   /** 属性生成的掷法（`.pc roll` 用它）。**没有这一栏 = 这套规则不支持掷属性**。 */
   chargen: ChargenSpec | null;
+  /** 排先攻读卡上哪个属性（`.combat start` 用它）。**永远非空**（缺省 `DEFAULT_INITIATIVE`）。 */
+  initiative: string;
   /** 上面那条 `requires` 编译成的东西；没写就是"什么形状都接受"。 */
   refuses: ((input: JudgeInput) => string | null) | null;
   levels: readonly CheckLevel[];
@@ -206,6 +220,9 @@ export function compileRule(file: RuleFile): CheckRule {
   } catch (error) {
     problems.push(`dice「${dice}」不是一个能掷的表达式：${error instanceof Error ? error.message : String(error)}`);
   }
+  // `initiative` 与 `dice` 不同：它是**属性名**，没有"能不能掷"可言，所以只做"非空"这一条
+  // （缺省已经保证）。刻意不拿 `parseDiceExpr` 试它 —— 那会把 `DEX` 判成语法错、拒绝整张表。
+  const initiative = String(file.initiative ?? '').trim() || DEFAULT_INITIATIVE;
 
   const levels: CheckLevel[] = [];
   const seen = new Set<string>();
@@ -267,7 +284,7 @@ export function compileRule(file: RuleFile): CheckRule {
   }
 
   if (problems.length) throw new RuleError(problems);
-  return { id, name, description: String(file.description ?? '').trim(), dice, chargen, refuses, levels };
+  return { id, name, description: String(file.description ?? '').trim(), dice, chargen, initiative, refuses, levels };
 }
 
 /**

@@ -1089,9 +1089,11 @@ const status = (key) => store.read(key);
   ok('**每条命令各自是一个 handler**（加一个动作 = 加一行声明 + 一个 handler）',
     ['.trpg new', '.trpg join', '.trpg status', '.trpg start', '.trpg end', '.trpg mode',
       '.trpg scenario', '.trpg', '.pc new', '.pc roll', '.pc confirm', '.pc show', '.pc save', '.pc',
+      '.combat start', '.combat next', '.combat end', '.combat',
+      '.log export', '.log',
       '.ra', '.rh', '.st', '.r']
       .every((name) => typeof commands[name] === 'function')
-    && Object.keys(commands).length === 18, JSON.stringify(Object.keys(commands)));
+    && Object.keys(commands).length === 24, JSON.stringify(Object.keys(commands)));
 
   const wizard = String(await tell('.trpg status'));
   ok('还没开局时 `.trpg status` 给的是**向导**（已经开局给的是局势卡，那是另一段的事）',
@@ -1527,6 +1529,408 @@ const status = (key) => store.read(key);
   ok('确认之后不能重掷（那张卡定下来了）', /已经确认过/.test(String(await as('.pc roll'))));
 }
 
+// ── 5k. 战斗（P5）：先攻、回合指针，以及"行动即推进" ─────────────────────────
+//
+// 排序本身的**定值断言**在 `t-trpg-rules.mjs` §15（注入脚本化随机源，逐面核对谁排第几）。
+// 这一段管**接线**，而接线里有三处是别的东西看不见的：
+//   ① **两条路各写各的落盘**（命令 `.combat` 与工具 `campaign action=combat`），所以两条都要钉；
+//   ② **先攻数值只给模型**（它等于卡上的属性，而 `hidden: ['stats']` 存在的理由就是藏属性）；
+//   ③ `tools/shared.ts` 的 `acted` 那条缝（行动被消费 → 指针前进）—— 它只在闸门与 `withCampaign`
+//      之间有代码，删掉它不会有任何别的套件变红。
+{
+  const runtime = createRuntime();
+  const commands = runtime.commandHandlers;
+  const route = routeIn(commands);
+  const K = 'group:p5-cmd';
+  const as = (text, qq = '51001') => commands[route(text)]({
+    chatKey: K, senderId: qq, text, media: [], replyToMessageId: null
+  });
+  const combat = () => new TrpgStore().read(K)?.combat ?? null;
+
+  // ── 三条"做不了"分开说 ──
+  ok('没开局时 `.combat start` 引导去 `.trpg new`（而不是给一句看不懂的话）',
+    /还没有开局/.test(String(await as('.combat start'))) && /\.trpg new/.test(String(await as('.combat start'))));
+
+  await as('.trpg new 战斗测试 coc7');
+  ok('一张卡都没有时 `.combat start` 明说"没有可以参战的人"并给出建卡那一步',
+    /没有可以参战的人/.test(String(await as('.combat start')))
+    && /\.pc new/.test(String(await as('.combat start'))));
+
+  // ── 建三个人（走玩家真敲的那条路：`.pc new` + `.st`）──
+  // 先攻值取 87 / 63 / 41：**多位数**才验得出"回执里没印那个数"（一位数会和序号撞上）。
+  // ⚠️ 一人一个 QQ 号：`.pc new` 是"给自己建卡"，同一个人敲第二次只会得到"你已经有一张卡了"。
+  let qq = 51001;
+  for (const [name, dex] of [['甲', 87], ['乙', 63], ['丙', 41]]) {
+    await as(`.pc new ${name}`, String(qq));
+    await as(`.st DEX ${dex}`, String(qq));
+    qq += 1;
+  }
+  // 一张**玩家还没见过**的卡：顺序是公开的（要发进群、进玩家笔记），所以它不该出现在里面。
+  await handlers.character(fakeCtx(K), { action: 'create', name: '线人', visible: false, stats: { DEX: 99 } });
+
+  const started = String(await as('.combat start'));
+  const after = combat();
+  ok('`.combat start` 按规则表声明的属性排一次先攻，落进存档（第 1 轮、指针在第一个）',
+    after?.key === 'DEX' && after.order.length === 3 && after.turn === 0 && after.round === 1,
+    JSON.stringify(after));
+  ok('**玩家还没见过的人不进先攻序**（顺序是公开的 —— 排进去就是把幕后的人说出来了）',
+    !after.order.includes('线人'), JSON.stringify(after.order));
+  ok('回执把顺序念出来，并点名"轮到谁"',
+    /先攻（按 DEX）：/.test(started) && after.order.every((name) => started.includes(name))
+    && started.includes(`第 1 轮，轮到「${after.order[0]}」。`), started);
+  // ⚠️ **这一条是本段的重点**：先攻值就是卡上的属性，而 `hidden: ['stats']` 存在的理由正是藏属性。
+  // 印进群等于悄悄把藏起来的东西说出去，且没有任何报错。
+  ok('**回执里不印先攻数值**（只印名字与序号）',
+    !started.includes('87') && !started.includes('63') && !started.includes('41'), started);
+  const startLog = new TrpgStore().read(K).log.at(-1);
+  ok('日志只留**名字顺序**的一行，也不印数值（日志会镜像进战报，而战报以后要发进群）',
+    /先攻（按 DEX）：/.test(startLog.text) && !startLog.text.includes('\n')
+    && !startLog.text.includes('87') && !startLog.text.includes('63'), JSON.stringify(startLog));
+
+  // ── 再排一次 = 重排（中途加人的唯一办法）──
+  const restarted = String(await as('.combat start'));
+  ok('再排一次 = 重排（不拒绝 —— 拒绝会让 DM 在"有人来晚了"时卡住），且回执把这件事说出来',
+    /重排/.test(restarted) && /第 1 轮/.test(restarted), restarted);
+
+  // ── 推进 ──
+  const before = combat();
+  const next = String(await as('.combat next'));
+  const moved = combat();
+  ok('`.combat next` 把指针往前推一格（轮次不变）',
+    moved.turn === (before.turn + 1) % 3 && moved.round === before.round, JSON.stringify([before, moved]));
+  ok('回执点名新的行动者，并附一条紧凑的顺序', /轮到「/.test(next) && /顺序：/.test(next), next);
+
+  // ── 倒下的人不占回合 ──
+  const withDown = new TrpgStore().read(K);
+  withDown.characters.find((c) => c.name === '乙').hp = 0;
+  new TrpgStore().write(withDown);
+  const rerolled = String(await as('.combat start'));
+  ok('**倒下的卡不进先攻序**（`isMobile`：HP 掉到 0 的人不该占一个回合位）',
+    !(combat()?.order ?? []).includes('乙') && (combat()?.order ?? []).length === 2, JSON.stringify(combat()));
+  ok('重排时倒下的人也不出现在回执里', !rerolled.includes('乙'), rerolled);
+
+  // ── 收场 ──
+  ok('`.combat end` 收场', /战斗结束/.test(String(await as('.combat end'))) && combat() === null);
+  ok('没有战斗时再收一次、或直接 next，都明说"现在没有在进行中的战斗"',
+    /现在没有在进行中的战斗/.test(String(await as('.combat end')))
+    && /先敲 `.combat start`/.test(String(await as('.combat next'))));
+
+  // ── 认不出的子命令落到裸 `.combat` 上，回用法清单（不静默）──
+  const bare = String(await as('.combat'));
+  ok('裸 `.combat` 回用法清单（三条子命令各自一行）',
+    /\.combat start/.test(bare) && /\.combat next/.test(bare) && /\.combat end/.test(bare), bare);
+  ok('敲错的子命令**不静默**：落到裸 `.combat` 上回用法（静默的话群友不知道自己为什么没生效）',
+    /\.combat start/.test(String(await as('.combat 乱写'))));
+}
+
+// ── 5l. 战斗（P5）：工具那一路，以及"行动被消费 → 指针前进" ───────────────────
+//
+// 两条路（命令 / 工具）**各写各的落盘**，所以上一条钉完命令，这里还要钉工具。
+// 工具用注入的定值随机源（文件顶部那份共享 `handlers`），于是顺序是**可预期的**：
+// 平手判据全相同 ⇒ 按名单顺序。
+{
+  const K = 'group:p5-tool';
+  const started = await call('campaign', fakeCtx(K), { action: 'start', title: '工具路', rule: 'coc7' });
+  ok('工具路也能开局（对照：下面几条不是空转的绿）', started.isError !== true, String(started.content));
+
+  // 先攻值刻意不同 ⇒ 顺序可预期（丙 30 > 甲 20 > 乙 10）。
+  for (const [name, dex] of [['甲', 20], ['乙', 10], ['丙', 30]]) {
+    await call('character', fakeCtx(K), { action: 'create', name, stats: { DEX: dex } });
+  }
+  const roll = await call('campaign', fakeCtx(K), { action: 'combat', sub: 'start' });
+  const view = store.read(K).combat;
+  ok('工具路排出的顺序与卡上的属性一致（丙 30 → 甲 20 → 乙 10）',
+    JSON.stringify(view.order) === JSON.stringify(['丙', '甲', '乙']), JSON.stringify(view));
+  ok('**给模型的那一份带先攻数值**（它本来就看得到全量状态，叙事时心里要有数）',
+    /1\. 丙 30/.test(body(roll)) && /2\. 甲 20/.test(body(roll)) && /3\. 乙 10/.test(body(roll)), body(roll));
+  ok('工具回执也点名当前行动者与轮次', /第 1 轮，轮到「丙」/.test(body(roll)), body(roll));
+
+  ok('`sub=next` 推进并回一行摘要',
+    /轮到「甲」/.test(body(await call('campaign', fakeCtx(K), { action: 'combat', sub: 'next' }))));
+  ok('`sub=end` 收场，再收一次给一句"不用收场"',
+    /收场/.test(body(await call('campaign', fakeCtx(K), { action: 'combat', sub: 'end' })))
+    && /没有在进行中的战斗/.test(body(await call('campaign', fakeCtx(K), { action: 'combat', sub: 'end' }))));
+  ok('`sub` 写错时把三个合法取值都列出来（`required` 不能按 action 分支，只能靠文案补救）',
+    /sub 只能是 start \/ next \/ end/.test(body(await call('campaign', fakeCtx(K), { action: 'combat', sub: 'x' }))));
+  ok('没开局时 `campaign action=combat` 走的是"先开局"那句话（同其余 action）',
+    /还没有开局/.test(body(await call('campaign', fakeCtx('group:p5-none'), { action: 'combat', sub: 'start' }))));
+}
+
+// ── 5m. 战斗（P5）：行动被消费 → 指针前进（`acted` 那条缝）──────────────────
+{
+  const K = 'group:p5-act';
+  await call('campaign', fakeCtx(K), { action: 'start', title: '推进', rule: 'coc7' });
+  for (const [name, dex] of [['甲', 20], ['乙', 10], ['丙', 30]]) {
+    await call('character', fakeCtx(K), { action: 'create', name, stats: { DEX: dex } });
+  }
+  await call('campaign', fakeCtx(K), { action: 'combat', sub: 'start' });
+  const at = () => store.read(K).combat;
+
+  ok('排好之后指针在「丙」', at().turn === 0 && at().round === 1, JSON.stringify(at()));
+
+  // ── 当前行动者**真的做了事** → 指针自己往前走 ──
+  const ctx1 = fakeCtx(K);
+  await call('roll', ctx1, { expr: '1d6', actor: '丙', reason: '先攻后的第一次' });
+  ok('**当前行动者掷了一次骰 → 指针前进一格**（不必 DM 每次去敲 next）',
+    at().turn === 1 && at().round === 1, JSON.stringify(at()));
+
+  // ── 别人做事不推 ──
+  await call('roll', fakeCtx(K), { expr: '1d6', actor: '乙', reason: '别人' });
+  ok('**不是当前行动者的人做事不推**（否则"玩家掷一次骰、DM 给敌人记伤害"会连推两格）',
+    at().turn === 1, JSON.stringify(at()));
+
+  // ── 被拒的那一次不推 ──
+  const ctx2 = fakeCtx(K);
+  await call('roll', ctx2, { expr: '1d6', actor: '甲', reason: '重掷' });
+  const afterFirst = at().turn;
+  const dup = await call('roll', ctx2, { expr: '1d6', actor: '甲', reason: '重掷' });
+  ok('同一轮里参数完全相同的第二次掷骰被拒（既有断言），**指针也不动**',
+    /已经做过这件事/.test(body(dup)) && at().turn === afterFirst, JSON.stringify(at()));
+
+  // ── ⚠️ 一次运行只推一格（`acted` 在 `withCampaign` 里读完即清）──
+  //
+  // 判据必须让"没清空"真的多推一格，否则这条是假的绿。构造：顺序只剩两个人、**后面那个倒下了**，
+  // 于是推一格会绕回原处 —— 此时"上一轮留下的名字"与"当前行动者"恰好是同一个。
+  const W = 'group:p5-act2';
+  await call('campaign', fakeCtx(W), { action: 'start', title: '绕圈', rule: 'coc7' });
+  for (const [name, dex] of [['甲', 20], ['乙', 10]]) {
+    await call('character', fakeCtx(W), { action: 'create', name, stats: { DEX: dex } });
+  }
+  await call('campaign', fakeCtx(W), { action: 'combat', sub: 'start' });
+  const down = store.read(W);
+  down.characters.find((c) => c.name === '乙').hp = 0;
+  store.write(down);
+  const ctx3 = fakeCtx(W);
+  await call('character', ctx3, { action: 'update', name: '甲', hpDelta: -1 });
+  const wrapped = store.read(W).combat;
+  ok('顺序里后面那个倒下时，推一格会绕回起点（第 2 轮、还是甲）—— 这是下面那条的前提',
+    wrapped.turn === 0 && wrapped.round === 2, JSON.stringify(wrapped));
+  // 同一次运行里的第二次调用**没有**消费任何人的主行动（不填 actor 的掷骰不占配额），
+  // 所以它不该再推一格。没清空 `acted` 的话，上一次留下的「甲」会被当成"他又动了"。
+  await call('roll', ctx3, { expr: '1d6', reason: '不占配额的掷骰' });
+  ok('**同一次运行里不会因为上一轮留下的名字多推一格**（`acted` 读完即清）',
+    store.read(W).combat.round === 2, JSON.stringify(store.read(W).combat));
+
+  // ── 指针停在倒下的人身上时无条件推进 ──
+  const D = 'group:p5-act3';
+  await call('campaign', fakeCtx(D), { action: 'start', title: '倒下', rule: 'coc7' });
+  for (const [name, dex] of [['甲', 30], ['乙', 20], ['丙', 10]]) {
+    await call('character', fakeCtx(D), { action: 'create', name, stats: { DEX: dex } });
+  }
+  await call('campaign', fakeCtx(D), { action: 'combat', sub: 'start' });
+  // 直接改存档（不走工具）：**走工具的话这次调用本身就会推指针**，前提就没了。
+  const killed = store.read(D);
+  killed.characters.find((c) => c.name === '甲').hp = 0;
+  store.write(killed);
+  await call('roll', fakeCtx(D), { expr: '1d6', actor: '丙', reason: '别人做事' });
+  ok('**指针停在倒下的人身上时无条件推进**（否则它会一直停在尸体上，直到谁想起来敲 next）',
+    store.read(D).combat.turn === 1 && store.read(D).combat.round === 1, JSON.stringify(store.read(D).combat));
+}
+
+// ── 5n. 战斗（P5）：两份视野各认它，且玩家那份不泄漏 ────────────────────────
+{
+  const runtime = createRuntime();
+  const commands = runtime.commandHandlers;
+  const route = routeIn(commands);
+  const K = 'group:p5-render';
+  const as = (text, qq = '52001') => commands[route(text)]({
+    chatKey: K, senderId: qq, text, media: [], replyToMessageId: null
+  });
+  await as('.trpg new 视野测试 coc7');
+  // 一人一个 QQ 号（同 §5k）；DEX 各不相同 ⇒ 顺序**确定**（87 > 63 > 41），
+  // 于是下面可以按名字断言，而且"战斗段里没有数值"这条才有判别力（属性段真的印着那三个数）。
+  let qq = 52001;
+  for (const [name, dex] of [['甲', 87], ['乙', 63], ['丙', 41]]) {
+    await as(`.pc new ${name}`, String(qq));
+    await as(`.st DEX ${dex}`, String(qq));
+    qq += 1;
+  }
+
+  ok('**没在打时整段不出现**（不是印一句"当前没有战斗" —— 那句话每轮都进 system prompt 却不带信息）',
+    !/—— 战斗（第/.test(runtime.prompt(K).body[2]));
+
+  await as('.combat start');
+  const dm = runtime.prompt(K).body[2];
+  const order = new TrpgStore().read(K).combat.order;
+  // ⚠️ **断言必须只落在战斗段里**：`DEX 87` 在属性段、在日志里都**本来就该出现**
+  // （属性默认可见，`hidden: ['stats']` 才是藏它的手段）。整段搜数字只会永远命中。
+  const blockOf = (text) => {
+    const at = text.indexOf('—— 战斗（');
+    if (at < 0) return '';
+    const rest = text.slice(at);
+    const end = rest.indexOf('\n—— ');
+    return end < 0 ? rest : rest.slice(0, end);
+  };
+  ok('模型那份带战斗段：第几轮、按什么属性排、轮到谁、顺序',
+    JSON.stringify(order) === JSON.stringify(['甲', '乙', '丙'])
+    && /—— 战斗（第 1 轮，按 DEX 排的先攻）——/.test(dm)
+    && dm.includes('轮到「甲」。') && blockOf(dm).includes('1. 甲'), dm.slice(-400));
+  ok('模型那份的战斗段**不重复印先攻数值**（属性段已经印过了，再印一遍是白占前缀）',
+    /DEX 87/.test(dm) && !/87/.test(blockOf(dm)), blockOf(dm));
+
+  const shown = renderForPlayers(new TrpgStore().read(K));
+  ok('玩家那份也有战斗段（顺序是公开的，谁先动在桌上藏不住），但**战斗段里一个数值都不印**',
+    /—— 战斗（第 1 轮）——/.test(shown) && shown.includes('轮到「甲」。')
+    && !/87|63|41/.test(blockOf(shown)), blockOf(shown));
+
+  // ── 倒下的人标出来 ──
+  const down = new TrpgStore().read(K);
+  down.characters.find((c) => c.name === '乙').hp = 0;
+  new TrpgStore().write(down);
+  ok('倒下的人在玩家那份里标「（倒下）」（群友得看得出这个人不占回合了）',
+    /乙（倒下）/.test(renderForPlayers(new TrpgStore().read(K))));
+
+  // ── ⚠️ 当前行动者被藏起来时，"轮到「X」"那句也要跟着消失 ──
+  //
+  // 只滤名单、照印"轮到「X」"的话，等于用一个名字把刚藏起来的人说出来了 —— 而且**没有任何报错**。
+  const hide = new TrpgStore().read(K);
+  hide.characters.find((c) => c.name === '甲').discovered = false;
+  new TrpgStore().write(hide);
+  const masked = renderForPlayers(new TrpgStore().read(K));
+  ok('**当前行动者还没被玩家见过时，"轮到「X」"那句整句不出现**（只滤名单等于用一个名字把他漏出去）',
+    /—— 战斗（第 1 轮）——/.test(masked) && !masked.includes('轮到「甲」')
+    && !masked.includes('甲'), masked);
+  ok('对照组：模型那一份**照样**看得到他（藏的是玩家，不是 DM）',
+    runtime.prompt(K).body[2].includes('轮到「甲」'));
+}
+
+// ── 5o. 战报的可见性（P6）：藏起来的东西不进战报 ─────────────────────────────
+//
+// 战报会被导出成一份文件**发进群**，所以它必须只含公开事件 —— 而 `campaign.log` 的 `state`
+// 与 `scene` 两类里混着 DM 的记账：暗线旗标的名字、"玩家尚未见过"、`隐藏：pools/notes`。
+// 判据落在**写那条日志的人**身上（`TrpgLogEntry.visible`），`mirrorLog` 据此挡下。
+// 这一段钉的就是"哪几处标了、标得对不对" —— 漏一处不会有任何报错，只会把暗线发进群。
+{
+  const K = 'group:p6-journal';
+  const runtime = createRuntime();
+  const journal = new JournalStore();
+  const ctx = () => fakeCtx(K);
+  /** 战报的正文（把这一局的战报当成一整个字符串看）。 */
+  const seen = () => journal.read(K).map((entry) => entry.text).join('\n');
+
+  // `title` 是必填的（见 §5h 那条早退断言）—— 少了它 `start` 会回一句 err，于是这一段
+  // 后面**每一条**都会"绿"（战报里什么都没有，负向断言自然成立）。夹具先把它给全。
+  await runtime.handlers.campaign(ctx(), { action: 'start', title: '战报可见性' });
+  ok('开局那条日志进战报（`beginCampaign` 那份镜像没漏）', /开团/.test(seen()), seen().slice(0, 200));
+
+  await runtime.handlers.character(ctx(), { action: 'create', name: '阿飞', hpMax: 12 });
+  ok('**公开的人物卡进战报**（这一条是下面那几条的对照）', /新建人物卡：阿飞/.test(seen()), seen());
+
+  // ① 整张卡藏起来（"这个人玩家还没见过"）。
+  await runtime.handlers.character(ctx(), { action: 'create', name: '线人', visible: false });
+  ok('**"玩家尚未见过"的卡不进战报** —— 正文里那四个字本身就是一次泄漏',
+    !seen().includes('线人'), seen());
+  ok('对照：它**确实进了 `campaign.log`**（挡的是战报那一侧，不是整个日志）',
+    (status(K)?.log ?? []).some((entry) => entry.text.includes('线人')));
+
+  // ② 有隐藏字段的卡：建卡那条日志的正文里就写着 `隐藏：stats`。
+  await runtime.handlers.character(ctx(), { action: 'create', name: '黑衣客', hidden: ['stats'] });
+  ok('**带隐藏字段的卡，建卡那条也不进战报**（正文写着 `隐藏：stats`）',
+    !seen().includes('黑衣客'), seen());
+
+  // ③ 改一个**被藏起来**的字段。
+  await runtime.handlers.character(ctx(), { action: 'update', name: '黑衣客', stats: { DEX: 87 } });
+  ok('**改隐藏字段（`stats`）不进战报**（`DEX 87` 正是刚被藏起来的那个数）',
+    !/DEX 87/.test(seen()), seen());
+
+  // ④ 改一个**公开**字段 —— 同一张卡、同一个工具，差别只在 `hidden` 那一栏。
+  await runtime.handlers.character(ctx(), { action: 'update', name: '阿飞', hpDelta: -3 });
+  ok('对照：公开字段的变化照样进战报（判据是**逐字段**的，不是"这张卡动过就整条藏"）',
+    /阿飞：HP 12→9/.test(seen()), seen());
+
+  // ⑤ 暗线旗标：写它的那一刻与**删掉**它的那一刻都不进战报（删的那条正文里带着名字）。
+  await runtime.handlers.campaign(ctx(), { action: 'flag', flags: { 真凶是医生: '是' }, visible: false });
+  ok('**暗线旗标不进战报**（写的时候就不该公开）', !seen().includes('真凶是医生'), seen());
+  ok('对照：暗线**确实写进了 `campaign.log`**（DM 得看得见它）',
+    (status(K)?.log ?? []).some((entry) => entry.text.includes('真凶是医生'))
+    && JSON.stringify(status(K)?.flags?.['真凶是医生']) === JSON.stringify({ value: '是', visible: false }),
+    JSON.stringify(status(K)?.flags?.['真凶是医生']));
+
+  await runtime.handlers.campaign(ctx(), { action: 'flag', flags: { 真凶是医生: '' } });
+  ok('**删掉一条暗线时那条日志也不进战报**（`旗标-：真凶是医生` 把名字说出来了）',
+    !seen().includes('真凶是医生'), seen());
+  ok('对照：删的那条**确实写进了 `campaign.log`**',
+    (status(K)?.log ?? []).some((entry) => entry.text.includes('旗标-：真凶是医生')),
+    JSON.stringify((status(K)?.log ?? []).map((entry) => entry.text)));
+
+  // ⑥ 公开旗标与公开场景照旧。
+  await runtime.handlers.campaign(ctx(), { action: 'flag', flags: { 已拿到钥匙: '是' } });
+  await runtime.handlers.campaign(ctx(), { action: 'scene', scene: '灯塔一层·门厅' });
+  ok('对照：公开旗标与公开场景都进战报',
+    /旗标：已拿到钥匙 = 是/.test(seen()) && /场景：灯塔一层·门厅/.test(seen()), seen());
+
+  ok('**战报里没有任何一条带着 `visible: false`**（挡在写入那一侧，不是靠读的时候滤）',
+    journal.read(K).length > 0 && journal.read(K).every((entry) => entry.visible !== false),
+    JSON.stringify(journal.read(K).filter((entry) => entry.visible === false)));
+}
+
+// ── 5p. `.log export`（P6）：把这一局的战报发成一份群文件 ────────────────────
+{
+  const K = 'group:p6-export';
+  const journal = new JournalStore();
+  const sent = [];
+  // **上传端口是递进去的**（生产里 `web/app.ts` 接 `SendQueue.sendFile`）—— 扩展只说
+  // "给谁、叫什么名字、正文是什么"，落临时文件与 `upload_*_file` 都是宿主的事。
+  const runtime = createRuntime({
+    sendFile: async (chatKey, fileName, content) => { sent.push({ chatKey, fileName, content }); }
+  });
+  const say = (text) => runtime.commandHandlers[routeIn(runtime.commandHandlers)(text)](
+    { chatKey: K, senderId: '61001', text, media: [], replyToMessageId: null });
+  const ctx = () => fakeCtx(K);
+
+  const empty = String(await say('.log export'));
+  ok('还没有战报时 `.log export` 说清"从开跑之后才开始记"（不是发一份空文件出去）',
+    /还没有战报/.test(empty), empty);
+  ok('对照：那一次**一个文件都没发**', sent.length === 0);
+
+  await runtime.handlers.campaign(ctx(), { action: 'start', title: '导出' });
+  await runtime.handlers.campaign(ctx(), { action: 'scene', scene: '灯塔一层·门厅' });
+  await runtime.handlers.character(ctx(), { action: 'create', name: '阿飞', hpMax: 12 });
+
+  // ⚠️ 取最近一次发出去的正文时**一律走这个帮手**（`sent.at(-1)?.content ?? ''`）：
+  // 夹具一旦失效（比如 `start` 少了 `title` 而回一句 err），裸下标会在这里抛 `TypeError`
+  // —— 那会**中止整个套件**（后面的 §6–§9 一次都不跑），而终端上只显示"这个套件失败了"。
+  // 取不到就返回空串，让断言**变红**而不是让套件消失。
+  const file = () => sent.at(-1)?.content ?? '';
+  const entries = journal.read(K);
+  const receipt = String(await say('.log export'));
+  ok('导出回执报出文件名与条数', /战报已导出：跑团战报-\d{8}-\d{4}\.md/.test(receipt)
+    && receipt.includes(`${entries.length} 条`), receipt);
+  ok('发出去的是**这一条会话**、而且是 `.md`',
+    sent.length === 1 && sent[0].chatKey === K && sent[0].fileName.endsWith('.md'),
+    JSON.stringify(sent.map((item) => [item.chatKey, item.fileName])));
+  ok('**导出的正文与战报逐字一致**（每一条的正文都在文件里）',
+    entries.length > 0 && entries.every((entry) => file().includes(entry.text)),
+    file().slice(0, 300));
+  ok('文件头写着这是哪条会话的战报（发给群友的那一份要能自证出处）',
+    file().startsWith(`# 跑团战报 · ${K}`), file().slice(0, 80));
+  ok('它是给人看的：正文里**没有**"给模型的话"（`用 campaign 的 action=…` 那种）',
+    file().length > 0 && !/action=/.test(file()) && !/campaign/.test(file()));
+
+  // ── append-only：再跑几轮，旧行逐字不变 ──
+  const raw = () => fs.readFileSync(journal.file(K), 'utf8');
+  const before = raw();
+  await runtime.handlers.campaign(ctx(), { action: 'scene', scene: '灯塔二层·塔顶' });
+  const after = raw();
+  ok('**append-only：新的一轮只往后追加，前面的行逐字不变**',
+    after.startsWith(before) && after.length > before.length, `${before.length} → ${after.length}`);
+
+  // ── 发布边界：手改过的文件也要被挡住 ──
+  //
+  // 判据与写侧**同一条**（`visible !== false`），不是第二份逻辑：导出是这条链上**唯一一个
+  // "把这份文件发出去"**的动作，所以它自己再挡一次。手写进去的那一行模拟"绕过 `mirrorLog`
+  // 的写入点"，而 `read()` **必须把它带回来**（丢掉标记 = 这一道闸门形同不存在）。
+  const hidden = { seq: 999, ts: Date.now(), kind: 'state', text: '暗线：真凶是医生', visible: false };
+  fs.appendFileSync(journal.file(K), `${JSON.stringify(hidden)}\n`, 'utf8');
+  ok('`read()` 把 `visible: false` **原样带回来**（丢掉它 = 导出那道闸门形同不存在）',
+    journal.read(K).at(-1)?.visible === false, JSON.stringify(journal.read(K).at(-1)));
+  const filtered = String(await say('.log export'));
+  ok('**手改过的文件也挡得住**：那一条没进导出（导出是这条链上唯一的发布动作）',
+    file().length > 0 && !file().includes('暗线：真凶是医生'), file().slice(-200));
+  ok('对照：其余条目照常导出（挡的是那一条，不是整份文件）',
+    filtered.includes(`${journal.read(K).filter((entry) => entry.visible !== false).length} 条`), filtered);
+}
+
 // ── 6. 注册表接点与 `onRunEnd` ──────────────────────────────────────────────
 {
   const entry = EXTRA_REGISTRY.find((item) => item.id === 'trpg');
@@ -1537,17 +1941,21 @@ const status = (key) => store.read(key);
     entry.overrideTools?.sendTool === 'say' && entry.tools.some((t) => t.name === 'say'));
   ok('finishTool 显式写 null（跑团没有收尾工具，框架段不提它）',
     entry.overrideTools?.finishTool === null);
-  ok('4 个工具 + 8 条命令声明（命令面统一到 `.`，子命令由 `subs` 展开）',
-    entry.tools.length === 4 && (entry.commands ?? []).length === 8,
+  ok('4 个工具 + 12 条命令声明（命令面统一到 `.`，子命令由 `subs` 展开）',
+    entry.tools.length === 4 && (entry.commands ?? []).length === 12,
     `${entry.tools.length}/${(entry.commands ?? []).length}`);
-  ok('声明就是那八条，而且**每条裸命令都排在自己的子命令之后**（顺序即行为）',
+  ok('声明就是那十二条，而且**每条裸命令都排在自己的子命令之后**（顺序即行为）',
     JSON.stringify((entry.commands ?? []).map((spec) => spec.names[0]))
-    === JSON.stringify(['.trpg', '.trpg', '.pc', '.pc', '.ra', '.rh', '.st', '.r'])
+    === JSON.stringify(['.trpg', '.trpg', '.pc', '.pc', '.combat', '.combat', '.log', '.log', '.ra', '.rh', '.st', '.r'])
     && JSON.stringify((entry.commands ?? [])[0].subs)
       === JSON.stringify(['new', 'join', 'status', 'start', 'end', 'mode', 'scenario'])
     && (entry.commands ?? [])[1].subs === undefined
     && JSON.stringify((entry.commands ?? [])[2].subs) === JSON.stringify(['new', 'roll', 'confirm', 'show', 'save'])
-    && (entry.commands ?? [])[3].subs === undefined,
+    && (entry.commands ?? [])[3].subs === undefined
+    && JSON.stringify((entry.commands ?? [])[4].subs) === JSON.stringify(['start', 'next', 'end'])
+    && (entry.commands ?? [])[5].subs === undefined
+    && JSON.stringify((entry.commands ?? [])[6].subs) === JSON.stringify(['export'])
+    && (entry.commands ?? [])[7].subs === undefined,
     JSON.stringify((entry.commands ?? []).map((spec) => [spec.names, spec.subs])));
   ok('工具名就是 say / campaign / character / roll',
     JSON.stringify(entry.tools.map((t) => t.name)) === JSON.stringify(['say', 'campaign', 'character', 'roll']),
@@ -1848,6 +2256,22 @@ console.log('\n=== 端到端：真起 app（createApp + start）===');
     /【安全规则/.test(systemText) && /【工作方式/.test(systemText));
   ok('能力段（漫画/转写/出图）让位了 —— 那些工具不在接管者的表里',
     !/download_jmcomic/.test(systemText) && !/【能力相关的工具规则】/.test(systemText));
+
+  // ── P5 的战斗：工具表与人格段都要真的到位 ──
+  //
+  // 工具 schema 是**每次请求前缀**的一部分，所以"参数里有没有 `combat` / `sub`"这件事
+  // 只能在这里看（`spec.ts` 的声明与模型拿到的东西之间隔着 `buildToolDefs` 那一层）。
+  const campaignTool = (taken?.tools ?? []).find((tool) => tool.function?.name === 'campaign');
+  const params = campaignTool?.function?.parameters ?? {};
+  ok('**`campaign` 的 `action` 枚举里有 `combat`**（工具表是模型唯一能看到"有这个能力"的地方）',
+    (params.properties?.action?.enum ?? []).includes('combat'),
+    JSON.stringify(params.properties?.action));
+  ok('`sub` 在 `campaign` 的参数里、而且**不是必填**（`required` 不能按 action 分支 —— 只有 `action` 是必填）',
+    'sub' in (params.properties ?? {}) && !(params.required ?? []).includes('sub'),
+    JSON.stringify([Object.keys(params.properties ?? {}), params.required]));
+  ok('跑团人格里真的有"打起来了"那一段（战斗规则不写进人格，模型就只能靠猜 —— 而顺序错了没有机制能发现）',
+    /打起来了：/.test(systemText) && /action=combat/.test(systemText));
+
   ok('这一轮模型看到的状态是"还没开局"（真 app 里 store 读的是真数据目录）',
     /还没有开局/.test(systemText), systemText.slice(-200));
 
@@ -1966,6 +2390,27 @@ console.log('\n=== 端到端：真起 app（createApp + start）===');
     .filter((m) => m.role === 'user').map((m) => String(m.content ?? '')).join('\n'));
   ok('跑团笔记唤醒了新一轮，且【跑团笔记】标签进了模型看到的正文',
     model.requests.length > noteBefore && /【跑团笔记】/.test(noteUser), noteUser.slice(-300));
+
+  // ── 接口层：战报那一栏（列表 + 删除）──
+  //
+  // 路由自己 `new JournalStore()`（三个 store 都是**目录的薄视图**），所以这一段顺带把那个
+  // 前提钉住：路由那一份读到的必须是扩展写进去的那批文件。错了的话面板会永远显示
+  // "还没有任何战报"，而扩展那边一切正常 —— 两边都不会报错。
+  const journalFile = new JournalStore();
+  journalFile.append('group:901', { seq: 1, ts: Date.now(), kind: 'roll', text: '张三 掷骰：1d100 = 42' });
+  const workshopRes = await fetch(`http://127.0.0.1:${port}/api/trpg/workshop`, { headers });
+  const workshop = await workshopRes.json();
+  const journalRow = (workshop.journals ?? []).find((item) => item.id === 'group_901');
+  ok('GET /api/trpg/workshop 列出磁盘上的战报（面板那一份 store 与扩展读写的是同一批文件）',
+    workshopRes.status === 200 && workshop.ok === true && journalRow?.entries === 1 && journalRow?.bytes > 0,
+    JSON.stringify(workshop.journals));
+
+  const delRes = await fetch(`http://127.0.0.1:${port}/api/trpg/journals/group_901`, { headers, method: 'DELETE' });
+  ok('DELETE /api/trpg/journals/<id> 真的把那份战报删掉了',
+    delRes.status === 200 && !fs.existsSync(journalFile.file('group:901')), String(delRes.status));
+  const again = await fetch(`http://127.0.0.1:${port}/api/trpg/journals/group_901`, { headers, method: 'DELETE' });
+  ok('再删一次是 404（报"成功"会让面板以为删掉了）—— 而 `remove()` 的返回值就是这条判据',
+    again.status === 404, String(again.status));
 
   await core.stop();
 }

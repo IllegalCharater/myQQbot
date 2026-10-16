@@ -805,13 +805,29 @@ ok("旧的 'status' 事件名订阅端已不再出现", !subscribed.includes('st
 
   ok('删除按钮**先 confirm**（破坏性动作不能点一下就没了）',
     /if \(!confirm\(/.test(settingsJs) && /data-trpg-del/.test(settingsJs));
-  ok('确认文案说清删的是什么、以及**正在跑的那一局不受影响**（否则没人敢点）',
-    /删除\$\{what\}「\$\{id\}」/.test(settingsJs) && /正在跑的那一局不受影响/.test(settingsJs));
+  ok('确认文案说清删的是什么 —— **三类各一句话**，不是笼统的"确定删除吗？"',
+    /confirm: \(id\) => `删除剧本「\$\{id\}」/.test(settingsJs)
+    && /confirm: \(id\) => `删除规则表「\$\{id\}」/.test(settingsJs)
+    && /confirm: \(id\) => `删除战报「\$\{id\}」/.test(settingsJs));
+  ok('剧本与规则表的确认文案都说清**正在跑的那一局不受影响**（否则没人敢点）',
+    (settingsJs.match(/正在跑的那一局不受影响/g) ?? []).length >= 2,
+    `${(settingsJs.match(/正在跑的那一局不受影响/g) ?? []).length} 处`);
+  ok('战报那份说的是**相反**的话：删掉就没了（它是三类里唯一不可逆的 —— 另外两样都能再写一份出来）',
+    /这一份删掉就没了/.test(settingsJs));
   ok('删完**重新拉一次**列表（只改内存里的 state 会让页面与服务端不一致）',
     /await loadSettings\(\)/.test(settingsJs));
   ok('坏文件在面板上**看得见问题**（跳过它只会让管理员看到"少了一个"）',
     /problems/.test(sectionsSrc2) && /item\.problems/.test(sectionsSrc2));
   ok('内置规则表在列表里标出来（可以删，但要看得出它是内置的）', /item\.builtin/.test(sectionsSrc2));
+  // 战报（P6）是这一栏的**第三类**：数据来自同一个端点，行与删除按钮与另外两类同形。
+  // 漏掉它的接线不会有任何报错，只是那一栏永远空着 —— 而"空着"与"还没有战报"在界面上一样。
+  ok('战报那一栏真的挂上了（第三类，与剧本、规则表同形）',
+    /data-trpg-row="journal"/.test(sectionsSrc2) && /data-trpg-del="journal"/.test(sectionsSrc2));
+  ok('战报的取数与另外两类**同一个端点**，且失败时的兜底里也有 `journals`',
+    /\/api\/trpg\/workshop/.test(settingsJs) && /journals: \[\]/.test(settingsJs),
+    /\/api\/trpg\/workshop/.test(settingsJs) ? '兜底缺 journals' : '没接端点');
+  ok('战报那一栏把"只追加"与"删掉就没了"写在明面上（那是它区别于另外两类的地方）',
+    /只追加/.test(sectionsSrc2) && /删掉就没了/.test(sectionsSrc2));
 }
 
 console.log(`\n════ 通过 ${pass} / 失败 ${fail} ════`);

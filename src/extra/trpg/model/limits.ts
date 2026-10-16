@@ -44,6 +44,20 @@ export const MAX_SYSTEM_CHARS = 60;
 export const MAX_RULE_CHARS = 64;
 export const MAX_NAME_CHARS = 24;
 
+/**
+ * 一场战斗最多几个人进先攻序（P5）。
+ *
+ * 与 `MAX_PLAYERS` / `MAX_CHARACTERS` 是**两个不同的数**，别合并：玩家名单只管报名，
+ * 而先攻序里还有 NPC —— 人数上限由"这一轮要印多长的顺序"决定，而那份顺序**每一轮都进
+ * system prompt**（`render/model.ts` 的战斗段）。所以它同样是成本，不是整洁。
+ */
+export const MAX_COMBATANTS = 20;
+/**
+ * 回合数的上限（P5）。它的用途只有一个：手改过的存档里 `round` 可能是个 `1e9` 或负数，
+ * 而那个数会一路印进提示词。**它不拦"这局打了多久"** —— 打到第 9999 轮是玩家自己的事。
+ */
+export const MAX_COMBAT_ROUNDS = 9999;
+
 /** 属性/技能值的合法区间。防的是模型给出 `1e9` 或 `NaN` 这种让它自己以后都算不明白的数。 */
 export const MIN_STAT = -999;
 export const MAX_STAT = 9999;
