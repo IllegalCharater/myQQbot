@@ -165,6 +165,7 @@ intercept?(input: ExtraCommandInput): ExtraInterceptResult | null
 - **必须在落档之前判**：落档要带 `wakeEligible`。拦下的消息**照常存档、照常上面板**，但落成**已读**历史（与斜杠命令逐字同形）：模型以后在【过去状态】里读得到，这一轮不惊动它。不落档会让面板与存档从此不一致；落成未读则当场与"越过模型"自相矛盾。
 - **问谁**与工具表同一套判据：附加模式要装载过，接管会话只问接管者；顺序即优先级，取第一个说"我要"的。
 - **抛错被吞掉并记日志**（运行时那层），绝不把异常打进 OneBot 的入站回调 —— 它跑在每一条消息上，一个写坏的钩子不该让人连聊天都收不到。
+- **`{}` 是"全拦"那一档，跑团的助手模式正靠它**（2026-10-16）：认不出骰子的消息也一并拦下，于是那个群里**一次模型调用都不会发生**。它顺带推翻了一句早先的结论 —— "助手模式仍受响应档位约束"不再成立：拦下的消息与斜杠命令逐字同形（`wakeEligible: false`、落成已读），窗口判定**根本走不到它**，所以低档位群里照样掷骰。**代价是知情的**：`3d6x`（敲错）与 `3d6 帮我看看`（半句话）都得不到回话（判据是"整串就是一个合法表达式"，放宽就会把后者变成一句语法错误）。
 
 ### 3.6 运行期配置覆盖（`configPatch`）：只叠在"这一轮运行"上
 
@@ -176,7 +177,8 @@ configPatch?(chatKey: string): ExtraConfigPatch   // 形状同 data/config.json
 
 - **不落盘、不外溢**：走 `core/config.ts` 的 `mergeConfigPatch`（新的纯函数：叠 + 归一化，**不改全局**）。改全局只有 `updateConfig` 一条路。于是"接管 A 群的扩展"不会顺手改掉 B 群的行为，并行的两个会话各看各的。**这是它最容易被人误解的一点** —— 实测探针：把 `mergeConfigPatch` 换成顺手 `Object.assign` 写回全局，`t-extras` 立刻报出 `{"maxRounds":42,"idle":999999999}`，那正是外溢的样子。
 - **⚠️ 必须一路传到提示词拼装里，否则只生效一半**：`buildSystemPrompt` / `buildUserPrompt` / `buildPastState` / `formatEntry` / `triggerLabels` / `digestConfigForChat` 都收一个 `config` 参数（缺省 = 全局那份，既有调用点逐字不变），**内部一律不再自己读 `getConfig()`**。分两处读的话，"预算 / 摘要档位 / 表情档位 / 成员备注"那一半就还是全局的，症状是"覆盖了、只生效一半"，没人查得出来。
-- **它管不到整条链路**（如实记下）：入站白名单、上下文窗口容量、发送限频、面板显示、以及**工具定义本身**（`buildToolDefs()` 在 app 启动时算一次）读到的仍是全局那份。`resolveTranscriptionConfig(cfg)` / `resolveImageGenConfig(cfg)` 收的是 `cfg`，**在**范围内。
+- **它管不到整条链路**（如实记下）：入站白名单、发送限频、面板显示、以及**工具定义本身**（`buildToolDefs()` 在 app 启动时算一次）读到的仍是全局那份。`resolveTranscriptionConfig(cfg)` / `resolveImageGenConfig(cfg)` 收的是 `cfg`，**在**范围内。
+- **上下文窗口容量与历史深度曾经也管不到，2026-10-16 起管得到了** —— 那是**改了两个读取点**换来的（不是它自己长出来的）：① `Orchestrator` 建 `ContextWindowRegistry` 时按 `configFor(chatKey)` 取容量（`capacity` 因此从"数字"变成 `数字 | ((chatKey) => number)`，`capacityFor(chatKey)` 是唯一入口）；② `wake-scheduler` 算历史深度时读 `this.configFor(chatKey)`。**两处缺一，症状都是"配了、看着生效、实际用的是别的"**：只改第一处，窗口宽了而【过去状态】还是老的深度；只改第二处，反过来。探针实测：把第一处退回全局读 → `t-trpg` 红 1 条 + `t-window` 红 2 条；把第二处退回 → `t-trpg` 红 1 条（**只有**历史深度那条，容量那条照样绿）。跑团用它把"够跑一局"的三个数（`maxContextMessages` / `historyCount` / `promptContextMaxChars`）抬到 `CONTEXT_FLOOR`，**语义是下限不是覆盖**，且 `0`（不限）原样留着。
 - **装载期对账**：`configPatch('')` 返回非对象、或那次调用抛错 → **拒绝装载**（与 `prompt` / `toolsFor` 同一条）。装载时另记一行日志说明"这个扩展会覆盖运行期配置" —— 判断"这个群为什么和设置里不一样"时，那是唯一的线索。
 
 守护分两层，**缺一层就会漏掉一整类错误**（探针实测）：`t-reply.mjs` 逐项断言那几个帮手认传进来的那份（住在三个不同帮手里的配置项各一条），`t-extras.mjs` 用**源级断言**钉 `agent-runner` 真的把它交给了两个 builder。删掉 `buildSystemPrompt({ config })` 那一行，`t-reply` 70 条**全绿**，只有源级那条红 —— "每处函数都对，但没人传给它"。

@@ -201,7 +201,7 @@ export function parseScenario(raw: unknown, id: string): ScenarioLookup {
  * ⚠️ 它**不等于** `parseScenario(...).ok`：那一个对**没有 frontmatter** 的文本也成功
  * （整份当正文、标题取文件名）。那是给手写 `.md` 留的宽容口子，不是"格式匹配成功"。
  *
- * `/跑团 存剧本` 拿它决定要不要让模型整理一遍（见 `scenario-format.ts`）。两类都算
+ * `/剧本` 拿它决定要不要让模型整理一遍（见 `scenario-format.ts`）。两类都算
  * "不是规定格式"：**裸正文**（没 frontmatter），或**有 frontmatter 但解析报错**
  * （JSON 写坏、正文超长…）—— 后一类模型同样修得了。
  */

@@ -231,7 +231,7 @@ export function renderBriefing(campaign: TrpgCampaign | null, catalog: BriefingC
   lines.push('这一局能选的剧本（开局时用 scenario 指定它的名字）：'
     + (catalog.scenarios.length
       ? catalog.scenarios.map((item) => `${item.id}${item.title && item.title !== item.id ? `（${item.title}）` : ''}`).join('、')
-      : '（还没有任何剧本 —— 让管理员往 data/trpg/scenarios/ 里放一份，或在群里用 `/跑团 存剧本` 存一份）'));
+      : '（还没有任何剧本 —— 让管理员往 data/trpg/scenarios/ 里放一份，或在群里用 `/剧本` 存一份）'));
   lines.push('这一局能选的检定规则（开局时用 rule 指定它的 id）：'
     + catalog.rules.map((item) => `${item.id}${item.description ? `（${item.description}）` : ''}`).join('；'));
 
@@ -245,6 +245,46 @@ export function renderBriefing(campaign: TrpgCampaign | null, catalog: BriefingC
 
   return lines.join('\n');
 }
+
+/**
+ * 剧本清单。`/剧本`、`/开局`（不带参数）与向导共用**这一份**拼法 ——
+ * 三处各写一遍的话，加一种状态（比如"有坏文件"）时必然漏掉其中一处。
+ */
+export function renderScenarioList(scenarios: readonly string[]): string {
+  if (!scenarios.length) {
+    return '剧本库里还没有剧本。\n'
+      + '把一份剧本（`.md` / `.txt` / `.docx` / `.pdf` 都行）发到群里，**引用它**敲 `/剧本` 就收进来了。\n'
+      + '不想要剧本也可以：直接 `/开局 <随便是什么名字>` —— 那一局没有注入剧本，我自己发挥。';
+  }
+  return `剧本库里现在有：${scenarios.join('、')}\n`
+    + '（要再加一份：把文件发到群里、引用它敲 `/剧本`）';
+}
+
+/**
+ * **未开局时的向导**：按「定模式 → 传剧本 → 开局」这个顺序把下一步说清楚。
+ *
+ * 为什么值得单独一份：`/跑团` 不带参数在**已经开局**时给的是局势卡（玩的时候要看的就是它），
+ * 而**还没开局**时给一张"（还没有人物卡）"的空卡等于什么都没说 —— 群里那位正需要知道
+ * "接下来敲什么"。判据是"这个会话有没有战役"，确定性、不猜。
+ */
+export function renderWizard({ modeLabel, scenarios }: { modeLabel: string; scenarios: readonly string[] }): string {
+  return [
+    '【跑团】这个群还没开局。按这个顺序来：',
+    '',
+    `1. 定模式（当前：${modeLabel}）`,
+    '   · `/模式 DM` —— 我当主持人：讲剧情、扮演 NPC、管人物卡与状态',
+    '   · `/模式 助手` —— 我只掷骰，别的什么都不做',
+    '2. 传剧本（**可选**）：把剧本文件发到群里，**引用它**敲 `/剧本`',
+    '3. 开局：`/开局 <剧本名>`',
+    '',
+    renderScenarioList(scenarios)
+  ].join('\n');
+}
+
+/** `/剧本` 带了名字却没引用文件时的用法。 */
+export const SCENARIO_USAGE = '用法：/剧本 [名字]\n'
+  + '· 带名字：把**引用的那个文件**收进剧本库，用这个名字（`.md` / `.txt` / `.docx` / `.pdf` 都行）\n'
+  + '· 不带名字：引用了文件就用文件名当名字；没引用就是**列出剧本库**';
 
 // ── 掷骰 / 检定结果的展示 ────────────────────────────────────────────────────
 //

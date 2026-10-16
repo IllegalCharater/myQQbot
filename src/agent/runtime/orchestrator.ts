@@ -72,15 +72,21 @@ export class Orchestrator implements AgentControlPort {
     // `toolDefs` 由 `web/app.ts` 递进来（扩展装载/接管后工具表会变）—— 本层不 import `extra/`，
     // 见 `OrchestratorDependencies.toolDefs` 的说明。缺省是纯内置那份，既有无参构造点不受影响。
     const toolDefsSource = toolDefs ?? (() => buildToolDefs());
+    // 配置来源：`configFor` 缺省就是全局那份（既有构造点一行不用改）。
+    const configSource = configFor ?? (() => getConfig());
 
     // jmcomic 队列不在构造函数里启动（S10b）：长期任务一律在 app.start() 起、app.stop() 停，
     // 见 src/web/app.ts 与 AGENTS.md「事件与长期任务边界」。
 
     // 动态上下文窗口（每会话一个，见 src/context-window.js）。
     // 容量每次现读配置 —— 设置页改上限要即时生效，不能在构造时固化。
+    //
+    // ⚠️ **按会话读**（`configSource(chatKey)`，不是全局那份）：扩展的运行期配置覆盖
+    // （`ExtraConfigPatch`）能把这个旋钮改宽，而覆盖是按会话的 —— 全局读会让"跑团挂载期间
+    // 拓宽窗口"整条路静默失效（补丁叠上了，这一处却没用它）。与提示词、工具表同一条口径。
     this.windows = windows instanceof ContextWindowRegistry ? windows : new ContextWindowRegistry({
       store,
-      capacity: () => Math.max(0, Number(getConfig().store?.maxContextMessages) || 0)
+      capacity: (chatKey) => Math.max(0, Number(configSource(chatKey).store?.maxContextMessages) || 0)
     });
 
     this.memoryConsolidator = new MemoryConsolidator({

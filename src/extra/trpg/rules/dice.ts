@@ -598,7 +598,12 @@ function wrap(text: string, precedence: number, parent: number, rightOperand: bo
  * 数字、可能是 null），在这里归一化比在每个调用点各写一遍 `String(x ?? '')` 好 ——
  * 后者会漂移，而漂移的表现是"某个入口的报错文案不同"。
  */
-export function rollDice(expr: unknown, rng: DiceRng): DiceRoll {
+/**
+ * 归一化 + 三条通用校验 + 解析。**掷之前那段公用就这一份**（`rollDice` 与 `parseDiceExpr` 共用）。
+ *
+ * 抽出来是为了**不重复解析**：`rollDice` 既要校验又要 AST，各写一遍就等于每掷一次解析两次。
+ */
+function parseChecked(expr: unknown): { text: string; node: Node } {
   const text = normalize(expr);
   if (!text) {
     throw new DiceError('EMPTY', `骰子表达式是空的 —— 写一个吧（${SYNTAX_HINT}）`, 0);
@@ -607,8 +612,57 @@ export function rollDice(expr: unknown, rng: DiceRng): DiceRoll {
     throw new DiceError('TOO_LONG',
       `骰子表达式太长了（最多 ${MAX_EXPR_CHARS} 个字符，收到 ${text.length} 个）`, MAX_EXPR_CHARS);
   }
+  return { text, node: new Parser(tokenize(text)).parse() };
+}
 
-  const node = new Parser(tokenize(text)).parse();
+/**
+ * **只解析、不掷**。成功返回归一化后的表达式，失败抛 `DiceError`。
+ *
+ * 为什么需要一个不掷的入口：`intercept` 要在**每一条**入站消息上判断"这句是不是掷骰请求"，
+ * 判完才真的掷一次。拿 `rollDice` 去试探等于每句话都白掷一遍（消耗熵，而且"这句话算不算请求"
+ * 与"掷出来什么"两件事从此缠在一起）。
+ */
+export function parseDiceExpr(expr: unknown): string {
+  return parseChecked(expr).text;
+}
+
+/**
+ * OneDice 的几种前缀：`.r` / `。r` / `r`，后面可以跟空白。**只认这一种形态。**
+ */
+const DICE_PREFIX = /^[.。]?\s*r\s*/i;
+
+/**
+ * 这条消息是不是一句"**掷骰请求**"？是就返回要掷的那个表达式，不是返回 `null`。
+ *
+ * 两条判据，都必须是确定性的：
+ *   ① 剥掉可选的 OneDice 前缀与首尾空白之后，**整条**消息就是一个合法表达式 —— **不做子串匹配**；
+ *   ② 里面**至少要有一组 `NdM`**。少了这条的后果很具体：纯数字也是合法表达式（`12`），
+ *      而群里那句"12"显然不是让人掷一个 12。
+ *
+ * ⚠️ **为什么不放宽成"包含 `NdB` 就算"**：中文没有分词，`我觉得3d6这骰子不错` 会被当成掷骰请求，
+ * 而它只是一句话 —— 然后它会拿到一句"骰子表达式看不懂"。放宽一条规则容易，把误判收回来很难，
+ * 同「提到我」那条子串标签的教训（AGENTS.md「是不是在叫我」）。
+ *
+ * ⚠️ **代价是知情的：判据是"整串能不能解析"，所以 `3d6x`（敲错了）与 `3d6 帮我看看`（半句话）
+ * 都返回 `null`** —— 调用方对 `null` 的处理是"静默拦下"，于是这两种都**得不到任何回话**。
+ * 想听到"看不懂"的走 `/掷骰 3d6x`（那条命令**不做**这层判据，`DiceError` 的文案原样进群）。
+ * 放宽到这里就会把第二种变成一句语法错误 —— 而"帮我掷 3d6"是群里很正常的说法，
+ * 对它回一句"看不懂"比沉默更糟。两条路都掷不出骰子，选安静的那条。
+ */
+export function looksLikeDiceRequest(text: unknown): string | null {
+  const raw = String(text ?? '').trim();
+  if (!raw) return null;
+  const body = raw.replace(DICE_PREFIX, '').trim();
+  if (!body || !/\d*d\d+/i.test(body)) return null;
+  try {
+    return parseDiceExpr(body);
+  } catch {
+    return null;
+  }
+}
+
+export function rollDice(expr: unknown, rng: DiceRng): DiceRoll {
+  const { text, node } = parseChecked(expr);
   const evaluator = new Evaluator(rng);
   const root = evaluator.visit(node);
   const groups = evaluator.groups;

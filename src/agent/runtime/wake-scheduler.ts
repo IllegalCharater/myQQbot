@@ -491,7 +491,9 @@ export class WakeScheduler {
     //
     // 未命中时：推进游标、不创建会话、不调模型 —— 这才是省 token 的关键
     // （消息内容仍留在存档里，日后被艾特时会作为"已读历史"带进提示词）。
-    const cfgNow = getConfig();
+    // ⚠️ **这一轮那份配置**（`configFor(chatKey)`，不是全局 `getConfig()`）：扩展的运行期配置
+    // 覆盖能把它拓宽，而覆盖是按会话的 —— 全局读会让那个补丁在这一处静默失效。
+    const cfgNow = this.configFor(chatKey);
     let responseDecision: ResponseDecision | null = null;
     const historyResult: HistoryPolicyResult = resolveHistoryPolicy({ historyCount: cfgNow.store.historyCount });
     if (!proactive) {

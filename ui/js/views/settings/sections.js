@@ -840,7 +840,7 @@ export function renderPersonaSaveBar() {
 /**
  * 「跑团」工作台：**剧本与规则表的列表 + 删除**。
  *
- * 用户明确划的界：面板**不能编辑、不能上传** —— 剧本在群里用 `/跑团 存剧本` 存（或管理员直接把
+ * 用户明确划的界：面板**不能编辑、不能上传** —— 剧本在群里用 `/剧本` 存（或管理员直接把
  * 文件放进数据目录），规则表直接编辑文件。所以这里只有两件事：看得见有哪些、删得掉不要的。
  *
  * 数据来自 `GET /api/trpg/workshop`（`ui/` 够不着 `src/`，只能经端点拿，同 `/api/extras`）。
@@ -866,7 +866,7 @@ export function renderTrpgSection() {
           <button class="btn btn-small btn-danger" data-trpg-del="scenario" data-trpg-id="${esc(item.id)}">删除</button>
         </div>
       </div>`).join('')
-    : '<div class="hint">还没有任何剧本。在群里引用一份剧本文件敲 <code>/跑团 存剧本 &lt;名字&gt;</code>，'
+    : '<div class="hint">还没有任何剧本。在群里引用一份剧本文件敲 <code>/剧本</code>，'
       + '或者把 <code>.md</code> 直接放进 <code>data/trpg/scenarios/</code>。</div>';
 
   const ruleRows = rules.length
@@ -888,10 +888,10 @@ export function renderTrpgSection() {
     <div class="hint" style="margin-bottom:10px">
       「跑团」扩展的<strong>剧本</strong>与<strong>检定规则表</strong>。两者都住在数据目录里，这一页只做
       <strong>看得见、删得掉</strong> —— 编辑与上传不在这里：剧本在群里用
-      <code>/跑团 存剧本 &lt;名字&gt;</code> 存（或直接放文件），规则表直接改文件。
+      <code>/剧本</code> 存（或直接放文件），规则表直接改文件。
     </div>
     <div class="hint" style="margin-bottom:10px">
-      开局时用 <code>/跑团 开局 &lt;剧本名&gt; [规则表 id]</code>（人敲，零成本），
+      开局时用 <code>/开局 &lt;剧本名&gt; [规则表 id]</code>（人敲，零成本），
       或者让 DM 调 <code>campaign</code> 的 <code>action=start</code> 带上 <code>scenario</code> / <code>rule</code>。
       可用清单每一轮都会注入 DM 的上下文，所以它知道有哪些能选。
     </div>

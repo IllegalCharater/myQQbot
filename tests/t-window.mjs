@@ -253,6 +253,55 @@ console.log('\n=== 14. 容量即时生效 ===');
   orc.abortAll();
 }
 
+// ── 14b. 容量**按会话**取（`configFor`）───────────────────────────────
+//
+// 这是扩展的 `configPatch`（跑团挂载时把窗口与历史深度拓宽）能生效的**唯一**原因：
+// `Orchestrator` 建 `ContextWindowRegistry` 时按 `configFor(chatKey)` 取容量，而不是全局那份。
+// 全局读的表现是"配了、看着生效、实际用的是别的" —— 而且不会有任何报错。
+{
+  const { getConfig } = await load('core/config.js');
+  updateConfig({ store: { contextSliderPos: 95, historyCount: 80, maxContextMessages: 2 } });
+
+  const store = new ChatStore(0);
+  const reg = new ContextWindowRegistry({ store, capacity: (k) => (k === 'group:wide' ? 7 : 1) });
+  ok('capacity 可以收一个函数（旧写法直接给数字仍然可用）',
+    reg.capacityFor('group:wide') === 7 && reg.capacityFor('group:narrow') === 1
+    && new ContextWindowRegistry({ store, capacity: 3 }).capacityFor('group:x') === 3,
+    JSON.stringify([reg.capacityFor('group:wide'), reg.capacityFor('group:narrow')]));
+  ok('容量取到坏值（NaN / 负数 / undefined）一律夹成 0 = 不限，不抛',
+    new ContextWindowRegistry({ store, capacity: () => Number.NaN }).capacityFor('group:x') === 0
+    && new ContextWindowRegistry({ store, capacity: () => -5 }).capacityFor('group:x') === 0
+    && new ContextWindowRegistry({ store, capacity: () => undefined }).capacityFor('group:x') === 0);
+
+  const sessions = new SessionRegistry(0);
+  const memory = { formatForPrompt: () => '', members: () => [], consolidationState: () => ({ counts: { memberImpression: 0 }, members: [], lastConsolidatedAt: 0 }), listChats: () => [] };
+  const stickers = { sync: async () => ({ entries: [] }) };
+  const onebot = { selfId: '999', selfNickname: '小鲸鱼', connected: true, sendText: async () => ({ message_id: 1 }), sendSticker: async () => ({}), sendPoke: async () => ({}) };
+  const sender = new SendQueue({ onebot, store });
+  const WIDE = key(); const NARROW = key();
+  const orc = new Orchestrator({
+    store, memory, stickers, sender, sessions, onebot, emit: () => {},
+    // 生产里这一行是 `extras.configFor(chatKey)`（`web/app.ts`）；这里替一个同形状的。
+    configFor: (k) => (k === WIDE
+      ? { ...getConfig(), store: { ...getConfig().store, maxContextMessages: 200 } }
+      : getConfig())
+  });
+
+  for (const K of [WIDE, NARROW]) {
+    for (let i = 1; i <= 5; i++) {
+      const e = store.appendIncoming(K, { mid: i, ts: Date.now() + i, senderId: '555', senderName: '张三', text: `第${i}条` });
+      orc.onIncoming(K, e);
+    }
+  }
+  ok('同一个进程里两个会话的容量可以不同（覆盖**按会话**，不外溢到别的群）',
+    orc.windows.stats(WIDE).capacity === 200 && orc.windows.stats(NARROW).capacity === 2,
+    JSON.stringify([orc.windows.stats(WIDE).capacity, orc.windows.stats(NARROW).capacity]));
+  ok('宽的那个真的留住了 5 条、窄的那个只留最新 2 条',
+    orc.windows.stats(WIDE).win === 5 && orc.windows.stats(NARROW).win === 2,
+    JSON.stringify([orc.windows.stats(WIDE).win, orc.windows.stats(NARROW).win]));
+  orc.abortAll();
+}
+
 // ── 15. 主动冒泡的唤醒带着 `proactive: true` ─────────────────────────
 //
 // 为什么这条在这里：`Orchestrator` 递给 `ProactiveController` 的那个 `wake` 回调，是

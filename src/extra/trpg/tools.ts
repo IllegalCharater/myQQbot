@@ -516,7 +516,7 @@ export interface BeginDeps {
 
 /**
  * 开一局。**命令与工具走的是这一个函数** —— 两个入口只是取参数的来源不同
- * （`/跑团 开局 <剧本> [规则]` vs `campaign action=start`），判据必须是同一套：
+ * （`/开局 <剧本> [规则]` vs `campaign action=start`），判据必须是同一套：
  * 已经开过局时怎么拒、剧本读不到时怎么办、规则表坏了怎么办，三处都不许有第二份答案。
  *
  * 剧本注入是**快照**（见 `types.ts` 的 `TrpgCampaign.scenario`）：骨架落进状态、正文复制进存档，

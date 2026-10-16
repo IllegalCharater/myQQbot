@@ -36,7 +36,14 @@ interface WindowOptions {
   initialEntries?: ChatMessage[];
   initialFoldedIds?: number[];
 }
-interface RegistryOptions { store?: ChatStore | null; capacity?: Capacity }
+interface RegistryOptions { store?: ChatStore | null; capacity?: RegistryCapacity }
+
+/**
+ * 注册表的容量来源。**可以按会话**（`(chatKey) => number`）—— 扩展的运行期配置覆盖
+ * （见 `extra/types.ts` 的 `ExtraConfigPatch`）能把这个旋钮改宽，而覆盖是**按会话**的，
+ * 所以容量也得按会话取。传常量就所有会话一样（照旧）。
+ */
+type RegistryCapacity = number | ((chatKey: string) => number) | null;
 
 export class ContextWindow {
   #capacityOf: () => number;
@@ -225,19 +232,27 @@ export class ContextWindow {
  */
 export class ContextWindowRegistry {
   #store: ChatStore | null;
-  #capacityOf: () => number;
+  #capacityOf: (chatKey: string) => number;
   #windows: Map<string, ContextWindow>;
 
   constructor({ store = null, capacity = null }: RegistryOptions = {}) {
     this.#store = store;
+    // 常量形态：忽略 chatKey（"所有会话同一个容量"仍然是最常见的用法）。
     this.#capacityOf = typeof capacity === 'function'
       ? capacity
       : () => Math.max(0, Number(capacity) || 0);
     this.#windows = new Map();
   }
 
-  get capacity() {
-    return Math.max(0, Number(this.#capacityOf()) || 0);
+  /**
+   * 某个会话的容量（0 = 不限）。
+   *
+   * 按会话取而不是"一个全局数"：扩展的运行期配置覆盖是按会话的，窗口容量必须跟着它走
+   * （见 `RegistryCapacity`）。**每次现读**，所以设置页改上限、或扩展叠加/撤销覆盖，
+   * 下一次 `ensure()` / `foldedCount()` 就生效。
+   */
+  capacityFor(chatKey: string): number {
+    return Math.max(0, Number(this.#capacityOf(chatKey)) || 0);
   }
 
   has(chatKey: string): boolean {
@@ -303,7 +318,7 @@ export class ContextWindowRegistry {
    * 容量 0（不限）时窗口即全部，折叠账本恒空。
    */
   #createSeeded(chatKey: string): ContextWindow {
-    const cap = this.capacity;
+    const cap = this.capacityFor(chatKey);
     const all = this.#store?.recentIncoming
       ? this.#store.recentIncoming(chatKey, { limit: 0 })
       : [];
@@ -314,7 +329,8 @@ export class ContextWindowRegistry {
     }
     return new ContextWindow({
       chatKey,
-      capacity: () => this.capacity,
+      // 闭包把这个会话的键带进去：容量**按会话**取（见 capacityFor）。
+      capacity: () => this.capacityFor(chatKey),
       initialEntries: all.slice(cut),
       initialFoldedIds: foldedIds
     });
