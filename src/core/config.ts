@@ -970,6 +970,21 @@ export function setRuntimeConfig(cfg: AppConfig) {
 }
 
 /**
+ * 把一份补丁**叠到一份配置上**并返回结果 —— **不改全局、不落盘**。
+ *
+ * 与 `updateConfig` 是两件事，别混：那个改的是**全局那份**（并写盘），这个只算出一份新对象，
+ * 给"**这一次运行看到的配置**"用（扩展的运行期覆盖走这条路，见 `extra/runtime.ts` 的 `configFor`）。
+ *
+ * 走一遍 `normalizeConfigShape` 是刻意的：它是全仓库唯一一处"把配置掐回合法形状"的地方，
+ * 而这里的补丁来自扩展（运行期拼出来的对象），不掐就等于给了一条绕过所有钳制的口子。
+ * 代价是每次调用都要走一遍归一化 —— 它一轮只调一次，可接受。
+ */
+export function mergeConfigPatch(base: AppConfig, patch: unknown): AppConfig {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return base;
+  return normalizeConfigShape(deepMerge(base, patch));
+}
+
+/**
  * 取某个会话实际生效的响应策略。只返回响应判定需要的最小字段，历史配置不会越界。
  * unifiedTier 开启 → 从全局滑条位置派生档位与概率；
  * 关闭 → 群聊查 groupSliderPos，有单独设置就换算出该群的 responseTier/randomPercent。
@@ -998,8 +1013,10 @@ export function responseConfigForChat(chatKey: string) {
  *
  * maxKeepChars 是唯一的例外：它**不参与按群覆盖**，永远是全局值（见下面 base 里的注释）。
  */
-export function digestConfigForChat(chatKey: string) {
-  const d = getConfig().digest || {};
+export function digestConfigForChat(chatKey: string, config?: AppConfig | null) {
+  // `config` 是"**这一轮运行读的那份**"（可能已叠过扩展的运行期覆盖，见 `mergeConfigPatch`）。
+  // 缺省读全局 —— 面板、压缩巡检这些不在一次运行里的调用方走的就是缺省那条。
+  const d = (config ?? getConfig()).digest || {};
   const num = (v: unknown, fallback: number) => {
     const n = Number(v);
     return Number.isFinite(n) ? Math.min(200000, Math.max(0, Math.round(n))) : fallback;

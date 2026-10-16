@@ -232,6 +232,10 @@ UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词
 
 斜杠命令只声明**一个词形列表** `names`（第一个是主命令词），判定、规范化与日志标签**三样都从它派生** —— 没有第二种判据（曾经是 `name` + `aliases` + 一个 `match` 正则，三份）。命中非首位词形时把开头那个词换成 `names[0]` 再交给处理函数，于是每个解析器只认识自己那一个词。判定的边界是**一条**：`词` 后面跟空白、**`[`**、或直接结束 —— `[` 也算边界，是因为协议端把媒体段渲染成紧贴着的占位符（`segmentsToText` 用 `out.join('')`），"发视频 + 打 `/转写`"送来的就是 `/转写[视频]`；统一成边界规则之后，原先为它单开的那条 `/转写[视频]` 词形被删掉了。见 `docs/extras-design.md` §3.3–§3.4。
 
+**扩展还能拦下普通消息**（`ExtraRuntime.intercept`）：入站链路在**落档之前**问一遍"这条你要不要自己接"，拦下的消息照常存档、照常上面板，但落成**已读**历史（`wakeEligible: !slashCommand && !intercepted`）—— 与斜杠命令并列的第二条确定性快路径，只是不需要群友敲斜杠。回执由**宿主**发（扩展碰不到 `sender`）。
+
+**扩展还能给"这一轮运行"叠一层配置补丁**（`ExtraRuntime.configPatch(chatKey)`）：`runAgent` 开头调一次 `host.configFor(chatKey)` 算出一份**叠过的配置**，那一轮读到的每一处都是它。它**不改全局、不落盘**（`core/config.ts` 的 `mergeConfigPatch`），所以接管的会话与别的会话各看各的。⚠️ 这份 `cfg` **必须一路传到提示词拼装里**（`buildSystemPrompt` / `buildUserPrompt` / `buildPastState` / `formatEntry` / `triggerLabels` / `digestConfigForChat` 都收 `config`，内部不再自己读 `getConfig()`）—— 漏一处就是"覆盖了、只生效一半"。见 `docs/extras-design.md` §3.5–§3.6。
+
 工具**结果**串通常是动态返回值（含错误文案），留在各自工具文件里；唯一例外是
 `transcribe_video` 的回执话术（`TOOL_PROMPT_TEXT.transcribe_video.receipt`）：它没有任何动态成分，
 且它要解决的问题是"**诱导模型说哪句话**"而不是"返回什么数据"，所以按固定指令处理。这一条特别值得

@@ -59,7 +59,7 @@ export class Orchestrator implements AgentControlPort {
   /** 群名缓存：groupId -> name，只有 `getChatName` / `#chatName` 用，不对类外暴露。 */
   #chatNameCache = new Map<string, string>();
 
-  constructor({ store, memory, stickers, sender, sessions, onebot, emit, windows = null, transcription, imageGen, hotSearch, toolDefs, extraPrompt }: OrchestratorDependencies) {
+  constructor({ store, memory, stickers, sender, sessions, onebot, emit, windows = null, transcription, imageGen, hotSearch, toolDefs, extraPrompt, configFor }: OrchestratorDependencies) {
     this.store = store;
     this.memory = memory;
     this.stickers = stickers;
@@ -113,6 +113,7 @@ export class Orchestrator implements AgentControlPort {
       windows: this.windows,
       toolDefs: toolDefsSource,
       extraPrompt,
+      configFor,
       emit: (event, payload) => this.emit(event, payload),
       getChatName: (groupId) => this.getChatName(groupId),
       // 群友印象自动整理：触发条件是"印象条数超过阈值 **且** 距上次整理超过冷却时间"，

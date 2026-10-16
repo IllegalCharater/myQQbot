@@ -10,6 +10,7 @@ import type { SessionRegistry } from '../../chat/sessions.js';
 import type { ContextWindowRegistry } from '../context/context-window.js';
 import type { AppEmit } from '../../core/events.js';
 import type { PromptPlan } from '../../core/prompt-catalog.js';
+import type { AppConfig } from '../../core/config.js';
 import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
 import type { ImageGenQueue } from '../../media/image-gen/index.js';
 import type { HotSearchScheduler } from '../../media/hot-search/scheduler.js';
@@ -116,6 +117,18 @@ export interface OrchestratorDependencies {
    * 它取决于**这个会话**此刻的状态。缺省 = 没有扩展参与。
    */
   extraPrompt?: (chatKey: string) => PromptPlan;
+  /**
+   * **这个会话这一轮运行读的配置**（缺省 = 全局那份 `getConfig()`）。
+   *
+   * 由 `web/app.ts` 递进来，让它能在全局配置上叠一层**只对这一轮生效**的补丁
+   * （`extras.configFor(chatKey)`，见 `extra/types.ts` 的 `ExtraConfigPatch`）。
+   * 与 `toolDefs` / `extraPrompt` 同一条规矩：本层不 import `extra/`（反向依赖），
+   * 只收一个回调；**每次运行现读一次**，所以语义同样是"下一次运行生效"。
+   *
+   * ⚠️ **它必须一路传到提示词拼装里**（`buildSystemPrompt` / `buildUserPrompt` 收 `config`）——
+   * 否则那一层会自己再读一次全局配置，"覆盖了但没生效"就是这么来的。
+   */
+  configFor?: (chatKey: string) => AppConfig;
 }
 
 export interface PromptContext extends TriggerContext, Record<string, unknown> {
@@ -136,4 +149,13 @@ export interface PromptContext extends TriggerContext, Record<string, unknown> {
   memory: MemoryStore;
   session?: SessionRecord;
   stickerEntries?: StickerEntry[];
+  /**
+   * **这一轮运行读的那份配置**（缺省 = 全局那份）。由 `runAgent` 从
+   * `AgentRunnerHost.configFor(chatKey)` 算出来传进来，于是扩展的运行期覆盖能一路盖到
+   * 提示词里（预算、摘要档位、表情档位、成员备注…）。
+   *
+   * ⚠️ 提示词拼装里**不许再自己读 `getConfig()`** —— 分两处读就会"覆盖了但那一处没生效"，
+   * 而症状是"设置改了、只有半截起作用"，没人查得出来。
+   */
+  config?: AppConfig;
 }

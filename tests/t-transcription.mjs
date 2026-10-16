@@ -123,6 +123,8 @@ const commandConfig = structuredClone(DEFAULT_CONFIG);
 commandConfig.allowAllWhenEmpty = true;
 const ingest = createIngest({
   commands,
+  // 本套件不涉及扩展拦消息：给一个永远不接的端口（真实那套见 t-extras.mjs）。
+  extras: { intercept: () => null },
   onebot: { selfId: '999999' },
   store: commandStore,
   sender: { sendTextBatch: async (...args) => { commandReplies.push(args); return {}; } },
@@ -168,6 +170,8 @@ const cardCommands = [];
 const cardReplies = [];
 const cardIngest = createIngest({
   commands,
+  // 本套件不涉及扩展拦消息：给一个永远不接的端口（真实那套见 t-extras.mjs）。
+  extras: { intercept: () => null },
   onebot: {
     selfId: '999999',
     getMsg: async () => ({
@@ -216,6 +220,8 @@ async function replyIngestFor(groupId, { replyId = '789', getMsg, segments }) {
   const forwarded = [];
   const ingest = createIngest({
     commands,
+  // 本套件不涉及扩展拦消息：给一个永远不接的端口（真实那套见 t-extras.mjs）。
+  extras: { intercept: () => null },
     onebot: { selfId: '999999', getMsg },
     store,
     sender: { sendTextBatch: async () => ({}) },
@@ -269,6 +275,8 @@ async function cardIngestFor(groupId, rawSegments) {
   const replies = [];
   const ingest = createIngest({
     commands,
+  // 本套件不涉及扩展拦消息：给一个永远不接的端口（真实那套见 t-extras.mjs）。
+  extras: { intercept: () => null },
     onebot: { selfId: '999999', getMsg: async () => ({ sender: { nickname: '卡片发送者' }, message: rawSegments }) },
     store: new ChatStore(),
     sender: { sendTextBatch: async (...args) => { replies.push(args); return {}; } },
@@ -326,6 +334,8 @@ const replyGate = new Promise((resolve) => { releaseReply = resolve; });
 const orderedForwarded = [];
 const orderedIngest = createIngest({
   commands,
+  // 本套件不涉及扩展拦消息：给一个永远不接的端口（真实那套见 t-extras.mjs）。
+  extras: { intercept: () => null },
   onebot: {
     selfId: '999999',
     getMsg: async () => replyGate

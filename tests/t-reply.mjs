@@ -9,7 +9,7 @@ process.env.QQ_AGENT_DATA_DIR = DIR;
 const { buildPastState, buildUserPrompt, buildSystemPrompt, buildTriggerBlock } = await load('agent/prompting/prompt-builder.js');
 const { evaluateWindowTrigger } = await load('agent/context/response-policy.js');
 const { resolveHistoryPolicy } = await load('agent/context/history-policy.js');
-const { updateConfig, responseConfigForChat } = await load('core/config.js');
+const { updateConfig, responseConfigForChat, digestConfigForChat, getConfig } = await load('core/config.js');
 const { ChatStore } = await load('chat/store.js');
 
 updateConfig({ persona: { botName: '小鲸鱼', selfNickname: '小鲸鱼' }, api: { model: 'stub', baseUrl: 'http://x' } });
@@ -192,6 +192,40 @@ ok('引用防错规则只在系统提示保留一份，用户提示不再重复�
   !/宁可不用引用，也不要拿别的消息的 id 凑/.test(up));
 ok('【过去状态】表头说明已与新规则一致', /最近的消息和带图的消息前有 #消息id/.test(up));
 ok('旧表头那句（只有带图才有 id）已不复存在', !/带图的消息前有 #消息id，看图/.test(up));
+
+// ── 3c. 运行期配置覆盖：传进来的那份配置真的被用到了 ────────────────────────
+//
+// 扩展可以给"这一轮运行"叠一层配置补丁（`ExtraConfigPatch`），而它的落点就是这两个函数的
+// `config` 参数。**只断言"参数传进去了"是不够的** —— 真正的坏法是某个帮手自己又读了一次
+// 全局配置，于是"覆盖了但那一半没生效"（预算、档位、备注分别住在不同的帮手手里）。
+// 所以这里挑三个住在不同帮手里的配置项，逐个断言它们真的跟着 `config` 走。
+{
+  const base = getConfig();
+  const patch = (part) => ({ ...base, ...part });
+
+  // ① 系统提示：`sticker.encourage` 住在 buildSystemPrompt 自己手里。
+  const quiet = buildSystemPrompt({ config: patch({ sticker: { ...base.sticker, encourage: 0 } }) });
+  const loud = buildSystemPrompt({ config: patch({ sticker: { ...base.sticker, encourage: 3 } }) });
+  ok('system prompt 认传进来的配置（表情档位变了，策略文案跟着变）', quiet !== loud);
+  ok('不传 config 与传全局那份逐字相同（缺省那条路没被改坏）',
+    buildSystemPrompt() === buildSystemPrompt({ config: base }));
+
+  // ② 用户提示：统一字符预算住在 buildUserPrompt 手里（它会一路传到预算裁剪那一步）。
+  const tight = buildUserPrompt({
+    chatKey: KEY, kind: 'group', chatId: '623820457', chatName: '13号',
+    triggerEntries: [store.recent(KEY, { limit: 1 })[0]], store, memory: { formatForPrompt: () => '' },
+    selfNickname: '小鲸鱼', historyLimit: 10, recentCount: 5, lastMessageAt: Date.now(),
+    config: patch({ store: { ...base.store, promptContextMaxChars: 200 } })
+  });
+  ok('user prompt 认传进来的配置（预算压到 200 之后明显短了一截）',
+    tight.length < up.length, `${tight.length} vs ${up.length}`);
+
+  // ③ 摘要档位住在 digestConfigForChat 手里（buildUserPrompt 把它当参数递下去）。
+  const dgc = (config) => digestConfigForChat(KEY, config);
+  ok('digestConfigForChat 认传进来的配置',
+    dgc(patch({ digest: { ...base.digest, maxChars: 0 } })).maxChars === 0
+    && dgc(patch({ digest: { ...base.digest, maxChars: 1234 } })).maxChars === 1234);
+}
 
 // ── 3b. "是不是在叫我"：两个名字都要给，结论由模型下 ──
 //

@@ -1,4 +1,5 @@
 import { getConfig, responseConfigForChat } from '../../core/config.js';
+import type { AppConfig } from '../../core/config.js';
 import { EVENTS } from '../../core/events.js';
 import { sleep } from '../../core/util.js';
 import { evaluateWindowTrigger } from '../context/response-policy.js';
@@ -39,6 +40,8 @@ export interface WakeSchedulerDependencies {
   toolDefs: (chatKey: string) => readonly ToolDefinition[];
   /** 扩展的提示词计划（可选）。同样每次运行现读 —— 它取决于这个会话此刻的状态。 */
   extraPrompt?: (chatKey: string) => PromptPlan;
+  /** **这个会话这一轮运行读的配置**（可选，缺省 = 全局 `getConfig()`）。见 `OrchestratorDependencies`。 */
+  configFor?: (chatKey: string) => AppConfig;
   emit: AppEmit;
   getChatName(groupId: string | number): Promise<string>;
   maybeConsolidateMemory(chatKey: string): void;
@@ -101,6 +104,16 @@ export class WakeScheduler {
   /** 扩展的提示词计划（缺省 = 没有扩展参与）。每次运行开头现读一次。 */
   promptPlanFor(chatKey: string): PromptPlan | null {
     return this.deps.extraPrompt ? this.deps.extraPrompt(chatKey) : null;
+  }
+
+  /**
+   * 这个会话**这一轮运行**读的配置（缺省 = 全局那份）。
+   *
+   * ⚠️ 它只由 `agent-runner` 在开头调**一次**、结果一路传下去。运行中途再调一次会拿到
+   * 另一个对象，而"同一轮里配置变了"是没人能解释的行为。
+   */
+  configFor(chatKey: string): AppConfig {
+    return this.deps.configFor ? this.deps.configFor(chatKey) : getConfig();
   }
 
   get aborted(): boolean {

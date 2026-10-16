@@ -34,11 +34,13 @@
 // 以及我们持有的那个引用。**所以没有 `dispose()` 的扩展，空闲卸载等于什么都没做。**
 import { SlidingWindowBudget } from '../media/call-budget.js';
 import { SYSTEM_FRAMEWORK_SECTIONS, SYSTEM_SECTION_IDS } from '../core/prompt-catalog.js';
+import { mergeConfigPatch } from '../core/config.js';
 import type { AppConfig } from '../core/config.js';
 import type { PromptPlan } from '../core/prompt-catalog.js';
 import type { ToolArguments, ToolContext, ToolDefinition, ToolResult } from '../agent/shared/types.js';
 import type {
-  ExtraCommand, ExtraCommandInput, ExtraEntry, ExtraMode, ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd, ExtraSpec
+  ExtraCommand, ExtraCommandInput, ExtraConfigPatch, ExtraEntry, ExtraInterceptResult, ExtraMode,
+  ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd, ExtraSpec
 } from './types.js';
 
 /**
@@ -276,6 +278,26 @@ export function checkRuntimeShape(entry: ExtraEntry, rt: ExtraRuntime): string |
   if (allowed !== undefined && !Array.isArray(allowed)) {
     return 'toolsFor() 必须返回一个工具名数组（或者干脆不写这个方法，表示"这个会话不限"）';
   }
+
+  // `configPatch` 同样**空着会话调一次**，理由与上面两条逐字相同。
+  // ⚠️ 这里**只查"不抛 + 是对象或空"**：补丁里写了什么由 `mergeConfigPatch` 走一遍归一化兜住
+  // （它是全仓库唯一一处把配置掐回合法形状的地方），装载期不必再验一遍字段。
+  let patch;
+  try {
+    patch = rt.configPatch?.('');
+  } catch (error) {
+    return `configPatch() 抛错：${errorMessage(error)}`;
+  }
+  if (patch !== undefined && patch !== null && !isRecord(patch)) {
+    return 'configPatch() 必须返回一个配置补丁对象（或者干脆不写这个方法）';
+  }
+
+  // `intercept` 是**每一条入站消息**都会走的钩子，所以这里只查它是不是函数 ——
+  // **刻意不空跑一次**：那是按消息走的判断，拿一个假消息去调它既可能误触发副作用，
+  // 又证明不了什么（真正的兜底是 `intercept()` 里的 try/catch，见那边的说明）。
+  if (rt.intercept !== undefined && typeof rt.intercept !== 'function') {
+    return 'intercept 必须是函数（或者干脆不写这个方法）';
+  }
   return null;
 }
 
@@ -423,6 +445,50 @@ export class ExtrasRuntime {
       }
     }
     return { mode: 'attach', append, override: merged };
+  }
+
+  /**
+   * **这条消息有没有扩展要自己接**（见 `ExtraRuntime.intercept`）。返回 `null` = 谁都不要，
+   * 照常落未读、走模型。
+   *
+   * 判据与工具表同一套（`#activeEntries`）：接管会话里只有接管者会被问到，附加模式问的是
+   * "这个会话里已装载的那些"。顺序即优先级 —— 取**第一个**说"我要"的，后面的不再问。
+   *
+   * ⚠️ **它跑在每一条入站消息上**，所以这里的容错是必须的：钩子抛错只记一行日志、当它没接，
+   * 绝不让异常穿进入站回调（那会把 OneBot 的 WS 消息处理打成未处理异常）。
+   */
+  intercept(chatKey: string, input: ExtraCommandInput): ExtraInterceptResult | null {
+    for (const entry of this.#activeEntries(chatKey)) {
+      const hook = this.#loaded.get(entry.id)?.rt.intercept;
+      if (typeof hook !== 'function') continue;
+      try {
+        const result = hook(input);
+        if (result) return result;
+      } catch (error) {
+        this.#deps.log(`[extras] ${entry.id} 的 intercept 抛错（这条消息照常走模型）：${errorMessage(error)}`);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * **这个会话这一轮运行读到的配置**：全局那份，叠上本会话里可用的各扩展的补丁。
+   *
+   * ⚠️ **不改全局、不落盘**（`mergeConfigPatch`）：改全局只有 `updateConfig` 一条路。
+   * 于是"接管 A 群的扩展"不会顺手改掉 B 群的行为，并行的两个会话也各看各的。
+   *
+   * 作用域就是**一次运行**：`agent-runner` 开头调一次、把结果交下去，那一轮读到的每一处
+   * （模型、轮数、温度、各能力开关、提示词里的预算与档位）都是叠过之后的。**入站白名单、
+   * 窗口容量、发送限频、面板显示读到的仍是全局那份** —— 那些不在"一次运行"的范围内。
+   */
+  configFor(chatKey: string): AppConfig {
+    let merged = this.#deps.getConfig();
+    for (const entry of this.#activeEntries(chatKey)) {
+      const patch = readConfigPatch(this.#loaded.get(entry.id)?.rt, this.#deps, chatKey);
+      if (!patch) continue;
+      merged = mergeConfigPatch(merged, patch);
+    }
+    return merged;
   }
 
   /**
@@ -618,6 +684,12 @@ export class ExtrasRuntime {
     const slot: LoadedSlot = { rt, inFlight: 0, timer: null, attach };
     this.#loaded.set(entry.id, slot);
     this.#deps.log(`[extras] 已加载 ${entry.id}${attach ? '' : '（接管用）'}`);
+    // 它会在每次运行时悄悄改掉那一轮读到的配置 —— 那件事**不该只在代码里看得出来**，
+    // 所以在装载时说一句（只在装载时，不刷屏）。判断"这个群为什么行为和设置里不一样"时，
+    // 这一行是日志里唯一的线索。
+    if (typeof rt.configPatch === 'function') {
+      this.#deps.log(`[extras] 注意：${entry.id} 会覆盖运行期配置（每次模型运行前叠一层，不落盘）`);
+    }
     if (attach) this.#armIdleTimer(entry.id, slot);
     return { ok: true, note: '' };
   }
@@ -868,6 +940,23 @@ function readContribution(rt: ExtraRuntime | undefined, deps: ExtrasDeps, chatKe
     return rt.prompt(chatKey) ?? null;
   } catch (error) {
     deps.log(`[extras] prompt() 抛错，本轮忽略它的提示词贡献：${errorMessage(error)}`);
+    return null;
+  }
+}
+
+/**
+ * 读一次扩展的配置补丁，任何异常都吞掉。
+ *
+ * 与 `readContribution` 同一条理由：它只是"这一轮多几条不同的设置"，一个写坏的补丁不该
+ * 把整轮运行掀翻。返回 `null` = 这一轮不叠（与"叠一个空对象"等价，但省一次深合并）。
+ */
+function readConfigPatch(rt: ExtraRuntime | undefined, deps: ExtrasDeps, chatKey: string): ExtraConfigPatch | null {
+  if (!rt || typeof rt.configPatch !== 'function') return null;
+  try {
+    const patch = rt.configPatch(chatKey);
+    return patch && typeof patch === 'object' && !Array.isArray(patch) ? patch : null;
+  } catch (error) {
+    deps.log(`[extras] configPatch() 抛错，本轮忽略它的配置覆盖：${errorMessage(error)}`);
     return null;
   }
 }

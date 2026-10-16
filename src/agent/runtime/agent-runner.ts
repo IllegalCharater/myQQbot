@@ -1,4 +1,5 @@
 import { getConfig } from '../../core/config.js';
+import type { AppConfig } from '../../core/config.js';
 import { EVENTS } from '../../core/events.js';
 import type { AppEmit } from '../../core/events.js';
 import { PROMPT_CATALOG } from '../../core/prompt-catalog.js';
@@ -59,6 +60,13 @@ export interface AgentRunnerHost {
   toolDefsFor(chatKey: string): ToolDefinition[];
   /** 这个会话的扩展提示词计划（可选，缺省 = 没有扩展参与）。 */
   promptPlanFor?(chatKey: string): PromptPlan | null;
+  /**
+   * **这个会话这一轮运行读的配置**（可选，缺省 = 全局 `getConfig()`）。
+   *
+   * 由 `WakeScheduler` 提供，最终来自 `web/app.ts` 的 `extras.configFor(chatKey)` ——
+   * 扩展的运行期配置覆盖就是从这里进来的（见 `extra/types.ts` 的 `ExtraConfigPatch`）。
+   */
+  configFor?(chatKey: string): AppConfig;
   aborted: boolean;
   emit: AppEmit;
   getChatName(groupId: string | number): Promise<string>;
@@ -79,7 +87,10 @@ function assistantText(content: unknown): string {
 }
 
 export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { kind, chatId, chatKey, triggerEntries, proactive, seq, historyLimit = null, historyBeforeId = null, responseInfo = null, historyInfo = null, foldedAway = 0 }: AgentRunOptions): Promise<void> {
-    const cfg = getConfig();
+    // **这一轮读的那份配置**：宿主（`WakeScheduler`）会先问一遍扩展要不要在全局那份上叠一层
+    // （`configFor` 缺省就是 `getConfig()`）。**只在这里算一次**、一路传下去 —— 中途再算一次
+    // 会拿到另一个对象，而"同一轮里配置变了"是没人能解释的行为。
+    const cfg = host.configFor ? host.configFor(chatKey) : getConfig();
     const chatName = kind === 'group' ? await host.getChatName(chatId) : '';
     const selfNickname = kind === 'group' ? (cfg.persona.selfNickname || host.onebot.selfNickname || cfg.persona.botName) : cfg.persona.botName;
 
@@ -106,6 +117,9 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
 
     // 组装提示词（无 LLM 历史）
     const systemPrompt = buildSystemPrompt({
+      // ⚠️ 把这份 `cfg` 交给它，而不是让它自己再读一次全局配置 —— 分两处读就会出现
+      // "覆盖了但那一处没生效"（预算、表情档位、能力开关都在它手里）。
+      config: cfg,
       persona: cfg.persona,
       capabilities: { vision: visionEnabled, search: searchEnabled },
       // 收藏夹站点名单进 system prompt：模型要靠它才知道 `web_search.site` 能填什么。
@@ -118,6 +132,8 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
     });
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,
+      // 同上：摘要档位、预算、成员备注都在拼装里读，必须看到同一份 `cfg`。
+      config: cfg,
       triggerEntries,
       store: host.store,
       memory: host.memory,

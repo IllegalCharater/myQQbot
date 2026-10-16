@@ -30,7 +30,15 @@ function asRecord(value: unknown): Record<string, unknown> {
 // ── 系统提示 ─────────────────────────────────────────────────────────────
 
 /** 组装系统提示。 */
-export function buildSystemPrompt({ persona, capabilities = {}, bookmarkSites = [], extraPrompt = null }: {
+export function buildSystemPrompt({ config, persona, capabilities = {}, bookmarkSites = [], extraPrompt = null }: {
+  /**
+   * **这一轮运行读的那份配置**。由 `runAgent` 从 `host.configFor(chatKey)` 传进来 ——
+   * 它可能已经叠过扩展的运行期覆盖（见 `ExtraConfigPatch`）。
+   *
+   * ⚠️ **本函数不许自己再读一次 `getConfig()`**：分两处读就会出现"覆盖了但这一处没生效"
+   * （表情档位、能力开关都在本函数手里）。缺省 = 全局那份，既有的无参调用逐字不变。
+   */
+  config?: AppConfig;
   persona?: AppConfig['persona'];
   capabilities?: { vision?: boolean; search?: boolean };
   /**
@@ -47,8 +55,8 @@ export function buildSystemPrompt({ persona, capabilities = {}, bookmarkSites = 
    */
   extraPrompt?: PromptPlan | null;
 } = {}): string {
-  const cfg = persona ?? getConfig().persona;
-  const appCfg = getConfig();
+  const appCfg = config ?? getConfig();
+  const cfg = persona ?? appCfg.persona;
   const stickerLevel = Math.min(3, Math.max(0, Number(appCfg.sticker?.encourage) || 0));
   const vision = capabilities.vision ?? appCfg.api?.vision !== false;
   const search = capabilities.search ?? appCfg.webSearch?.enabled !== false;
@@ -142,7 +150,10 @@ export function formatReplyPrefix(reply: unknown): string {
 
 // withId：是否带 "#消息id" 前缀。id 只在需要引用/看图的场景展示（触发批、带图消息），
 // 纯文本历史行不带，避免整屏数字噪音。
-function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {}): string {
+//
+// `config`：**这一轮运行读的那份配置**（调用方一路传下来）。缺省 = 全局那份 ——
+// 压缩巡检那边就是这么调的（它不在一次运行里）。
+function formatEntry(m: ChatMessage, { withId = true, config = null }: { withId?: boolean; config?: AppConfig | null } = {}): string {
   // 压缩摘要条目：它不是某个人说的话，而是一段系统生成的纪要。
   // 走普通分支会渲染成「[HH:MM] 聊天记录摘要：…」，读起来像群里多了个昵称叫
   // "聊天记录摘要"的人。摘要文本自带【历史摘要 时间范围 · 共 N 条】表头，
@@ -197,7 +208,7 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
     const label = asRecord(m.trpgNote).kind === 'suggest' ? '【行动建议】' : '【跑团笔记】';
     return `[${formatShortTime(m.ts)}] ${label}${String(m.text || '')}`;
   }
-  const notes = getConfig().memberNotes || {};
+  const notes = (config ?? getConfig()).memberNotes || {};
   const senderId = String(m.senderId || '');
   const who = m.self ? '我' : (notes[senderId] || m.senderName || senderId || '未知');
   // 引用预览由 formatReplyPrefix 拼（唯一拼法，带被引用消息的 #id）。
@@ -223,8 +234,9 @@ const RECENT_ID_LINES = 12;
  * 组装"过去状态"文本：消息 JSON 的最近一段（带时间与已读语义）。
  * 读取条数由调度层已经解析好的 `historyLimit` 决定，本模块不参与档位判定。
  */
-export function buildPastState(store: ChatStore, chatKey: string, { excludeIds = [], limit = null, beforeId = null }: { excludeIds?: number[]; limit?: number | null; beforeId?: number | null } = {}): PastStateResult {
-  const cfg = getConfig().store;
+export function buildPastState(store: ChatStore, chatKey: string, { excludeIds = [], limit = null, beforeId = null, config = null }: { excludeIds?: number[]; limit?: number | null; beforeId?: number | null; config?: AppConfig | null } = {}): PastStateResult {
+  const usable = config ?? getConfig();
+  const cfg = usable.store;
   const maxLimit = limit === null ? Math.max(0, Number(cfg.historyCount) || 0) : Math.max(0, Number(limit) || 0);
   const exclude = new Set(excludeIds);
   if (maxLimit <= 0) return { text: '', count: 0, messages: [] };
@@ -236,7 +248,7 @@ export function buildPastState(store: ChatStore, chatKey: string, { excludeIds =
   // 入口拦截只管"新消息"，这里管"老库存"。机器人自己的发言（self）不过滤。
   const [pKind, pId] = String(chatKey || '').split(':');
   if (pKind === 'group' && pId) {
-    const blocklist = getConfig().blocklist as Record<string, unknown>;
+    const blocklist = usable.blocklist as Record<string, unknown>;
     const values = Array.isArray(blocklist[pId]) ? blocklist[pId] : [];
     const blocked = new Set(values.map(String));
     if (blocked.size) messages = messages.filter((m) => m.self || !blocked.has(String(m.senderId)));
@@ -244,7 +256,7 @@ export function buildPastState(store: ChatStore, chatKey: string, { excludeIds =
   messages = messages.slice(-maxLimit);
   // 带媒体的消息一律给 id（看图/收藏表情要用它），最近 RECENT_ID_LINES 行也一律给。
   const idFrom = Math.max(0, messages.length - RECENT_ID_LINES);
-  const lines = messages.map((m, i) => formatEntry(m, { withId: i >= idFrom || (m.media || []).length > 0 }));
+  const lines = messages.map((m, i) => formatEntry(m, { withId: i >= idFrom || (m.media || []).length > 0, config: usable }));
   // 一并把选中的消息返回：调用方要用它判定"记忆该带哪些群友"，
   // 避免模型看到历史里根本没出现的群友印象（那样显得莫名其妙）。
   return { text: lines.join('\n'), count: lines.length, messages };
@@ -429,7 +441,7 @@ export function collectInjectedDigests(store: ChatStore, chatKey: string, { conf
   };
 }
 
-function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
+function triggerLabels(entry: ChatMessage, ctx: TriggerContext, config: AppConfig | null = null): string[] {
   // 异步结果是机器输出，不是"谁在提问题"：整条短路。
   // 不短路的话下面几条正则必然误标 —— 转写正文里出现"吗/呢"或以"？"结尾是常事（→"提问"），
   // 提到 bot 的名字也是常事（→"提到我"），而这两条都会让模型以为有人在向它提问。
@@ -443,8 +455,9 @@ function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
   const text = String(entry?.text ?? '');
   const lower = text.toLowerCase();
   const nick = String(ctx.selfNickname || '').toLowerCase();
-  const botName = String(getConfig().persona.botName || '').toLowerCase();
-  const notes = getConfig().memberNotes || {};
+  const usable = config ?? getConfig();
+  const botName = String(usable.persona.botName || '').toLowerCase();
+  const notes = usable.memberNotes || {};
   const noteName = notes[String(entry?.senderId || '')];
   const noteLower = String(noteName || '').toLowerCase();
   if (text.startsWith('@') || text.includes(`@${ctx.selfNickname}`) || (nick && text.includes(`@${nick}`))) labels.push('@我');
@@ -469,12 +482,12 @@ function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
 }
 
 /** 私聊/群聊时私聊始终高触发。 */
-export function buildTriggerBlock(triggerEntries: ChatMessage[], ctx: TriggerContext): string {
+export function buildTriggerBlock(triggerEntries: ChatMessage[], ctx: TriggerContext, config: AppConfig | null = null): string {
   const lines: string[] = [];
   for (const m of triggerEntries) {
-    const labels = triggerLabels(m, ctx);
+    const labels = triggerLabels(m, ctx, config);
     const labelStr = labels.length ? `（${labels.join('/')}）` : '';
-    lines.push(`${formatEntry(m)}${labelStr}`);
+    lines.push(`${formatEntry(m, { config })}${labelStr}`);
   }
   return lines.join('\n');
 }
@@ -517,7 +530,9 @@ function joinPromptWithinBudget(
  * ctx: { chatKey, kind, chatId, chatName, triggerEntries, trigger, selfLastMessageAt, selfNickname }
  */
 export function buildUserPrompt(ctx: PromptContext): string {
-  const cfg = getConfig();
+  // **这一轮读的那份配置**（可能已叠过扩展的运行期覆盖）。本函数与它调下去的那几个帮手
+  // 都只认这一份 —— 谁再自己 `getConfig()` 一次，那一处就会"覆盖了却没生效"。
+  const cfg = ctx.config ?? getConfig();
   const now = Date.now();
   // 当前窗口与独立历史按边界彻底分离：triggerEntries 只进【本次唤醒】，历史只能
   // 从窗口最早消息之前读取。excludeIds 再做一层防御性排重。
@@ -529,11 +544,11 @@ export function buildUserPrompt(ctx: PromptContext): string {
     : Math.max(0, Number(ctx.historyLimit) || 0);
   // 先用原始窗口决定本轮是否需要历史摘要；摘要被选中后，再从
   // 【过去状态】排除同一本地 id，避免同一段正文在两个区块里出现两次。
-  let past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: historyLimit, beforeId: historyBeforeId });
+  let past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: historyLimit, beforeId: historyBeforeId, config: cfg });
 
   // 历史印象（压缩摘要）：与上面的原始历史是**两条独立通道**，互不挤占 ——
   // 原始历史读多少条由 historyCount 决定，摘要带多少由 digest.maxChars 决定。
-  const dgc = digestConfigForChat(ctx.chatKey);
+  const dgc = digestConfigForChat(ctx.chatKey, cfg);
   // 不勾「每轮都注入」时维持原来的时机：只有真的要读历史的那一轮才带摘要。
   // historyCount=0 时不应被一个几千字的摘要抵消省 token 的目的，除非显式每轮注入。
   const wantDigest = dgc.maxChars > 0 && (dgc.injectEveryRound || past.count > 0);
@@ -542,7 +557,8 @@ export function buildUserPrompt(ctx: PromptContext): string {
     past = buildPastState(ctx.store, ctx.chatKey, {
       excludeIds: [...excludeIds, ...dig.injected.map((x) => x.entry.id)],
       limit: historyLimit,
-      beforeId: historyBeforeId
+      beforeId: historyBeforeId,
+      config: cfg
     });
   }
   // 写回最终真正注入的历史条数，供 get_recent_messages 的 offset 补偿。
@@ -634,7 +650,7 @@ export function buildUserPrompt(ctx: PromptContext): string {
   parts.push(PROMPT_CATALOG.user.currentTime(formatFullTime(now)));
 
   // 本次唤醒
-  const triggerBlock = buildTriggerBlock(ctx.triggerEntries, ctx);
+  const triggerBlock = buildTriggerBlock(ctx.triggerEntries, ctx, cfg);
   // 动态上下文窗口裁剪过时要说清楚：否则"以下是你还没看过的最新消息"就成了假话，
   // 模型可能意识不到自己漏看了一波消息的开头。这些条并没有丢，只是降级进了【过去状态】。
   const folded = Math.max(0, Number(ctx.foldedAway) || 0);

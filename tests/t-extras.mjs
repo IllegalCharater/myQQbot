@@ -97,7 +97,7 @@ const cmd = (name) => ({ names: [name] });
  */
 function makeFakeEntry(id, names, {
   defaultEnabled = true, mode = 'attach', commands = [], body = null, dispose = null, prompt = null,
-  overrideTools = null, onRunEnd = null, toolsFor = null
+  overrideTools = null, onRunEnd = null, toolsFor = null, configPatch = null, intercept = null
 } = {}) {
   const counters = { load: 0, dispose: 0, run: 0, command: 0, runEnd: 0 };
   /** 宿主递给 `load()` 的口子 —— 扩展要拿它做"只有宿主才知道怎么做"的事。 */
@@ -130,6 +130,8 @@ function makeFakeEntry(id, names, {
       if (commands.length) rt.commandHandlers = commandHandlers;
       if (prompt) rt.prompt = () => prompt;
       if (toolsFor) rt.toolsFor = toolsFor;
+      if (configPatch) rt.configPatch = () => configPatch;
+      if (intercept) rt.intercept = intercept;
       if (onRunEnd) rt.onRunEnd = (session) => { counters.runEnd += 1; return onRunEnd(session); };
       rt.dispose = dispose === null ? () => { counters.dispose += 1; } : dispose;
       return rt;
@@ -988,6 +990,213 @@ await withFakeTimers(async (timers) => {
   ok('那个口子真的是组装根递进来的那一个（能一路调回去）',
     sent.length === 1 && sent[0].chatKey === 'group:n2' && sent[0].text === '知道了',
     JSON.stringify(sent));
+}
+
+// ── 17. 运行期配置覆盖：只叠在**这一轮运行**上 ─────────────────────────────
+//
+// 这一段的判据全部是"不报错地坏掉"那类：补丁没生效 = 模型按旧配置跑；补丁落到了全局 =
+// **别的会话**跟着变（接管是会话级的，而 config 不是）。所以逐条钉，尤其是"全局没被改"。
+//
+// ⚠️ 这里**用真配置**（`getConfig()`）建运行时，而不是套件别处那个 `makeRuntime` ——
+// 那个喂的是只有 `extras` 一栏的极简假配置，而本段要断言的正是"全局那份一个字没动"。
+{
+  const { getConfig } = await load('core/config.js');
+  const withRealConfig = (registry) => createExtrasRuntime(registry, {
+    getConfig, builtinToolNames: [], log: () => {}
+  });
+  // 基线：用 `extras.idleUnloadMs` 当观测点 —— 它在全局配置里、且有归一化钳制（上限 24h）。
+  const baseIdle = getConfig().extras.idleUnloadMs;
+  const baseRounds = getConfig().api.maxRounds;
+
+  const patcher = makeFakeEntry('patcher', ['t'], {
+    configPatch: { api: { maxRounds: 42 }, extras: { idleUnloadMs: 999999999 } }
+  });
+  const runtime = withRealConfig([patcher.entry]);
+
+  ok('未装载时 configFor 就是全局那份', runtime.configFor(G).api.maxRounds === baseRounds);
+  await runtime.load('patcher');
+  const patched = runtime.configFor(G);
+  ok('装载后 configFor 叠上了补丁', patched.api.maxRounds === 42);
+  ok('补丁照样走归一化（超上限的值被掐回 24h）',
+    patched.extras.idleUnloadMs === 24 * 60 * 60 * 1000, String(patched.extras.idleUnloadMs));
+  ok('**全局那份一个字没动**（不落盘、不外溢到别的地方）',
+    getConfig().api.maxRounds === baseRounds && getConfig().extras.idleUnloadMs === baseIdle,
+    JSON.stringify({ maxRounds: getConfig().api.maxRounds, idle: getConfig().extras.idleUnloadMs }));
+  ok('同一份补丁对别的会话也生效（它是**装载**出来的，不是按会话绑的）',
+    runtime.configFor('group:other').api.maxRounds === 42);
+
+  await runtime.unload('patcher');
+  ok('卸载即撤销', runtime.configFor(G).api.maxRounds === baseRounds);
+  await runtime.stop();
+}
+
+// 接管模式下**只有接管者的补丁**（与工具表 / 命令表 / 提示词同一套判据）。
+{
+  const { getConfig } = await load('core/config.js');
+  const withRealConfig = (registry) => createExtrasRuntime(registry, {
+    getConfig, builtinToolNames: [], log: () => {}
+  });
+  const attach = makeFakeEntry('cfg_at', ['at_tool'], { configPatch: { api: { maxRounds: 11 } } });
+  const over = makeFakeEntry('cfg_ov', ['ov_tool'], {
+    mode: 'override', overrideTools: { sendTool: 'ov_tool' }, configPatch: { api: { maxRounds: 99 } }
+  });
+  const runtime = withRealConfig([attach.entry, over.entry]);
+  const A = 'group:700';
+  await runtime.load('cfg_at');
+  ok('附加扩展的补丁生效', runtime.configFor(A).api.maxRounds === 11);
+  await runtime.load('cfg_ov', 'test', A);
+  ok('接管之后只剩接管者的补丁（附加那个让位）', runtime.configFor(A).api.maxRounds === 99,
+    String(runtime.configFor(A).api.maxRounds));
+  ok('**别的会话**不受接管影响（那边仍是附加扩展那份）',
+    runtime.configFor('group:701').api.maxRounds === 11,
+    String(runtime.configFor('group:701').api.maxRounds));
+  await runtime.stop();
+}
+
+// 装载期对账：写坏的 `configPatch` 拒绝装载（否则症状是"这个扩展装不上"，与配置毫无关系）。
+{
+  {
+    const runtime = makeRuntime([{
+      id: 'badpatch2', title: 'badpatch2', displayDesc: 'x', defaultEnabled: true,
+      tools: [], async load() { return { handlers: {}, configPatch: () => '不是对象' }; }
+    }], DEFAULT_EXTRAS);
+    const result = await runtime.load('badpatch2');
+    ok('configPatch 返回非对象 → 拒绝装载', result.ok === false && String(result.note).includes('补丁对象'), JSON.stringify(result));
+  }
+  {
+    const runtime = makeRuntime([{
+      id: 'throwpatch', title: 'throwpatch', displayDesc: 'x', defaultEnabled: true,
+      tools: [], async load() { return { handlers: {}, configPatch: () => { throw new Error('炸'); } }; }
+    }], DEFAULT_EXTRAS);
+    const result = await runtime.load('throwpatch');
+    ok('configPatch 抛错 → 拒绝装载（空会话那次调用就炸了）',
+      result.ok === false && String(result.note).includes('configPatch() 抛错'), JSON.stringify(result));
+  }
+  {
+    const runtime = makeRuntime([{
+      id: 'badintercept', title: 'badintercept', displayDesc: 'x', defaultEnabled: true,
+      tools: [], async load() { return { handlers: {}, intercept: '不是函数' }; }
+    }], DEFAULT_EXTRAS);
+    const result = await runtime.load('badintercept');
+    ok('intercept 不是函数 → 拒绝装载', result.ok === false && String(result.note).includes('intercept 必须是函数'), JSON.stringify(result));
+  }
+}
+
+// ── 18. 拦消息：纯工具能力越过模型回复 ──────────────────────────────────────
+const inbound = (text = '3d6') => ({
+  chatKey: G, senderId: '5', text, media: [], replyToMessageId: 7
+});
+{
+  const first = makeFakeEntry('ic1', ['t'], { intercept: () => ({ reply: '第一个' }) });
+  const second = makeFakeEntry('ic2', ['ic2_tool'], { intercept: () => ({ reply: '第二个' }) });
+  const runtime = makeRuntime([first.entry, second.entry], DEFAULT_EXTRAS);
+  ok('未装载的扩展不会被问到', runtime.intercept(G, inbound()) === null);
+
+  await runtime.load('ic1');
+  ok('第一个说"我要"的赢（顺序即优先级）', runtime.intercept(G, inbound())?.reply === '第一个');
+  await runtime.load('ic2');
+  ok('后装载的抢不走（仍是注册表里靠前的那个）', runtime.intercept(G, inbound())?.reply === '第一个');
+  await runtime.unload('ic1');
+  ok('它卸载之后轮到下一个', runtime.intercept(G, inbound())?.reply === '第二个');
+
+  const silent = makeFakeEntry('ic3', ['t'], { intercept: () => ({}) });
+  const r3 = makeRuntime([silent.entry], DEFAULT_EXTRAS);
+  await r3.load('ic3');
+  const swallowed = r3.intercept(G, inbound());
+  ok('返回空对象 = 拦下但**不吭声**（屏蔽 / 去重要的就是这个）',
+    swallowed !== null && (swallowed.reply ?? null) === null, JSON.stringify(swallowed));
+
+  const boom = makeFakeEntry('ic4', ['t'], { intercept: () => { throw new Error('炸'); } });
+  const r4 = makeRuntime([boom.entry], DEFAULT_EXTRAS);
+  await r4.load('ic4');
+  ok('钩子抛错被吞掉、当它没接（绝不把异常打进接入链）', r4.intercept(G, inbound()) === null);
+
+  const pass = makeFakeEntry('ic5', ['t'], { intercept: () => null });
+  const r5 = makeRuntime([pass.entry], DEFAULT_EXTRAS);
+  await r5.load('ic5');
+  ok('返回 null = 不管这条（照常走模型）', r5.intercept(G, inbound()) === null);
+
+  // 接管会话里**只有接管者**会被问到。
+  const ov = makeFakeEntry('ic_ov', ['ov_tool'], { mode: 'override', overrideTools: { sendTool: 'ov_tool' }, intercept: () => ({ reply: '接管者' }) });
+  const r6 = makeRuntime([first.entry, ov.entry], DEFAULT_EXTRAS);
+  await r6.load('ic1');
+  await r6.load('ic_ov', 'test', 'group:800');
+  ok('接管会话里问的是接管者', r6.intercept('group:800', inbound())?.reply === '接管者');
+  ok('别的会话问的还是附加那个', r6.intercept(G, inbound())?.reply === '第一个');
+}
+
+// ingest 端到端：拦下的消息**不惊动模型**，但照常存档、照常上面板。
+{
+  const { createIngest } = await load('web/onebot/ingest.js');
+  const { createSlashCommands } = await load('web/onebot/slash-commands.js');
+  const { ChatStore } = await load('chat/store.js');
+  const { DEFAULT_CONFIG } = await load('core/config.js');
+
+  const store = new ChatStore();
+  const sent = [];
+  const forwarded = [];
+  const cfgNow = { ...structuredClone(DEFAULT_CONFIG), allowAllWhenEmpty: true };
+  const ingest = createIngest({
+    onebot: { selfId: '9' },
+    store,
+    sender: { sendTextBatch: async (...args) => { sent.push(args); return {}; } },
+    orchestrator: { onIncoming: (...args) => { forwarded.push(args); } },
+    transcription: { enqueue: () => { throw new Error('不该入队'); } },
+    imageGen: { enqueue: () => { throw new Error('不该入队'); } },
+    jmcomic: { enqueue: () => { throw new Error('不该入队'); } },
+    commands: createSlashCommands(),
+    // 只接 `3d6` 这一条；其余一律不管。
+    extras: { intercept: (_chatKey, input) => (input.text.trim() === '3d6' ? { reply: '🎲 12' } : null) },
+    emit: () => {},
+    getConfig: () => cfgNow,
+    log: () => {}
+  });
+  const groupId = 900001;
+  const message = (text, id) => ({
+    post_type: 'message', message_type: 'group', group_id: groupId, user_id: 5,
+    message_id: id, sender: { user_id: 5, nickname: '甲' },
+    message: [{ type: 'text', data: { text } }]
+  });
+
+  await ingest.handle(message('3d6', 1001));
+  ok('拦下的消息**不惊动模型**（`onIncoming` 一次都没被调）', forwarded.length === 0, String(forwarded.length));
+  ok('回执由**宿主**发进群（扩展碰不到 sender）',
+    sent.length === 1 && String(sent[0][1]) === '🎲 12', JSON.stringify(sent));
+  const archived = store.recent(`group:${groupId}`, { limit: 5 });
+  ok('消息照常存档，且落成**已读**历史（与斜杠命令逐字同形）',
+    archived.some((m) => String(m.text) === '3d6' && m.read === true),
+    JSON.stringify(archived.map((m) => [m.text, m.read])));
+
+  // 对照：不被拦的消息照常交给编排器 —— 没有这一条，上面那些"没被调"可能是假绿。
+  await ingest.handle(message('3d6 是什么意思', 1002));
+  ok('对照：不被拦的消息照常交给编排器', forwarded.length === 1, String(forwarded.length));
+  ok('对照：同一条消息仍然**未读**（照常参与响应判定）',
+    store.recent(`group:${groupId}`, { limit: 5 }).find((m) => String(m.text) === '3d6 是什么意思')?.read === false);
+}
+
+// ── 19. 源级断言：两个新挂点在运行链路上真的接上了 ───────────────────────────
+//
+// 这两条守的是**接线**，不是行为：`agent-runner` 忘记用 `host.configFor`（覆盖压根不生效）、
+// 或者用了却没把 `config` 交给提示词拼装（**只生效一半** —— 预算/档位那一半还是全局的）。
+// 两者都零报错，而后者尤其像"覆盖生效了"。
+{
+  const agentSrc = fs.readFileSync(path.join(ROOT, 'src/agent/runtime/agent-runner.ts'), 'utf8');
+  ok('agent-runner 用 `host.configFor`（而不是自己读全局），且只算一次',
+    /const cfg = host\.configFor \? host\.configFor\(chatKey\) : getConfig\(\);/.test(agentSrc));
+  ok('agent-runner 把那份 cfg 交给 system / user prompt 两处（漏一处就是"只生效一半"）',
+    /config: cfg,\s*\n\s*persona: cfg\.persona,/.test(agentSrc) && /config: cfg,/.test(agentSrc));
+
+  const appSrc = fs.readFileSync(path.join(ROOT, 'src/web/app.ts'), 'utf8');
+  ok('组装根把 `extras.configFor` 递给 Orchestrator',
+    /configFor: \(chatKey\) => extras\.configFor\(chatKey\)/.test(appSrc));
+  ok('组装根把 `extras.intercept` 递给 ingest（只给这一个方法）',
+    /extras: \{ intercept: \(chatKey, input\) => extras\.intercept\(chatKey, input\) \}/.test(appSrc));
+
+  const ingestSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/web/onebot/ingest.ts'), 'utf8'));
+  ok('ingest 在**落档之前**问拦截（否则 wakeEligible 只能按"不是命令"来定）',
+    ingestSrc.indexOf('extras.intercept(') < ingestSrc.indexOf('store.appendIncoming('));
+  ok('ingest 把拦下也计入 `wakeEligible: false`（与斜杠命令同一处判据）',
+    /wakeEligible: !slashCommand && !intercepted/.test(ingestSrc));
 }
 
 process.exit(done() ? 0 : 1);

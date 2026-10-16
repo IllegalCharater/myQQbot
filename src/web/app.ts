@@ -196,7 +196,10 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       return extras.isOverridden(chatKey) ? mine : [...BUILTIN_TOOLS, ...mine];
     },
     // 提示词计划同理，每次运行现读：它取决于这个会话此刻的状态。
-    extraPrompt: (chatKey) => extras.promptPlan(chatKey)
+    extraPrompt: (chatKey) => extras.promptPlan(chatKey),
+    // **这一轮运行读的配置**：全局那份叠上本会话里可用扩展的运行期覆盖（不落盘、不外溢）。
+    // `agent-runner` 开头算一次、一路传下去 —— 提示词那边也收这一份，不再自己读全局。
+    configFor: (chatKey) => extras.configFor(chatKey)
   });
   const hotSearch = createHotSearchAdminActions(hotSearchScheduler);
 
@@ -234,6 +237,9 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // 组装根只把 OneBot 的入站回调接到 `ingest.handle()` 上。
   const ingest = createIngest({
     onebot, store, sender, orchestrator, transcription, imageGen, commands, emit, getConfig, log,
+    // 扩展拦普通消息的口子（`ExtraRuntime.intercept`）。与 `/漫画` 只拿 `enqueue` 同形：
+    // 接入层只拿它要用的那一个方法，不把整个扩展运行时塞进去。
+    extras: { intercept: (chatKey, input) => extras.intercept(chatKey, input) },
     // `/漫画 <ID>` 只拿到"入队"这一个口子；`onebot/sender/store` 在这里补齐 ——
     // 漫画队列的运行时依赖本来就是这么绑的（与工具路径同一个 `enqueueJmcomicDownload`）。
     jmcomic: {

@@ -22,6 +22,7 @@ import type { OneBotClient } from '../../qq/onebot.js';
 import type { OneBotEvent } from '../../qq/types.js';
 import type { SendQueue } from '../../qq/sender.js';
 import type { SlashCommandDeps, SlashCommands } from './slash-commands.js';
+import type { ExtrasRuntime } from '../../extra/runtime.js';
 import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
 import type { ImageGenQueue } from '../../media/image-gen/index.js';
 // ⚠️ 别名不是洁癖：`qq/onebot.js` 已经导出一个同名的 `extractMediaFromSegments`（那是
@@ -91,7 +92,7 @@ export interface Ingest {
   handle(event: OneBotEvent): Promise<void>;
 }
 
-export function createIngest({ onebot, store, sender, orchestrator, transcription, imageGen, jmcomic, commands, emit, getConfig, log }: {
+export function createIngest({ onebot, store, sender, orchestrator, transcription, imageGen, jmcomic, commands, extras, emit, getConfig, log }: {
   onebot: OneBotClient;
   store: ChatStore;
   sender: Pick<SendQueue, 'sendTextBatch'>;
@@ -106,6 +107,13 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
    * 命令表里现在还有扩展贡献的命令，而那张表要按装载状态现算（见 `slash-commands.ts`）。
    */
   commands: SlashCommands;
+  /**
+   * 扩展的**入站拦截**端口（见 `ExtraRuntime.intercept`）。**只暴露这一个方法** ——
+   * 与 `/漫画` 只拿 `enqueue` 同形：接入层不该认识整个扩展运行时。
+   *
+   * 装了它才有"扩展拦普通消息"这条路；不装（headless 测试）就是没有拦截，其余照常。
+   */
+  extras: Pick<ExtrasRuntime, 'intercept'>;
   emit: AppEmit;
   getConfig: () => AppConfig;
   log: (...args: unknown[]) => void;
@@ -274,6 +282,8 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
 
     if (!text && !media.length) return;
     const chatKey = `${kind}:${id}`;
+    const replyToMessageId = typeof event.message_id === 'string' || typeof event.message_id === 'number'
+      ? event.message_id : null;
     // 斜杠命令（`/转写`、`/画` …）是**确定性快路径**：不进 LLM、不占一次唤醒。
     // 判定、解析、入队与即时回执**全在 `web/onebot/slash-commands.ts` 一处**（那张表是唯一事实源），
     // 这里只用同一个判据决定两件事：要不要并入引用附件、要不要落成已读历史。
@@ -284,18 +294,39 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       media.push(...repliedMedia);
       addVideoAliases(media);
     }
+    // ── 扩展拦消息：与斜杠命令并列的第二条确定性快路径 ──
+    //
+    // 区别是它**不需要群友敲斜杠**：纯工具能力（骰子、签到）可以直接认下一条普通消息并
+    // 当场回话，**一整轮模型调用都不发生**（没有它的话，这类消息只能靠模型判"这看起来像
+    // 骰子表达式"再调工具 —— 慢、要花钱，还受响应档位约束）。
+    //
+    // 只在**不是**主流程命令时问（命令优先，与命令表"内置在前、扩展在后"是同一条顺序）。
+    // 判据同步、无 I/O 是硬要求（见 `extra/types.ts`：它跑在每一条入站消息上），
+    // 抛错在运行时那层就吞掉并记日志了，不会打到这条入站链上。
+    //
+    // 收的是本条消息**自己的**媒体，**不含**它引用那条的：合并引用附件是给"附件型命令"
+    // （转写/画）准备的，而拦截是纯文本判断 —— 并进来只会让存档多出"只在被拦下时才有"的形状。
+    const intercepted = slashCommand ? null : extras.intercept(chatKey, {
+      chatKey,
+      // 用 `commandText` 而不是 `text`：后者可能已被合并转发展开整份替换过。
+      text: commandText,
+      media,
+      senderId,
+      replyToMessageId
+    });
+
     // 条目要**当面交给**编排器（onIncoming 的第二个参数）：上下文窗口的入窗入口
-    // 只有它一个，少传一次窗口与存档就会静默分叉。确定性命令是唯一例外：它通过
-    // wakeEligible:false 原子落成已读历史，窗口及其兜底同步都会明确排除它。
+    // 只有它一个，少传一次窗口与存档就会静默分叉。两条确定性快路径是仅有的例外：它们通过
+    // wakeEligible:false 原子落成已读历史，窗口及其兜底同步都会明确排除它们。
     const entry = store.appendIncoming(chatKey, {
-      mid: typeof event.message_id === 'string' || typeof event.message_id === 'number' ? event.message_id : null,
+      mid: replyToMessageId,
       ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
       senderId,
       senderName,
       text: text || '[图片]',
       reply,
       media,
-      wakeEligible: !slashCommand
+      wakeEligible: !slashCommand && !intercepted
     });
     emit(EVENTS.chatUpdate, chatKey);
 
@@ -310,11 +341,22 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
           media,
           // `/漫画` 的去重键是"请求者 + 漫画 ID"，缺了它俩人就共用一个额度。
           senderId,
-          replyToMessageId: typeof event.message_id === 'string' || typeof event.message_id === 'number'
-            ? event.message_id : null
+          replyToMessageId
         },
         { transcription, imageGen, jmcomic, sender, log }
       );
+      return;
+    }
+
+    // 扩展接下了这条：**照常存档、照常上面板**（就在上面那两行），但落成**已读**历史 ——
+    // 模型以后在【过去状态】里读得到，这一轮不惊动它。回话由**宿主**发（扩展碰不到 sender），
+    // 发不出去只记日志：这条消息本身已经落档了，抛出去会污染入站回调。
+    if (intercepted) {
+      const receipt = intercepted.reply == null ? '' : String(intercepted.reply);
+      if (receipt) {
+        await sender.sendTextBatch(chatKey, receipt, { replyToMessageId })
+          .catch((error) => log(`[ingest] 扩展拦消息的回执发送失败：${errorMessage(error)}`));
+      }
       return;
     }
 
