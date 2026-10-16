@@ -16,6 +16,7 @@ import type { PromptPlan, SystemSectionId } from '../../core/prompt-catalog.js';
 import { formatFullTime, formatShortTime } from '../../core/util.js';
 import { buildStickerContext, buildStickerStrategyHint } from '../../stickers/stickers.js';
 import type { AppConfig } from '../../core/config.js';
+import { isAsyncResult } from '../../chat/store.js';
 import type { ChatStore } from '../../chat/store.js';
 import type { ChatMessage } from '../../chat/types.js';
 import type { DigestSelection, PastStateResult, PromptContext, SelectedDigest, TriggerContext } from '../shared/types.js';
@@ -186,6 +187,14 @@ function formatEntry(m: ChatMessage, { withId = true }: { withId?: boolean } = {
   if (m.kind === 'image-result') {
     const status = asRecord(m.imageResult).status;
     const label = status === 'failed' ? '【图片生成失败】' : (status === 'unsent' ? '【图片发送失败】' : '【图片生成结果】');
+    return `[${formatShortTime(m.ts)}] ${label}${String(m.text || '')}`;
+  }
+  // 跑团扩展的两种机器条目（同一种 kind，标签按 `trpgNote.kind` 分）——
+  // 与出图那三个标签分开是同一个理由：**模型看到不同标签要做的事不同**。
+  // 【跑团笔记】= 群友的认知变了（在叙事里自然承接）；【行动建议】= 你上一轮没说话，
+  // 这些方向得用你自己的话讲出来。
+  if (m.kind === 'trpg-note') {
+    const label = asRecord(m.trpgNote).kind === 'suggest' ? '【行动建议】' : '【跑团笔记】';
     return `[${formatShortTime(m.ts)}] ${label}${String(m.text || '')}`;
   }
   const notes = getConfig().memberNotes || {};
@@ -421,11 +430,15 @@ export function collectInjectedDigests(store: ChatStore, chatKey: string, { conf
 }
 
 function triggerLabels(entry: ChatMessage, ctx: TriggerContext): string[] {
-  // 转写结果是机器输出，不是"谁在提问题"：整条短路。
+  // 异步结果是机器输出，不是"谁在提问题"：整条短路。
   // 不短路的话下面几条正则必然误标 —— 转写正文里出现"吗/呢"或以"？"结尾是常事（→"提问"），
   // 提到 bot 的名字也是常事（→"提到我"），而这两条都会让模型以为有人在向它提问。
   // 出图结果同理：它的正文是「模型自己写的那段描述」+ "已发送"，同样会命中这些正则。
-  if (entry?.kind === 'transcript' || entry?.kind === 'jmcomic-result' || entry?.kind === 'image-result') return [];
+  // 跑团笔记也一样（它的正文里就写着"群友""DM"这些词）。
+  //
+  // 判据是**共享的那个谓词**而不是在这里再列一遍 kind：列一遍的话，加第五种异步结果时
+  // 这里会静默漏掉 —— 而漏掉的表现只是"标签多了一条"，没有任何报错。
+  if (isAsyncResult(entry)) return [];
   const labels: string[] = [];
   const text = String(entry?.text ?? '');
   const lower = text.toLowerCase();

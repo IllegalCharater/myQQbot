@@ -77,11 +77,12 @@ const DEFAULT_EXTRAS = { enabled: {}, idleUnloadMs: 600000, maxLoadsPerHour: 20 
 /** 本套件用的会话标识。**接管按会话隔离**，所以三张表都要带上它。 */
 const G = 'group:1';
 
-function makeRuntime(registry, extrasConfig, builtinToolNames = []) {
+function makeRuntime(registry, extrasConfig, builtinToolNames = [], extraDeps = {}) {
   return createExtrasRuntime(registry, {
     getConfig: () => ({ extras: extrasConfig }),
     builtinToolNames,
-    log: () => {}
+    log: () => {},
+    ...extraDeps
   });
 }
 
@@ -96,9 +97,11 @@ const cmd = (name) => ({ names: [name] });
  */
 function makeFakeEntry(id, names, {
   defaultEnabled = true, mode = 'attach', commands = [], body = null, dispose = null, prompt = null,
-  overrideTools = null
+  overrideTools = null, onRunEnd = null
 } = {}) {
-  const counters = { load: 0, dispose: 0, run: 0, command: 0 };
+  const counters = { load: 0, dispose: 0, run: 0, command: 0, runEnd: 0 };
+  /** 宿主递给 `load()` 的口子 —— 扩展要拿它做"只有宿主才知道怎么做"的事。 */
+  const seen = { deps: null };
   const entry = {
     id,
     title: id,
@@ -108,8 +111,9 @@ function makeFakeEntry(id, names, {
     tools: names.map(spec),
     ...(commands.length ? { commands: commands.map(cmd) } : {}),
     ...(overrideTools ? { overrideTools } : {}),
-    async load() {
+    async load(deps) {
       counters.load += 1;
+      seen.deps = deps ?? null;
       const handlers = {};
       for (const name of names) {
         handlers[name] = async (_ctx, args) => {
@@ -125,11 +129,12 @@ function makeFakeEntry(id, names, {
       const rt = { handlers };
       if (commands.length) rt.commandHandlers = commandHandlers;
       if (prompt) rt.prompt = () => prompt;
+      if (onRunEnd) rt.onRunEnd = (session) => { counters.runEnd += 1; return onRunEnd(session); };
       rt.dispose = dispose === null ? () => { counters.dispose += 1; } : dispose;
       return rt;
     }
   };
-  return { entry, counters };
+  return { entry, counters, seen };
 }
 
 // ── 1. 闸门 + **模型零装载入口** ────────────────────────────────────────────
@@ -681,8 +686,11 @@ await withFakeTimers(async (timers) => {
   const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
   const registrySrc = stripComments(read('src/extra/registry.ts'));
   const loadLines = registrySrc.split(/\r?\n/).filter((line) => /\bload\s*:/.test(line));
+  // 判据是"**函数引用** + **字面量说明符**"这两件事，所以参数列表允许有内容（`(deps)`）：
+  // 扩展可以收下宿主的口子（`ExtraRuntimeDeps`），而那不影响"说明符是字面量"这条 ——
+  // 后者才是这条断言存在的理由（写成变量就搬不进包）。
   ok('registry.ts 每个 load 都是「函数引用 + 字面量说明符」（写成变量就搬不进包）',
-    loadLines.length > 0 && loadLines.every((line) => /load\s*:\s*\(\)\s*=>\s*import\(\s*'\.\/[^']+\.js'\s*\)/.test(line)),
+    loadLines.length > 0 && loadLines.every((line) => /load\s*:\s*\([^)]*\)\s*=>\s*import\(\s*'\.\/[^']+\.js'\s*\)/.test(line)),
     loadLines.join(' | '));
   ok('registry.ts 不静态 import 任何扩展实现',
     !/^\s*import\b[^\n]*impl\.js/m.test(registrySrc));
@@ -777,6 +785,112 @@ await withFakeTimers(async (timers) => {
   const bad2 = makeRuntime([ov.entry], { ...DEFAULT_EXTRAS, override: { 'group:5': '不存在' } });
   await bad2.start();
   ok('配置里绑了不存在的扩展 → 忽略（不抛）', bad2.isOverridden('group:5') === false);
+}
+
+// ── 16. 运行结束钩子：只有**正在接管那个会话**的扩展才收得到 ─────────────────
+//
+// 它存在的理由：跑团的"兜底建议"要挂在"一次 agent 运行结束了"这个时刻上，而那件事只有
+// `chat/sessions.ts` 的 `finish()` 知道（`chat` 不能 import `extra`，所以走组装根的回调）。
+//
+// 判据复用 `#overrideEntry`（与 `toolDefs` / `promptPlan` 同一处）：它同时管"这个会话有没有
+// 被接管"、"那个扩展此刻还装不装"、"它还**能不能用**"。**附加模式的扩展没有"这一轮"的概念**，
+// 没绑这个会话的接管者也一样 —— 把钩子发给他们，症状是"某个扩展忽然开始对不属于它的回合做反应"。
+{
+  const run = { chatKey: 'group:n1', status: 'noreply', sentCount: 0, trigger: [] };
+
+  // 附加模式（默认 attach）：收不到 —— 它不接管任何会话。
+  let attachHit = 0;
+  const attach = makeFakeEntry('re_attach', ['t'], { onRunEnd: () => { attachHit += 1; } });
+  const rt1 = makeRuntime([attach.entry], { ...DEFAULT_EXTRAS, enabled: { re_attach: true } });
+  await rt1.load('re_attach');
+  rt1.runEnded(run);
+  await flush();
+  ok('**附加模式的扩展收不到 onRunEnd**（它没有"这一轮"）',
+    attachHit === 0 && attach.counters.runEnd === 0);
+
+  // 接管模式，但绑的是**别的**会话：也收不到。
+  let otherHit = 0;
+  const other = makeFakeEntry('re_other', ['say'], {
+    mode: 'override', overrideTools: { sendTool: 'say' }, onRunEnd: () => { otherHit += 1; }
+  });
+  const rt2 = makeRuntime([other.entry], { ...DEFAULT_EXTRAS, enabled: { re_other: true } });
+  await rt2.load('re_other', 'test', 'group:elsewhere');
+  rt2.runEnded(run);
+  await flush();
+  ok('接管了**别的**会话的扩展收不到这个会话的 onRunEnd（接管是按会话隔离的）', otherHit === 0);
+
+  // 接管了这个会话：收得到，且拿到的是这次收尾的快照本身。
+  let got = null;
+  const mine = makeFakeEntry('re_mine', ['say'], {
+    mode: 'override',
+    overrideTools: { sendTool: 'say' },
+    onRunEnd: (session) => { got = session; }
+  });
+  const rt3 = makeRuntime([mine.entry], { ...DEFAULT_EXTRAS, enabled: { re_mine: true } });
+  await rt3.load('re_mine', 'test', run.chatKey);
+  rt3.runEnded(run);
+  await flush();
+  ok('接管了这个会话的扩展收到 onRunEnd，拿到的是这次收尾的快照',
+    mine.counters.runEnd === 1 && got === run, JSON.stringify(got));
+
+  // 扩展被关掉（**不重启**）之后立即不再收 —— 与 `toolDefs` / `promptPlan` 同一个判据，
+  // 也避免了"扩展已经停用、钩子还在往它身上打"那种静默的坏状态。
+  //
+  // ⚠️ `defaultEnabled: false` 是必须的：`isExtraEnabled` 在 `enabled` 里查不到时**回落到
+  // `defaultEnabled`**，所以"把 enabled 清空"对一个默认开的扩展等于什么都没做（第一版就是这么
+  // 假绿的：关掉之后钩子照跑）。
+  const live = { ...DEFAULT_EXTRAS, enabled: { re_off: true } };
+  let offHit = 0;
+  const toggled = makeFakeEntry('re_off', ['say'], {
+    defaultEnabled: false,
+    mode: 'override', overrideTools: { sendTool: 'say' }, onRunEnd: () => { offHit += 1; }
+  });
+  const rt4 = createExtrasRuntime([toggled.entry], {
+    getConfig: () => ({ extras: live }), builtinToolNames: [], log: () => {}
+  });
+  await rt4.load('re_off', 'test', run.chatKey);
+  rt4.runEnded(run);
+  await flush();
+  ok('开着的时候收得到（对照：不是一直都不收）', offHit === 1, String(offHit));
+  live.enabled = {};
+  rt4.runEnded(run);
+  await flush();
+  ok('**关掉扩展之后立即收不到**（不重启也生效，判据是现读的 enabled）', offHit === 1, String(offHit));
+
+  // 实现没有 onRunEnd：静默跳过，不抛也不报错（附加模式与 clock 就是这样）。
+  const noHook = makeFakeEntry('re_none', ['say'], { mode: 'override', overrideTools: { sendTool: 'say' } });
+  const rt5 = makeRuntime([noHook.entry], { ...DEFAULT_EXTRAS, enabled: { re_none: true } });
+  await rt5.load('re_none', 'test', run.chatKey);
+  let threw = false;
+  try { rt5.runEnded(run); await flush(); } catch { threw = true; }
+  ok('实现没有 onRunEnd 时静默跳过（不抛、不报错）', threw === false);
+
+  // 钩子抛错**不该掀翻收尾**（它是旁路：会话已经落盘、索引已经更新）。
+  const boom = makeFakeEntry('re_boom', ['say'], {
+    mode: 'override',
+    overrideTools: { sendTool: 'say' },
+    onRunEnd: () => { throw new Error('钩子炸了'); }
+  });
+  const rt6 = makeRuntime([boom.entry], { ...DEFAULT_EXTRAS, enabled: { re_boom: true } });
+  await rt6.load('re_boom', 'test', run.chatKey);
+  let boomThrew = false;
+  try { rt6.runEnded(run); await flush(); } catch { boomThrew = true; }
+  ok('onRunEnd 抛错只记日志，不往上抛（`SessionRegistry.finish` 还等着返回呢）', boomThrew === false);
+
+  // `load(deps)` 收得到宿主的口子 —— 扩展要靠它做"只有宿主才知道怎么做"的事
+  // （跑团的 `deliverNote` 就是那条：把机器条目送进会话）。
+  ok('扩展的 load(deps) 收得到宿主的口子（否则扩展只能自己 import 那条链，而那是反向依赖）',
+    mine.seen.deps?.deliverNote === undefined || typeof mine.seen.deps?.deliverNote === 'function',
+    JSON.stringify(Object.keys(mine.seen.deps ?? {})));
+  const sent = [];
+  const sink = makeFakeEntry('re_sink', ['t']);
+  const rt7 = makeRuntime([sink.entry], { ...DEFAULT_EXTRAS, enabled: { re_sink: true } }, [],
+    { deliverNote: (chatKey, note) => sent.push({ chatKey, ...note }) });
+  await rt7.load('re_sink');
+  sink.seen.deps.deliverNote('group:n2', { kind: 'journal', text: '知道了' });
+  ok('那个口子真的是组装根递进来的那一个（能一路调回去）',
+    sent.length === 1 && sent[0].chatKey === 'group:n2' && sent[0].text === '知道了',
+    JSON.stringify(sent));
 }
 
 process.exit(done() ? 0 : 1);

@@ -7,10 +7,11 @@
 // ── 加一个扩展 = 建一个目录 + 加一行 ──
 //
 //   src/extra/<x>/spec.ts   纯数据（工具声明 + id/title/description/defaultEnabled），**重东西一个字都不许有**
-//   src/extra/<x>/impl.ts   `export function createRuntime(): ExtraRuntime`，重东西全在这里
+//   src/extra/<x>/impl.ts   `export function createRuntime(deps: ExtraRuntimeDeps): ExtraRuntime`，重东西全在这里
 //
 // 然后在本文件加一行：展开那个 spec，`load` 写成一个返回动态 import 的函数引用
-// —— 写法就照下面 clock 那一行（说明符指到该目录下的 impl.js）。
+// —— 写法就照下面 clock 那一行（说明符指到该目录下的 impl.js）。`deps` 是宿主递给扩展的口子
+// （见 `types.ts` 的 `ExtraRuntimeDeps`）；扩展不用它就写成 `()`，与下面的 clock 一样。
 //
 // ⚠️ **`load` 里的说明符必须是字面量**。这不是风格问题：写成变量会让 tsc 看不见它、
 // `check-layers.mjs` 扫不到它、`scripts/build-desktop.mjs` 的 src⇄dist 对账也覆盖不到它 ——
@@ -32,7 +33,9 @@ export const EXTRA_REGISTRY: readonly ExtraEntry[] = [
     // **顺序是语义**：`/能力` 的列表、以及套件里"命令表第 0 条是谁"都按注册表顺序。
     // 新扩展加在末尾（clock 是参考实现，一直在最前）。
     ...trpgSpec,
-    load: () => import('./trpg/impl.js').then((m) => m.createRuntime())
+    // 跑团**要用宿主的口子**：把"玩家知道了什么""给你几个方向"这类机器条目送进会话
+    // （`deliverNote`），以及在一轮结束时收 `onRunEnd`。所以它把 deps 透传给 createRuntime。
+    load: (deps) => import('./trpg/impl.js').then((m) => m.createRuntime(deps))
   }
 ];
 

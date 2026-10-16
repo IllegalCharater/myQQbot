@@ -100,6 +100,35 @@ for (const entry of fs.readdirSync(mediaRoot, { withFileTypes: true })) {
     errors.push(`media/${entry.name}: media/ 根目录只许放通用工具类 —— 能力请开一个目录`);
   }
 }
+
+// 跑团规则层（`extra/trpg/rules/`）：**纯函数目录**，不许 import 到该目录之外。
+//
+// 判据是"它必须能脱离平台独立开发与测试"：掷骰是跑团里唯一"错了会毁掉整局信任"的东西，
+// 所以解析与求值不许碰 I/O、配置、日志或任何平台对象 —— 连 `node:` 内置模块都不许。
+// 真熵源（`randomInt`）因此住在 `extra/trpg/entropy.ts`、由调用方**注入**，规则层连它的名字都不认识。
+// 这与 DiceRobot 的 `dicerobot/trpg/ruff.toml` 是同一条约束（那边用 ruff 的 banned-api 表达）。
+//
+// ⚠️ **这条只靠注释守不住**：第一次"顺手 import 一个 logger 调试一下"不会有任何报错，
+// 而破坏是静默的 —— 纯函数目录一旦有了 I/O，那些"注入随机源所以可复现"的断言就全变成假的绿。
+const rulesDir = path.join(SRC, 'extra', 'trpg', 'rules');
+if (fs.existsSync(rulesDir)) {
+  for (const source of filesUnder(rulesDir)) {
+    const sourceRel = slash(path.relative(SRC, source));
+    const text = fs.readFileSync(source, 'utf8');
+    for (const match of text.matchAll(SPECIFIER)) {
+      const specifier = match[1] || match[2] || match[3];
+      if (!specifier.startsWith('.')) {
+        errors.push(`${sourceRel} -> ${specifier}: 跑团规则层是纯函数目录，不得 import 任何外部模块`
+          + '（真熵源在 extra/trpg/entropy.ts，由调用方注入）');
+        continue;
+      }
+      const resolved = slash(path.relative(rulesDir, path.resolve(path.dirname(source), specifier)));
+      if (resolved.startsWith('..') || path.isAbsolute(resolved)) {
+        errors.push(`${sourceRel} -> ${specifier}: 跑团规则层不得 import 到 rules/ 之外`);
+      }
+    }
+  }
+}
 // **能力目录要不要带 `index.ts` 桶文件，这里不强制**：五个能力有（消费方 import `<能力>/index.js`），
 // 而 `hot-search/` 没有 —— 它的消费者直接用那四个文件、套件也直接取内部的纯函数，
 // 桶文件对它只是多一层。写文档时别把"通常有"说成"必须有"。

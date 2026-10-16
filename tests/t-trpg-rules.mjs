@@ -5,16 +5,20 @@
 // 而不是"结果落在合法区间里"这种什么都证明不了的断言。
 //
 // 没有文件、没有网络、没有子进程 —— 被测的两个模块是纯函数，连 config 都不 import。
+// `scripts/check-layers.mjs` 有一条闸门钉着这件事（`extra/trpg/rules/**` 不许 import 到该目录之外）。
 import { checker, dataDir } from './lib/harness.mjs';
 import { load } from './lib/src.mjs';
 
 // 与别的套件同一条纪律：先造临时数据目录，再 load 任何模块。
-// （这两个模块当下不碰 DATA_DIR，但保持这个顺序，将来它们真要用时不会静默写进真 data/。）
+// （这两个模块当下不碰 DATA_DIR，但保持这个顺序，将来它们真要用地时不会静默写进真 data/。）
 dataDir('qqagent-trpg-rules-');
 
 const { ok, done } = checker();
 const { DiceError, rollDice } = await load('extra/trpg/rules/dice.js');
-const { defaultJudge, resolveCheck } = await load('extra/trpg/rules/check.js');
+const {
+  COC7_RULE, GENERIC_RULE, LEVEL_RULES, check, defaultJudge, getCheckRule, resolveCheck
+} = await load('extra/trpg/rules/check.js');
+const { combine, formatPercentile, rollPercentile } = await load('extra/trpg/rules/percentile.js');
 
 /**
  * 让第 i 颗骰子掷出 `want[i]`（骰子面数 `n`）。
@@ -28,12 +32,21 @@ const rollOf = (n, ...want) => {
   return () => (want[i++] - 0.5) / n;
 };
 
+/** 十位/个位骰的脚本化随机源：让第 i 个数字骰掷出 `want[i]`（0–9）。 */
+const digitsOf = (...want) => {
+  let i = 0;
+  return () => (want[i++] + 0.5) / 10;
+};
+
 /** 一个 rng 被调用了几次。用来验"颗数真的按表达式来"。 */
 const counting = (inner) => {
   const box = { calls: 0 };
   box.rng = () => { box.calls++; return inner(); };
   return box;
 };
+
+/** 任何掷骰调用都要给随机源 —— 规则层**没有默认值**（`tsc` 拦漏掉的调用点，这里也一样）。 */
+const anyRng = () => 0.5;
 
 // ── 1. 解析与求值：逐面核对 ─────────────────────────────────────────────────
 {
@@ -42,6 +55,7 @@ const counting = (inner) => {
   ok('3d6：没有 kh/kl 时 kept 就是 dice', JSON.stringify(r.kept) === '[4,2,5]' && r.dropped === 0);
   ok('3d6：total 是各面之和', r.total === 11, String(r.total));
   ok('3d6：count / faces 如实回填', r.count === 3 && r.faces === 6);
+  ok('3d6：算式明细印得出每一颗（`3d6 → 4+2+5 = 11`）', r.detail === '4+2+5', r.detail);
 
   // `d20` 省略颗数 = 1 颗。这条是"省略写法"唯一的存在理由，钉死。
   const one = rollDice('d20', rollOf(20, 20));
@@ -58,16 +72,24 @@ const counting = (inner) => {
   ok('2d6-1：负修饰可用（total 允许低于骰面之和）',
     minus.total === 1 && minus.modifier === -1, JSON.stringify(minus));
 
-  const flat = rollDice('12');
+  const flat = rollDice('12', anyRng);
   ok('纯数字：没有骰子、dice 为空、total 就是它本身',
     flat.count === 0 && flat.faces === 0 && flat.dice.length === 0 && flat.total === 12, JSON.stringify(flat));
+  ok('纯数字：没有算式明细（不印 `12 → 12 = 12` 那种废话）', flat.detail === '');
 
   const spaced = rollDice('  4 D 6 KH 3  ', rollOf(6, 6, 5, 4, 1));
   ok('空白与前缀大写都被归一化（expr 回显的是归一化后的形态）',
     spaced.expr === '4d6kh3' && spaced.total === 15, JSON.stringify(spaced));
+
+  // 全角来自中文输入法，`x` 作乘号是常见写法 —— 两者都折算，而 `expr` 回显的是折算后的形态。
+  const wide = rollDice('（2d6）×3', rollOf(6, 3, 3));
+  ok('全角括号与乘号都被折算（`（2d6）×3` 与 `(2d6)*3` 同义）',
+    wide.expr === '(2d6)*3' && wide.total === 18, JSON.stringify(wide));
+  const xMul = rollDice('2x3', anyRng);
+  ok('`x` 作乘号', xMul.total === 6, String(xMul.total));
 }
 
-// ── 2. kh / kl 真的留对了 ──────────────────────────────────────────────────
+// ── 2. kh / kl 真的留对了（`k` / `q` 是它们的 OneDice 简写）────────────────────
 {
   const rng = rollOf(6, 1, 6, 3, 5);
   const h = rollDice('4d6kh3', rng);
@@ -86,17 +108,104 @@ const counting = (inner) => {
 
   const withMod = rollDice('4d6kh3+2', rollOf(6, 6, 6, 6, 1));
   ok('kh 与修饰连用：先 kh 再 +2', withMod.total === 20 && withMod.modifier === 2, JSON.stringify(withMod));
+
+  // 同一颗骰面，`k` 与 `kh` 必须给出相同的结果（简写不该有第二种语义）。
+  // **不比 `expr`**：它回显的是归一化后的输入，`4d6k3` 与 `4d6kh3` 本来就该各印各的。
+  const legacy = rollDice('4d6kh3', rollOf(6, 1, 6, 3, 5));
+  const short = rollDice('4d6k3', rollOf(6, 1, 6, 3, 5));
+  ok('`k` ≡ `kh`（除 expr 回显外逐字段相同）',
+    short.expr === '4d6k3' && JSON.stringify({ ...short, expr: '' }) === JSON.stringify({ ...legacy, expr: '' }),
+    JSON.stringify(short));
+  const qShort = rollDice('4d6q3', rollOf(6, 1, 6, 3, 5));
+  ok('`q` ≡ `kl`', qShort.total === 9 && JSON.stringify(qShort.kept) === '[1,3,5]', JSON.stringify(qShort));
 }
 
-// ── 3. 失败要说清楚（工具会把 error.message 原样回给模型）────────────────────
+// ── 3. 多组骰子 / 括号 / 四则 / 乘方 ────────────────────────────────────────
+//
+// 这一整节在旧版本里是"**刻意不支持**"的（`2d6+1d4` 报错）。扩成 OneDice 子集之后
+// 它们成了正向能力，所以断言也翻过来了。
+{
+  const multi = rollDice('2d6+1d4', rollOf(6, 4, 3, 2));
+  ok('2d6+1d4：多组相加，total 是两组之和', multi.total === 9, JSON.stringify(multi));
+  ok('2d6+1d4：groups 逐组留档（每一组的颗数/面数/骰面都在）',
+    multi.groups.length === 2
+    && JSON.stringify(multi.groups[0].dice) === '[4,3]' && multi.groups[0].faces === 6
+    && JSON.stringify(multi.groups[1].dice) === '[2]' && multi.groups[1].faces === 4,
+    JSON.stringify(multi.groups));
+  ok('2d6+1d4：顶层 dice 是各组按顺序拼接（"全部骰面都看得见"这条不因多组而失效）',
+    JSON.stringify(multi.dice) === '[4,3,2]' && multi.count === 3, JSON.stringify(multi.dice));
+  ok('2d6+1d4：多组时 faces 没有单一含义，记 0（要看精确值就查 groups）',
+    multi.faces === 0, String(multi.faces));
+  ok('2d6+1d4：算式明细给两组各自加括号（不加就会读成"一次掷了三颗"）',
+    multi.detail === '(4+3)+(2)', multi.detail);
+
+  const paren = rollDice('(2d6+3)*2', rollOf(6, 4, 3));
+  ok('(2d6+3)*2：先算括号再乘（(4+3+3)×2 = 20）', paren.total === 20, JSON.stringify(paren));
+  ok('(2d6+3)*2：明细里括号保留得住（不然"先乘后加"会算成二十几）',
+    paren.detail === '(4+3+3)×2', paren.detail);
+
+  const pow = rollDice('2^3^2', anyRng);
+  ok('`^` 右结合：2^3^2 = 2^(3^2) = 512（不是 (2^3)^2 = 64）', pow.total === 512, String(pow.total));
+
+  const div = rollDice('9/2', anyRng);
+  ok('除法是整数运算、向下取整（9/2 = 4）', div.total === 4, String(div.total));
+  const negDiv = rollDice('-9/2', anyRng);
+  ok('负数除法也向下取整（-9/2 = -5，不是 -4）', negDiv.total === -5, String(negDiv.total));
+
+  const unary = rollDice('-(2d6)', rollOf(6, 2, 3));
+  ok('一元负号可用', unary.total === -5, String(unary.total));
+}
+
+// ── 4. 奖惩骰（d100 的十位骰与个位骰）──────────────────────────────────────
+{
+  // 个位 5，十位 3 → 35。`b` 缺省追加 1 颗，所以共 2 个十位骰。
+  ok('combine(3,5) = 35', combine(3, 5) === 35);
+  ok('combine(0,5) = 5（十位 0 是个位不变，不是 100）', combine(0, 5) === 5);
+  ok('combine(0,0) = 100（十位与个位都是 0）', combine(0, 0) === 100);
+  ok('combine(9,0) = 90', combine(9, 0) === 90);
+
+  // ⚠️ 这两条是这一节最要紧的：候选**必须先组合成结果再比大小**。
+  // 若改成比十位数字，个位 0 + 十位 {0,9} 时奖励骰会取到十位 0 → 结果 100，
+  // 而不是正确的 90 —— 大成功从此永远掷不出来。
+  const bonus = rollPercentile({ rng: digitsOf(0, 0, 9), extra: 1 });
+  ok('奖励骰：个位 0、十位 0 与 9 → 候选 100 与 90，必须取 90',
+    bonus.value === 90 && bonus.base === 100, JSON.stringify(bonus));
+  const pen = rollPercentile({ rng: digitsOf(0, 9, 0), extra: 1, penalty: true });
+  ok('惩罚骰：同一组候选取 100', pen.value === 100, JSON.stringify(pen));
+
+  ok('formatPercentile：没有追加骰时就是结果本身',
+    formatPercentile(rollPercentile({ rng: digitsOf(2, 5) })) === '52');
+  ok('formatPercentile：有追加骰时展开成 `基准[奖励骰:…]`（舍弃的那些也印出来）',
+    formatPercentile(rollPercentile({ rng: digitsOf(5, 3, 9), extra: 1 })) === '35[奖励骰:9]',
+    formatPercentile(rollPercentile({ rng: digitsOf(5, 3, 9), extra: 1 })));
+
+  // `bN` 的 N 是**追加**的十位骰个数：b2 一共掷 3 个十位骰，个位仍只掷一次。
+  const roll = rollDice('1d100b2', digitsOf(5, 3, 7, 1));
+  ok('1d100b2：个位 5、十位 3/7/1 → 候选 35/75/15，取 15',
+    roll.total === 15 && roll.faces === 100 && roll.count === 1, JSON.stringify(roll));
+  ok('1d100b2：明细展开了被舍弃的十位骰（`35[奖励骰:7 1]`）', roll.detail === '35[奖励骰:7 1]', roll.detail);
+
+  const bare = rollDice('b', digitsOf(5, 3, 9));
+  ok('裸 `b` = 一颗带 1 个奖励骰的 d100（取 min(35,95) = 35）', bare.total === 35, JSON.stringify(bare));
+  const p2 = rollDice('p2', digitsOf(5, 3, 7, 1));
+  ok('`p2` 取最大的候选（75）', p2.total === 75, String(p2.total));
+
+  const withMod = rollDice('1d100b1+10', digitsOf(5, 3, 9));
+  ok('奖惩骰可以参与四则运算', withMod.total === 45, String(withMod.total));
+}
+
+// ── 5. 失败要说清楚（工具会把 error.message 原样回给模型）────────────────────
 {
   const fails = (expr, code, label) => {
     try {
-      rollDice(expr);
+      rollDice(expr, anyRng);
       ok(label, false, '居然没抛错');
     } catch (error) {
       const isOurs = error instanceof DiceError;
-      const has = (message) => /骰子|支持|颗数|面数|保留|目标值/.test(String(error.message));
+      // 判据是"文案里有面向用户的实质信息"，所以用的是**领域词**而不是"是个中文句子"：
+      // `骰` 一个字就够（覆盖骰子/奖惩骰/骰面），刻意的宽 —— 它的作用是拦住
+      // "把 message 换成 `表达式错误`" 那类退化，不是逐字比对文案。
+      const has = (message) => /骰|支持|颗数|面数|保留|目标值/.test(String(error.message));
       ok(label, isOurs && error.code === code && has(),
         `code=${isOurs ? error.code : '(不是 DiceError)'} msg=${String(error.message).slice(0, 60)}`);
     }
@@ -109,29 +218,46 @@ const counting = (inner) => {
   fails('101d6', 'DICE_COUNT', '超过 100 颗报 DICE_COUNT');
   fails('d1', 'DICE_FACES', '单面骰报 DICE_FACES');
   fails('d1001', 'DICE_FACES', '超过 1000 面报 DICE_FACES');
+  fails('2d20b1', 'DICE_FACES', '奖惩骰写非 100 的面数报 DICE_FACES');
   fails('4d6kh0', 'KEEP_COUNT', 'kh0 报 KEEP_COUNT');
   fails('4d6kh5', 'KEEP_COUNT', 'kh 超过颗数报 KEEP_COUNT');
+  fails('1d100b0', 'EXTRA_COUNT', '奖惩骰 0 颗报 EXTRA_COUNT');
+  fails('1d100b11', 'EXTRA_COUNT', '奖惩骰超过 10 颗报 EXTRA_COUNT');
+  fails('1/0', 'DIV_ZERO', '除零报 DIV_ZERO');
+  fails('2^-1', 'EXPONENT', '负指数报 EXPONENT（整数运算下它没有意义）');
+  fails('2^999', 'EXPONENT', '指数过大报 EXPONENT');
+  fails('999^60', 'POWER_SIZE', '乘方结果过大报 POWER_SIZE（在算之前就该拦住）');
+  fails('100d6+100d6+100d6', 'TOTAL_DICE', '整个表达式的骰子总量超限报 TOTAL_DICE（加法绕不开单组上限）');
   fails('3d6+', 'SYNTAX', '残缺修饰报 SYNTAX');
+  fails('(3d6', 'SYNTAX', '括号没闭合报 SYNTAX');
+  fails('3d6)', 'SYNTAX', '多余内容报 SYNTAX');
   fails('abc', 'SYNTAX', '不是表达式报 SYNTAX');
-  fails('2d6+1d4', 'SYNTAX', '多组相加报 SYNTAX（刻意不支持，文案要点出这点）');
   fails('3d6x', 'SYNTAX', '未知修饰报 SYNTAX');
+  fails('2b3', 'SYNTAX', '`2b3` 的左值无意义，报 SYNTAX（文案要指出正确写法是 2db3）');
+  fails('3d6a6', 'SYNTAX', '骰池（a）明确报"不支持"而不是含糊的语法错');
 
-  // 文案必须带上"下一步" —— 模型照着它才改得对。三条都要在。
-  try { rollDice('2d6+1d4'); } catch (error) {
-    ok('报错文案给出了可执行的下一步（支持的形态 + 一次只能掷一组）',
-      /3d6/.test(error.message) && /一次只能掷一组骰子/.test(error.message), String(error.message));
+  // 文案必须带上"下一步" —— 模型照着它才改得对。
+  try { rollDice('2b3', anyRng); } catch (error) {
+    ok('`2b3` 的报错文案给出正确写法与支持的形态',
+      /2db3/.test(error.message) && /3d6/.test(error.message), String(error.message));
+  }
+  try { rollDice('3d6a6', anyRng); } catch (error) {
+    ok('骰池的报错文案点名"骰池"并列出支持的形态',
+      /骰池/.test(error.message) && /支持/.test(error.message), String(error.message));
   }
 }
 
-// ── 4. 可复现：同一个 rng 序列必得同一个结果 ────────────────────────────────
+// ── 6. 可复现：同一个 rng 序列必得同一个结果 ────────────────────────────────
 {
-  const build = () => rollOf(6, 3, 1, 4, 1, 5, 9 % 6);
+  const build = () => rollOf(6, 3, 1, 4, 1, 5, 3);
   const a = rollDice('3d6+2', build());
   const b = rollDice('3d6+2', build());
   ok('同序列两次掷骰逐字段相同（这是"可复核"的机械前提）',
     JSON.stringify(a) === JSON.stringify(b), `${JSON.stringify(a)} vs ${JSON.stringify(b)}`);
 
   // 不变式：三条，换任意表达式都成立。随机跑一批，比钉死几个用例更值。
+  // ⚠️ 不变式里的 `total === Σkept + modifier` 在**有乘除的表达式的上不成立**（`modifier` 是
+  // `total − Σkept`，见 `DiceRoll` 的说明），所以这里只跑"一组骰子 + kh/kl"的形态。
   let invariantOk = true;
   let detail = '';
   for (let i = 0; i < 200 && invariantOk; i++) {
@@ -139,7 +265,7 @@ const counting = (inner) => {
     const faces = 2 + (i % 11);
     const keep = 1 + (i % n);
     const expr = i % 3 === 0 ? `${n}d${faces}kh${keep}` : i % 3 === 1 ? `${n}d${faces}kl${keep}` : `${n}d${faces}`;
-    const r = rollDice(expr);
+    const r = rollDice(expr, rollOf(faces, ...Array.from({ length: n }, (_, k) => 1 + ((i + k) % faces))));
     const sum = r.kept.reduce((s, v) => s + v, 0);
     if (r.dice.length !== r.count) { invariantOk = false; detail = `${expr}: dice.length ${r.dice.length} ≠ count ${r.count}`; }
     else if (r.kept.length + r.dropped !== r.dice.length) { invariantOk = false; detail = `${expr}: kept+dropped ≠ dice`; }
@@ -150,7 +276,7 @@ const counting = (inner) => {
     invariantOk, detail);
 }
 
-// ── 5. 坏的随机源不该毁掉掷骰 ──────────────────────────────────────────────
+// ── 7. 坏的随机源不该毁掉掷骰 ──────────────────────────────────────────────
 {
   // rng 是**注入**的，所以它可能返回任何东西。越界的面值会让 total 变成谁也算不出的怪数，
   // 比抛错难查得多 —— 所以实现把值夹回 [0,1)。这条钉的就是那个夹取。
@@ -158,9 +284,15 @@ const counting = (inner) => {
   const r = rollDice(`${bad.length}d6`, () => bad.shift() ?? 0);
   ok('rng 返回越界值 / NaN / Infinity 时，面值仍落在 [1, faces]（夹回合法区间，而不是抛错）',
     r.dice.every((v) => Number.isInteger(v) && v >= 1 && v <= 6), JSON.stringify(r.dice));
+
+  // 奖惩骰那条路要各自夹一次个位与十位。
+  const badDigits = [1, -1, NaN, 5, Infinity];
+  const p = rollDice('1d100b1', () => badDigits.shift() ?? 0);
+  ok('奖惩骰的个位/十位骰也被夹回 0–9（坏随机源不毁掉整次掷骰）',
+    p.total >= 1 && p.total <= 100, String(p.total));
 }
 
-// ── 6. 检定：机械部分（与规则书无关）──────────────────────────────────────
+// ── 8. 检定：机械部分（与规则书无关）──────────────────────────────────────
 {
   const r = resolveCheck('3d6', 10, { rng: rollOf(6, 4, 5, 6) });
   ok('resolveCheck 回填目标值与差值（margin = total - target）',
@@ -173,20 +305,26 @@ const counting = (inner) => {
   ok('差 1 就是不成功，且 margin 说得出差多少', short.success === false && short.margin === -1);
 
   try {
-    resolveCheck('3d6', '难');
+    resolveCheck('3d6', '难', { rng: anyRng });
     ok('目标值不是数时报错', false, '居然没抛错');
   } catch (error) {
     ok('目标值不是数时报错，且文案给出正确写法',
       error instanceof DiceError && error.code === 'TARGET' && /3d6 对 12/.test(error.message),
       String(error.message));
   }
+
+  // 传了 target 就是检定；不传就是掷骰 —— 但**判定的机械部分**与掷骰共用同一个解析器，
+  // 所以多组骰子照样能检定。
+  const multi = resolveCheck('2d6+1d4', 8, { rng: rollOf(6, 4, 3, 2) });
+  ok('多组骰子的表达式也能检定', multi.roll.total === 9 && multi.success === true, JSON.stringify(multi));
 }
 
-// ── 7. 默认判定：大成功/大失败只在单颗骰时 ──────────────────────────────────
+// ── 9. 默认判定：大成功/大失败只在单颗骰时 ──────────────────────────────────
 {
   const crit = resolveCheck('1d20', 30, { rng: rollOf(20, 20) });
   ok('单颗骰掷出最大面 = critical，且**压过**目标值（难度再高也算大成功）',
     crit.grade === 'critical' && crit.success === true, JSON.stringify(crit));
+  ok('critical 带中文档位名（展示层优先用它）', crit.label === '大成功', String(crit.label));
 
   const fumble = resolveCheck('1d20', 0, { rng: rollOf(20, 1) });
   ok('单颗骰掷出 1 = fumble，且**压过** target=0（大失败就是失败）',
@@ -196,12 +334,12 @@ const counting = (inner) => {
   ok('多颗骰即使全是最大值也不判 critical —— 多骰下"全最大"没有公认语义，不替规则书发明',
     multi.grade === 'success' && multi.success === true, JSON.stringify(multi));
 
-  const plain = resolveCheck('12', 10);
+  const plain = resolveCheck('12', 10, { rng: anyRng });
   ok('纯数字表达式（没有骰子）走普通成功/失败，不会误判成大成功',
     plain.grade === 'success' && plain.success === true, JSON.stringify(plain));
 }
 
-// ── 8. 判定函数是可换的（换规则书只换它）───────────────────────────────────
+// ── 10. 判定函数是可换的（换规则书只换它）───────────────────────────────────
 {
   // COC 那种"掷低为佳"的读法：同一个骰面在两个判定下结论必须相反 —— 这是"接缝真的存在"
   // 的判据。只断言"自定义 judge 被调到了"证明不了什么。
@@ -227,14 +365,87 @@ const counting = (inner) => {
 
   ok('默认判定是导出的具名函数（扩展要拿它当"不换规则书"的默认值）',
     typeof defaultJudge === 'function');
+
+  const viaDefault = resolveCheck('3d6', 10, { rng: rollOf(6, 4, 5, 6) });
+  const viaRule = resolveCheck('3d6', 10, { rng: rollOf(6, 4, 5, 6), rule: GENERIC_RULE });
+  ok('默认判定与 generic 规则表逐字段一致（两处不会漂移）',
+    JSON.stringify(viaDefault) === JSON.stringify(viaRule), JSON.stringify(viaDefault));
 }
 
-// ── 9. 颗数真的按表达式来（rng 调用次数是唯一的证据）────────────────────────
+// ── 11. 规则表：COC 六级 + 穷举自检 ────────────────────────────────────────
+//
+// 穷举那两条是这一节的重点：**"某个等级永远匹配不到"这种错误今天完全静默** ——
+// 它只有等玩家恰好掷出那个点数才会暴露，而那时你已经在跑了。
+{
+  const coc = (roll, skill) => resolveCheck('1d100', skill, { rng: rollOf(100, roll), rule: COC7_RULE });
+  ok('COC：掷出 1 = 大成功', coc(1, 50).grade === 'critical' && coc(1, 50).success === true, JSON.stringify(coc(1, 50)));
+  ok('COC：掷出 100 = 大失败（哪怕技能值 80）', coc(100, 80).grade === 'fumble', JSON.stringify(coc(100, 80)));
+  ok('COC：技能值小于 50 时，96 以上也是大失败', coc(96, 40).grade === 'fumble', JSON.stringify(coc(96, 40)));
+  ok('COC：技能值 50 时 96 不是大失败（判据里有 `skill < 50`）', coc(96, 50).grade === 'failure', JSON.stringify(coc(96, 50)));
+  ok('COC：roll ≤ skill/5 = 极难成功', coc(10, 50).grade === 'extreme', JSON.stringify(coc(10, 50)));
+  ok('COC：roll ≤ skill/2 = 困难成功（25 ≤ 25）', coc(25, 50).grade === 'hard', JSON.stringify(coc(25, 50)));
+  ok('COC：roll ≤ skill = 成功', coc(30, 50).grade === 'success', JSON.stringify(coc(30, 50)));
+  ok('COC：roll > skill = 失败', coc(60, 50).grade === 'failure', JSON.stringify(coc(60, 50)));
+  ok('COC 的六个档位都有中文名（展示层直接印，不必自己查表）',
+    ['大成功', '大失败', '极难成功', '困难成功', '成功', '失败']
+      .every((label) => COC7_RULE.levels.some((level) => level.label === label)));
+
+  // 选了 COC 却掷别的骰子：必须**明确拒绝**，而不是给出一个"看起来正常"的错误答案。
+  try {
+    resolveCheck('3d6', 10, { rng: anyRng, rule: COC7_RULE });
+    ok('COC 规则表对非 d100 的掷骰明确拒绝', false, '居然没抛错');
+  } catch (error) {
+    ok('COC 规则表对非 d100 的掷骰明确拒绝，且文案指出用 1d100',
+      error instanceof DiceError && /1d100/.test(error.message), String(error.message));
+  }
+
+  ok('getCheckRule：认得大小写，认不出来的回落 generic（读取路径不抛错）',
+    getCheckRule('coc7').id === 'coc7' && getCheckRule('COC7').id === 'coc7'
+    && getCheckRule('nope').id === 'generic' && getCheckRule(undefined).id === 'generic');
+  ok('LEVEL_RULES 就是那两张表（配置里能写的 id 只有它们）',
+    LEVEL_RULES.map((rule) => rule.id).join(',') === 'generic,coc7');
+
+  // ── 穷举：每一组取值都有等级匹配，且每个等级都被匹配到过 ──
+  const sweep = (rule, build) => {
+    const seen = new Set();
+    let gap = '';
+    for (const input of build()) {
+      try { seen.add(check(rule, input).name); }
+      catch (error) { gap = `${rule.id}: ${error.message}`; break; }
+    }
+    ok(`${rule.id}：穷举全部取值，每一组都有等级匹配（最后一条必须无条件匹配）`, !gap, gap);
+    const missing = rule.levels.map((level) => level.name).filter((name) => !seen.has(name));
+    ok(`${rule.id}：每个等级都真的能被匹配到（否则是等级顺序有误）`,
+      missing.length === 0, missing.join(','));
+  };
+  sweep(GENERIC_RULE, function* () {
+    for (let target = 0; target <= 30; target++)
+      for (let roll = 1; roll <= 20; roll++)
+        yield { total: roll, dice: [roll], kept: [roll], faces: 20, target };
+  });
+  sweep(COC7_RULE, function* () {
+    for (let target = 0; target <= 100; target++)
+      for (let roll = 1; roll <= 100; roll++)
+        yield { total: roll, dice: [roll], kept: [roll], faces: 100, target };
+  });
+}
+
+// ── 12. 颗数真的按表达式来（rng 调用次数是唯一的证据）──────────────────────
 {
   const box = counting(rollOf(6, 1, 2, 3, 4, 5, 6));
   const r = rollDice('6d6', box.rng);
   ok('6d6 恰好调用随机源 6 次（不是"多掷几颗再挑"，那会让结果分布悄悄变样）',
     box.calls === 6 && r.dice.length === 6, `calls=${box.calls}`);
+
+  // 奖惩骰：个位掷一次、十位掷 extra+1 次 —— 多掷一个十位骰会悄悄改变分布。
+  const pbox = counting(digitsOf(1, 2, 3));
+  rollDice('1d100b2', pbox.rng);
+  ok('1d100b2 恰好调用随机源 4 次（个位 1 + 十位 3）', pbox.calls === 4, `calls=${pbox.calls}`);
+
+  // 多组：每一组各自掷自己的颗数。
+  const mbox = counting(rollOf(6, 1, 2, 3));
+  const multi = rollDice('2d6+1d4', mbox.rng);
+  ok('2d6+1d4 恰好调用随机源 3 次（两组各自掷）', mbox.calls === 3 && multi.count === 3, `calls=${mbox.calls}`);
 }
 
 process.exit(done() ? 0 : 1);

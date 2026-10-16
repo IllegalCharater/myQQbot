@@ -8,23 +8,41 @@
 import { EXTRA_PROMPT_TEXT } from '../prompts.js';
 import type { ExtraSpec } from '../types.js';
 
-const T = EXTRA_PROMPT_TEXT;
+const PROMPTS = EXTRA_PROMPT_TEXT;
 
-/** 工具参数里那个"名字 → 数值"的表（属性/技能）。两个工具共用这一个形状。 */
+/** 工具参数里那个"名字 → 数值"的表（属性/技能）。建卡与改卡共用这一个形状。 */
 const STATS_SCHEMA = {
   type: 'object',
   additionalProperties: { type: 'number' },
-  description: T.character_create.stats
+  description: PROMPTS.character.stats
 };
 
+/** 字段级可见度的取值域（与 `types.ts` 的 `HIDDEN_FIELDS` 一致，两处都是硬约束）。 */
+const HIDDEN_SCHEMA = {
+  type: 'array',
+  items: { type: 'string', enum: ['stats', 'pools', 'notes'] },
+  description: PROMPTS.character.hidden
+};
+
+/**
+ * **四个工具，不是七个**。
+ *
+ * 合并的判据是"参数互不重叠、机械部分相同"，而收益是具体的：工具 schema 是**每次请求前缀**的
+ * 一部分，每多一个工具就打散一次提示词缓存；合并后每个工具内部用 `action` 分支，
+ * 而 `action` 的取值在 schema 里是 `enum`，模型看见的就是全部选项。
+ *
+ * 代价知情：`required` 不能按 `action` 分支（JSON Schema 里没有这个能力），所以"某个 action
+ * 少传了必填字段"只能靠 `tools.ts` 里的中文错误文案补救 —— 那批文案因此必须点明"这个 action
+ * 需要什么"。
+ */
 export const trpgSpec: ExtraSpec = {
   id: 'trpg',
   title: '跑团（TRPG）',
   // ⚠️ `displayDesc` 必须取自 `tools[0]`（这里是 `say`）那一格 —— `tests/t-extras.mjs`
   // 逐个比对两者，写别处就红。理由见 `extra/types.ts`：设置页那一行与工具文案同源。
-  displayDesc: T.say.displayDesc,
+  displayDesc: PROMPTS.say.displayDesc,
   /**
-   * **接管模式**：装载即让**那个会话**的模型侧整体换掉 —— 工具表只剩下面这 7 个、
+   * **接管模式**：装载即让**那个会话**的模型侧整体换掉 —— 工具表只剩下面这 4 个、
    * 命令表只剩跑团那两条（外加永远在的 `/能力`）、system prompt 换成"框架契约 + 跑团人格"。
    * 存档、上下文窗口、记忆、后台任务照常。
    */
@@ -47,102 +65,90 @@ export const trpgSpec: ExtraSpec = {
     // `say` **必须是第一个**：`displayDesc` 取自它那一格（见上）。
     {
       name: 'say',
-      description: T.say.description,
+      description: PROMPTS.say.description,
       parameters: {
         type: 'object',
         properties: {
-          text: { description: T.say.text, oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
-          replyToMessageId: { type: ['integer', 'string'], description: T.say.replyToMessageId }
+          text: { description: PROMPTS.say.text, oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+          replyToMessageId: { type: ['integer', 'string'], description: PROMPTS.say.replyToMessageId }
         },
         required: ['text']
       }
     },
     {
-      name: 'campaign_start',
-      description: T.campaign_start.description,
+      name: 'campaign',
+      description: PROMPTS.campaign.description,
       parameters: {
         type: 'object',
         properties: {
-          title: { type: 'string', description: T.campaign_start.title },
-          system: { type: 'string', description: T.campaign_start.system },
-          scene: { type: 'string', description: T.campaign_start.scene },
-          restart: { type: 'boolean', description: T.campaign_start.restart }
-        },
-        required: ['title']
-      }
-    },
-    {
-      name: 'character_create',
-      description: T.character_create.description,
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: T.character_create.name },
-          ownerId: { type: ['integer', 'string'], description: T.character_create.ownerId },
-          hpMax: { type: 'integer', description: T.character_create.hpMax },
-          sanMax: { type: 'integer', description: T.character_create.sanMax },
-          stats: STATS_SCHEMA
-        },
-        required: ['name']
-      }
-    },
-    {
-      name: 'character_update',
-      description: T.character_update.description,
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: T.character_update.name },
-          hpDelta: { type: 'integer', description: T.character_update.hpDelta },
-          sanDelta: { type: 'integer', description: T.character_update.sanDelta },
-          full: { type: 'boolean', description: T.character_update.full },
-          stats: STATS_SCHEMA,
-          note: { type: 'string', description: T.character_update.note },
-          forget: { type: 'string', description: T.character_update.forget },
-          remove: { type: 'boolean', description: T.character_update.remove }
-        },
-        required: ['name']
-      }
-    },
-    {
-      name: 'story_update',
-      description: T.story_update.description,
-      parameters: {
-        type: 'object',
-        properties: {
-          scene: { type: 'string', description: T.story_update.scene },
+          action: {
+            type: 'string',
+            enum: ['start', 'scene', 'flag', 'reveal'],
+            description: PROMPTS.campaign.action
+          },
+          title: { type: 'string', description: PROMPTS.campaign.title },
+          system: { type: 'string', description: PROMPTS.campaign.system },
+          rule: { type: 'string', enum: ['generic', 'coc7'], description: PROMPTS.campaign.rule },
+          scene: { type: 'string', description: PROMPTS.campaign.scene },
+          restart: { type: 'boolean', description: PROMPTS.campaign.restart },
           flags: {
             type: 'object',
             additionalProperties: { type: 'string' },
-            description: T.story_update.flags
-          }
+            description: PROMPTS.campaign.flags
+          },
+          visible: { type: 'boolean', description: PROMPTS.campaign.visible },
+          name: { type: 'string', description: PROMPTS.campaign.name },
+          fields: {
+            type: 'array',
+            items: { type: 'string', enum: ['stats', 'pools', 'notes'] },
+            description: PROMPTS.campaign.fields
+          },
+          actionSource: { type: 'string', description: PROMPTS.campaign.actionSource }
         },
-        required: []
+        required: ['action']
       }
     },
     {
-      name: 'roll_dice',
-      description: T.roll_dice.description,
+      name: 'character',
+      description: PROMPTS.character.description,
       parameters: {
         type: 'object',
         properties: {
-          expr: { type: 'string', description: T.roll_dice.expr },
-          reason: { type: 'string', description: T.roll_dice.reason }
+          action: {
+            type: 'string',
+            enum: ['create', 'update', 'remove'],
+            description: PROMPTS.character.action
+          },
+          name: { type: 'string', description: PROMPTS.character.name },
+          ownerId: { type: ['integer', 'string'], description: PROMPTS.character.ownerId },
+          hpMax: { type: 'integer', description: PROMPTS.character.hpMax },
+          sanMax: { type: 'integer', description: PROMPTS.character.sanMax },
+          hpDelta: { type: 'integer', description: PROMPTS.character.hpDelta },
+          sanDelta: { type: 'integer', description: PROMPTS.character.sanDelta },
+          full: { type: 'boolean', description: PROMPTS.character.full },
+          stats: STATS_SCHEMA,
+          note: { type: 'string', description: PROMPTS.character.note },
+          forget: { type: 'string', description: PROMPTS.character.forget },
+          visible: { type: 'boolean', description: PROMPTS.character.visible },
+          hidden: HIDDEN_SCHEMA,
+          actionSource: { type: 'string', description: PROMPTS.character.actionSource }
+        },
+        required: ['action', 'name']
+      }
+    },
+    {
+      name: 'roll',
+      description: PROMPTS.roll.description,
+      parameters: {
+        type: 'object',
+        properties: {
+          expr: { type: 'string', description: PROMPTS.roll.expr },
+          target: { type: 'number', description: PROMPTS.roll.target },
+          reason: { type: 'string', description: PROMPTS.roll.reason },
+          actor: { type: 'string', description: PROMPTS.roll.actor },
+          actionSource: { type: 'string', description: PROMPTS.roll.actionSource }
         },
         required: ['expr']
-      }
-    },
-    {
-      name: 'skill_check',
-      description: T.skill_check.description,
-      parameters: {
-        type: 'object',
-        properties: {
-          expr: { type: 'string', description: T.skill_check.expr },
-          target: { type: 'number', description: T.skill_check.target },
-          reason: { type: 'string', description: T.skill_check.reason }
-        },
-        required: ['expr', 'target']
       }
     }
   ],

@@ -25,13 +25,55 @@
 // types/registry/runtime 与每个扩展同时依赖，反向依赖就成环。这里只 import 下层类型
 // （`agent/shared/types.js` 与 `chat/types.js` 都 ≤ extra 的 4，向下依赖合法，且都是 `import type`）。
 import type { ToolArguments, ToolContext, ToolResult } from '../agent/shared/types.js';
-import type { MediaEntry } from '../chat/types.js';
+import type { ChatMessage, MediaEntry } from '../chat/types.js';
 
 /** 模型可见的工具声明。**纯数据** —— 拿到它不需要加载任何实现。 */
 export interface ExtraToolSpec {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+}
+
+/**
+ * 一条**机器条目**（回流）。扩展只说"这是一条什么、正文是什么"，怎么落库是宿主的事。
+ *
+ * ⚠️ 它与 `say` 那条路**完全不同**：这个不往群里发消息，它落的是一条**未读**条目、推窗口、
+ * 让模型有机会自己开口（见 `chat/store.ts` 的 `appendAsyncResult` 与
+ * `agent/context/response-policy.ts`）。扩展拿它当"把事实交回去"，不当"发言"用 ——
+ * 发言只有扩展自己的 `sendTool` 一条路。
+ */
+export interface ExtraNote {
+  /** 条目的子类型，渲染标签按它分（跑团用 `journal` / `suggest`）。 */
+  kind: string;
+  text: string;
+}
+
+/** 组装根递给扩展的口子。扩展自己决定要不要用。 */
+export interface ExtraRuntimeDeps {
+  /**
+   * 把一条机器条目送进会话（落存档 → 入窗 → 通知面板）。
+   *
+   * 由 `web/app.ts` 递进来，而不是扩展自己 `import` 那条链 —— 组装是 web 的活，
+   * 而且这条链要碰 `ChatStore` 与 `Orchestrator`（`extra → agent` 是反向依赖）。
+   * 缺省时什么都不做：测试与未接线的宿主不需要它。
+   */
+  deliverNote?(chatKey: string, note: ExtraNote): void;
+}
+
+/**
+ * 一次运行结束时的快照。扩展的 `onRunEnd` 收它。
+ *
+ * **手上有哪些事实**就是这四样，够跑团那句"这一轮 DM 一句话没说、而且是被真人推动的"用，
+ * 也刻意不更多 —— 一个能看穿整条会话的钩子会诱使人拿它去做本来该进 `runAgent` 的事。
+ */
+export interface ExtraRunEnd {
+  chatKey: string;
+  /** 收尾状态：`done` / `noreply` / `error` / `aborted`。 */
+  status: string;
+  /** 这一轮真的发出去几条（`recordSent` 那本账的条数，`media/` 与面板读的也是它）。 */
+  sentCount: number;
+  /** 触发这一轮的消息（判断"这一轮是不是由真人推动的"要用它）。 */
+  trigger: readonly ChatMessage[];
 }
 
 /**
@@ -155,6 +197,16 @@ export interface ExtraRuntime {
    */
   prompt?(chatKey: string): ExtraPromptContribution;
   /**
+   * 一次 agent 运行结束了（收尾点是 `chat/sessions.ts` 的 `SessionRegistry.finish`）。
+   *
+   * **同步或异步都行，抛错会被吞掉并记日志** —— 它是运行收尾路径上的旁路，不该有能力
+   * 影响主流程。缺省 = 这个扩展不关心。
+   *
+   * ⚠️ **它不是一个"每轮都被调用"的钩子**：只在**这个扩展正在接管 `chatKey`** 时才会被调到
+   * （见 `runtime.ts` 的 `runEnded`）。附加模式的扩展没有"这一轮"的概念。
+   */
+  onRunEnd?(session: ExtraRunEnd): void | Promise<void>;
+  /**
    * 释放这个扩展自己持有的重资源（子进程 / socket / 定时器 / 大缓存）。
    *
    * ⚠️ **没有 `dispose()` 的扩展，空闲卸载等于什么都没做**：Node ESM 没有模块卸载，
@@ -221,7 +273,11 @@ export interface ExtraSpec {
 /** 注册表的一行：spec + 一个懒加载入口。 */
 export interface ExtraEntry extends ExtraSpec {
   /**
-   * 懒加载入口。
+   * 懒加载入口。**收下宿主的口子**（`ExtraRuntimeDeps`）—— 扩展拿到它才能在运行期做
+   * "宿主才知道怎么做"的事（比如把一条回流条目送进会话）。扩展不用它就忽略参数。
+   *
+   * 为什么是参数而不是让扩展自己 import：那条链要碰 `ChatStore` 与 `Orchestrator`
+   * （`extra → agent` 是反向依赖，`check-layers` 会拦），而且组装是 `web/` 的活。
    *
    * ⚠️ 说明符**必须是字面量**（形如 `import('./clock/impl.js')`，写成变量就不行）—— 那才是
    * tsc 与打包脚本都看得见、且能随包发出去的东西。写成动态路径会让 tsc 看不见它、
@@ -229,5 +285,5 @@ export interface ExtraEntry extends ExtraSpec {
    * 症状是"某个扩展没被搬进包"，而这正是打包脚本存在的唯一理由。`tests/t-extras.mjs`
    * 有一条源级断言钉这条。
    */
-  load(): Promise<ExtraRuntime>;
+  load(deps: ExtraRuntimeDeps): Promise<ExtraRuntime>;
 }

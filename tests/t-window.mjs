@@ -424,7 +424,10 @@ console.log('\n=== 18. 异步任务结果不参与窗口滑出 ===');
   const asyncKinds = [
     ['transcript', { text: '【转写结果】视频里在讲茶叶', senderName: '转写' }],
     ['jmcomic-result', { text: '漫画 12345 的 PDF 已上传到当前会话', senderName: '漫画下载' }],
-    ['image-result', { text: '「一只猫」的图片已生成并发送到当前会话', senderName: '图像' }]
+    ['image-result', { text: '「一只猫」的图片已生成并发送到当前会话', senderName: '图像' }],
+    // 第四种：跑团扩展的机器条目（【跑团笔记】/【行动建议】）。它与上面三种同一条理由 ——
+    // 它是"玩家认知变了"或"该给点方向了"的唯一凭据，被滑出就等于静默丢失。
+    ['trpg-note', { text: '【跑团笔记】群友现在知道了：灯塔的门是虚掩的。', senderName: '跑团笔记' }]
   ];
   for (const [kind, extra] of asyncKinds) {
     const w = new ContextWindow({ chatKey: `group:pin-${kind}`, capacity: 3 });

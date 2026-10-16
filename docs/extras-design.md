@@ -39,25 +39,31 @@ src/extra/
 ├─ types.ts          契约（ExtraSpec / ExtraRuntime / ExtraCommandSpec / ExtraPromptContribution）—— 不 import 本模块任何文件
 ├─ prompts.ts        扩展的固定指令 EXTRA_PROMPT_TEXT / EXTRA_PROMPT_SECTIONS —— **必须无 import**（§7）
 ├─ registry.ts       静态清单 EXTRA_REGISTRY，每行 { ...xSpec, load }
-├─ runtime.ts        ExtrasRuntime：装载表 + 由它派生的三张表 + 校验
+├─ runtime.ts        ExtrasRuntime：装载表 + 由它派生的三张表 + 校验 + 运行结束钩子
 ├─ clock/            参考扩展（attach）：把整条链跑起来并可观察，刻意只有最小形态
 └─ trpg/             第一个功能完整的**接管**扩展（override）。目录内部按职责分：
-   ├─ spec.ts        纯数据（7 个工具 + 2 条命令 + overrideTools）
-   ├─ impl.ts        createRuntime()：只做接线（handlers / commandHandlers / prompt）
-   ├─ state.ts       状态层：上限、归一化、读写（`data/trpg/<会话>.json`）
-   ├─ render.ts      展示层：给模型的状态段 / 给群友的状态卡 / 掷骰与检定的结果格式
-   ├─ tools.ts       7 个工具的实现（校验 → 改状态 → 把"发生了什么"回给模型）
-   ├─ types.ts       领域类型（**不 import 本模块任何文件**，防成环）
-   └─ rules/         纯函数规则引擎（dice.ts / check.ts），**与对话链完全无关**
+   ├─ spec.ts        纯数据（4 个工具 + 2 条命令 + overrideTools）
+   ├─ impl.ts        createRuntime(deps)：只做接线（handlers / commandHandlers / prompt / onRunEnd）
+   ├─ state.ts       状态层：上限、归一化**含旧形状迁移**、读写（`data/trpg/<会话>.json`）
+   ├─ render.ts      展示层：给模型的状态段 / **给群友的玩家视角**（两份独立函数）/ 掷骰与检定的结果格式
+   ├─ tools.ts       4 个工具的实现（校验 → 改状态 → 把"发生了什么"回给模型）+ 行动经济账本
+   ├─ suggest.ts     DM 整轮沉默时的兜底建议（生成 + 解析）
+   ├─ entropy.ts     唯一熵源（`node:crypto`）—— 规则层不许 import 它，由调用方注入
+   ├─ types.ts       领域类型 + `HIDDEN_FIELDS`（**不 import 本模块任何文件**，防成环）
+   └─ rules/         纯函数规则引擎（dice.ts / percentile.ts / check.ts / economy.ts），**与对话链完全无关**
 ```
+
+**宿主递给扩展的口子**（`ExtraRuntimeDeps`，§7 与 `types.ts`）：`load(deps)` 收下它，目前只有一个成员 `deliverNote(chatKey, note)` —— 把一条机器条目送进会话。**为什么是参数而不是让扩展自己 import**：那条链要碰 `ChatStore` 与 `Orchestrator`，而 `extra → agent` 是反向依赖（层级闸门会拦），组装是 `web/` 的活。扩展只说"这是一条什么、正文是什么"，**怎么落库由宿主决定**。
 
 ```ts
 // registry.ts —— 与 web/runtime/lifecycle.ts 的装配清单同一形态：存函数引用、只 for...of、无按键分发
 export const EXTRA_REGISTRY: readonly ExtraEntry[] = [
   { ...clockSpec, load: () => import('./clock/impl.js').then((m) => m.createRuntime()) },
-  { ...trpgSpec,  load: () => import('./trpg/impl.js').then((m) => m.createRuntime()) }
+  { ...trpgSpec,  load: (deps) => import('./trpg/impl.js').then((m) => m.createRuntime(deps)) }
 ];
 ```
+
+⚠️ `load` 的参数列表允许有内容（`(deps)`），但**说明符必须仍是字面量** —— 写成变量就搬不进包，`t-extras.mjs` 有一条源级断言钉这两件事。
 
 **加一个扩展 = 建一个目录 + 在本文件加一行。** **顺序是语义**（`/能力` 的列表与"命令表第 0 条是谁"都按注册表顺序），新扩展加在末尾。
 
@@ -297,8 +303,9 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 | `tests/t-tool-protocol.mjs` | 协议纠正；`capabilityProtocol` 里那条漫画规则；**`recordSent` 真的记账 + 真的发 `session-update`**（缺 `at` 时不写 `"undefined"`） |
 | `tests/t-lifecycle.mjs` / `t-tasks.mjs` | `extras.runtime` 的 id 对账与 entry 顺序 |
 | `tests/t-admin.mjs` | 真起 app 验 `/api/extras`（含 `mode`）与 `extras` 配置回显 |
-| `tests/t-trpg.mjs`（80 条） | **第一个功能完整的接管扩展**：状态层的上限与归一化、7 个工具的正反路径、两条命令（含「非法表达式**抛**出去让外壳原样发进群」）、`prompt(chatKey)` 的人格前/状态后、以及**真起 `createApp()` 的端到端**（接管会话只剩跑团那 7 个工具、system prompt 是跑团人格且不含主人格、能力段让位、`say` 那一轮真的被判成 `done`、对照组是没被接管的群照常） |
-| `tests/t-trpg-rules.mjs`（45 条） | 与对话链无关的纯函数规则引擎（见 `docs/ts-migration-plan.md`） |
+| `tests/t-trpg.mjs`（145 条） | **第一个功能完整的接管扩展**：状态层的上限与归一化（含旧形状迁移）、4 个工具的正反路径、**可见性两套投影（含一条专门的泄漏断言）**、行动经济（去重 / 配额 / 新 `ctx` 即新回合）、`reveal` 与它的回流条目、**`onRunEnd` 的六条判据**（起真假模型端点 —— 不这样的话"没发条目"在生成失败时也是绿的，那是**假绿**）、两条命令（含「非法表达式**抛**出去让外壳原样发进群」）、`prompt(chatKey)` 的人格前/状态后、**源级断言：掷骰路径上不许出现 `Math.random`**、以及**真起 `createApp()` 的端到端**（接管会话只剩跑团那 4 个工具、system prompt 是跑团人格且不含主人格、能力段让位、`say` 那一轮真的被判成 `done`、`trpg-note` 能唤醒一轮并把标签送进正文、对照组是没被接管的群照常） |
+| `tests/t-trpg-rules.mjs`（109 条） | 与对话链无关的纯函数规则引擎（见 `docs/ts-migration-plan.md`）；含**两张检定等级表的穷举自检** |
+| `tests/t-extras.mjs` 第 16 段 | **运行结束钩子**（`runEnded`）：只有接管那个会话的扩展收得到、关掉扩展立即收不到、没有 `onRunEnd` 的实现静默跳过、钩子抛错不往上抛、`load(deps)` 收得到宿主的口子 |
 
 **证伪探针实测过十一条**（不是推断）：`toolDefs()` 去掉装载门 → `t-extras` 红 6 条；`join('\n\n')` 改回 `join('\n')` → `t-reply` **只在补了分隔符那条断言之后**才红（补之前 59 条全绿 —— 那正是这条断言的成因）；`extras.runtime` 从 `LIFECYCLE` 删掉 → `t-lifecycle` 红 6 条；去掉别名规范化 → `t-slash-commands` 红 2 条；**把边界从"空白/`[`/结束"收回成"空白/结束" → `t-slash-commands` 红 2 条**（含一条端到端的：`/转写[视频]` 什么都不入队）；**把 `#overrideEntry` 退回全局（不理会话键）→ `t-extras` 红 4 条**（表现就是"B 群也忽然变了个人"，谁也不报错）；**让接管绑定不起计时器 → `t-extras` 红 3 条**（表现是"接管永远不撒手"）。
 
@@ -310,7 +317,37 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 | 去掉 `prompt-builder` 里 `sendTool` 的透传（退回硬编码） | `t-reply` 红 3 条（三条工具名断言） |
 | `recordSent` 里的 `session.sent.push(...)` 注释掉 | `t-tool-protocol` 红 2 条，**其中一条是既有的端到端用例**：`send_message` 那条路径当场报 `{"status":"noreply","sent":[]}` —— 正是文档里说的那个症状 |
 | 删掉 `validateRegistry` 里那条「接管必须声明 `sendTool`」 | `t-extras` 红 1 条 |
-| 把 `web/app.ts` 的 `isOverridden(chatKey) ? mine : [...BUILTIN_TOOLS, ...mine]` 改成总是拼上内置工具 | **除 `t-trpg.mjs` 外全部套件照绿** —— 它报出的是「接管会话拿到 25 个内置工具 + 7 个跑团工具」。这一行是「接管时内置工具让位」的唯一实现处，而 `extras.toolDefs()` 那一层的断言看不见它（那一层只管扩展自己那几个） |
+| 把 `web/app.ts` 的 `isOverridden(chatKey) ? mine : [...BUILTIN_TOOLS, ...mine]` 改成总是拼上内置工具 | **除 `t-trpg.mjs` 外全部套件照绿** —— 它报出的是「接管会话拿到 25 个内置工具 + 4 个跑团工具」。这一行是「接管时内置工具让位」的唯一实现处，而 `extras.toolDefs()` 那一层的断言看不见它（那一层只管扩展自己那几个） |
 | 去掉跑团 `say` 里的 `recordSent` | `t-trpg` 红 6 条，含端到端那条（会话被记成 `noreply`） |
 | 把跑团 `prompt(chatKey)` 的 body 顺序倒过来（状态在前、人格在后） | `t-trpg` 红 3 条 |
 | 去掉 `#overrideEntry` 里那条"扩展被关掉就不算接管" | `t-extras` 红 3 条。**这条探针暴露的是跑团落地时抓到的真 bug**：关掉扩展（不重启）之后，被接管的会话会拿到"接管人格 + **零工具**"，而 `toolDefs()` 那条断言**照样绿**（它按启用闸门过滤，本来就返回 0）—— 红的只有 `isOverridden` 那条。这正是那个 bug 之所以静默的原因 |
+| 去掉跑团 `onRunEnd` 里那条"触发批里要有真人消息" | `t-trpg` 红 6 条。**第一版是假绿**：假模型端点的脚本是**消耗式**的，`arm()` 又赋回同一个（已被 shift 空的）数组引用，于是那些"本该不兜底"的用例即便守卫坏了也生成不出东西 —— 断言照绿。探针把守卫整行删掉才发现 |
+| 把 `renderStatusCard` 改回 `renderForModel` | `t-trpg` 红 2 条（`/跑团` 给群友的是 DM 视角） |
+| 把 `renderForPlayers` 的日志过滤去掉（改回 `campaign.log.slice(-3)`） | `t-trpg` 红 5 条。**这是套件抓出来的真泄漏**：`state`/`scene` 日志的正文里混着 `隐藏：pools/notes` 与`旗标：真凶是医生 = 是（暗线）` |
+| 把 `impl.ts` 的 `secureRng` 换成 `Math.random` | **只有 `t-trpg` 第 7 段那条源级断言会红，其余套件全绿** —— 掷骰本来就随机，没有任何行为断言看得出熵源换了。所以这条只能从源码文本上守 |
+| 往 `rules/` 里加一句 `import fs from 'node:fs'`（或 `from '../state.js'`） | `check-layers.mjs` 报两条（非相对 import / 越出 `rules/`），退出码 1 |
+
+## 11. 宿主口子与运行结束钩子（2026-10-16 补，随跑团的兜底建议一起落地）
+
+`load(deps)` 收下 `ExtraRuntimeDeps`；`ExtraRuntime` 上多了一个可选的 `onRunEnd?(session)`。
+
+### 11.1 `deliverNote(chatKey, note)` —— 把机器条目送进会话
+
+扩展只说"这是一条什么、正文是什么"（`ExtraNote`），**怎么落库由宿主决定**：`web/app.ts` 把它接到 `store.appendTrpgNote` → `deliverAsyncResult`（落存档 → 入窗 → 通知面板），与另外三种异步回流走同一条链。
+
+- **为什么是参数、不是让扩展自己 import**：那条链要碰 `ChatStore` 与 `Orchestrator`，而 `extra → agent` 是反向依赖（层级闸门会拦），组装是 `web/` 的活。
+- **为什么它不是"发一条群消息"**：那等于绕开扩展自己的发言工具与 `recordSent` 那本账。它落的是一条**未读的机器条目**，让模型有机会开口 —— 与 `AGENTS.md` 的「工具不得代模型发言」是同一条。
+
+### 11.2 `onRunEnd(session)` —— 一次 agent 运行结束了
+
+收尾点是 `chat/sessions.ts` 的 `SessionRegistry.finish()`（一次运行**唯一**的收尾处）。三条边界：
+
+- **判据是本会话此刻由谁接管**（`#overrideEntry`，与 `toolDefs` / `promptPlan` 同一处）。所以**附加模式的扩展永远收不到** —— 它们没有"这一轮"的概念；扩展被关掉（不重启）之后也一样收不到。
+- **旁路语义**：接线走 `SessionRegistry` 的**构造参数回调**（照 `StickerManager({ onChange })` 的先例 —— 低层不 import 高层），由 `extras.runEnded(session)` 转给实现。扩展抛错只记一行日志、不往上抛，更不影响 `finish()` 的持久化与返回值。
+- **`autoLoad: false`**：一次运行结束不是装载的理由；没装载就什么都不做。
+
+⚠️ **写扩展的人要记住的一条**：钩子里任何"再唤醒一轮"的动作（跑团落的那条建议条目就会唤醒下一轮），都必须带一条"**这一轮是不是真人推动的**"守卫 —— 否则它自己触发自己，形成无限循环。跑团的判据是"触发批里存在真人消息"，而这条判据同时就是它的终止证明。
+
+## 12. 已知缺口（知情取舍）
+
+- **`onRunEnd` 里产生的模型调用不进 token 账**。它发生在 `SessionRegistry.finish()` **之后**，而 `#persist` 对已结束的会话会**重复累加** `usage-today.json`，所以补记要先加一个"只累加增量"的入口 —— 那是 `SessionRegistry` 自己的一处设计隐患，不该由某个扩展顺手改。跑团的做法是把用量写进日志，账面上少算那几百个 token。

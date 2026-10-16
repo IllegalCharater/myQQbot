@@ -79,6 +79,12 @@ export function evaluateWindowTrigger({ entries, identity = {}, policy, roll }: 
   if (entries.some((entry) => entry?.kind === 'image-result')) {
     return { responseTier: 0, reason: '图片生成结果', shouldRespond: true };
   }
+  // 跑团笔记同理：它要么是"群友的认知变了"（扩展刚揭示了什么），要么是"DM 上一轮沉默、
+  // 兜底给了几个方向"。两种都得让模型看到并开口 —— 低档位把它静默消费掉，就等于那条笔记
+  // 白写了（而写它的那一次调用是花了钱的）。
+  if (entries.some((entry) => entry?.kind === 'trpg-note')) {
+    return { responseTier: 0, reason: '跑团笔记', shouldRespond: true };
+  }
   if (tier >= 2 && hitKeyword(texts.join('\n'), policy.keywords)) return { responseTier: 2, reason: '关键词命中', shouldRespond: true };
   const rollValue = Number(roll);
   const randomHit = rollValue < Math.max(0, Math.min(100, Number(policy.randomPercent) || 0));

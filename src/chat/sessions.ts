@@ -22,12 +22,23 @@ export class SessionRegistry {
   current: Map<string, SessionRecord>;
   _lastPersistAt?: Map<string, number>;
   /**
+   * 会话结束时的回调（"一次 agent 运行结束了"这件事的**唯一**通知点）。
+   *
+   * 收尾路径上的**旁路**：它抛错只记一行日志，绝不影响 `finish()` 的返回值或持久化 ——
+   * 持久化在前、回调在后，两者不共享任何失败。
+   */
+  onFinish: ((s: SessionRecord) => void) | null;
+  /**
    * @param {number} keepFiles 保留最近多少个会话记录文件；**0 = 不限制**。
    *   注意：不能用 `x || 300` 兜底 —— 0 是 falsy 会被误当成"未设置"变回 300，
    *   用户想"取消上限"就永远改不掉。也不能 Math.max(20,…) 强制下限。
    */
-  constructor(keepFiles = 0) {
+  constructor(keepFiles = 0, { onFinish = null }: { onFinish?: ((s: SessionRecord) => void) | null } = {}) {
     this.keepFiles = Math.max(0, Number.isFinite(Number(keepFiles)) ? Math.round(Number(keepFiles)) : 0);
+    // 与 `StickerManager` 的 `onChange` 同形：**低层不 import 高层**，所以"运行结束了"这件事
+    // 由构造参数回调交出去，由组装根接线（扩展在 `extra/`，比 `chat/` 高两级 —— 反向依赖会被
+    // `check-layers.mjs` 拦）。
+    this.onFinish = typeof onFinish === 'function' ? onFinish : null;
     this.index = [];   // [{ id, chatKey, startedAt, endedAt, status, outcome, usage, trigger, model, promptChars }]
     this.current = new Map(); // id -> session object（运行中的在内存里）
     fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -168,6 +179,13 @@ export class SessionRegistry {
         }
       }
     } catch { /* ignore */ }
+    // 通知放在**最后**：此刻会话已经落盘、索引已经更新，回调里读到的是一个稳定的收尾快照。
+    // 抛错只记日志 —— 它是旁路，不该有能力影响这次收尾。
+    try {
+      this.onFinish?.(s);
+    } catch (error: unknown) {
+      console.error('[sessions] onFinish 回调失败:', error instanceof Error ? error.message : error);
+    }
     return s;
   }
 

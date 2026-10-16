@@ -37,6 +37,7 @@ import { initPicImageSearch, closePicImageSearchClient } from '../media/image-so
 import { buildToolDefs } from '../agent/tools/index.js';
 import { createExtrasRuntime } from '../extra/runtime.js';
 import { EXTRA_REGISTRY } from '../extra/registry.js';
+import type { ExtraNote } from '../extra/types.js';
 
 export type { AppHandle, CreateAppOptions } from './types.js';
 
@@ -76,7 +77,22 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // ── 组件 ──
   const store = new ChatStore(cfg.store?.maxMessagesPerChat ?? 0);   // 0 = 不限
   const memory = new MemoryStore();
-  const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0);   // 0 = 不限
+  // `onFinish` 是"一次 agent 运行结束了"的唯一通知点（收尾在 `SessionRegistry.finish`）。
+  // 跑团的兜底建议挂在这上面：**DM 整轮一句话没说、而且这一轮是真人推动的**时，才生成
+  // 几个方向交回流条目，由下一轮的 DM 自己说出来（判据全在 `extra/trpg/impl.ts` 的 `onRunEnd`）。
+  //
+  // 用函数声明（会提升）：`extras` 要到下面才构造，而这个函数体要等真的有一次运行收尾
+  // 才会执行，那时它早就建好了（与 `deliverAsyncResult` 同一个理由）。
+  const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0, {
+    onFinish: (session) => extras.runEnded({
+      chatKey: session.chatKey,
+      status: session.status,
+      sentCount: session.sent.length,
+      // `trigger` 在类型上是 `unknown`（面板/投影按需读），这里按数组收窄 —— 收窄失败时
+      // 给空数组（"没有触发消息"），扩展那边就会因为"不是真人推动的"而不动作。
+      trigger: Array.isArray(session.trigger) ? (session.trigger as ChatMessage[]) : []
+    })
+  });   // 0 = 不限
   const onebot = new OneBotClient({
     wsUrl: cfg.snowluma?.wsUrl,
     httpUrl: cfg.snowluma?.httpUrl,
@@ -135,6 +151,15 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     deliverAsyncResult(chatKey, store.appendImageResult(chatKey, { prompt, status, reason }));
   }
 
+  // 扩展递进来的机器条目（跑团的【跑团笔记】/【行动建议】）。与上面三条**走同一条路** ——
+  // 落存档 → 入窗 → 通知面板，因为它要的正是同一件事：让模型看到并自己开口。
+  //
+  // 扩展只说"这是一条什么、正文是什么"（`ExtraNote`），**怎么落库在这里决定** —— 那一层
+  // 不该知道 `ChatMessage` 的形状（它连 `chat/store.js` 都不必认识）。
+  function deliverNote(chatKey: string, note: ExtraNote) {
+    deliverAsyncResult(chatKey, store.appendTrpgNote(chatKey, { noteKind: note.kind, text: note.text }));
+  }
+
   // 扩展运行时（`src/extra/`）：工具**声明**在这里静态拼进工具表，**实现**等模型首次调用那个
   // 工具时才 `import()`；空闲超过 `extras.idleUnloadMs` 就 dispose 掉重资源（工具仍留在表里）。
   //
@@ -145,7 +170,11 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   const extras = createExtrasRuntime(EXTRA_REGISTRY, {
     getConfig,
     builtinToolNames: buildToolDefs().map((def) => def.name),
-    log
+    log,
+    // 扩展把机器条目送回会话的口子（跑团的【跑团笔记】/【行动建议】）。
+    // 只有它需要：`deliverNote` 是**宿主才知道怎么做**的事（要落 `ChatStore`、要入窗），
+    // 而扩展那一层连 `chat/store.js` 都不必认识。
+    deliverNote
   });
   // 内置工具表算一次就够（它是常量，只有扩展那部分是变的）—— 上面那次调用只是为了拿名字。
   const BUILTIN_TOOLS = buildToolDefs();

@@ -78,12 +78,12 @@ const NON_WAKE_KINDS = new Set(['digest', 'note']);
  *
  * 它与 `NON_WAKE_KINDS` 是两回事（那个管"该不该占一次唤醒"，只有 digest/note 不进），
  * 与 `NON_PERSON_KINDS` 也是两回事（那个还多含 digest/note）。三个集合回答三个问题，
- * 别合并。`NON_PERSON_KINDS` 由它派生，所以**加第四种异步结果只要改这一行**。
+ * 别合并。`NON_PERSON_KINDS` 由它派生，所以**加一种异步结果只要改这一行**。
  *
  * 它另一个用途在 `agent/context/context-window.ts`：这些条目**不许被滑出窗口**
  * （滑出即标已读 = 模型永远看不到自己的任务结果，且没有任何日志）。
  */
-const ASYNC_RESULT_KINDS = new Set(['transcript', 'jmcomic-result', 'image-result']);
+const ASYNC_RESULT_KINDS = new Set(['transcript', 'jmcomic-result', 'image-result', 'trpg-note']);
 
 /** 这条条目是不是异步任务结果（见上）。 */
 export function isAsyncResult(m: ChatMessage | null | undefined): boolean {
@@ -764,6 +764,39 @@ export class ChatStore {
       text,
       ts,
       extra: { imageResult: { prompt: body, count: shot, status, reason: why } }
+    });
+  }
+
+  /**
+   * 追加一条**跑团笔记**（kind:'trpg-note'）：跑团扩展产生的机器条目。
+   *
+   * 两种子类型（`extra.trpgNote.kind`），标签在 `prompt-builder` 里按它分，**因为两者要模型
+   * 做的事不同**：
+   *   • `journal`（【跑团笔记】）—— 群友的认知变了（某个人物被揭示、某条暗线公开了）。
+   *     模型要做的：在叙事里自然承接，别念清单、别宣布"笔记已更新"。
+   *   • `suggest`（【行动建议】）—— DM 上一轮一句话没说，系统兜底给了几个方向。
+   *     模型要做的：自己组织语言把它们说出来（别照抄、别说是系统给的）。
+   *
+   * 与其他三种异步结果同形：`read:false` 才能进窗口（写成已读会落在 `#lastSeenId` 水位线
+   * 之下 —— 进程内看得见、重启后永久不可见，见 `appendTranscript` 的说明）。
+   *
+   * ⚠️ 正文由扩展给（它是"这一轮发生了什么"的唯一知情人），但**扩展不代模型发言**：
+   * 这条只负责把事实送进窗口，说不说、怎么说由下一轮的主 DM 决定 —— 与 AGENTS.md 的
+   * 「工具不得代模型发言」是同一条。
+   */
+  appendTrpgNote(chatKey: string, { noteKind = 'journal', text = '', ts = Date.now() }: {
+    noteKind?: string;
+    text?: unknown;
+    ts?: number;
+  } = {}) {
+    const kind = String(noteKind ?? '').trim() || 'journal';
+    const body = String(text ?? '').trim().slice(0, 1500);
+    return this.appendAsyncResult(chatKey, {
+      kind: 'trpg-note',
+      senderName: kind === 'suggest' ? '行动建议' : '跑团笔记',
+      text: body,
+      ts,
+      extra: { trpgNote: { kind, chars: Array.from(body).length } }
     });
   }
 

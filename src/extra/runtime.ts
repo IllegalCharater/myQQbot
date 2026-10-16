@@ -38,10 +38,17 @@ import type { AppConfig } from '../core/config.js';
 import type { PromptPlan } from '../core/prompt-catalog.js';
 import type { ToolArguments, ToolContext, ToolDefinition, ToolResult } from '../agent/shared/types.js';
 import type {
-  ExtraCommand, ExtraCommandInput, ExtraEntry, ExtraMode, ExtraRuntime, ExtraSpec
+  ExtraCommand, ExtraCommandInput, ExtraEntry, ExtraMode, ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd, ExtraSpec
 } from './types.js';
 
-export interface ExtrasDeps {
+/**
+ * 组装根递给运行时的那一份。**它同时是递给扩展实现的那一份**（`ExtraRuntimeDeps`）——
+ * 扩展的 `load(deps)` 收到的就是这个对象，所以那三个口子对扩展也是可见的。
+ *
+ * 多出来的三样是**运行时自己**要的，扩展不该用它们（`getConfig` 会让扩展绕过自己的配置项、
+ * `builtinToolNames` 是装载期的名字对账、`log` 只是让扩展能往宿主日志里写一行）。
+ */
+export interface ExtrasDeps extends ExtraRuntimeDeps {
   /** 每次现读（`idleUnloadMs` / `maxLoadsPerHour` 改完即时生效；`enabled` 例外，见 registry.ts）。 */
   getConfig(): AppConfig;
   /**
@@ -400,6 +407,29 @@ export class ExtrasRuntime {
     return { mode: 'attach', append, override: merged };
   }
 
+  /**
+   * 一次 agent 运行结束了 → 通知**正在接管这个会话**的那个扩展。
+   *
+   * 判据用 `#overrideEntry`（与 `toolDefs` / `promptPlan` 同一处）：它同时管三件事 ——
+   * 这个会话有没有被接管、那个扩展此刻还装不装、以及它还**能不能用**（`extras.enabled` 是
+   * 每次现读的）。"关掉扩展但不重启"会造出一个会话看似被接管、实则一个工具都没有的状态，
+   * 那种时候不该再往它身上挂钩子。
+   *
+   * **`autoLoad: false`**：一次运行结束不是装载的理由 —— 附加模式与会话没被接管的扩展都不该
+   * 因为"有人跑完一轮"而把实现拉起来。
+   *
+   * **不抛错**：它是收尾路径上的旁路。失败只记一行日志，主流程照常走完。
+   */
+  runEnded(session: ExtraRunEnd): void {
+    const override = this.#overrideEntry(session.chatKey);
+    if (!override) return;
+    void this.#withExtra(override.id, session.chatKey, false, async (rt) => {
+      if (typeof rt.onRunEnd === 'function') await rt.onRunEnd(session);
+    }).catch((error: unknown) => {
+      this.#deps.log(`[extras] ${override.id} 的 onRunEnd 失败：${errorMessage(error)}`);
+    });
+  }
+
   /** 给 `/能力` 与 `GET /api/extras` 看的注册表投影。 */
   list(): ExtraListRow[] {
     const config = this.#deps.getConfig();
@@ -558,7 +588,7 @@ export class ExtrasRuntime {
   async #loadImpl(entry: ExtraEntry, attach: boolean): Promise<ExtraActionResult> {
     let rt: ExtraRuntime;
     try {
-      rt = await entry.load();
+      rt = await entry.load(this.#deps);
     } catch (error) {
       return { ok: false, note: `「${entry.title}」加载失败：${errorMessage(error)}` };
     }

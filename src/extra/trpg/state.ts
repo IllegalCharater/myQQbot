@@ -15,7 +15,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../../core/paths.js';
-import type { TrpgCampaign, TrpgCharacter, TrpgLogEntry } from './types.js';
+import { HIDDEN_FIELDS } from './types.js';
+import type { HiddenField, TrpgCampaign, TrpgCharacter, TrpgFlag, TrpgLogEntry } from './types.js';
 
 // ── 上限 ─────────────────────────────────────────────────────────────────────
 /** 一个会话最多几场？——一场。这条常量只是把那个决定写下来，不参与判断。 */
@@ -32,6 +33,7 @@ export const MAX_FLAG_VALUE_CHARS = 160;
 export const MAX_SCENE_CHARS = 400;
 export const MAX_TITLE_CHARS = 60;
 export const MAX_SYSTEM_CHARS = 60;
+export const MAX_RULE_CHARS = 32;
 export const MAX_NAME_CHARS = 24;
 /** 属性/技能值的合法区间。防的是模型给出 `1e9` 或 `NaN` 这种让它自己以后都算不明白的数。 */
 export const MIN_STAT = -999;
@@ -112,8 +114,28 @@ function normalizeCharacter(raw: unknown): TrpgCharacter | null {
     hpMax,
     san: clampInt(source.san, 0, sanMax, sanMax),
     sanMax,
-    notes
+    notes,
+    // 缺省是"玩家已经见过"：老存档里没有这两个字段，而把既有的卡一夜之间变成"没发现"
+    // 会让玩家笔记整页空掉。要藏起来是一个**显式动作**（建卡时 visible=false）。
+    discovered: source.discovered !== false,
+    hidden: normalizeHidden(source.hidden)
   };
+}
+
+/**
+ * 字段级可见度：只留认识的那几个字段名，去重。
+ *
+ * 认不出来的一律丢弃而不是报错 —— 它可能来自一个更早/更晚的版本，而"某个字段名不认识"
+ * 不该让整张卡报废（同 `normalizeCharacter` 其余部分的取舍）。
+ */
+function normalizeHidden(raw: unknown): HiddenField[] {
+  if (!Array.isArray(raw)) return [];
+  const out: HiddenField[] = [];
+  for (const item of raw) {
+    const name = text(item, MAX_NAME_CHARS).toLowerCase() as HiddenField;
+    if ((HIDDEN_FIELDS as readonly string[]).includes(name) && !out.includes(name)) out.push(name);
+  }
+  return out;
 }
 
 function normalizeLogEntry(raw: unknown): TrpgLogEntry | null {
@@ -148,14 +170,14 @@ export function normalizeCampaign(raw: unknown, chatKey: string): TrpgCampaign |
     }
   }
 
-  const flags: Record<string, string> = {};
+  const flags: Record<string, TrpgFlag> = {};
   const rawFlags = source.flags;
   if (rawFlags && typeof rawFlags === 'object' && !Array.isArray(rawFlags)) {
     for (const [key, value] of Object.entries(rawFlags as Record<string, unknown>)) {
       if (Object.keys(flags).length >= MAX_FLAGS) break;
       const label = text(key, MAX_NAME_CHARS);
       if (!label) continue;
-      flags[label] = text(value, MAX_FLAG_VALUE_CHARS);
+      flags[label] = normalizeFlag(value);
     }
   }
 
@@ -174,6 +196,7 @@ export function normalizeCampaign(raw: unknown, chatKey: string): TrpgCampaign |
     chatKey,
     title: text(source.title, MAX_TITLE_CHARS),
     system: text(source.system, MAX_SYSTEM_CHARS),
+    rule: text(source.rule, MAX_RULE_CHARS),
     scene: text(source.scene, MAX_SCENE_CHARS),
     flags,
     characters,
@@ -184,13 +207,36 @@ export function normalizeCampaign(raw: unknown, chatKey: string): TrpgCampaign |
   };
 }
 
+/**
+ * 一条旗标归一化，**含旧形状的迁移**。
+ *
+ * 旧存档里 `flags` 是 `Record<string, string>`（值是裸字符串）。那份数据一律读成
+ * "玩家可见"：升级不该让已开团的群丢掉旗标，也不该把原本公开的事实一夜之间变成暗线 ——
+ * 把某条改成暗线是一个**显式动作**（`action=flag` 带 `visible=false`），不是升级的副作用。
+ * 同 `jmcomic.pythonPath` 与 `bookmarkFirst` 那两处迁移的取舍。
+ */
+function normalizeFlag(raw: unknown): TrpgFlag {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const entry = raw as Record<string, unknown>;
+    return {
+      value: text(entry.value, MAX_FLAG_VALUE_CHARS),
+      visible: entry.visible !== false
+    };
+  }
+  return { value: text(raw, MAX_FLAG_VALUE_CHARS), visible: true };
+}
+
 /** 开一场新团。不落盘 —— 由调用方决定什么时候写。 */
-export function emptyCampaign(chatKey: string, { title, system }: { title: string; system: string }): TrpgCampaign {
+export function emptyCampaign(
+  chatKey: string,
+  { title, system, rule }: { title: string; system: string; rule: string }
+): TrpgCampaign {
   const now = Date.now();
   return {
     chatKey,
     title: text(title, MAX_TITLE_CHARS) || '未命名',
     system: text(system, MAX_SYSTEM_CHARS),
+    rule: text(rule, MAX_RULE_CHARS),
     scene: '',
     flags: {},
     characters: [],
