@@ -59,7 +59,7 @@ export function createRuntime(): ExtraRuntime {
     },
     commandHandlers: {
       // 键与 `spec.commands[].name` 逐字相同 —— 那个名字就是命令词本身。
-      // 返回的是**回执文本**，由 `web/onebot/slash-commands.ts` 的 `runCommand` 发进群
+      // 返回的是**回执文本**，由 `web/onebot/commands.ts` 的 `runCommand` 发进群
       // （回执的发送与失败话术全在那一处，扩展不碰 sender）。
       async '/时间'(input) {
         const gone = disposedGuard();

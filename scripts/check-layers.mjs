@@ -133,6 +133,49 @@ if (fs.existsSync(rulesDir)) {
 // 而 `hot-search/` 没有 —— 它的消费者直接用那四个文件、套件也直接取内部的纯函数，
 // 桶文件对它只是多一层。写文档时别把"通常有"说成"必须有"。
 
+// 跑团（`extra/trpg/`）：**七个分层子目录 + 一个只放组装/声明/入口的根**。
+//
+// 判据与 `agent/` / `web/` 那两条逐字相同：**没有闸门，搬进子目录的东西会一个一个搬回来**。
+// 跑团在 2026-10-16 那次重构里从 17 个平铺文件长成 30+，根目录白名单是那次重构唯一的机检约束。
+// 七个子目录各自的分工见 `src/extra/trpg/index.ts` 与 AGENTS.md「跑团（TRPG）」。
+const trpgRoot = path.join(SRC, 'extra', 'trpg');
+const TRPG_GROUPS = ['rules', 'model', 'store', 'scenario', 'commands', 'tools', 'render'];
+const TRPG_ROOT_ALLOW = new Set(['index.ts', 'types.ts', 'spec.ts', 'impl.ts', 'entropy.ts', 'suggest.ts']);
+if (fs.existsSync(trpgRoot)) {
+  for (const group of TRPG_GROUPS) {
+    if (!fs.existsSync(path.join(trpgRoot, group))) errors.push(`extra/trpg/${group}: 缺少跑团分层目录`);
+  }
+  for (const entry of fs.readdirSync(trpgRoot, { withFileTypes: true })) {
+    if (entry.isFile() && SOURCE_EXT.test(entry.name) && !TRPG_ROOT_ALLOW.has(entry.name)) {
+      errors.push(`extra/trpg/${entry.name}: 跑团根目录只许放桶文件/领域类型/声明/组装/熵源/兜底建议，`
+        + `实现请落进 ${TRPG_GROUPS.join(' / ')} 之一`);
+    }
+  }
+}
+
+// 跑团的**领域模型层**（`extra/trpg/model/`）：纯数据变换，**不碰外部世界**。
+//
+// 判据是"给一份状态，返回新状态"：归一化、钳制、状态机都在这里，而需要读写时一律**收 store
+// 端口作参数**（`beginCampaign(chatKey, args, { store, rules, scenarios })` 就是这个形状）。
+// 所以它不该认识 `node:fs` / `node:path` —— 那两样一出现，"这一层能不能脱离磁盘被测"就没了答案。
+//
+// ⚠️ 与 `rules/` 那条不同，这里**允许** import 本模块之外的东西（它要用 `agent` 的 `ok`/`err`），
+// 只拦那两个内置模块。**这条也只靠注释守不住**：顺手 import 一个 `node:path` 去 join 个路径
+// 不会有任何报错，而破坏是静默的（测试开始需要建真目录）。
+const modelDir = path.join(trpgRoot, 'model');
+if (fs.existsSync(modelDir)) {
+  for (const source of filesUnder(modelDir)) {
+    const sourceRel = slash(path.relative(SRC, source));
+    const text = fs.readFileSync(source, 'utf8');
+    for (const match of text.matchAll(SPECIFIER)) {
+      const specifier = match[1] || match[2] || match[3];
+      if (specifier === 'node:fs' || specifier === 'node:path') {
+        errors.push(`${sourceRel} -> ${specifier}: 跑团领域模型层不做 I/O，需要读写时收 store 端口作参数`);
+      }
+    }
+  }
+}
+
 for (const source of files) {
   const sourceRel = slash(path.relative(SRC, source));
   const sourceDomain = sourceRel.split('/')[0];

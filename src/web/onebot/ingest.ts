@@ -21,7 +21,7 @@ import {
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { OneBotEvent } from '../../qq/types.js';
 import type { SendQueue } from '../../qq/sender.js';
-import type { SlashCommandDeps, SlashCommands } from './slash-commands.js';
+import type { CommandDeps, CommandDispatcher } from './commands.js';
 import type { ExtrasRuntime } from '../../extra/runtime.js';
 import type { VideoTranscriptionQueue } from '../../media/transcription/index.js';
 import type { ImageGenQueue } from '../../media/image-gen/index.js';
@@ -101,12 +101,12 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
   transcription: Pick<VideoTranscriptionQueue, 'enqueue'>;
   imageGen: Pick<ImageGenQueue, 'enqueue'>;
   /** 斜杠命令层的漫画下载端口（`onebot/sender/store` 由装配根在绑定处补齐）。 */
-  jmcomic: SlashCommandDeps['jmcomic'];
+  jmcomic: CommandDeps['jmcomic'];
   /**
    * 斜杠命令分发器。**由装配根建好递进来**，而不是这里 import 那两个模块级函数 ——
-   * 命令表里现在还有扩展贡献的命令，而那张表要按装载状态现算（见 `slash-commands.ts`）。
+   * 命令表里现在还有扩展贡献的命令，而那张表要按装载状态现算（见 `commands.ts`）。
    */
-  commands: SlashCommands;
+  commands: CommandDispatcher;
   /**
    * 扩展的**入站拦截**端口（见 `ExtraRuntime.intercept`）。**只暴露这一个方法** ——
    * 与 `/漫画` 只拿 `enqueue` 同形：接入层不该认识整个扩展运行时。
@@ -285,10 +285,10 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     const replyToMessageId = typeof event.message_id === 'string' || typeof event.message_id === 'number'
       ? event.message_id : null;
     // 斜杠命令（`/转写`、`/画` …）是**确定性快路径**：不进 LLM、不占一次唤醒。
-    // 判定、解析、入队与即时回执**全在 `web/onebot/slash-commands.ts` 一处**（那张表是唯一事实源），
+    // 判定、解析、入队与即时回执**全在 `web/onebot/commands.ts` 一处**（那张表是唯一事实源），
     // 这里只用同一个判据决定两件事：要不要并入引用附件、要不要落成已读历史。
     // 判据若在这里另写一份，漂移的表现是"命令没被认出来、消息进了 LLM"，不报任何错。
-    const slashCommand = commands.isSlashCommand(commandText, chatKey);
+    const slashCommand = commands.isCommandEntry(commandText, chatKey);
     if (slashCommand && repliedMedia.length) {
       // 引用的那条消息里的附件要并进来：`/转写` 靠它取引用视频，`/画` 靠它取参考图（图生图）。
       media.push(...repliedMedia);
@@ -333,7 +333,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     // 命令消息到此为止：它已经作为**已读存档**留在会话里了，处理完就返回、不惊动模型。
     // 出图/转写这类要几十秒的活由各自的单并发后台队列接着干，不占住 OneBot 的入站处理链。
     if (slashCommand) {
-      await commands.handleSlashCommand(
+      await commands.handleCommandEntry(
         {
           chatKey,
           // 用 `commandText` 而不是 `text`：后者可能已被合并转发展开整份替换过。

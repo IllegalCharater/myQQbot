@@ -9,7 +9,7 @@
 // 为什么值得花这个成本：`web/app.ts` 里那句 `isOverridden(chatKey) ? mine : [...BUILTIN_TOOLS, ...mine]`
 // 是"接管时内置工具让位"的**唯一**实现处，而 `extras.toolDefs()` 那一层的断言看不见它
 // （那一层只管扩展自己那几个）。少了这一段，把内置工具重新拼回去不会有任何东西变红，
-// 而症状是"接管之后模型手里同时有跑团工具和 25 个内置工具，人格指令却在叫它用 say"。
+// 而症状是"接管之后模型手里同时有跑团工具和一堆内置工具，人格指令却在叫它用 say"。
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -19,23 +19,48 @@ import { ROOT, load, stripComments } from './lib/src.mjs';
 const DIR = dataDir('qqagent-trpg-');
 const { ok, done } = checker();
 
+// 上层一律走**桶文件**（`web/` 路由也是这么用的）；只有纯函数层 `rules/` 直接取内部实现 ——
+// 那是它存在的意义（能脱离平台独立测试），也是这个套件大半断言的对象。
 const {
-  TrpgStore, appendLog, campaignFile, clampInt, emptyCampaign, findCharacter, normalizeCampaign, text
-} = await load('extra/trpg/state.js');
-const {
-  formatCheck, formatRoll, renderForModel, renderForPlayers, renderStatusCard
-} = await load('extra/trpg/render.js');
-const { createHandlers } = await load('extra/trpg/tools.js');
-const { createRuntime, saveScenario, scenarioNameFromFile } = await load('extra/trpg/impl.js');
+  TrpgStore, appendLog, campaignFile, clampInt, emptyCampaign, findCharacter, normalizeCampaign, text,
+  formatCheck, formatRoll, renderForModel, renderForPlayers, renderStatusCard,
+  createHandlers, createRuntime, saveScenario, scenarioNameFromFile,
+  RuleStore, ScenarioStore, isFormattedScenario, parseScenario, saveScenarioText,
+  formatScenarioText, stripFence, MODE_LABEL, TrpgModeStore, parseMode, TRPG_ASSISTANT_TOOLS, beginCampaign,
+  JournalStore
+} = await load('extra/trpg/index.js');
 const { DiceError, looksLikeDiceRequest, rollDice } = await load('extra/trpg/rules/dice.js');
 const { createLedger, consume, recall, remember } = await load('extra/trpg/rules/economy.js');
-const { RuleStore } = await load('extra/trpg/rule-store.js');
-const { ScenarioStore, isFormattedScenario, parseScenario, saveScenarioText } = await load('extra/trpg/scenario.js');
-const { formatScenarioText, stripFence } = await load('extra/trpg/scenario-format.js');
-const { MODE_LABEL, TrpgModeStore, parseMode } = await load('extra/trpg/mode.js');
-const { TRPG_ASSISTANT_TOOLS } = await load('extra/trpg/spec.js');
-const { beginCampaign } = await load('extra/trpg/tools.js');
 const { EXTRA_REGISTRY } = await load('extra/registry.js');
+
+/**
+ * `text` → 该由哪个处理函数接手。
+ *
+ * `.trpg <子命令>` 展开后的键是**两截**（`'.trpg mode'`，见 `ExtraCommandSpec.subs`），
+ * 所以先试前两个词、再退回第一个。**两条都要试**：`.r 3d6` 的键只有一截。
+ */
+function routeIn(commands) {
+  return (text) => {
+    const words = String(text).trim().split(/\s+/);
+    const two = `${words[0]} ${words[1] ?? ''}`;
+    return typeof commands[two] === 'function' ? two : words[0];
+  };
+}
+
+/**
+ * 调一条命令。
+ *
+ * 命令缺席时**返回一句话**而不是让 `undefined(...)` 抛出去：抛了会让整个套件在第一个用例处
+ * **中止**，后面的断言从未运行（仓库里记过这个坑，报出来仍只是"这个套件失败了"）。
+ */
+function callIn(commands) {
+  const route = routeIn(commands);
+  return (text, chatKey, media = []) => {
+    const key = route(text);
+    if (typeof commands[key] !== 'function') return Promise.resolve(`（没有这条命令：${key}）`);
+    return commands[key]({ chatKey, senderId: '10001', text, media, replyToMessageId: null });
+  };
+}
 
 const store = new TrpgStore();
 /** 规则表存在临时数据目录的 `rules/` 下（内置两套由它懒补齐，所以这里不用自己造）。 */
@@ -506,38 +531,43 @@ const status = (key) => store.read(key);
   // 与 `checkRuntimeShape` 的装载期对账同一条判据：**声明 ⇄ 实现两个方向逐个相等**。
   // 从注册表取声明、从 `createRuntime()` 取实现 —— 两边各改一处而漏掉另一处的表现是
   // "命令敲下去没有任何反应"，而那是装配期就会拒绝装载的（这里只是提前钉住）。
+  // ⚠️ **要展开 `subs`**：带 subs 的声明自己不占 `names[0]`，真正会被匹配的是
+  // `<命令> <子命令>` 那些串（见 `ExtraCommandSpec.subs`）。不展开的话这条断言会把
+  // 正确的实现判成"实现了却没声明"。
   const declaredCommands = (EXTRA_REGISTRY.find((item) => item.id === 'trpg')?.commands ?? [])
-    .map((spec) => spec.names[0]);
+    .flatMap((spec) => (spec.subs?.length
+      ? spec.subs.map((sub) => `${spec.names[0]} ${sub}`)
+      : [spec.names[0]]));
   ok('命令处理函数的键就是 names[0]（装载时两个方向对账）',
     Object.keys(commands ?? {}).sort().join(',') === [...declaredCommands].sort().join(','),
     JSON.stringify(Object.keys(commands ?? {})));
 
-  const rollReceipt = await commands['/掷骰']({
-    chatKey: key, senderId: '10001', text: '/掷骰 3d6', media: [], replyToMessageId: null
+  const rollReceipt = await commands['.r']({
+    chatKey: key, senderId: '10001', text: '.r 3d6', media: [], replyToMessageId: null
   });
-  ok('/掷骰 直接给结果，并记进日志（零 LLM 成本的快路径）',
+  ok('.r 直接给结果，并记进日志（零 LLM 成本的快路径）',
     /3d6 → \d\+\d\+\d/.test(rollReceipt) && /10001 掷/.test(status(key).log.at(-1).text), String(rollReceipt));
 
-  const multiReceipt = await commands['/掷骰']({
-    chatKey: key, senderId: '1', text: '/掷骰 2d6+1d4', media: [], replyToMessageId: null
+  const multiReceipt = await commands['.r']({
+    chatKey: key, senderId: '1', text: '.r 2d6+1d4', media: [], replyToMessageId: null
   });
-  ok('/掷骰 也认得新文法（多组相加不再报错）', /2d6\+1d4 →/.test(multiReceipt), String(multiReceipt));
+  ok('.r 也认得新文法（多组相加不再报错）', /2d6\+1d4 →/.test(multiReceipt), String(multiReceipt));
 
-  ok('/掷骰 不带表达式时回用法（而不是静默）',
-    /用法/.test(await commands['/掷骰']({ chatKey: key, senderId: '1', text: '/掷骰', media: [], replyToMessageId: null })));
+  ok('.r 不带表达式时回用法（而不是静默）',
+    /用法/.test(await commands['.r']({ chatKey: key, senderId: '1', text: '.r', media: [], replyToMessageId: null })));
 
   // 坏表达式**抛**出去 —— 外壳会把 message 原样发进群。
   let thrown = null;
   try {
-    await commands['/掷骰']({ chatKey: key, senderId: '1', text: '/掷骰 3d6+', media: [], replyToMessageId: null });
+    await commands['.r']({ chatKey: key, senderId: '1', text: '.r 3d6+', media: [], replyToMessageId: null });
   } catch (error) { thrown = error; }
-  ok('/掷骰 的非法表达式**抛出**（外层 runCommand 会把这句中文原样发进群）',
+  ok('.r 的非法表达式**抛出**（外层 runCommand 会把这句中文原样发进群）',
     thrown instanceof DiceError && /骰子表达式/.test(thrown.message), String(thrown?.message));
 
-  const statusReceipt = await commands['/跑团']({
-    chatKey: hideKey, senderId: '1', text: '/跑团', media: [], replyToMessageId: null
+  const statusReceipt = await commands['.trpg status']({
+    chatKey: hideKey, senderId: '1', text: '.trpg status', media: [], replyToMessageId: null
   });
-  ok('/跑团 给的是**玩家视角**：藏起来的人与暗线旗标都不出现',
+  ok('.trpg status 给的是**玩家视角**：藏起来的人与暗线旗标都不出现',
     /《暗涌》/.test(statusReceipt) && !/线人/.test(statusReceipt) && !/真凶是医生/.test(statusReceipt),
     String(statusReceipt).slice(0, 200));
 }
@@ -671,29 +701,37 @@ const status = (key) => store.read(key);
   ok('坏规则表**不进清单**（它本来也选不中），但仍在工作台列表里',
     !/broken/.test(briefing) && rules.list().some((r) => r.id === 'broken'));
 
-  // ── `/开局` 命令：与工具共用同一个实现 ──
+  // ── `.trpg new` 命令：与工具共用同一个实现（P2 起建局归 new，start 只推状态） ──
   const commands = runtime.commandHandlers;
-  const at = (command, text, key) => commands[command]({
-    chatKey: key, senderId: '10001', text, media: [], replyToMessageId: null
-  });
-  const cmd = (text, key = 'group:940') => at('/开局', text, key);
-  const opened = await cmd('/开局 灯塔');
-  ok('`/开局 <剧本>` 真的开了一局，且与工具注入的东西一致',
+  const at = (text, key) => callIn(commands)(text, key);
+  const cmd = (text, key = 'group:940') => at(text, key);
+  const opened = await cmd('.trpg new 灯塔');
+  ok('`.trpg new <剧本>` 真的开了一局，且与工具注入的东西一致',
     /剧本「灯塔」已注入/.test(String(opened)) && store.read('group:940').title === '改过的'
     && store.read('group:940').scenario.id === '灯塔', String(opened));
-  // 不带剧本名 = **选剧本这一步**：列出可选的，并告诉对方怎么敲（不是一句干巴巴的用法）。
-  ok('`/开局` 不带剧本名时列出可选的剧本（而不是静默、也不是一句"用法"）',
-    /选一份剧本开局/.test(String(await cmd('/开局')))
-    && /剧本库/.test(String(await cmd('/开局'))), String(await cmd('/开局')));
-  // 拆掉子命令之后，`/跑团 开局 灯塔` 这种旧写法（或敲错）会落到 `/跑团` 上。
+  ok('新建的一局停在 **`preparing`**（等人报名/建卡/确认），而且发起人自动进了名单',
+    store.read('group:940').status === 'preparing'
+    && JSON.stringify(store.read('group:940').players) === JSON.stringify(['10001']),
+    JSON.stringify([store.read('group:940').status, store.read('group:940').players]));
+  ok('回执说清了下一步是 `.trpg join` / `.pc new` / `.trpg start`（不是让模型去建卡）',
+    /\.trpg join/.test(String(opened)) && /\.pc new/.test(String(opened)), String(opened));
+  // 不带名字 = **选剧本这一步**：列出可选的，再给用法（不是一句干巴巴的"用法"）。
+  ok('`.trpg new` 不带名字时列出可选的剧本（而不是静默、也不是光一句"用法"）',
+    /用法：/.test(String(await cmd('.trpg new', 'group:943')))
+    && /剧本库里/.test(String(await cmd('.trpg new', 'group:943'))), String(await cmd('.trpg new', 'group:943')));
+  // 认不出来的子命令落到**裸 `.trpg`** 上（它排在所有子命令之后）。
   // **不能静默忽略** —— 那样群友只会看到一张状态卡，不知道自己敲的那条为什么没生效。
-  ok('**带参数的 `/跑团` 不再当子命令**，而是回一张命令清单',
-    /这几条各自是一条命令/.test(String(await at('/跑团', '/跑团 开局 灯塔', 'group:940')))
-    && /\/开局/.test(String(await at('/跑团', '/跑团 乱写', 'group:940'))),
-    String(await at('/跑团', '/跑团 开局 灯塔', 'group:940')));
-  ok('不带参数时仍是玩家视角的状态卡（**原语义一个字没变**）',
-    /【跑团笔记】/.test(String(await at('/跑团', '/跑团', 'group:930')))
-    && !/线人/.test(String(await at('/跑团', '/跑团', 'group:907'))));
+  const stray = String(await at('.trpg 乱写', 'group:940'));
+  ok('**认不出的子命令落到裸 `.trpg` 上**，回一张命令清单（不默默当成某一个）',
+    /这几条各自是一条命令/.test(stray) && /\.trpg new/.test(stray), stray);
+  ok('**子命令优先于裸命令**（顺序即行为）：`.trpg end` 走的是收团，不是被裸命令吃掉',
+    /收团|没有在进行中的团/.test(String(await cmd('.trpg end', 'group:944'))),
+    String(await cmd('.trpg end', 'group:944')));
+  ok('`子命令` 那个词本身也能当参数用（`.trpg new status` 是"开一局叫 status 的团"）',
+    !/这几条各自是一条命令/.test(String(await cmd('.trpg new status', 'group:942'))));
+  ok('.trpg status 不带参数时仍是玩家视角的状态卡（**原语义一个字没变**）',
+    /【跑团笔记】/.test(String(await at('.trpg status', 'group:930')))
+    && !/线人/.test(String(await at('.trpg status', 'group:907'))));
 
   // ── 工作台：列表 + 删除 ──
   ok('工作台列表来自磁盘（列出来的，一定是真的有的）',
@@ -723,8 +761,8 @@ const status = (key) => store.read(key);
     fileId: 'd5df8391f95b09df4de35ea1c783c368_f14a71fa-c936-11f1-ad09-6dfb0de8648e',
     size: 4, url: 'http://180.101.246.192:80/asn.x', ...over
   });
-  const save = (media, name, key = 'group:950') => commands['/剧本']({
-    chatKey: key, senderId: '10001', text: `/剧本 ${name}`, media, replyToMessageId: null
+  const save = (media, name, key = 'group:950') => commands['.trpg scenario']({
+    chatKey: key, senderId: '10001', text: `.trpg scenario ${name}`, media, replyToMessageId: null
   });
 
   // 不带名字时：引用了文件就用文件名当名字（那条路会真的去下载，所以放在下面那个带回环服务的
@@ -833,8 +871,8 @@ const status = (key) => store.read(key);
         model.requests.length === 0 && /已存剧本「现成的」/.test(fast) && !/模型整理/.test(fast), fast);
       // 回执末尾那句"下一步敲什么"是**用户可见**的，而且它跟着命令一起改过名 ——
       // 漏改的表现是**机器人教群友敲一条不存在的命令**，不会有任何报错。
-      ok('回执末尾给的是**拆开后的**开局命令（`/开局 <名字>`，不是作废的 `/跑团 开局`）',
-        /开局：\/开局 现成的/.test(fast) && !/跑团 开局/.test(fast), fast);
+      ok('回执末尾给的是**当前面**的开局命令（`.trpg start <名字>`，不是作废的 `/跑团 开局`）',
+        /开局：\.trpg start 现成的/.test(fast) && !/跑团 开局|\/开局/.test(fast), fast);
 
       model.requests = [];
       model.script = [{ content: '```markdown\n' + FORM + '\n```' }];
@@ -923,27 +961,23 @@ const status = (key) => store.read(key);
 
   // ── `/模式` 这条命令 ──
   const commands = createRuntime().commandHandlers;
-  const tell = (text, chatKey = 'group:mode-c') => {
-    const word = String(text).trim().split(/\s+/)[0];
-    if (typeof commands[word] !== 'function') return Promise.resolve(`（没有这条命令：${word}）`);
-    return commands[word]({ chatKey, senderId: '10001', text, media: [], replyToMessageId: null });
-  };
+  const tell = (text, chatKey = 'group:mode-c') => callIn(commands)(text, chatKey);
 
   ok('`/模式` 不带参数 → 报当前模式与两条可用命令',
-    /当前：/.test(String(await tell('/模式'))) && /助手/.test(String(await tell('/模式'))));
+    /当前：/.test(String(await tell('.trpg mode'))) && /助手/.test(String(await tell('.trpg mode'))));
   ok('`/模式 助手` → 记住，并回一句"下一轮生效"',
-    /已切到/.test(String(await tell('/模式 助手'))) && modes.read('group:mode-c') === 'assistant');
+    /已切到/.test(String(await tell('.trpg mode 助手'))) && modes.read('group:mode-c') === 'assistant');
   ok('助手模式下不带参数敲 `/跑团` → 给的是**这个模式怎么用**，不是一张"还没开团"的空状态卡',
-    /发一个骰子表达式/.test(String(await tell('/跑团'))) && !/还没有开团/.test(String(await tell('/跑团'))));
-  ok('助手模式下那条回复指向的是 `/模式 DM`（写成旧词形的话群友照抄就切不回来）',
-    /`\/模式 DM`/.test(String(await tell('/跑团'))));
-  ok('`/模式 DM` → 切回来', /已切到/.test(String(await tell('/模式 DM')))
+    /发一个骰子表达式/.test(String(await tell('.trpg status'))) && !/还没有开团/.test(String(await tell('.trpg status'))));
+  ok('助手模式下那条回复指向的是 `.trpg mode DM`（写成旧词形的话群友照抄就切不回来）',
+    /`\.trpg mode DM`/.test(String(await tell('.trpg status'))));
+  ok('`/模式 DM` → 切回来', /已切到/.test(String(await tell('.trpg mode DM')))
     && modes.read('group:mode-c') === 'dm');
   ok('重复切到同一个模式时说清"已经是了"，不假装做了什么',
-    /已经是/.test(String(await tell('/模式 DM'))) && String(await tell('/模式 DM')).includes(MODE_LABEL.dm));
+    /已经是/.test(String(await tell('.trpg mode DM'))) && String(await tell('.trpg mode DM')).includes(MODE_LABEL.dm));
   ok('不认识的模式 → 列出可用的两个（不默默当成某一个）',
-    /不认识的模式/.test(String(await tell('/模式 随便'))) && modes.read('group:mode-c') === 'dm');
-  ok('帮助里列了「模式」这一条', /`\/模式/.test(String(await tell('/跑团 乱写'))));
+    /不认识的模式/.test(String(await tell('.trpg mode 随便'))) && modes.read('group:mode-c') === 'dm');
+  ok('帮助里列了「模式」这一条', /`\.trpg mode/.test(String(await tell('.trpg 乱写'))));
 }
 
 // ── 5e. 助手模式的拦截：整条消息都不进模型 ───────────────────────────────────
@@ -1050,59 +1084,60 @@ const status = (key) => store.read(key);
   const commands = createRuntime().commandHandlers;
   // 按 `text` 的第一个词路由到对应命令 —— 断言里写的因此仍是**群友真敲的那一整句**，
   // 而不是"我以为该调哪个 handler"。
-  const tell = (text, chatKey = 'group:flow', media = []) => {
-    const word = String(text).trim().split(/\s+/)[0];
-    // 命令缺席时**返回一句话**而不是让 `undefined(...)` 抛出去：抛了会让整个套件在第一个
-    // 用例处**中止**，后面的断言从未运行（仓库里记过这个坑，报出来仍只是"这个套件失败了"）。
-    if (typeof commands[word] !== 'function') return Promise.resolve(`（没有这条命令：${word}）`);
-    return commands[word]({ chatKey, senderId: '10001', text, media, replyToMessageId: null });
-  };
+  const tell = (text, chatKey = 'group:flow', media = []) => callIn(commands)(text, chatKey, media);
 
-  ok('**每条命令各自是一个 handler**（拆开之后加一个动作 = 加一行声明 + 一个 handler）',
-    ['/跑团', '/模式', '/剧本', '/开局', '/掷骰'].every((name) => typeof commands[name] === 'function')
-    && Object.keys(commands).length === 5, JSON.stringify(Object.keys(commands)));
+  ok('**每条命令各自是一个 handler**（加一个动作 = 加一行声明 + 一个 handler）',
+    ['.trpg new', '.trpg join', '.trpg status', '.trpg start', '.trpg end', '.trpg mode',
+      '.trpg scenario', '.trpg', '.pc new', '.pc roll', '.pc confirm', '.pc show', '.pc save', '.pc',
+      '.ra', '.rh', '.st', '.r']
+      .every((name) => typeof commands[name] === 'function')
+    && Object.keys(commands).length === 18, JSON.stringify(Object.keys(commands)));
 
-  const wizard = String(await tell('/跑团'));
-  ok('还没开局时 `/跑团` 给的是**向导**（已经开局给的是局势卡，那是另一段的事）',
+  const wizard = String(await tell('.trpg status'));
+  ok('还没开局时 `.trpg status` 给的是**向导**（已经开局给的是局势卡，那是另一段的事）',
     /还没开局/.test(wizard) && /1\. 定模式/.test(wizard) && /2\. 传剧本/.test(wizard)
-    && /3\. 开局/.test(wizard), wizard.slice(0, 80));
-  ok('向导按「定模式 → 传剧本 → 开局」排，而且把**当前模式**写在明面上',
+    && /3\. 起一局/.test(wizard) && /5\. 都确认了/.test(wizard), wizard.slice(0, 80));
+  ok('向导按「定模式 → 传剧本 → 起一局 → 建卡 → 开跑」排，而且把**当前模式**写在明面上',
     wizard.indexOf('定模式') < wizard.indexOf('传剧本')
-    && wizard.indexOf('传剧本') < wizard.indexOf('3. 开局')
-    && wizard.includes(MODE_LABEL.dm), wizard.slice(0, 200));
+    && wizard.indexOf('传剧本') < wizard.indexOf('3. 起一局')
+    && wizard.indexOf('3. 起一局') < wizard.indexOf('4.')
+    && wizard.indexOf('4.') < wizard.indexOf('5. 都确认了')
+    && wizard.includes(MODE_LABEL.dm), wizard.slice(0, 240));
   ok('向导里带上了剧本清单（不是干巴巴一句"没有"）',
     /剧本库里/.test(wizard) && /(引用它敲|要再加一份)/.test(wizard));
-  ok('向导指向的是**拆开后的命令**（还写着 `/跑团 开局` 的话，群友照抄就敲不动）',
-    /`\/模式 DM`/.test(wizard) && /`\/剧本`/.test(wizard) && /`\/开局 <剧本名>`/.test(wizard)
-    && !/\/跑团 (模式|剧本|开局)/.test(wizard), wizard);
+  ok('向导指向的是**当前面的命令**（写着旧词形的话，群友照抄就敲不动）',
+    /`\.trpg mode DM`/.test(wizard) && /`\.trpg scenario`/.test(wizard)
+    && /`\.trpg new/.test(wizard) && /`\.trpg join`/.test(wizard)
+    && /`\.pc new/.test(wizard) && /`\.pc confirm`/.test(wizard) && /`\.trpg start`/.test(wizard)
+    && !/\/跑团|\/模式|\/剧本|\/开局/.test(wizard), wizard);
 
   ok('`/剧本` 不带名字又没引用文件 → **列出剧本库**（顺带说了怎么再传一份）',
-    /剧本库里/.test(String(await tell('/剧本')))
-    && /(引用它敲|要再加一份)/.test(String(await tell('/剧本'))));
+    /剧本库里/.test(String(await tell('.trpg scenario')))
+    && /(引用它敲|要再加一份)/.test(String(await tell('.trpg scenario'))));
   ok('`/剧本 甲` 带了名字却没引用文件 → 明说没有文件 + 用法（不假装存下了）',
-    /没有文件/.test(String(await tell('/剧本 甲')))
-    && /用法/.test(String(await tell('/剧本 甲'))));
+    /没有文件/.test(String(await tell('.trpg scenario 甲')))
+    && /用法/.test(String(await tell('.trpg scenario 甲'))));
   // 命令真的把 `input.media` 递给了 `saveScenario`，而且名字是**从文件名推的**：
   // 这两件事由"没有 url 时的早退分支"验出来 —— 它在下载**之前**返回，所以既不联网、也不起 Python。
   // 推不出名字的话这里拿到的是剧本清单（而不是这条回执），断言当场红。
   ok('`/剧本` 引用了一份没给下载地址的文件 → 名字取自文件名，media 真的递到了 saveScenario',
-    /拿到了「灯塔.md」/.test(String(await tell('/剧本', 'group:flow4',
+    /拿到了「灯塔.md」/.test(String(await tell('.trpg scenario', 'group:flow4',
       [{ kind: 'file', name: '灯塔.md', file: '灯塔.md' }]))),
-    String(await tell('/剧本', 'group:flow4', [{ kind: 'file', name: '灯塔.md', file: '灯塔.md' }])));
+    String(await tell('.trpg scenario', 'group:flow4', [{ kind: 'file', name: '灯塔.md', file: '灯塔.md' }])));
 
-  ok('`/开局` 不带名字 = **选剧本**这一步：列清单 + 说清怎么敲',
-    /选一份剧本开局/.test(String(await tell('/开局')))
-    && /剧本库里/.test(String(await tell('/开局'))));
-  ok('`/开局 乱起一个名字` 照常开局，但**明说没有注入剧本**（剧本是可选的）',
-    /没有注入剧本/.test(String(await tell('/开局 乱起一个名字', 'group:flow2'))));
+  ok('`.trpg new` 不带名字 = **选剧本**这一步：列清单 + 说清怎么敲',
+    /用法：/.test(String(await tell('.trpg new')))
+    && /剧本库里/.test(String(await tell('.trpg new'))));
+  ok('`.trpg new 乱起一个名字` 照常开局，但**明说没有注入剧本**（剧本是可选的）',
+    /没有注入剧本/.test(String(await tell('.trpg new 乱起一个名字', 'group:flow2'))));
 
-  // `/跑团` 带参数 = 旧写法或敲错。**不静默忽略** —— 群友得知道自己敲的那条为什么没生效。
-  const stray = String(await tell('/跑团 开局 灯塔', 'group:flow3'));
-  ok('带参数的 `/跑团` → 回一张命令清单，把四条都列出来（不默默当成某一个）',
-    /这几条各自是一条命令/.test(stray) && ['/模式', '/剧本', '/开局', '/掷骰']
+  // 认不出的子命令落到**裸 `.trpg`** 上。**不静默忽略** —— 群友得知道自己敲的那条为什么没生效。
+  const stray = String(await tell('.trpg 乱写', 'group:flow3'));
+  ok('认不出的子命令 → 回一张命令清单，把每一条都列出来（不默默当成某一个）',
+    /这几条各自是一条命令/.test(stray) && ['.trpg mode', '.trpg scenario', '.trpg start', '.r']
       .every((name) => stray.includes(`\`${name}`)), stray);
-  ok('对照：**不带参数**的 `/跑团` 仍然给向导（上面那条不是把整条命令吃掉了）',
-    /还没开局/.test(String(await tell('/跑团', 'group:flow5'))));
+  ok('对照：**不带参数**的 `.trpg status` 仍然给向导（上面那条不是把整条命令吃掉了）',
+    /还没开局/.test(String(await tell('.trpg status', 'group:flow5'))));
 
   // 从文件名推名字：判据在这一层单独钉 —— 它上面那条路会真的去下载并**起 Python 抽文本**，
   // 而仓库的测试约定是不启动真解释器。
@@ -1120,6 +1155,378 @@ const status = (key) => store.read(key);
     JSON.stringify(scenarioNameFromFile(file('.md'))));
 }
 
+// ── 5h. 会话全链路（P2）：建团 → 报名 → 建卡 → 确认 → 开跑 → 收团 ──────────
+//
+// 这一段按**群友实际会怎么走**跑一遍：每一步都用不同的 senderId（身份是 QQ 号，决策 2），
+// 所以它同时验了"谁的卡是谁的"这件事。
+{
+  const commands = createRuntime().commandHandlers;
+  const route = routeIn(commands);
+  const as = (qq, text) => {
+    const key = route(text);
+    if (typeof commands[key] !== 'function') return Promise.resolve(`（没有这条命令：${key}）`);
+    return commands[key]({ chatKey: chain, senderId: qq, text, media: [], replyToMessageId: null });
+  };
+  const chain = 'group:p2-chain';
+  const now = () => new TrpgStore().read(chain);
+  const A = '20001'; const B = '20002';
+  const journal = new JournalStore();
+
+  ok('没有局时 `.trpg join` 说清先建局（而不是静默）',
+    /\.trpg new/.test(String(await as(A, '.trpg join'))), String(await as(A, '.trpg join')));
+  ok('没有局时 `.trpg start` 也说清先建局', /\.trpg new/.test(String(await as(A, '.trpg start'))));
+  ok('没有局时 `.pc new` 也说清先建局', /\.trpg new/.test(String(await as(A, '.pc new 阿飞'))));
+
+  const created = String(await as(A, '.trpg new 灯塔'));
+  ok('`.trpg new` 建出 **`preparing`** 的一局，发起人自动进名单',
+    now()?.status === 'preparing' && JSON.stringify(now()?.players) === JSON.stringify([A]), created);
+  ok('回执把下一步写全了（`.trpg join` / `.pc new` / `.trpg start`）',
+    /\.trpg join/.test(created) && /\.pc new/.test(created) && /\.trpg start/.test(created));
+
+  ok('`preparing` 的 `.trpg status` 明说"准备中"（那是唯一一个还开不了跑的状态）',
+    /准备中/.test(String(await as(B, '.trpg status'))), String(await as(B, '.trpg status')));
+
+  ok('第二个人 `.trpg join` 进得来', /已加入/.test(String(await as(B, '.trpg join'))));
+  ok('重复 join 被拒，并说清为什么', /已经在这一局里/.test(String(await as(B, '.trpg join'))));
+  ok('join 的人也进名单了', JSON.stringify(now()?.players) === JSON.stringify([A, B]));
+
+  const early = String(await as(A, '.trpg start'));
+  ok('**卡没建好时开不了跑**，而且**逐人**说清还差谁、下一步敲什么（不是一句"还有人不合格"）',
+    /还差/.test(early) && early.includes(A) && early.includes(B) && /\.pc new/.test(early), early);
+
+  const made = String(await as(A, '.pc new 阿飞'));
+  ok('`.pc new` 建出**自己的**卡（`ownerId` = 敲命令的人），并停在"未确认"',
+    now()?.characters.at(-1)?.ownerId === A && now()?.characters.at(-1)?.confirmed === false, made);
+  ok('回执点明"定下来之后要 `.pc confirm`"', /\.pc confirm/.test(made), made);
+  // **没先 join 的人直接建卡，也要进名单** —— 不把"报名"与"建卡"分成两步（群友会漏掉
+  // 前一步，而 `canActivate` 是按名单逐人查的，那张卡会落进"查不到这个人"的缝里）。
+  const lazy = 'group:p2-lazy';
+  await commands['.trpg new']({ chatKey: lazy, senderId: A, text: '.trpg new 懒人测试', media: [], replyToMessageId: null });
+  await commands['.pc new']({ chatKey: lazy, senderId: '20077', text: '.pc new 直接建卡', media: [], replyToMessageId: null });
+  ok('**没先 join 就建卡 → 也算报名**（名单按 QQ 号收，不用先敲 `.trpg join`）',
+    JSON.stringify(new TrpgStore().read(lazy)?.players) === JSON.stringify([A, '20077']),
+    JSON.stringify(new TrpgStore().read(lazy)?.players));
+  ok('同一个人再建一次卡被拒（并说清改卡走哪条路）',
+    /已经有一张卡/.test(String(await as(A, '.pc new 阿飞二号'))));
+  ok('别人用同一个名字建卡也被拒（名字是唯一的键）',
+    /已经有叫/.test(String(await as(B, '.pc new 阿飞'))));
+
+  await as(B, '.pc new 小满');
+  ok('两个人都建了卡之后，`start` 仍然拦住（**确认还没做**）',
+    /还没确认/.test(String(await as(A, '.trpg start'))), String(await as(A, '.trpg start')));
+
+  const confirmed = String(await as(A, '.pc confirm'));
+  ok('`.pc confirm` 认自己的卡，并顺手报出还差谁', now()?.characters[0]?.confirmed === true
+    && /还差/.test(confirmed) && confirmed.includes('小满'), confirmed);
+  ok('重复确认说一句"已经确认过了"', /已经确认过/.test(String(await as(A, '.pc confirm'))));
+  ok('没建卡的人 `.pc confirm` 被引导去 `.pc new`',
+    /先敲 `.pc new/.test(String(await as('20009', '.pc confirm'))));
+
+  await as(B, '.pc confirm');
+  const started = String(await as(A, '.trpg start'));
+  ok('全员确认之后 `.trpg start` 真的把这一局推成 **`active`**',
+    now()?.status === 'active' && /开跑/.test(started), started);
+  ok('已经在跑时再 `.trpg start` 说一句"已经在跑了"', /已经在跑/.test(String(await as(A, '.trpg start'))));
+
+  const mine = String(await as(A, '.pc show'));
+  ok('`.pc show` 不带名字看的是**自己的**卡（标题与全群那份不同）',
+    /【我的跑团卡】/.test(mine) && /阿飞/.test(mine) && !/小满/.test(mine) || /场上的人/.test(mine), mine.slice(0, 200));
+  ok('`.pc show <别人>` 给的是**玩家视角**（与全群那份逐字同形）',
+    /小满/.test(String(await as(A, '.pc show 小满'))));
+  ok('`.pc show <不存在的名字>` 列出你见过的人，而不是一句"找不到"',
+    /你见过的是/.test(String(await as(A, '.pc show 查无此人'))));
+  ok('`.pc save` 给一份凭据（人数/卡数/旗标/记录）',
+    /已保存这一局/.test(String(await as(A, '.pc save'))), String(await as(A, '.pc save')));
+
+  // ── 收团 ──
+  // "走过的场景"取的是**日志里的 scene 条目**（那才是走过的路），所以这里走一次 `appendLog`
+  // 而不是直接改 `campaign.scene` —— 直接改字段只反映"此刻在哪"，摘要要的是轨迹。
+  // 再塞一条暗线，好让"没解开的事"有东西。
+  const withSecret = now();
+  withSecret.flags['真凶是守塔人'] = { value: '是', visible: false };
+  appendLog(withSecret, 'scene', '场景：灯塔一层·门厅');
+  new TrpgStore().write(withSecret);
+
+  // ── 工具那一路也要进战报 ──
+  // 命令路与工具路各写各的落盘（命令自己 `store.write`，工具走 `withCampaign` 外壳），
+  // 所以两条都要被钉住 —— 只钉一条的话另一条漏了镜像不会有任何报错。
+  const beforeTool = journal.read(chain).length;
+  await createRuntime().handlers.campaign(fakeCtx(chain), { action: 'scene', scene: '控制室' });
+  ok('**工具路径的落盘也进战报**（`withCampaign` 那份镜像没漏）',
+    journal.read(chain).length > beforeTool && /控制室/.test(journal.read(chain).at(-1).text),
+    JSON.stringify(journal.read(chain).at(-1)));
+
+  const ended = String(await as(A, '.trpg end'));
+  ok('`.trpg end` 回的是**代码算出来的摘要**（时长/玩家/场景/没解开的事），不是让模型总结',
+    /收团/.test(ended) && /阿飞（20001）/.test(ended) && /小满（20002）/.test(ended)
+    && /灯塔一层·门厅/.test(ended) && /真凶是守塔人/.test(ended), ended);
+  ok('收团**清掉了这一局的存档**（下一局才起得来 —— 否则只能靠 restart 清）',
+    now() === null && /存档已经清掉/.test(ended));
+  ok('没有局时再 `.trpg end` 说一句"没有在进行中的团"',
+    /没有在进行中的团/.test(String(await as(A, '.trpg end'))));
+
+  // ── 满员 ──
+  const full = 'group:p2-full';
+  await commands['.trpg new']({ chatKey: full, senderId: '30000', text: '.trpg new 满员测试', media: [], replyToMessageId: null });
+  for (let i = 1; i < 8; i++) {
+    await commands['.trpg join']({ chatKey: full, senderId: `3000${i}`, text: '.trpg join', media: [], replyToMessageId: null });
+  }
+  const overflow = String(await commands['.trpg join']({
+    chatKey: full, senderId: '30099', text: '.trpg join', media: [], replyToMessageId: null
+  }));
+  ok('满员（8 人）之后 `.trpg join` 被拒，并把上限说出来',
+    /已经满了/.test(overflow) && overflow.includes('8'), overflow);
+  ok('满员时 `.pc new` 也进不来（名单满了就不该再落一张卡进"查不到这个人"的缝里）',
+    /已经满了/.test(String(await commands['.pc new']({
+      chatKey: full, senderId: '30099', text: '.pc new 挤一挤', media: [], replyToMessageId: null
+    }))));
+
+  // ── 旧存档迁移 ──
+  const legacy = 'group:p2-legacy';
+  const legacyFile = new TrpgStore().file(legacy);
+  fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+  fs.writeFileSync(legacyFile, JSON.stringify({
+    title: '老团', system: '', rule: 'generic', scene: '', scenario: { id: '', body: '' },
+    flags: { 旧旗标: '是' }, characters: [{ name: '老卡', ownerId: '40001', hp: 5, hpMax: 5 }],
+    log: [], seq: 1, createdAt: 1, updatedAt: 1
+  }), 'utf8');
+  const migrated = new TrpgStore().read(legacy);
+  ok('**旧存档缺 `status` 一律读成 `active`**（升级不该把正在跑的团退回建卡阶段）',
+    migrated?.status === 'active' && migrated?.players.length === 0 && migrated?.sessionId === '');
+  ok('旧存档里的卡也读得回来，`confirmed` 缺省 false（不影响 `active` 的局）',
+    migrated?.characters[0]?.name === '老卡' && migrated?.characters[0]?.confirmed === false);
+  ok('旧形状的旗标照样迁成"玩家可见"（与既有的那条迁移同源）',
+    migrated?.flags['旧旗标']?.visible === true);
+
+  // ── 战报（P2 只落写侧） ──
+  const lines = journal.read(chain);
+  ok('战报真的落下来了：这一条链上每一步的日志都在（P2 起就在记，不必等 P6 的导出）',
+    lines.length >= 5 && lines.some((line) => line.text.startsWith('开团：')), `共 ${lines.length} 条`);
+  ok('战报里的 kind 认得出是掷骰/建卡/场景（它就是 `campaign.log` 的那个形状）',
+    lines.some((line) => line.kind === 'state'), JSON.stringify(lines.map((line) => line.kind)));
+  const again = journal.read(chain);
+  ok('append-only：再读一次，前面的行**逐字不变**',
+    JSON.stringify(again.slice(0, lines.length)) === JSON.stringify(lines));
+  ok('**收团不清战报**（清掉的只是 `campaign.log` 那份环形缓冲）', journal.read(chain).length === lines.length);
+}
+
+// ── 5i. 检定与暗骰（P3）：.ra 公开 / .rh 暗骰 / .st 改属性 ─────────────────────
+//
+// 暗骰那一段会发一次**独立模型调用**（私密叙事），所以这里起假模型端点 —— 与 `suggest` /
+// 剧本整理两条路同一个做法：验的是"真的走了那一步"，而不是拿桩子把它绕过去。
+{
+  const { updateConfig, getConfig } = await load('core/config.js');
+  const model = await fakeModelServer({ model: 'stub-secret' });
+  const previous = { ...getConfig().api };
+  updateConfig({ api: { baseUrl: model.url, model: 'stub-secret' } });
+
+  try {
+    const K = 'group:p3-check';
+    const A = '31001';
+    const sent = [];
+    // **私聊端口是递进去的**（生产里 `web/app.ts` 接 `SendQueue`）—— 扩展只说"给谁、说什么"。
+    const runtime = createRuntime({ sendPrivate: async (qq, text) => { sent.push({ qq, text }); } });
+    const commands = runtime.commandHandlers;
+    // ⚠️ 按**前两个词**路由（`.pc confirm` 的键是两截，见 `ExtraCommandSpec.subs`）——
+    // 只取第一个词会落到裸 `.pc` 上，而那是个用法提示，测试会以"看起来没生效"假红。
+    const route = routeIn(commands);
+    const as = (text) => commands[route(text)]({
+      chatKey: K, senderId: A, text, media: [], replyToMessageId: null
+    });
+    const store = new TrpgStore();
+    const journal = new JournalStore();
+
+    // 先开一局、建卡、填两个技能（走命令，顺带把前面几段的路再走一遍）。
+    await commands['.trpg new']({ chatKey: K, senderId: A, text: '.trpg new 检定测试', media: [], replyToMessageId: null });
+    await commands['.pc new']({ chatKey: K, senderId: A, text: '.pc new 阿飞', media: [], replyToMessageId: null });
+
+    const stat = String(await as('.st 侦查 45'));
+    ok('`.st` 给一张还没确认的卡填技能（这是 chargen 之外的手工路）',
+      store.read(K)?.characters[0]?.stats['侦查'] === 45 && /侦查 = 45/.test(stat), stat);
+    ok('`.st` 记进日志（状态变更都要留痕）',
+      store.read(K)?.log.some((entry) => entry.text.includes('侦查：')), JSON.stringify(store.read(K)?.log.at(-1)));
+    ok('`.st` 不带参数时列出卡上有什么（不是一句"用法"）',
+      /侦查/.test(String(await as('.st'))));
+    ok('`.st 侦查` 只给名字时回显当前值', /侦查 = 45/.test(String(await as('.st 侦查'))));
+    ok('`.st` 的值不是数就说清楚（不静默）', /不是一个数/.test(String(await as('.st 侦查 难'))));
+    const clamped = String(await as('.st 力量 99999'));
+    ok('`.st` 与 `character` 用**同一套钳制**（99999 被夹到 MAX_STAT）',
+      store.read(K)?.characters[0]?.stats['力量'] === 9999, clamped);
+
+    // ── `.ra` 公开检定 ──
+    const before = journal.read(K).length;
+    const pub = String(await as('.ra 侦查'));
+    ok('`.ra` 自动读卡上的技能值，回执与 `formatCheck` 逐字同形',
+      /阿飞 的侦查：1d100 → \d+ = \d+ ｜ 对 45 → (成功|失败)/.test(pub), pub);
+    ok('`.ra` 记进 `campaign.log` 的 `check` 类（那正是玩家视角要回看的东西）',
+      store.read(K)?.log.at(-1)?.kind === 'check', JSON.stringify(store.read(K)?.log.at(-1)));
+    ok('`.ra` 的日志也进战报', journal.read(K).length > before);
+
+    ok('`.ra` 不带技能名时列出卡上有什么，并给出 `.r` 这条替代路',
+      /你卡上有/.test(String(await as('.ra'))) && /\.r /.test(String(await as('.ra'))));
+    ok('**卡上没有这个技能**时列出有的那些（清单 30，不是一句"没有"）',
+      /你卡上没有【?「?游泳/.test(String(await as('.ra 游泳'))) && /侦查/.test(String(await as('.ra 游泳'))),
+      String(await as('.ra 游泳')));
+    ok('**没建卡的人** `.ra` 被引导去 `.pc new`（清单 29）',
+      /先敲 `.pc new/.test(String(await commands['.ra']({
+        chatKey: K, senderId: '31099', text: '.ra 侦查', media: [], replyToMessageId: null
+      }))));
+    ok('**没有战役**时 `.ra` 被引导去 `.trpg new`', /\.trpg new/.test(String(await commands['.ra']({
+      chatKey: 'group:p3-none', senderId: A, text: '.ra 侦查', media: [], replyToMessageId: null
+    }))));
+
+    // ── `.rh` 暗骰 ──
+    model.requests = [];
+    model.script = [{ content: '你屏住呼吸，指尖在桌沿上停了一瞬 —— 有什么地方不对劲，但你说不上来。' }];
+    const secretReceipt = String(await as('.rh 侦查'));
+    ok('**`.rh` 在群里那句话逐字不含点数**（那是暗骰的全部意义）',
+      secretReceipt === '暗骰结果已私聊发送 —— 点开和我的私聊看。', secretReceipt);
+    ok('`.rh` 把点数**私聊**发给了掷骰的人（收件人是那个 QQ 号）',
+      sent.length === 1 && sent[0].qq === A && /1d100 → \d+ = \d+/.test(sent[0].text), JSON.stringify(sent));
+    ok('`.rh` 那段私密叙事来自**一次独立模型调用**（提示词在 `EXTRA_PROMPT_JOBS.trpg.secretRoll`）',
+      model.requests.length === 1 && /暗骰/.test(JSON.stringify(model.requests[0].messages))
+      && /不对劲/.test(sent[0].text), JSON.stringify(sent[0].text.slice(0, 120)));
+    ok('**暗骰不留痕**：不写 `campaign.log`、也不进战报（决策 7）',
+      !store.read(K)?.log.some((entry) => entry.text.includes('暗骰'))
+      && !journal.read(K).some((line) => line.text.includes('暗骰')),
+      JSON.stringify(store.read(K)?.log.at(-1)));
+
+    // 模型抽风时只发点数：暗骰不该因为叙事失败而失败。
+    sent.length = 0;
+    model.script = [{ content: '' }];
+    const degraded = String(await as('.rh 侦查'));
+    ok('叙事生成失败时**照发点数**（旁路失败不该让这次暗骰丢掉）',
+      degraded === secretReceipt && sent.length === 1 && /1d100 →/.test(sent[0].text), degraded);
+
+    // 没装私聊端口时**先说不掷** —— 掷了却发不出去等于把这次暗骰丢了。
+    const bare = createRuntime();
+    const beforeBare = new TrpgStore().read(K)?.log.length ?? 0;
+    const noChannel = String(await bare.commandHandlers['.rh']({
+      chatKey: K, senderId: A, text: '.rh 侦查', media: [], replyToMessageId: null
+    }));
+    ok('**没装私聊通道时不掷**，并且如实说一句（而不是掷完才发现发不出去）',
+      /没装私聊通道/.test(noChannel) && (new TrpgStore().read(K)?.log.length ?? 0) === beforeBare, noChannel);
+
+    // ── 确认之后归 DM ──
+    await as('.pc confirm');
+    ok('`.st` 在**确认之后被拒**（那张卡定下来了，改数值归 DM）',
+      /已经确认过/.test(String(await as('.st 侦查 90')))
+      && store.read(K)?.characters[0]?.stats['侦查'] === 45);
+    ok('`.ra` 在确认之后照常能用（确认管的是改卡，不是掷骰）', /对 45/.test(String(await as('.ra 侦查'))));
+  } finally {
+    updateConfig({ api: previous });
+  }
+}
+
+// ── 5j. 属性生成（P4）：`.pc roll` 与派生值的落点 ─────────────────────────────
+//
+// 掷法本身在 `t-trpg-rules.mjs` 里逐面钉着（那是纯函数层）；这一段管的是**接线**：
+// 掷出来的东西有没有写进卡、有没有进日志、三份视野里认不认它、以及"不支持时说不支持"。
+{
+  const runtime = createRuntime();
+  const commands = runtime.commandHandlers;
+  const route = routeIn(commands);
+  const K = 'group:p4-chargen';
+  const A = '41001';
+  const as = (text, qq = A, key = K) => commands[route(text)]({
+    chatKey: key, senderId: qq, text, media: [], replyToMessageId: null
+  });
+  const at = (text, key) => commands[route(text)]({
+    chatKey: key, senderId: A, text, media: [], replyToMessageId: null
+  });
+
+  // COC7 那一栏在规则表里，所以这里显式选它。
+  await at('.trpg new 属性测试 coc7', K);
+  await as('.pc new 阿飞');
+
+  const rolled = String(await as('.pc roll'));
+  const afterRoll = new TrpgStore().read(K);
+  const card = afterRoll.characters[0];
+  ok('`.pc roll` 掷出八个属性并写进卡',
+    Object.keys(card.stats).length === 8 && typeof card.stats.STR === 'number', JSON.stringify(card.stats));
+  ok('派生值也写进卡了（HP / MP / SAN / DB / Build / MOV）',
+    card.hpMax > 0 && card.mpMax > 0 && card.sanMax > 0 && card.db !== ''
+    && typeof card.build === 'number' && card.mov > 0,
+    JSON.stringify({ hp: card.hpMax, mp: card.mpMax, san: card.sanMax, db: card.db, build: card.build, mov: card.mov }));
+  ok('刚掷完是满的（当前值跟着上限走 —— 掷属性等于新建一个人）',
+    card.hp === card.hpMax && card.mp === card.mpMax && card.san === card.sanMax);
+  // ⚠️ **判据必须是"按公式算出来的那个数"，不是"大于 0"**：`.pc new` 就已经给了 10 点 HP，
+  // 所以"有没有写派生值"这件事，只有把结果与公式对上才验得出来（探针实测：把掷属性那一步
+  // 里写 `hpMax` 的那一行拆掉，只查 `> 0` 的断言**照样全绿**）。
+  ok('派生值是**按公式从刚掷出的属性算的**（HP=(CON+SIZ)/10、MP=POW/5、SAN=POW）',
+    card.hpMax === Math.max(1, Math.floor((card.stats.CON + card.stats.SIZ) / 10))
+    && card.mpMax === Math.floor(card.stats.POW / 5)
+    && card.sanMax === card.stats.POW,
+    JSON.stringify({ stats: { CON: card.stats.CON, SIZ: card.stats.SIZ, POW: card.stats.POW },
+      got: { hp: card.hpMax, mp: card.mpMax, san: card.sanMax } }));
+  ok('回执把属性与派生都念出来（群友不必自己算）',
+    /STR \d+/.test(rolled) && /派生：/.test(rolled) && /DB /.test(rolled) && /MOV \d/.test(rolled), rolled);
+  ok('回执告诉你可以重掷', /再敲一次/.test(rolled), rolled);
+  ok('掷属性记进日志（状态变更都要留痕）',
+    afterRoll.log.at(-1)?.kind === 'state' && /掷属性/.test(afterRoll.log.at(-1)?.text ?? ''),
+    JSON.stringify(afterRoll.log.at(-1)));
+  ok('**确认之前可以重掷**', /已掷出/.test(String(await as('.pc roll'))));
+
+  // ── 三份视野都认这几个新字段 ──
+  const mine = String(await as('.pc show'));
+  ok('玩家视角带上 MP / DB / Build / MOV',
+    /MP \d+\/\d+/.test(mine) && /DB /.test(mine) && /MOV \d/.test(mine), mine);
+  const dmView = runtime.prompt(K).body[2];
+  ok('DM 那份也带上（它得知道这个人打得疼不疼）',
+    /MP \d+\/\d+/.test(dmView) && /DB /.test(dmView), dmView.slice(0, 400));
+
+  const hideStore = new TrpgStore();
+  const hidden = hideStore.read(K);
+  hidden.characters[0].hidden = ['pools', 'stats'];
+  hideStore.write(hidden);
+  const masked = String(await as('.pc show'));
+  ok('`pools` 藏起来时 **MP 也变 `???`**（它和 HP/SAN 是同一类东西）', /MP \?\?\?/.test(masked), masked);
+  ok('`stats` 藏起来时 DB / Build / MOV **一起藏**（藏属性却露 DB 等于没藏）',
+    /属性\/技能 \?\?\?/.test(masked) && !/DB /.test(masked), masked);
+
+  // ── "不支持"要说出来 ──
+  const G = 'group:p4-generic';
+  await at('.trpg new 通用测试 generic', G);
+  await at('.pc new 阿飞', G);
+  const noChargen = String(await at('.pc roll', G));
+  ok('规则表**没有** `chargen` 时如实说一句，并给出 `.st` 这条替代路（不许硬塞一套出来）',
+    /没有属性生成/.test(noChargen) && /\.st /.test(noChargen), noChargen);
+  ok('没卡的人 `.pc roll` 被引导去 `.pc new`',
+    /先敲 `.pc new/.test(String(await commands['.pc roll']({
+      chatKey: G, senderId: '41099', text: '.pc roll', media: [], replyToMessageId: null
+    }))));
+
+  // ── MP 也归代码管（工具那一路）──
+  //
+  // 每次 `update` 都换一个 `ctx`：行动经济按 `ctx` 记账，同一个 ctx 第二次会被配额拦下
+  // （那是另一段的事，这里要的是"MP 能扣、`full` 能回满"）。
+  const handlers = createRuntime().handlers;
+  const before = new TrpgStore().read(K)?.characters[0]?.mp ?? 0;
+  const cut = await handlers.character(fakeCtx(K), { action: 'update', name: '阿飞', mpDelta: -3 });
+  ok('MP 能被扣（`mpDelta`），回执里带上当前 MP',
+    new TrpgStore().read(K)?.characters[0]?.mp === Math.max(0, before - 3) && /MP \d+\/\d+/.test(String(cut.content)),
+    String(cut.content));
+  ok('**MP 的变化进了日志**（工具回执给的是"现在多少"，日志记的是"从多少变到多少"）',
+    /MP \d+→\d+/.test(new TrpgStore().read(K)?.log.at(-2)?.text ?? '')
+    || /MP \d+→\d+/.test(new TrpgStore().read(K)?.log.at(-1)?.text ?? ''),
+    JSON.stringify(new TrpgStore().read(K)?.log.slice(-2)));
+  const refill = await handlers.character(fakeCtx(K), { action: 'update', name: '阿飞', full: true });
+  ok('`full` 回满时 **MP 一起回满**（它也是"回满"该管的东西）',
+    new TrpgStore().read(K)?.characters[0]?.mp === new TrpgStore().read(K)?.characters[0]?.mpMax,
+    String(refill.content));
+  const withMp = await handlers.character(fakeCtx(K), { action: 'create', name: '小满', mpMax: 12 });
+  // ⚠️ 判"没出错"要写 `!== true`：`ok()` 返回的是 `{ content }`，成功时**根本没有 `isError`**
+  // （只有 `err()` 才带上它）。写成 `=== false` 的断言永远红。
+  ok('MP 上限也能在建卡时给（`mpMax`）',
+    withMp.isError !== true && new TrpgStore().read(K)?.characters.at(-1)?.mpMax === 12
+    && /MP 12\/12/.test(String(withMp.content)),
+    JSON.stringify([withMp, new TrpgStore().read(K)?.characters.map((c) => [c.name, c.mpMax])]));
+
+  // ── 确认之后不能重掷 ──
+  await as('.pc confirm');
+  ok('确认之后不能重掷（那张卡定下来了）', /已经确认过/.test(String(await as('.pc roll'))));
+}
+
 // ── 6. 注册表接点与 `onRunEnd` ──────────────────────────────────────────────
 {
   const entry = EXTRA_REGISTRY.find((item) => item.id === 'trpg');
@@ -1130,13 +1537,18 @@ const status = (key) => store.read(key);
     entry.overrideTools?.sendTool === 'say' && entry.tools.some((t) => t.name === 'say'));
   ok('finishTool 显式写 null（跑团没有收尾工具，框架段不提它）',
     entry.overrideTools?.finishTool === null);
-  ok('4 个工具 + 5 条命令（工具是合并后的形态；命令 2026-10-16 按职责拆开）',
-    entry.tools.length === 4 && (entry.commands ?? []).length === 5,
+  ok('4 个工具 + 8 条命令声明（命令面统一到 `.`，子命令由 `subs` 展开）',
+    entry.tools.length === 4 && (entry.commands ?? []).length === 8,
     `${entry.tools.length}/${(entry.commands ?? []).length}`);
-  ok('五条命令的词形就是那五个（加一条 = 加一行声明 + 一个 handler，两处都要动）',
+  ok('声明就是那八条，而且**每条裸命令都排在自己的子命令之后**（顺序即行为）',
     JSON.stringify((entry.commands ?? []).map((spec) => spec.names[0]))
-    === JSON.stringify(['/跑团', '/模式', '/剧本', '/开局', '/掷骰']),
-    JSON.stringify((entry.commands ?? []).map((spec) => spec.names)));
+    === JSON.stringify(['.trpg', '.trpg', '.pc', '.pc', '.ra', '.rh', '.st', '.r'])
+    && JSON.stringify((entry.commands ?? [])[0].subs)
+      === JSON.stringify(['new', 'join', 'status', 'start', 'end', 'mode', 'scenario'])
+    && (entry.commands ?? [])[1].subs === undefined
+    && JSON.stringify((entry.commands ?? [])[2].subs) === JSON.stringify(['new', 'roll', 'confirm', 'show', 'save'])
+    && (entry.commands ?? [])[3].subs === undefined,
+    JSON.stringify((entry.commands ?? []).map((spec) => [spec.names, spec.subs])));
   ok('工具名就是 say / campaign / character / roll',
     JSON.stringify(entry.tools.map((t) => t.name)) === JSON.stringify(['say', 'campaign', 'character', 'roll']),
     JSON.stringify(entry.tools.map((t) => t.name)));
@@ -1304,23 +1716,45 @@ const status = (key) => store.read(key);
 // 所以只能从源码文本上守。判据是"掷骰路径上不许出现 `Math.random`"，以及"`node:crypto`
 // 只在 `entropy.ts` 里出现一次"（两处拿熵就等于有两个熵源，而其中一个迟早会漂移）。
 {
-  const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
-  const impl = stripComments(read('src/extra/trpg/impl.ts'));
-  const tools = stripComments(read('src/extra/trpg/tools.ts'));
-  const rules = ['dice.ts', 'check.ts', 'percentile.ts', 'economy.ts']
-    .map((file) => stripComments(read(`src/extra/trpg/rules/${file}`))).join('\n');
+  // **扫整个目录**，不钉单个文件：2026-10-16 那次分层重构把 `tools.ts` 拆成了五个文件，
+  // 钉单文件会以"找不到这段代码"的形式**假红**（而它想守的性质其实完好）。
+  // 扫目录还有一条额外的好处：将来新增的掷骰路径自动纳入，不必记得回来加文件名。
+  const walk = (dir) => fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true }).flatMap((entry) => (
+    entry.isDirectory()
+      ? walk(path.join(dir, entry.name))
+      : (entry.name.endsWith('.ts') ? [path.join(dir, entry.name)] : [])
+  ));
+  const files = walk('src/extra/trpg');
+  const body = (rel) => stripComments(fs.readFileSync(path.join(ROOT, rel), 'utf8'));
+  const all = files.map((rel) => body(rel));
+  const outsideEntropy = files.filter((rel) => !rel.endsWith('entropy.ts')).map((rel) => body(rel)).join('\n');
+  const rules = files.filter((rel) => rel.includes(`${path.sep}rules${path.sep}`)).map((rel) => body(rel)).join('\n');
 
-  ok('impl.ts 用 secureRng 掷骰，且**不出现** Math.random',
-    /secureRng/.test(impl) && !/Math\.random/.test(impl),
-    (impl.match(/Math\.random/) ?? []).join(' | '));
-  ok('tools.ts 与规则层里也不出现 Math.random（随机源只有一个入口）',
-    !/Math\.random/.test(tools) && !/Math\.random/.test(rules),
-    [...(tools.match(/Math\.random/g) ?? []), ...(rules.match(/Math\.random/g) ?? [])].join(' | '));
+  ok('跑团源码树里 `Math.random` **一处都没有**（随机源只有一个入口：`entropy.ts` 的 secureRng）',
+    all.every((text) => !/Math\.random/.test(text)),
+    files.filter((rel, i) => /Math\.random/.test(all[i])).join(' | '));
   ok('`node:crypto` 只在 entropy.ts 里出现（两个熵源迟早会漂移）',
-    /node:crypto/.test(read('src/extra/trpg/entropy.ts'))
-    && !/node:crypto/.test(impl) && !/node:crypto/.test(tools) && !/node:crypto/.test(rules));
-  ok('规则层是纯函数目录：里面一条相对 import 都没有指向 rules/ 之外',
+    /node:crypto/.test(body('src/extra/trpg/entropy.ts')) && !/node:crypto/.test(outsideEntropy));
+  ok('规则层是纯函数目录：里面一条相对 import 都没有指向 rules/ 之外，也没有 node: 内置',
     !/from\s*'\.\.\//.test(rules) && !/from\s*'node:/.test(rules));
+  ok('闸门扫的是**整个目录**（不是钉死的几个文件名）—— 它至少覆盖 rules/ 下现有的五个文件',
+    files.filter((rel) => rel.includes(`${path.sep}rules${path.sep}`)).length >= 5,
+    String(files.length));
+
+  // ── 两条接线的源级断言（P3）──
+  //
+  // 它们都没法在套件里从行为上验：`web/app.ts` import 不了（它要起整个 app），
+  // 而 `sendPrivate` 那条链的终点是**真的给一个 QQ 号发私聊**。所以只能扫源码文本。
+  // 这与「带副作用的入口文件只能靠文本断言守」是同一条（见 AGENTS.md 的测试约定）。
+  const app = body('src/web/app.ts');
+  ok('`web/app.ts` 真的把 `sendPrivate` 接上了，而且走的是**同一只 `SendQueue`**（`private:` 前缀）',
+    /sendPrivate:/.test(app) && /private:\$\{/.test(app) && /sender\.sendTextBatch/.test(app));
+  ok('`say` 的 `atUserId` 真的透传到 `sendTextBatch`（不传的话模型写了 @ 也点不到人）',
+    /atUserId/.test(body('src/extra/trpg/tools/say.ts'))
+    && /atUserId/.test(body('src/extra/trpg/spec.ts'))
+    && /atUserId:/.test(body('src/extra/prompts.ts')));
+  ok('`sendPrivate` 是**宿主的口子**（`extra/types.ts` 上的可选成员），扩展只说"给谁、说什么"',
+    /sendPrivate\?\(/.test(body('src/extra/types.ts')));
 }
 
 // ── 9. 端到端：真起 app，接管一个群，看模型实际收到什么 ──────────────────────
@@ -1402,7 +1836,7 @@ console.log('\n=== 端到端：真起 app（createApp + start）===');
   const systemText = String((taken?.messages ?? []).find((m) => m.role === 'system')?.content ?? '');
 
   ok('接管会话的模型请求真的发出去了（否则下面都是空转的绿）', !!taken && toolNames.length > 0);
-  ok('**接管会话的工具表只剩跑团那 4 个**（内置 25 个全部让位）',
+  ok('**接管会话的工具表只剩跑团那 4 个**（内置那些全部让位）',
     JSON.stringify([...toolNames].sort()) === JSON.stringify(['campaign', 'character', 'roll', 'say']),
     JSON.stringify(toolNames));
   ok('框架契约段照接管者声明的名字写（send_message 不在表里，提示词也不该提它）',

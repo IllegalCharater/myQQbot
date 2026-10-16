@@ -58,6 +58,21 @@ export interface ExtraRuntimeDeps {
    * 缺省时什么都不做：测试与未接线的宿主不需要它。
    */
   deliverNote?(chatKey: string, note: ExtraNote): void;
+
+  /**
+   * **私聊投递**：把一句话发给某个 QQ 号（跑团的暗骰用它）。
+   *
+   * 与 `deliverNote` 同一条理由 —— 扩展只说"给谁、说什么"，怎么发是宿主的事：那条链要碰
+   * `SendQueue`，而 `extra → web` 是反向依赖（`check-layers` 会拦），组装是 `web/` 的活。
+   *
+   * ⚠️ **缺省时调用方要自己判**（跑团的 `.rh` 就是先看它在不在再掷）—— 掷了却发不出去，
+   * 等于把这次暗骰丢了，而群里只会看到一句"发不出去"。
+   *
+   * ⚠️ 它**绕过了扩展自己的会话**：目标可能是一个从没跟机器人说过话的私聊。那会在对方的
+   * 私聊存档里留下一条 `我：…`（`SendQueue.appendSelf`）—— 那是刻意的（玩家能往回翻），
+   * 代价是"从没聊过天的私聊"会出现在存档列表里。
+   */
+  sendPrivate?(targetUserId: string, text: string): Promise<void>;
 }
 
 /**
@@ -90,7 +105,7 @@ export type ExtraMode = 'attach' | 'override';
 /**
  * 斜杠命令的**声明**（纯数据，静态可得）。
  *
- * ⚠️ 判据必须放在这里、而不是实现里：`isSlashCommand()` 是同步的、且在入站热路径上被调
+ * ⚠️ 判据必须放在这里、而不是实现里：`isCommandEntry()` 是同步的、且在入站热路径上被调
  * （决定这条消息要不要落成已读历史、要不要并入引用附件）—— 它不可能去问一个异步的装载表。
  * 判据静态 + 执行时装载，这条矛盾就没了。
  */
@@ -108,10 +123,31 @@ export interface ExtraCommandSpec {
    * 也是往这个数组里加一条 —— **没有第二种判据**。
    */
   names: readonly string[];
+
+  /**
+   * **子命令**（2026-10-16 加）。声明期的糖：由 `runtime.ts` 展开成 `<names[0]> <sub>` 这些
+   * **普通命令词**，此后没有任何地方知道"子命令"这个概念。
+   *
+   * 判据是"词形仍然只有一个落点"：不展开的话，每个子命令要么各自写一条 `names`
+   * （`names: ['.trpg new']` —— 那也可以，只是清单变长），要么在 `run` 里自己切第一个词
+   * （那就多出**第二份**判定，而两份判据漂移的症状是"命令认出来了、参数解析不出来"）。
+   *
+   * 展开的产物是 `{ names: ['<命令> <子命令>'] }`，所以：
+   *   • `commandHandlers` 的键是 `'.trpg new'` 这样**带空格**的串（装载期两个方向对账）；
+   *   • 判定沿用既有的边界规则 —— `词` 后面跟空白就算命中，而 `'<命令> <子命令>'` 里的空白
+   *     正好是那个边界，所以 `.trpg new 灯塔` 落到 `.trpg new` 上、`rest` 是 `' 灯塔'`；
+   *   • **不带 `subs` 的声明就是一条普通命令**（`names[0]` 自己当键）。
+   *
+   * ⚠️ **裸命令要单独声明一条**（`{ names: ['.trpg'] }` 排在带 subs 的那条**之后**）：
+   * 带 subs 的声明**只产出子命令**，自己不占 `names[0]`。靠后的裸命令因此成了"一个子命令
+   * 都没匹配上"的兜底（回用法提示）。顺序即行为 —— 反过来的话裸命令会先命中，
+   * 所有子命令全被它吃掉。
+   */
+  subs?: readonly string[];
 }
 
 /**
- * 命令处理函数的入参。与 `web/onebot/slash-commands.ts` 的 `SlashCommandInput` **同形但独立**：
+ * 命令处理函数的入参。与 `web/onebot/commands.ts` 的 `CommandInput` **同形但独立**：
  * 扩展不认识 web（分层闸门），两边靠 web 侧那个适配器在**编译期**对账。
  */
 export interface ExtraCommandInput {
@@ -156,12 +192,12 @@ export type ExtraConfigPatch = Record<string, unknown>;
 /**
  * 扩展交出来的**一条命令**：声明 + 处理函数。`ExtrasRuntime.commandDefs()` 交出来的就是它。
  *
- * ⚠️ 它上面那个 `ExtraCommandHandler` / `ExtraCommandInput` 与 web 侧的 `SlashCommand` /
- * `SlashCommandInput` **是两个不同的东西，别合并**：
+ * ⚠️ 它上面那个 `ExtraCommandHandler` / `ExtraCommandInput` 与 web 侧的 `CommandEntry` /
+ * `CommandInput` **是两个不同的东西，别合并**：
  *   • 本类型是**业务实现** —— 只返回一句回执文本，**不碰 sender**（扩展拿不到 `SendQueue`）；
- *   • web 侧那个 `SlashCommand` 是**命令骨架** —— 回执的发送、`error.message` 原样进群、
+ *   • web 侧那个 `CommandEntry` 是**命令骨架** —— 回执的发送、`error.message` 原样进群、
  *     发送失败不抛，三条都在它的 `runCommand` 外壳里。
- * `web/onebot/slash-commands.ts` 的 `adaptExtraCommand()` 就是把前者套进后者的那一层。
+ * `web/onebot/commands.ts` 的 `adaptExtraCommand()` 就是把前者套进后者的那一层。
  *
  * 而**这一份类型本身只有一处**：web 侧的 `ExtraCommand` 直接 import 它
  * （`web → extra` 是允许的方向），所以"两边的形状漂移了"是**编译错误**，而不是要靠人核对。

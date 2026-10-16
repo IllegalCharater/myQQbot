@@ -81,7 +81,9 @@ export const trpgSpec: ExtraSpec = {
         type: 'object',
         properties: {
           text: { description: PROMPTS.say.text, oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
-          replyToMessageId: { type: ['integer', 'string'], description: PROMPTS.say.replyToMessageId }
+          replyToMessageId: { type: ['integer', 'string'], description: PROMPTS.say.replyToMessageId },
+          // 纯数字 QQ 号。**必须用它才能真的 @ 到人**（写进 text 只是一串文字），见 prompts.ts。
+          atUserId: { type: ['integer', 'string'], description: PROMPTS.say.atUserId }
         },
         required: ['text']
       }
@@ -139,8 +141,10 @@ export const trpgSpec: ExtraSpec = {
           ownerId: { type: ['integer', 'string'], description: PROMPTS.character.ownerId },
           hpMax: { type: 'integer', description: PROMPTS.character.hpMax },
           sanMax: { type: 'integer', description: PROMPTS.character.sanMax },
+          mpMax: { type: 'integer', description: PROMPTS.character.mpMax },
           hpDelta: { type: 'integer', description: PROMPTS.character.hpDelta },
           sanDelta: { type: 'integer', description: PROMPTS.character.sanDelta },
+          mpDelta: { type: 'integer', description: PROMPTS.character.mpDelta },
           full: { type: 'boolean', description: PROMPTS.character.full },
           stats: STATS_SCHEMA,
           note: { type: 'string', description: PROMPTS.character.note },
@@ -173,21 +177,39 @@ export const trpgSpec: ExtraSpec = {
    * 所以列表在**没装载**时就能算出来 —— 这几条命令被敲到时才把本扩展拉起来（入口是人）。
    *
    * ⚠️ 它们**只出现在被接管的会话里**：`commandDefs()` 对非接管的会话直接跳过 override 模式的
-   * 扩展。所以别的群敲不到 `/跑团`，也看不到跑团这件事存在。
+   * 扩展。所以别的群敲不到 `.trpg`，也看不到跑团这件事存在。
    *
-   * **一条命令一个职责**（2026-10-16 拆的）：原先三个动作挂在 `/跑团` 下当子命令，那张
-   * `words[0]` 分支表就是词形列表的第二份定义 —— 而词形列表只有这一处（`names[0]` 同时是
-   * `commandHandlers` 的键）。拆开之后 `/跑团` 只报状态，加一个动作 = 加一行声明 + 一个 handler。
+   * ── 前缀是 `.` 而不是 `/`（2026-10-16 起）──
    *
-   * ⚠️ **词形共用一个命名空间**（同一命令内、跨命令、跨扩展都查），注册表自检拒绝重复。
-   * 这三条是裸词，所以它们占了 `/模式` `/剧本` `/开局` 这三个名字 —— 将来别的扩展想要同名
-   * 会被装配期拒掉（那是刻意的护栏，不是意外）。
+   * OneDice 的手感（`.r 3d6`），也是这一族命令与主流程 `/转写` `/画` `/漫画` `/能力`
+   * 分开的标记。前缀的合法性由 `validateRegistry` 查（`/` 与 `.` 都收）。
+   *
+   * ── 子命令是**声明期的糖**（`subs`）──
+   *
+   * `runtime.ts` 把它们展开成 `.trpg start` 这样的**普通命令词**，此后没有任何地方知道
+   * "子命令"这个概念（见 `ExtraCommandSpec.subs`）。所以：
+   *   • `commandHandlers` 的键是 `.trpg start`（带空格）这样一串；
+   *   • 判定沿用既有的边界规则 —— `.trpg start 灯塔` 落到 `.trpg start` 上，`rest` 是 `' 灯塔'`；
+   *   • **裸命令要单独声明一条，且排在带 `subs` 的那条之后**（见下面那条 `.trpg`）。
+   *     顺序即行为：反过来的话裸命令会先命中，所有子命令全被它吃掉。
+   *
+   * ⚠️ 词形共用一个命名空间（同一命令内、跨命令、跨扩展都查），注册表自检拒绝重复 ——
+   * 而且查的是**展开后**的串（两个扩展各写一个 `.trpg start` 正是最该被拦住的那种撞名）。
    */
   commands: [
-    { names: ['/跑团', '/trpg'] },
-    { names: ['/模式'] },
-    { names: ['/剧本'] },
-    { names: ['/开局'] },
-    { names: ['/掷骰', '/roll'] }
+    // 会话这一族：起局 → 报名 → 确认 → 开跑 → 收团，加上形态与剧本。
+    { names: ['.trpg'], subs: ['new', 'join', 'status', 'start', 'end', 'mode', 'scenario'] },
+    // **裸命令兜底**：排在所有子命令之后 —— 只在"一个子命令都没匹配上"时命中，回用法清单。
+    { names: ['.trpg'] },
+    // 人物卡那一族。同样先子命令、后裸命令（顺序即行为）。
+    { names: ['.pc'], subs: ['new', 'roll', 'confirm', 'show', 'save'] },
+    { names: ['.pc'] },
+    // 检定与属性：参数是**技能名**，所以是普通命令（没有子命令那一族）。它们都要读卡，
+    // 所以都在 `commands/check.ts` 里（`.ra` 公开、`.rh` 暗骰、`.st` 改属性）。
+    { names: ['.ra'] },
+    { names: ['.rh'] },
+    { names: ['.st'] },
+    // 掷骰：参数是**一整条表达式**，所以它自己剥前缀、不按词切（见 `commands/shared.ts`）。
+    { names: ['.r'] }
   ]
 };

@@ -22,7 +22,7 @@
 // 那是它自己的一处设计隐患（`#persist` 对已结束的会话会重复累加），不该由这个扩展顺手改。
 import { chatCompletion } from '../../llm/llm.js';
 import { EXTRA_PROMPT_JOBS } from '../prompts.js';
-import { MAX_LOG_RENDER } from './state.js';
+import { MAX_LOG_RENDER } from './model/limits.js';
 import type { TrpgCampaign } from './types.js';
 
 const MAX_OPTIONS = 4;

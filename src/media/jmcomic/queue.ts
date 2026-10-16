@@ -243,7 +243,7 @@ export function enqueueJmcomicDownload(ctx: JmContext, comicId: unknown) {
  * 解析 `/漫画 <漫画ID>` 命令：返回漫画 ID，**不是这条命令**时返回 `null`。
  *
  * 与 `/转写`、`/画` 同一个分工：**命令自己的语法留在领域模块里**，接入层的命令表
- * （`web/onebot/slash-commands.ts`）只负责"认出是哪条命令、按什么顺序处理、回不回执"。
+ * （`web/onebot/commands.ts`）只负责"认出是哪条命令、按什么顺序处理、回不回执"。
  * 认命令要求 `/漫画` 后面跟空白或直接结束（`/漫画xx` 不是这条命令）。
  *
  * 只做"有没有写 ID"这一层；**ID 的格式校验仍在 `enqueueJmcomicDownload` 里**

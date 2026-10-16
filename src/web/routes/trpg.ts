@@ -12,8 +12,8 @@
 // **不能在这里编辑、也不能在这里上传**：剧本与规则表的写入路径只有两条 ——
 // 群里的命令（`/开局` / `/剧本`），以及管理员直接编辑数据目录里的文件。
 // 面板只负责"看得见有哪些、删得掉不要的"。
-import { RuleStore } from '../../extra/trpg/rule-store.js';
-import { ScenarioStore } from '../../extra/trpg/scenario.js';
+// 走**桶文件**：`web/` 是外部消费者，不该知道跑团内部怎么分目录（判据同 `media/web-search/`）。
+import { RuleStore, ScenarioStore } from '../../extra/trpg/index.js';
 import { errorMessage } from '../http/http.js';
 import type { Route } from '../types.js';
 

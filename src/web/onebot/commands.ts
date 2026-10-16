@@ -10,7 +10,7 @@
 //   ③ 这条消息归谁处理。
 // 判据写两遍时（`/^\/画(?:\s|$)/` 与 `/^\/画/` 看着都对）不会有任何报错，表现只有两种：
 // **命令没被认出来、消息进了 LLM**，或者**同一条消息被处理两次**。所以判据由
-// `createSlashCommands()` 产出的那一份**同时**给 ingest 与这里用。
+// `createCommandDispatcher()` 产出的那一份**同时**给 ingest 与这里用。
 //
 // ── 命令的**解析**仍留在各自的领域模块里 ──
 //
@@ -22,7 +22,7 @@
 //
 // 扩展**不认识 web**（分层闸门），所以它按自己的形状声明命令（`ExtraCommandSpec` + 一个
 // `run(input) → 回执文本`），由 `src/extra/runtime.ts` 的 `commandDefs()` 交出来、在
-// `web/app.ts` 里喂给本工厂。**判据仍然是同一个来源**：`isSlashCommand` 与 `handleSlashCommand`
+// `web/app.ts` 里喂给本工厂。**判据仍然是同一个来源**：`isCommandEntry` 与 `handleCommandEntry`
 // 读的是同一个 provider，所以"判据只有一份"这条性质没有破。
 //
 // ── 与注册层的禁令不冲突 ──
@@ -41,7 +41,7 @@ import type { ImageGenQueue } from '../../media/image-gen/index.js';
 import type { ExtraActionResult, ExtraListRow } from '../../extra/runtime.js';
 import type { ExtraCommand } from '../../extra/types.js';
 
-export interface SlashCommandInput {
+export interface CommandInput {
   chatKey: string;
   /**
    * 发起这条命令的群友 QQ 号。
@@ -64,7 +64,7 @@ export interface SlashCommandInput {
 }
 
 /** `/漫画` 只需要这些：会话标识、请求者、漫画 ID。运行时依赖由装配根绑好。 */
-export interface SlashCommandJmcomicInput {
+export interface CommandJmcomicInput {
   chatKey: string;
   kind: 'group' | 'private';
   chatId: string;
@@ -72,11 +72,11 @@ export interface SlashCommandJmcomicInput {
   comicId: string;
 }
 
-export interface SlashCommandDeps {
+export interface CommandDeps {
   transcription: Pick<VideoTranscriptionQueue, 'enqueue'>;
   imageGen: Pick<ImageGenQueue, 'enqueue'>;
   /** 漫画下载：端口只暴露"入队"，`onebot/sender/store` 由装配根在绑定处补齐。 */
-  jmcomic: { enqueue(input: SlashCommandJmcomicInput): { position?: number } };
+  jmcomic: { enqueue(input: CommandJmcomicInput): { position?: number } };
   /**
    * `/能力` 的**唯一口子**：列表 + 装载 + 卸载（同 `/漫画` 只拿 `enqueue`）。
    *
@@ -96,7 +96,7 @@ export interface SlashCommandDeps {
   log: (...args: unknown[]) => void;
 }
 
-interface SlashCommand {
+interface CommandEntry {
   /**
    * **所有命令词。第一个是主命令词**（`names[0]`）。
    *
@@ -112,7 +112,7 @@ interface SlashCommand {
    * （比如 `/转写` 那个由文本化产生的 `/转写[视频]`）也是往这个数组里加一条。
    */
   names: readonly string[];
-  run(input: SlashCommandInput, deps: SlashCommandDeps): Promise<void>;
+  run(input: CommandInput, deps: CommandDeps): Promise<void>;
 }
 
 /**
@@ -122,21 +122,21 @@ interface SlashCommand {
  * （check-layers），所以这里直接 import 它，而不是再抄一遍形状：抄一遍的话"两边漂移了"
  * 只能靠人核对，import 之后**编译器就会报**。
  *
- * ⚠️ `ExtraCommand` 与下面那个 `SlashCommand` 是**两个不同的职责，别合并**：那一个是**命令骨架**
+ * ⚠️ `ExtraCommand` 与下面那个 `CommandEntry` 是**两个不同的职责，别合并**：那一个是**命令骨架**
  * （发回执、错误话术、失败不抛），这一个是**业务实现**（只返回一句话，不碰 sender）。
  * `adaptExtraCommand()` 就是把后者套进前者的那一层。
  */
-export interface SlashCommandExtraSource {
+export interface CommandExtraSource {
   /** 接管中 = 主命令（除 `/能力`）让位。 */
   override: boolean;
   commands: readonly ExtraCommand[];
 }
 
-const NO_EXTRAS: SlashCommandExtraSource = { override: false, commands: [] };
+const NO_EXTRAS: CommandExtraSource = { override: false, commands: [] };
 
 // ── 主流程命令 ──
 
-const transcribeCommand: SlashCommand = {
+const transcribeCommand: CommandEntry = {
   // "发一个视频 + 打一句 `/转写`"送来的文本是 `'/转写[视频]'`（占位符紧贴着，没有空格）。
   // 这里**不需要**为它单开一个词形：`[` 算边界（见 `startsWithWord`），所以 `/转写` 本身就认得出，
   // 而 `parseTranscriptionCommand` 拿到原样的 `'/转写[视频]'` 会从 media 里取到那个视频。
@@ -151,7 +151,7 @@ const transcribeCommand: SlashCommand = {
   }
 };
 
-const drawCommand: SlashCommand = {
+const drawCommand: CommandEntry = {
   names: ['/画'],
   async run({ chatKey, text, media, replyToMessageId }, { imageGen, sender, log }) {
     await runCommand('/画', { sender, log }, chatKey, replyToMessageId, async () => {
@@ -176,7 +176,7 @@ const drawCommand: SlashCommand = {
   }
 };
 
-const jmcomicCommand: SlashCommand = {
+const jmcomicCommand: CommandEntry = {
   names: ['/漫画'],
   // `/漫画 12345`：只做"下载"这一件事 —— **搜索仍只由模型用 search_jmcomic 做**
   // （那是刻意的两条路：搜索廉价可反复，下载要拉全本、导出 PDF、传群文件且不可撤销）。
@@ -212,7 +212,7 @@ const jmcomicCommand: SlashCommand = {
  * ⚠️ **它必须是斜杠命令，不能是工具**：这一轮的设计就是"装载的控制权在人手里"。
  * 给模型一个装载工具等于把这条边界拆掉。
  */
-const capabilitiesCommand: SlashCommand = {
+const capabilitiesCommand: CommandEntry = {
   // `/扩展` 只是"另一个叫法"，语义完全一样（命中它时会被规范回 `/能力` 再解析）。
   names: ['/能力', '/扩展'],
   async run({ chatKey, text, replyToMessageId }, { extras, sender, log }) {
@@ -234,7 +234,7 @@ const capabilitiesCommand: SlashCommand = {
   }
 };
 
-const BUILTIN_COMMANDS: readonly SlashCommand[] = [transcribeCommand, drawCommand, jmcomicCommand, capabilitiesCommand];
+const BUILTIN_COMMANDS: readonly CommandEntry[] = [transcribeCommand, drawCommand, jmcomicCommand, capabilitiesCommand];
 
 /**
  * 接管模式下仍然保留的主流程命令 —— **只有 `/能力`**。
@@ -242,18 +242,18 @@ const BUILTIN_COMMANDS: readonly SlashCommand[] = [transcribeCommand, drawComman
  * 其余三条（`/转写` `/画` `/漫画`）是主流程的**功能**，接管时整体让位；`/能力` 不是功能，
  * 是"把主流程换回来"的开关。少了它，管理员装上一个接管扩展之后再没有任何办法卸掉它。
  */
-const OVERRIDE_KEPT_COMMANDS: readonly SlashCommand[] = [capabilitiesCommand];
+const OVERRIDE_KEPT_COMMANDS: readonly CommandEntry[] = [capabilitiesCommand];
 
-export interface SlashCommands {
+export interface CommandDispatcher {
   /**
    * 归一化后认命令。导出给 ingest：它要用**同一个判据**决定 `wakeEligible` 与要不要并入引用附件。
    *
    * **要传会话标识**：被接管的会话里，主流程命令让位、只剩接管者的那些命令
    * （`/能力` 例外，它永远在）。
    */
-  isSlashCommand(text: unknown, chatKey: string): boolean;
+  isCommandEntry(text: unknown, chatKey: string): boolean;
   /** 处理一条斜杠命令。**返回是否已接管**（`false` = 不是命令，调用方照常走 LLM 路径）。 */
-  handleSlashCommand(input: SlashCommandInput, deps: SlashCommandDeps): Promise<boolean>;
+  handleCommandEntry(input: CommandInput, deps: CommandDeps): Promise<boolean>;
 }
 
 /**
@@ -283,10 +283,10 @@ function startsWithWord(text: string, word: string): boolean {
 /**
  * 一条命令认不认这句话：**名字列表里有任何一个词打头就算**。没有第二种判据。
  *
- * ⚠️ `isSlashCommand` 与 `handleSlashCommand` 必须都走这一个函数 —— 分成两份时的表现是
+ * ⚠️ `isCommandEntry` 与 `handleCommandEntry` 必须都走这一个函数 —— 分成两份时的表现是
  * "命令没被认出来、消息进了 LLM"或"同一条消息被处理两次"，两种都不报错。
  */
-function matchesCommand(command: SlashCommand, text: string): boolean {
+function matchesCommand(command: CommandEntry, text: string): boolean {
   return command.names.some((word) => startsWithWord(text, word));
 }
 
@@ -297,7 +297,7 @@ function matchesCommand(command: SlashCommand, text: string): boolean {
  * 各能力的 commands.ts 里，扩展的在 `impl.ts` 里，加一个词形要改三处，而漏改的表现是
  * "命令被认出来了、但解析不出参数"（`/time` 交给只认 `^/时间` 的解析器 → 返回用法提示）。
  */
-function canonicalize(command: SlashCommand, text: string): string {
+function canonicalize(command: CommandEntry, text: string): string {
   const canonical = command.names[0] ?? '';
   for (const word of command.names) {
     if (word !== canonical && startsWithWord(text, word)) return canonical + text.slice(word.length);
@@ -309,10 +309,10 @@ function canonicalize(command: SlashCommand, text: string): string {
  * 把扩展贡献的命令套上**与内置命令同一只外壳**（`runCommand`）：回执发送、"抛出的中文原样进群"、
  * 发送失败不抛 —— 那三条是三条内置命令共用的一份，扩展不必再写一遍，行为也就不会漂移。
  *
- * 这个函数同时是**形状的编译期检查**：`ExtraCommandInput` 与 `SlashCommandInput` 一旦漂移，
+ * 这个函数同时是**形状的编译期检查**：`ExtraCommandInput` 与 `CommandInput` 一旦漂移，
  * 这里就编译不过（这正是"两份形状必然漂移"的机检形态）。
  */
-function adaptExtraCommand(command: ExtraCommand): SlashCommand {
+function adaptExtraCommand(command: ExtraCommand): CommandEntry {
   return {
     names: command.names,
     run: (input, deps) => runCommand(
@@ -332,22 +332,22 @@ function adaptExtraCommand(command: ExtraCommand): SlashCommand {
  * 顺序即行为（与装配清单同理）：主流程命令在前、扩展命令在后 —— 所以**扩展永远遮蔽不了内置**
  * （某个扩展声明了 `/画`，那条匹配永远轮不到它，是死代码而不是覆盖）。
  */
-export function createSlashCommands(
-  source: (chatKey: string) => SlashCommandExtraSource = () => NO_EXTRAS,
-  extras?: SlashCommandDeps['extras']
-): SlashCommands {
-  const tableFor = (chatKey: string): ReadonlyArray<SlashCommand> => {
+export function createCommandDispatcher(
+  source: (chatKey: string) => CommandExtraSource = () => NO_EXTRAS,
+  extras?: CommandDeps['extras']
+): CommandDispatcher {
+  const tableFor = (chatKey: string): ReadonlyArray<CommandEntry> => {
     const current = source(chatKey);
     const builtin = current.override ? OVERRIDE_KEPT_COMMANDS : BUILTIN_COMMANDS;
     return [...builtin, ...current.commands.map(adaptExtraCommand)];
   };
 
   return {
-    isSlashCommand(text, chatKey) {
+    isCommandEntry(text, chatKey) {
       const value = String(text ?? '').trim();
       return tableFor(chatKey).some((command) => matchesCommand(command, value));
     },
-    async handleSlashCommand(input, deps) {
+    async handleCommandEntry(input, deps) {
       const text = String(input.text ?? '').trim();
       const command = tableFor(input.chatKey).find((item) => matchesCommand(item, text));
       if (!command) return false;
@@ -393,7 +393,7 @@ function renderCapabilityList(rows: ExtraListRow[]): string {
  */
 async function runCommand(
   tag: string,
-  { sender, log }: Pick<SlashCommandDeps, 'sender' | 'log'>,
+  { sender, log }: Pick<CommandDeps, 'sender' | 'log'>,
   chatKey: string,
   replyToMessageId: string | number | null,
   body: () => Promise<string | null>

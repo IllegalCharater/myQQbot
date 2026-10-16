@@ -27,7 +27,7 @@ import { createSnowlumaController } from './onebot/snowluma.js';
 import { createTokenBridge } from './onebot/tokens.js';
 import type { OneBotRuntime } from './onebot/tokens.js';
 import { createIngest } from './onebot/ingest.js';
-import { createSlashCommands } from './onebot/slash-commands.js';
+import { createCommandDispatcher } from './onebot/commands.js';
 import { createConsole } from './http/console.js';
 import { errorMessage, isRecord } from './http/http.js';
 import type { AppHandle, CreateAppOptions } from './types.js';
@@ -174,7 +174,12 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     // 扩展把机器条目送回会话的口子（跑团的【跑团笔记】/【行动建议】）。
     // 只有它需要：`deliverNote` 是**宿主才知道怎么做**的事（要落 `ChatStore`、要入窗），
     // 而扩展那一层连 `chat/store.js` 都不必认识。
-    deliverNote
+    deliverNote,
+    // 私聊投递（跑团的暗骰）。`SendQueue` 本来就收 `private:<QQ>` 这种键，
+    // 所以这里只是把它包一层 —— 扩展那一侧只说"给谁、说什么"。
+    sendPrivate: async (targetUserId: string, text: string) => {
+      await sender.sendTextBatch(`private:${targetUserId}`, text);
+    }
   });
   // 内置工具表算一次就够（它是常量，只有扩展那部分是变的）—— 上面那次调用只是为了拿名字。
   const BUILTIN_TOOLS = buildToolDefs();
@@ -220,7 +225,7 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // ── 斜杠命令 ──
   // 命令表**是 provider 而不是数组**：扩展命令与"是否接管中"都会在运行期变（`/能力` 装载/卸载）。
   // `/能力` 那条主流程命令拿到的是 `extras` 的三个口子，与 `/漫画` 只拿 `enqueue` 同形。
-  const commands = createSlashCommands(
+  const commands = createCommandDispatcher(
     (chatKey) => ({ override: extras.isOverridden(chatKey), commands: extras.commandDefs(chatKey) }),
     // `/能力` 的几个口子。装载/卸载只在这里接出去 —— **模型侧没有任何口子**；
     // `load`/`unload` 带上会话，是因为**接管按会话隔离**（附加模式用不到它）。

@@ -3,7 +3,7 @@
 // ── 为什么它不在 `rules/` 里 ──
 //
 // `rules/` 那一层是纯函数目录（不许 import 到该目录之外，由 `scripts/check-layers.mjs` 机检），
-// 而真熵源要 `node:crypto`。所以熵源住在这里，由 `tools.ts` / `impl.ts` **注入**进规则层。
+// 而真熵源要 `node:crypto`。所以熵源住在这里，由 `tools/` / `commands/` / `impl.ts` **注入**进规则层。
 //
 // ── 为什么不能用 `Math.random` ──
 //

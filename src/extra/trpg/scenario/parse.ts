@@ -1,4 +1,4 @@
-// 跑团剧本的**存储层**：目录、frontmatter 解析、归一化、列表、读取、删除。
+// 剧本格式的**解析与判据**（从 `scenario.ts` 拆出，2026-10-16）。纯函数，不碰磁盘。
 //
 // ── 一份剧本是什么 ──
 //
@@ -26,15 +26,11 @@
 //   • **frontmatter 可选**：没有就整份当正文（标题用文件名）。这条让"就贴一段设定"也能存。
 //
 // 未知的 key **忽略并记下来**（同 `normalizeCampaign` 的宽容取舍）：多打一个字不该让整份剧本报废。
-import fs from 'node:fs';
-import path from 'node:path';
-import { DATA_DIR } from '../../core/paths.js';
-import { MAX_CHARACTERS, MAX_FLAGS, normalizeCharacter, normalizeFlag, safeFileName, text } from './state.js';
-import { MAX_SCENARIO_CHARS } from './types.js';
-import type { DocumentText } from '../../media/document/index.js';
-import type { TrpgCharacter, TrpgFlag } from './types.js';
-
-export const SCENARIOS_DIR = path.join(DATA_DIR, 'trpg', 'scenarios');
+import { MAX_CHARACTERS, MAX_FLAGS, text } from '../model/limits.js';
+import { normalizeCharacter } from '../model/character.js';
+import { normalizeFlag } from '../model/campaign.js';
+import { MAX_SCENARIO_CHARS } from '../types.js';
+import type { TrpgCharacter, TrpgFlag } from '../types.js';
 
 /**
  * 下载剧本文件时的大小上限。
@@ -78,7 +74,7 @@ const KNOWN_KEYS = new Set(['title', 'rule', 'scene', 'flags', 'characters']);
 /**
  * 解析一份剧本文件。
  *
- * Raises（返回 `ok:false`）：frontmatter 里某一行没有冒号、某个 JSON 值解不开、正文超长 ——
+ * 失败（返回 `ok:false`）：frontmatter 里某一行没有冒号、某个 JSON 值解不开、正文超长 ——
  * 三种都**指出是哪里**（"第几行"或"哪个字段"），因为读它的人正在手改这个文件。
  */
 export function parseScenario(raw: unknown, id: string): ScenarioLookup {
@@ -201,7 +197,7 @@ export function parseScenario(raw: unknown, id: string): ScenarioLookup {
  * ⚠️ 它**不等于** `parseScenario(...).ok`：那一个对**没有 frontmatter** 的文本也成功
  * （整份当正文、标题取文件名）。那是给手写 `.md` 留的宽容口子，不是"格式匹配成功"。
  *
- * `/剧本` 拿它决定要不要让模型整理一遍（见 `scenario-format.ts`）。两类都算
+ * `/剧本` 拿它决定要不要让模型整理一遍（见 `scenario/format.ts`）。两类都算
  * "不是规定格式"：**裸正文**（没 frontmatter），或**有 frontmatter 但解析报错**
  * （JSON 写坏、正文超长…）—— 后一类模型同样修得了。
  */
@@ -213,133 +209,4 @@ export function isFormattedScenario(raw: unknown, id = 'scenario'): boolean {
   // 只看"开头有没有那一行" —— 闭合那一步交给 parseScenario（它自己会报"没有闭合"）。
   if (start >= lines.length || !FRONTMATTER_START.test(lines[start])) return false;
   return parseScenario(source, id).ok;
-}
-
-/**
- * 抽取结果 → 落进剧本库。
- *
- * ⚠️ **"字节 → 文本"这一步不在这里**，它由通用能力 `media/document/` 做（而且要起 Python
- * 子进程）。这一层刻意保持**同步、纯**（同它上面那个 `parseScenario`），于是它能在不启动任何
- * 解释器的前提下被测。分开的判据是"**要不要碰外部世界**"：写盘要（在 store 里）、解字节不要。
- *
- * 剧本因此可以直接传 `.pdf` / `.docx`。**判断"这是不是规定格式"也不在这里**（那是
- * `isFormattedScenario` 的事，而且它的答案决定接下来要不要走 `scenario-format.ts` 那次模型调用）——
- * 本函数只管一件事：把一份**已经确定能解析**的正文写进去。
- */
-export function saveScenarioText(name: string, doc: DocumentText, store: ScenarioStore): ScenarioLookup {
-  // 抽取器会按自己的上限截断。**截断过的正文必须当场拒**，不能落库 ——
-  // 截断是在人还能改的时候不说、跑起来才少半段，而那时没人知道少了什么
-  // （同 `MAX_SCENARIO_CHARS` 那条约定的理由）。
-  if (doc.truncated) {
-    return {
-      ok: false,
-      message: `这份文件太长了（共 ${doc.chars} 字，超过单份剧本能读的上限）—— `
-        + '剧本只放世界观与主线，细节请拆成旗标与人物卡，或者换一份短一点的'
-    };
-  }
-  return store.write(name, doc.text);
-}
-
-interface CacheEntry { mtimeMs: number; lookup: ScenarioLookup }
-
-export class ScenarioStore {
-  readonly dir: string;
-  #cache = new Map<string, CacheEntry>();
-
-  constructor(dir: string = SCENARIOS_DIR) {
-    this.dir = dir;
-  }
-
-  file(id: string): string {
-    return path.join(this.dir, `${id}.md`);
-  }
-
-  /** 目录里此刻有哪些剧本。**坏文件也列出来**，并把问题带上。 */
-  list(): ScenarioSummary[] {
-    let names: string[] = [];
-    try {
-      names = fs.readdirSync(this.dir).filter((name) => name.toLowerCase().endsWith('.md')).sort();
-    } catch {
-      return [];
-    }
-    const out: ScenarioSummary[] = [];
-    for (const name of names) {
-      const id = name.slice(0, -'.md'.length);
-      if (!safeFileName(id)) continue;
-      const stat = this.#stat(id);
-      if (!stat) continue;
-      const lookup = this.#load(id, stat.mtimeMs);
-      out.push(lookup.ok
-        ? { id, title: lookup.scenario.title, chars: lookup.scenario.body.length, savedAt: stat.mtimeMs, problems: [] }
-        : { id, title: id, chars: 0, savedAt: stat.mtimeMs, problems: [lookup.message] });
-    }
-    return out;
-  }
-
-  /** 读一份剧本。坏文件**拒绝**（不拿一个空壳顶上 —— 那会变成"开局了但什么都没注入"）。 */
-  read(id: unknown): ScenarioLookup {
-    const wanted = safeFileName(id, 40);
-    if (!wanted) return { ok: false, message: '剧本名不能是空的' };
-    const stat = this.#stat(wanted);
-    if (!stat) {
-      const known = this.list().map((item) => item.id);
-      return { ok: false, message: `没有叫「${wanted}」的剧本。现在有：${known.join('、') || '（一个都没有）'}` };
-    }
-    return this.#load(wanted, stat.mtimeMs);
-  }
-
-  /** 写一份剧本（名字即 id）。`raw` 是文件全文（含 frontmatter）。 */
-  write(id: unknown, raw: unknown): ScenarioLookup {
-    const wanted = safeFileName(id, 40);
-    if (!wanted) return { ok: false, message: '剧本名不能是空的（也不能只有路径分隔符或点）' };
-    const parsed = parseScenario(raw, wanted);
-    if (!parsed.ok) return parsed;
-    try {
-      fs.mkdirSync(this.dir, { recursive: true });
-      const target = this.file(wanted);
-      const tmp = `${target}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, String(raw ?? ''), 'utf8');
-      fs.renameSync(tmp, target);
-    } catch (error) {
-      return { ok: false, message: `写不进剧本目录：${error instanceof Error ? error.message : String(error)}` };
-    }
-    this.#cache.delete(wanted);
-    return parsed;
-  }
-
-  remove(id: unknown): boolean {
-    const wanted = safeFileName(id, 40);
-    if (!wanted) return false;
-    this.#cache.delete(wanted);
-    try {
-      fs.rmSync(this.file(wanted));
-      return true;
-    } catch {
-      return false;   // 本来就没有
-    }
-  }
-
-  // ── 内部 ──
-
-  #stat(id: string): { mtimeMs: number } | null {
-    try {
-      return { mtimeMs: fs.statSync(this.file(id)).mtimeMs };
-    } catch {
-      return null;
-    }
-  }
-
-  /** 读 + 解析，按 mtime 缓存（`prompt()` 每轮都会问一次清单，不能每轮重解所有文件）。 */
-  #load(id: string, mtimeMs: number): ScenarioLookup {
-    const cached = this.#cache.get(id);
-    if (cached && cached.mtimeMs === mtimeMs) return cached.lookup;
-    let lookup: ScenarioLookup;
-    try {
-      lookup = parseScenario(fs.readFileSync(this.file(id), 'utf8'), id);
-    } catch (error) {
-      lookup = { ok: false, message: `读不到剧本「${id}」：${error instanceof Error ? error.message : String(error)}` };
-    }
-    this.#cache.set(id, { mtimeMs, lookup });
-    return lookup;
-  }
 }

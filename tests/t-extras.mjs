@@ -415,7 +415,8 @@ await withFakeTimers(async (timers) => {
   const badAlias = throws(() => makeRuntime([
     { ...makeFakeEntry('a4', [], { commands: ['/x'] }).entry, commands: [{ names: ['/x', 'time'] }] }
   ], DEFAULT_EXTRAS));
-  ok('词形不带斜杠开头 → 构造函数抛错', !!badAlias && badAlias.includes('必须带斜杠'), String(badAlias));
+  ok('词形不带合法前缀（`/` 或 `.`）→ 构造函数抛错',
+    !!badAlias && badAlias.includes('必须以 / 或 . 开头'), String(badAlias));
 
   const spaceAlias = throws(() => makeRuntime([
     { ...makeFakeEntry('a5', [], { commands: ['/x'] }).entry, commands: [{ names: ['/x', '/两 个字'] }] }
@@ -487,6 +488,68 @@ await withFakeTimers(async (timers) => {
   const result3 = await r3.load('cmdm');
   ok('命令：声明了却没实现 → 拒绝装载',
     result3.ok === false && String(result3.note).includes('命令声明了却没有实现'), JSON.stringify(result3));
+}
+
+// ── 7b. 子命令（`subs`）：声明期的糖，展开成普通命令词 ────────────────────────
+//
+// 判据是"词形仍然只有一个落点"：展开在 `runtime.ts` 里做**一次**，此后没有任何地方知道
+// "子命令"这个概念（见 `ExtraCommandSpec.subs`）。三件事都要钉：产出的是**展开后的词**、
+// 装载期对账按展开后的**键集合**、以及查重也按它 —— 两个扩展各写一个 `.x new`
+// 正是最该被拦住的那种撞名。
+{
+  /** 手写的假扩展：`commands`（可带 subs）与 `commandHandlers` 的键由用例自己给。 */
+  const makeSubEntry = (id, commands, keys) => ({
+    id, title: id, displayDesc: `${id} 的说明`, mode: 'attach', defaultEnabled: true, tools: [],
+    commands,
+    async load() {
+      const commandHandlers = {};
+      for (const key of keys) commandHandlers[key] = async () => `${id} 的 ${key} 回执`;
+      return { handlers: {}, commandHandlers };
+    }
+  });
+
+  const subCommands = [{ names: ['.x'], subs: ['new', 'join'] }, { names: ['.x'] }];
+  const rt = makeRuntime([makeSubEntry('sub', subCommands, ['.x new', '.x join', '.x'])], DEFAULT_EXTRAS);
+  const loaded = await rt.load('sub');
+  ok('带 subs 的声明**装载得过**：键就是展开出来的那三个（`.x new` / `.x join` / 裸 `.x`）',
+    loaded.ok === true, JSON.stringify(loaded));
+
+  const defs = rt.commandDefs('group:1');
+  ok('`commandDefs()` 产出的是**展开后的普通命令词**（此后没人知道"子命令"这个概念）',
+    JSON.stringify(defs.map((c) => c.names[0])) === JSON.stringify(['.x new', '.x join', '.x']),
+    JSON.stringify(defs.map((c) => c.names)));
+  ok('裸 `.x` **排在最后**（顺序即行为）—— 它不该把 `.x new` 吃掉',
+    defs[defs.length - 1].names[0] === '.x');
+  const receipt = await defs[0].run({
+    chatKey: 'group:1', senderId: '1', text: '.x new 甲', media: [], replyToMessageId: null
+  });
+  ok('展开出来的命令调到的是**那个子命令的 handler**（不是主命令那个）',
+    receipt === 'sub 的 .x new 回执', String(receipt));
+
+  // 两个方向的对账都按展开后的集合。
+  const missing = makeRuntime([makeSubEntry('sub2', subCommands, ['.x new', '.x'])], DEFAULT_EXTRAS);
+  const missResult = await missing.load('sub2');
+  ok('声明了 `.x join` 却没实现 → 拒绝装载（对账按**展开后的键**）',
+    missResult.ok === false && String(missResult.note).includes('命令声明了却没有实现'), JSON.stringify(missResult));
+
+  const surplus = makeRuntime(
+    [makeSubEntry('sub3', [{ names: ['.x'], subs: ['new'] }], ['.x new', '.x 多余的'])], DEFAULT_EXTRAS
+  );
+  const surplusResult = await surplus.load('sub3');
+  ok('实现了 `.x 多余的` 却没声明 → 拒绝装载',
+    surplusResult.ok === false && String(surplusResult.note).includes('命令实现了却没有声明'),
+    JSON.stringify(surplusResult));
+
+  // 构造期自检抛错 —— `throws` 那个帮手是**别的块**里的（块作用域），这里自己兜一个。
+  let subClash = null;
+  try {
+    makeRuntime([
+      makeSubEntry('c1', [{ names: ['.x'], subs: ['new'] }], ['.x new']),
+      makeSubEntry('c2', [{ names: ['.x'], subs: ['new'] }], ['.x new'])
+    ], DEFAULT_EXTRAS);
+  } catch (error) { subClash = String(error?.message ?? error); }
+  ok('两个扩展各写一个 `.x new` → 构造函数抛错（查重查的是**展开后**的串）',
+    !!subClash && subClash.includes('重复'), String(subClash));
 }
 
 // ── 8. 提示词覆盖的段名：覆盖一个不存在的段落不会有任何报错，必须拦在装载时 ────
@@ -1128,7 +1191,7 @@ const inbound = (text = '3d6') => ({
 // ingest 端到端：拦下的消息**不惊动模型**，但照常存档、照常上面板。
 {
   const { createIngest } = await load('web/onebot/ingest.js');
-  const { createSlashCommands } = await load('web/onebot/slash-commands.js');
+  const { createCommandDispatcher } = await load('web/onebot/commands.js');
   const { ChatStore } = await load('chat/store.js');
   const { DEFAULT_CONFIG } = await load('core/config.js');
 
@@ -1144,7 +1207,7 @@ const inbound = (text = '3d6') => ({
     transcription: { enqueue: () => { throw new Error('不该入队'); } },
     imageGen: { enqueue: () => { throw new Error('不该入队'); } },
     jmcomic: { enqueue: () => { throw new Error('不该入队'); } },
-    commands: createSlashCommands(),
+    commands: createCommandDispatcher(),
     // 只接 `3d6` 这一条；其余一律不管。
     extras: { intercept: (_chatKey, input) => (input.text.trim() === '3d6' ? { reply: '🎲 12' } : null) },
     emit: () => {},

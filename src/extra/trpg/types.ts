@@ -51,6 +51,24 @@ export interface TrpgCharacter {
   hpMax: number;
   san: number;
   sanMax: number;
+  /**
+   * 魔法值（P4 起，COC7 的 MP）。`mpMax` 为 0 = 这套规则/这张卡没有 MP 这个概念
+   * （同 `sanMax` 那条：**印一个 `MP 0/0` 只会让人困惑**，所以渲染按"字段在不在"决定印不印）。
+   */
+  mp: number;
+  mpMax: number;
+  /**
+   * **伤害加值**（Damage Bonus），形如 `+1d4` / `-2` / `0`。
+   *
+   * 它是**一条掷骰表达式**而不是数字 —— 因为它本来就要被掷（`1d4+DB`）。存字符串而不是存
+   * "几个骰子"，是为了让 DM 把它原样写进 `.r` / `roll` 里，不必自己换算。
+   * COC7 的表按 STR+SIZ 查，见 `rules/chargen.ts`。
+   */
+  db: string;
+  /** 体格（Build）。与 DB 同一张表给出，两者不独立。 */
+  build: number;
+  /** 移动力（MOV）。COC7 按 STR/DEX 与 SIZ 的大小关系给 7/8/9。 */
+  mov: number;
   /** 自由文本备注（物品、状态、旧伤…）。有上限，因为它每轮都进提示词。 */
   notes: string[];
   /**
@@ -62,7 +80,18 @@ export interface TrpgCharacter {
   discovered: boolean;
   /** **字段级**可见度：这张卡上对玩家隐藏的字段名，取值见 `HIDDEN_FIELDS`。空数组 = 全可见。 */
   hidden: HiddenField[];
+  /**
+   * 玩家自己确认过这张卡了吗（`.pc confirm`）。`preparing → active` 的一道闸门。
+   *
+   * ⚠️ **缺省 false**，而旧存档里的卡统统是 false —— 那不会挡住任何旧局：迁移把"没有 `status`
+   * 字段"的存档一律读成 `active`（见 `model/campaign.ts`），而 `confirmed` 只在 `preparing`
+   * 那一档参与判定。DM 那一份渲染与工具都不读它（DM 建卡是"它说了算"）。
+   */
+  confirmed: boolean;
 }
+
+/** 一局处在哪一步。见 `model/session.ts` 的状态机。 */
+export type TrpgStatus = 'preparing' | 'active';
 
 /** 一条跑团日志。 */
 export interface TrpgLogEntry {
@@ -101,6 +130,26 @@ export interface TrpgScenarioRef {
 /** 一场跑团的全部状态。一个会话最多一场。 */
 export interface TrpgCampaign {
   chatKey: string;
+  /**
+   * **这一局的身份**。`/trpg new` 时生成（`base36` 的时间戳），换局时换一个新的。
+   *
+   * 用途是"把这一局的东西认出来"：收团摘要的标题、日志里的指代，以及 P6 那个战报文件
+   * 想让"哪几段属于同一局"看得出来（战报本身按会话 append，不按局分文件）。
+   * **不是主键** —— 存档仍然一个会话一个文件（`data/trpg/<会话>.json`）。
+   */
+  sessionId: string;
+  /**
+   * 这一局走到哪一步了。缺省 `active`（**迁移**：旧存档没有这个字段，一律读成"已经在跑了" ——
+   * 升级不该把正在进行的团退回建卡阶段）。判据与状态机在 `model/session.ts`。
+   */
+  status: TrpgStatus;
+  /**
+   * 加入了这一局的**玩家 QQ 号**（决策 2：玩家 = QQ 号，不引入账号体系）。
+   *
+   * 与 `characters[].ownerId` 是同一套身份的两种用法：这里管"谁报了名"（`.trpg join`），
+   * 卡上那个管"这张卡是谁的"。`preparing → active` 要求两者对得上（见 `canActivate`）。
+   */
+  players: string[];
   title: string;
   /** 规则系统名（自由文本，如「通用骰子」「COC 7 版」）。**本模块不解释它**。 */
   system: string;

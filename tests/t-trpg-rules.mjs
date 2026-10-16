@@ -20,10 +20,11 @@ const { DiceError, rollDice } = await load('extra/trpg/rules/dice.js');
 const {
   BUILTIN_RULE_FILES, GENERIC_RULE, RuleError, check, compileRule, defaultJudge, resolveCheck, toVars, verifyRule
 } = await load('extra/trpg/rules/check.js');
+const { derive, rollChargen } = await load('extra/trpg/rules/chargen.js');
 const { ConditionError, compileCondition } = await load('extra/trpg/rules/condition.js');
 const { combine, formatPercentile, rollPercentile } = await load('extra/trpg/rules/percentile.js');
-const { RuleStore } = await load('extra/trpg/rule-store.js');
-const { safeFileName } = await load('extra/trpg/state.js');
+const { RuleStore } = await load('extra/trpg/store/rule-store.js');
+const { safeFileName } = await load('extra/trpg/model/paths.js');
 
 /** 内置的 COC 表 —— 它现在是**种子数据**，用同一套编译路径编出来（不再是一个写死的常量）。 */
 const COC7_RULE = compileRule(BUILTIN_RULE_FILES.coc7);
@@ -444,6 +445,140 @@ const anyRng = () => 0.5;
   }
   ok('编译失败时指明是**哪一级**、问题是什么',
     /第 1 级/.test(compileProblem) && /判定条件/.test(compileProblem), compileProblem);
+
+  // ── `dice`：技能检定掷什么（`.ra` 照它去掷） ──
+  //
+  // 它拼错的表现是"群里点一下 `.ra` 报个看不懂的语法错"，所以判据放在编译期（与其余"坏表拒绝"同源）。
+  let diceProblem = '';
+  try {
+    compileRule({ id: 'bad4', name: 'x', dice: '3d6+', levels: [{ name: 'a', label: 'A', success: true, condition: 'true' }] });
+  } catch (error) {
+    diceProblem = error instanceof RuleError ? error.problems.join('；') : `不是 RuleError: ${error}`;
+  }
+  ok('`dice` 不是一个能掷的表达式 → 编译期就拒绝（不是等到群友点 `.ra` 才炸）',
+    /dice「3d6\+」/.test(diceProblem) && /不是一个能掷的表达式/.test(diceProblem), diceProblem);
+  ok('`dice` 编译进规则对象（`.ra` 直接取它去掷）',
+    COC7_RULE.dice === '1d100' && GENERIC_RULE.dice === '1d100',
+    JSON.stringify([COC7_RULE.dice, GENERIC_RULE.dice]));
+  ok('**没写 `dice` 的老表照常能用**（缺省 `1d100`，与两套内置表一致）',
+    compileRule({ id: 'legacy', name: 'x', levels: [{ name: 'a', label: 'A', success: true, condition: 'true' }] }).dice === '1d100');
+  ok('`dice` 写得对就照单全收（用 d20 的团不必改代码）',
+    compileRule({
+      id: 'd20ish', name: 'x', dice: '1d20',
+      levels: [{ name: 'a', label: 'A', success: true, condition: 'true' }]
+    }).dice === '1d20');
+}
+
+// ── 11b. 属性生成与派生（P4，COC 7 版）────────────────────────────────────
+//
+// 属性是"一次掷定、之后一直用"的数字，所以它和掷骰同级：**给定 rng 必得同一结果**。
+// 这里用两个极端的 rng（全 0 → 全 1 点、全 0.999 → 全最大）把每一面都钉死，
+// 再单独把 DB/Build 表的**每一档边界**与 MOV 的**三种情形**穷举一遍。
+{
+  const COC7_CHARGEN = BUILTIN_RULE_FILES.coc7.chargen;
+
+  const min = rollChargen(COC7_CHARGEN, () => 0);
+  ok('rng 全 0 → 八个属性都是最小值（`3d6*5` → 15、`(2d6+6)*5` → 40）',
+    JSON.stringify(min.stats) === JSON.stringify({
+      STR: 15, CON: 15, DEX: 15, APP: 15, POW: 15, SIZ: 40, INT: 40, EDU: 40
+    }), JSON.stringify(min.stats));
+  ok('派生：HP=(CON+SIZ)/10 向下取整、MP=POW/5、SAN=POW',
+    min.derived.hpMax === 5 && min.derived.mpMax === 3 && min.derived.sanMax === 15,
+    JSON.stringify(min.derived));
+  ok('派生：STR+SIZ=55 落在最低那一档（DB -2 / Build -2）',
+    min.derived.db === '-2' && min.derived.build === -2, JSON.stringify(min.derived));
+  ok('派生：STR 与 DEX 都比 SIZ 小 → MOV 7',
+    min.derived.mov === 7, String(min.derived.mov));
+
+  const max = rollChargen(COC7_CHARGEN, () => 0.999);
+  ok('rng 全 0.999 → 八个属性都是最大值（90）',
+    Object.values(max.stats).every((value) => value === 90), JSON.stringify(max.stats));
+  ok('派生：HP 18 / MP 18 / SAN 90',
+    max.derived.hpMax === 18 && max.derived.mpMax === 18 && max.derived.sanMax === 90,
+    JSON.stringify(max.derived));
+  ok('派生：STR+SIZ=180 落在 +1d6 那一档（Build 2）',
+    max.derived.db === '+1d6' && max.derived.build === 2, JSON.stringify(max.derived));
+  ok('派生：STR 与 DEX 都不小于 SIZ → MOV 9',
+    max.derived.mov === 9, String(max.derived.mov));
+
+  ok('同一份 spec + 同一个 rng 序列 → **逐字相同的结果**（`rules/` 那条约定的判据）',
+    JSON.stringify(rollChargen(COC7_CHARGEN, () => 0.4)) === JSON.stringify(rollChargen(COC7_CHARGEN, () => 0.4)));
+
+  // ── DB / Build 表的**每一档边界** ──
+  //
+  // 表是按 STR+SIZ 查的，而边界最容易写错（`<` 还是 `<=`）。所以每一档的两个端点都点名。
+  const dbAt = (total) => {
+    const { derived } = derive({ STR: Math.floor(total / 2), SIZ: total - Math.floor(total / 2), DEX: 50, CON: 50, POW: 50 });
+    return `${derived.db}/${derived.build}`;
+  };
+  const rows = [
+    [64, '-2/-2'], [65, '-1/-1'], [84, '-1/-1'], [85, '0/0'], [124, '0/0'],
+    [125, '+1d4/1'], [164, '+1d4/1'], [165, '+1d6/2'], [204, '+1d6/2'],
+    [205, '+2d6/3'], [284, '+2d6/3'], [285, '+3d6/4'], [364, '+3d6/4'],
+    [365, '+4d6/5'], [444, '+4d6/5'], [445, '+5d6/6'], [600, '+5d6/6']
+  ];
+  const wrong = rows.filter(([total, want]) => dbAt(total) !== want);
+  ok('DB/Build 表**每一档的两个端点**都对（`<` 写成 `<=` 会在这里红）',
+    !wrong.length, JSON.stringify(wrong.map(([total, want]) => `${total}: 想要 ${want} 拿到 ${dbAt(total)}`)));
+  ok('表的**兜底行**在（超出最后一行也不该掉出去）', dbAt(9999) === '+5d6/6', dbAt(9999));
+
+  // ── MOV 的三种情形（含"等于"落在哪一边） ──
+  const movOf = (STR, DEX, SIZ) => derive({ STR, DEX, SIZ, CON: 50, POW: 50 }).derived.mov;
+  ok('STR 与 DEX **都小于** SIZ → 7；等号不算"小于"',
+    movOf(40, 40, 50) === 7 && movOf(49, 49, 50) === 7, `${movOf(40, 40, 50)}/${movOf(49, 49, 50)}`);
+  ok('STR 与 DEX **都不小于** SIZ → 9（等于也算）',
+    movOf(50, 50, 50) === 9 && movOf(80, 50, 50) === 9 && movOf(50, 80, 50) === 9,
+    `${movOf(50, 50, 50)}/${movOf(80, 50, 50)}/${movOf(50, 80, 50)}`);
+  ok('一高一低 → 8', movOf(80, 30, 50) === 8 && movOf(30, 80, 50) === 8,
+    `${movOf(80, 30, 50)}/${movOf(30, 80, 50)}`);
+
+  // ── 缺属性 ──
+  //
+  // 判据是"缺哪个报哪个、**只丢那几项**"：改一个名字不该把另外几项也一起弄没。
+  const partial = derive({ STR: 60, SIZ: 70, DEX: 50, POW: 40 });
+  ok('缺 `CON` → HP 算不出来，但 MP/SAN/DB/MOV 照算（逐项独立）',
+    partial.derived.hpMax === undefined && partial.derived.mpMax === 8 && partial.derived.sanMax === 40
+    && partial.derived.db === '+1d4' && partial.derived.build === 1 && partial.derived.mov === 7,
+    JSON.stringify(partial));
+  ok('`missing` 报出缺的名字（调用方据此说一句"缺 CON"而不是"算出来是 0"）',
+    JSON.stringify(partial.missing) === JSON.stringify(['CON']), JSON.stringify(partial.missing));
+  ok('全是空属性 → 一个派生值都没有，`missing` 把**全部**要的名字列出来（不短路）',
+    JSON.stringify(derive({}).derived) === '{}'
+    && JSON.stringify(derive({}).missing) === JSON.stringify(['CON', 'SIZ', 'POW', 'STR', 'DEX']),
+    JSON.stringify(derive({}).missing));
+
+  // ── 规则表的 `chargen` 段 ──
+  ok('内置 coc7 声明了 chargen（八项，掷法与规则书一致）',
+    !!COC7_CHARGEN && Object.keys(COC7_CHARGEN.attributes).length === 8
+    && COC7_CHARGEN.attributes.STR === '3d6*5' && COC7_CHARGEN.attributes.SIZ === '(2d6+6)*5',
+    JSON.stringify(COC7_CHARGEN?.attributes));
+  ok('**内置 generic 没有 chargen**（它那套没有属性生成这件事，不许为了好看硬塞一份）',
+    BUILTIN_RULE_FILES.generic.chargen === undefined && GENERIC_RULE.chargen === null);
+  ok('chargen 编译进规则对象（`.pc roll` 直接取它去掷）',
+    JSON.stringify(COC7_RULE.chargen?.attributes) === JSON.stringify(COC7_CHARGEN.attributes));
+
+  let chargenProblem = '';
+  try {
+    compileRule({
+      id: 'badc', name: 'x', chargen: { attributes: { STR: '3d6*' } },
+      levels: [{ name: 'a', label: 'A', success: true, condition: 'true' }]
+    });
+  } catch (error) {
+    chargenProblem = error instanceof RuleError ? error.problems.join('；') : `不是 RuleError: ${error}`;
+  }
+  ok('`chargen` 的掷法写错了 → 编译期就拒绝（并指明是哪个属性）',
+    /chargen/.test(chargenProblem) && /STR/.test(chargenProblem), chargenProblem);
+  let emptyChargen = '';
+  try {
+    compileRule({
+      id: 'badc2', name: 'x', chargen: { attributes: {} },
+      levels: [{ name: 'a', label: 'A', success: true, condition: 'true' }]
+    });
+  } catch (error) {
+    emptyChargen = error instanceof RuleError ? error.problems.join('；') : `不是 RuleError: ${error}`;
+  }
+  ok('`chargen.attributes` 是空的 → 拒绝（写了个空段比不写更坏：看起来支持、其实掷不出东西）',
+    /空的/.test(emptyChargen), emptyChargen);
 }
 
 // ── 12. 条件表达式：白名单之外的一切都拒绝 ─────────────────────────────────

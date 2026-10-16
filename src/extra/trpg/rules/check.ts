@@ -18,7 +18,11 @@
 // 某组取值会一个等级都匹配不上，而故障要等玩家恰好掷出那个点数才暴露 —— `verifyRule`
 // 就是为此存在的，它在加载与设置页里都会跑。
 import { ConditionError, compileCondition } from './condition.js';
-import { DiceError, rollDice } from './dice.js';
+
+/** 没写 `dice` 时技能检定掷什么。**写明的常量**：改它等于改所有老表的默认行为。 */
+const DEFAULT_CHECK_DICE = '1d100';
+import { DiceError, parseDiceExpr, rollDice } from './dice.js';
+import type { ChargenSpec } from './chargen.js';
 import type { ConditionVars } from './condition.js';
 import type { DiceRng, DiceRoll } from './dice.js';
 
@@ -60,6 +64,27 @@ export interface RuleFile {
    * 之类的判据会给出一个"看起来正常"的错误答案。静默算错是这一层最坏的失败模式，所以宁可拒绝。
    */
   requires?: { condition: string; message: string };
+  /**
+   * `.ra` / `.rh` 拿哪种骰子做技能检定（可选，**缺省 `1d100`**）。
+   *
+   * **为什么在规则文件里而不是写死在命令里**：技能检定掷什么骰是规则的一部分（COC 是 d100、
+   * D&D 是 d20），而规则表本来就是数据。写死 d100 等于让所有用 d20 的团永远用不了 `.ra`。
+   * 缺省 d100 与两套内置表一致，也让"没写这一栏的老表"照常能用。
+   *
+   * ⚠️ 它与 `requires` 是**两件事**：这一栏说"该掷什么"（`.ra` 照它去掷），
+   * `requires` 说"接不接受"（掷出来的形状不合就拒绝）。写了 `requires` 的表最好也写这一栏，
+   * 否则 `.ra` 会拿 d100 去撞一个只收 d20 的规则（那会被明确拒绝，但体验是"点一下报个错"）。
+   */
+  dice?: string;
+  /**
+   * **属性生成**（可选）。写一栏 = 这套规则支持"掷一套属性"（`.pc roll`），
+   * 形状按 COC 7 版设计（决策 3：先做这一套）。
+   *
+   * ⚠️ **键名不是随便起的**：派生公式（HP 要 `CON`/`SIZ`、MP 要 `POW`、DB 要 `STR`+`SIZ`、
+   * MOV 要 `STR`/`DEX`/`SIZ`）认的就是这几个名字，见 `rules/chargen.ts`。
+   * 改了名不会算错 —— 那几项会**派生不出来**，并明说缺谁。
+   */
+  chargen?: ChargenSpec;
   levels: RuleLevelFile[];
 }
 
@@ -76,6 +101,10 @@ export interface CheckRule {
   id: string;
   name: string;
   description: string;
+  /** 技能检定该掷的表达式（`.ra` 用它）。已在编译期校验过**解析得了**。 */
+  dice: string;
+  /** 属性生成的掷法（`.pc roll` 用它）。**没有这一栏 = 这套规则不支持掷属性**。 */
+  chargen: ChargenSpec | null;
   /** 上面那条 `requires` 编译成的东西；没写就是"什么形状都接受"。 */
   refuses: ((input: JudgeInput) => string | null) | null;
   levels: readonly CheckLevel[];
@@ -104,6 +133,7 @@ export const BUILTIN_RULE_FILES: Readonly<Record<string, RuleFile>> = {
     id: 'generic',
     name: '通用（掷高为佳）',
     description: '含修饰的合计 ≥ 目标值即成功；只有单颗骰时才判大成功 / 大失败。',
+    dice: '1d100',
     levels: [
       // 大成功 / 大失败**只在单颗骰时**才判：多骰（尤其带 kh/kl）下"全最大值"没有公认语义 ——
       // 我们不替规则书发明一个。单骰时"掷出最大面 = 大成功、掷出 1 = 大失败"是跨系统最通行的读法。
@@ -118,6 +148,15 @@ export const BUILTIN_RULE_FILES: Readonly<Record<string, RuleFile>> = {
     id: 'coc7',
     name: 'COC 7 版检定',
     description: 'd100 技能检定，六个档位（大成功 / 极难 / 困难 / 成功 / 失败 / 大失败）。',
+    dice: '1d100',
+    // COC 7 版的属性掷法：3d6×5 那一组与 (2d6+6)×5 那一组（见 `rules/chargen.ts`）。
+    // 派生值（HP/MP/SAN/DB/Build/MOV）由代码按同一份规则书算，不在这里声明。
+    chargen: {
+      attributes: {
+        STR: '3d6*5', CON: '3d6*5', DEX: '3d6*5', APP: '3d6*5', POW: '3d6*5',
+        SIZ: '(2d6+6)*5', INT: '(2d6+6)*5', EDU: '(2d6+6)*5'
+      }
+    },
     requires: {
       condition: 'count == 1 and faces == 100',
       message: 'COC 7 版检定要掷 1d100（技能检定是百分骰）'
@@ -159,6 +198,14 @@ export function compileRule(file: RuleFile): CheckRule {
   if (!id) problems.push('缺少 id');
   if (!name) problems.push('缺少 name');
   if (!Array.isArray(file.levels) || !file.levels.length) problems.push('levels 不能为空');
+  // `dice` 只在写错了的时候才有话说：它会被 `.ra` 拿去真的掷，拼错的表现是"点一下报个
+  // 看不懂的语法错"。放在编译期拦下来，与其余"坏表拒绝"同一条判据。
+  const dice = String(file.dice ?? '').trim() || DEFAULT_CHECK_DICE;
+  try {
+    parseDiceExpr(dice);
+  } catch (error) {
+    problems.push(`dice「${dice}」不是一个能掷的表达式：${error instanceof Error ? error.message : String(error)}`);
+  }
 
   const levels: CheckLevel[] = [];
   const seen = new Set<string>();
@@ -192,8 +239,35 @@ export function compileRule(file: RuleFile): CheckRule {
     }
   }
 
+  // `chargen`：每一格都要能掷（同 `dice` 那条）。写在表里但掷不出来的表现是
+  // "群友敲 `.pc roll` 报一个看不懂的语法错"，所以在编译期拦下。
+  let chargen: ChargenSpec | null = null;
+  if (file.chargen !== undefined && file.chargen !== null) {
+    const raw = file.chargen.attributes;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      problems.push('chargen.attributes 要是一个对象（属性名 → 掷法）');
+    } else {
+      const attributes: Record<string, string> = {};
+      for (const [key, expr] of Object.entries(raw as Record<string, unknown>)) {
+        const name = String(key ?? '').trim();
+        const text = String(expr ?? '').trim();
+        if (!name) { problems.push('chargen.attributes 里有一个空的属性名'); continue; }
+        try {
+          parseDiceExpr(text);
+        } catch (error) {
+          problems.push(`chargen.attributes 的「${name}」掷法「${text}」有问题：`
+            + `${error instanceof Error ? error.message : String(error)}`);
+          continue;
+        }
+        attributes[name] = text;
+      }
+      if (!Object.keys(attributes).length) problems.push('chargen.attributes 是空的（要么别写这一栏）');
+      chargen = Object.keys(attributes).length ? { attributes } : null;
+    }
+  }
+
   if (problems.length) throw new RuleError(problems);
-  return { id, name, description: String(file.description ?? '').trim(), refuses, levels };
+  return { id, name, description: String(file.description ?? '').trim(), dice, chargen, refuses, levels };
 }
 
 /**

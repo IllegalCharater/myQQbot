@@ -15,10 +15,10 @@ const {
 const { isBilibiliUrl, bilibiliUrlFromCandidates } = await load('media/media-source/parsers/bilibili.js');
 const { cardPayloadCandidates, xmlPayloadCandidates } = await load('media/media-source/providers/card-payload.js');
 const { DEFAULT_CONFIG, updateConfig } = await load('core/config.js');
-const { createSlashCommands } = await load('web/onebot/slash-commands.js');
+const { createCommandDispatcher } = await load('web/onebot/commands.js');
 // ingest 现在从 deps 拿命令分发器（命令表里可能有扩展贡献的命令，装哪个要现算）。
 // 本套件只关心转写与卡片，用一张**只有主流程命令**的表即可。
-const commands = createSlashCommands();
+const commands = createCommandDispatcher();
 
 const rejected = [
   'file:///etc/passwd', 'data:text/plain,hello', 'ftp://example.com/a.mp4',

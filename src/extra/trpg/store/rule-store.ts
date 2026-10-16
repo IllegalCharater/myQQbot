@@ -15,11 +15,12 @@
 //     （`GENERIC_RULE`），否则"删掉一个文件"就能让整个扩展没法做检定。
 import fs from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR } from '../../core/paths.js';
-import { BUILTIN_RULE_FILES, compileRule, verifyRule } from './rules/check.js';
-import { GENERIC_RULE } from './rules/check.js';
-import { MAX_RULE_CHARS, safeFileName } from './state.js';
-import type { CheckRule, RuleFile } from './rules/check.js';
+import { DATA_DIR } from '../../../core/paths.js';
+import { BUILTIN_RULE_FILES, compileRule, verifyRule } from '../rules/check.js';
+import { GENERIC_RULE } from '../rules/check.js';
+import { MAX_RULE_CHARS } from '../model/limits.js';
+import { safeFileName } from '../model/paths.js';
+import type { CheckRule, RuleFile } from '../rules/check.js';
 
 export const RULES_DIR = path.join(DATA_DIR, 'trpg', 'rules');
 

@@ -1,166 +1,36 @@
-// 跑团扩展的**实现**（懒加载的那一半）。
+// 跑团扩展的**实现**（懒加载的那一半）—— **纯接线**。
 //
 // 它只在**被加载时**才被 `import()` —— 入口是人：群里敲 `/能力 加载 trpg`，或者敲它自己的
-// `/跑团` `/掷骰`，或者 `config.json` 的 `extras.override` 在开机时播种。
+// 命令，或者 `config.json` 的 `extras.override` 在开机时播种。
 // 它这一装载就是**接管**（`spec.mode === 'override'`）：那个会话的模型侧换成跑团这一套。
 //
 // ── 这一层几乎什么都不做，那是有意的 ──
 //
-// 状态在 `state.ts`、渲染在 `render.ts`、工具在 `tools.ts`、规则在 `rules/`、兜底建议在
-// `suggest.ts`、模式在 `mode.ts`（它同时被 `toolsFor` / `prompt` / `onRunEnd` 读）。
-// 这里只做**接线**：把 `ExtraRuntime` 那几个口子接到上面那几件东西上。
+// 声明在 `spec.ts`、判据与状态机在 `model/`、落盘在 `store/`、剧本格式在 `scenario/`、
+// 玩家命令在 `commands/`、模型工具在 `tools/`、展示在 `render/`、规则在 `rules/`、
+// 兜底建议在 `suggest.ts`、真熵源在 `entropy.ts`。
+// 这里只做一件事：把 `ExtraRuntime` 那几个口子接到上面那几件东西上。
 import { isPersonMessage } from '../../chat/store.js';
 import { errorMessage } from '../../agent/tools/shared.js';
-import { safeFetchBinary } from '../../media/safe-fetch.js';
-import { FORMAT_LABEL, extractDocumentText } from '../../media/document/index.js';
-import { EXTRA_PROMPT_SECTIONS } from '../prompts.js';
-import { secureRng } from './entropy.js';
 import { getConfig } from '../../core/config.js';
-import { MODE_LABEL, TrpgModeStore, parseMode } from './mode.js';
-import {
-  SCENARIO_USAGE, formatRoll, renderBriefing, renderForModel, renderScenarioList, renderStatusCard, renderWizard
-} from './render.js';
-import { RuleStore } from './rule-store.js';
+import { EXTRA_PROMPT_SECTIONS } from '../prompts.js';
+import { createCommands } from './commands/index.js';
+import { scenarioIds, usableScenarios } from './commands/shared.js';
+import { secureRng } from './entropy.js';
+import { appendLog } from './model/campaign.js';
+import { renderForModel } from './render/model.js';
+import { renderBriefing } from './render/status.js';
+import { formatRoll } from './render/format.js';
 import { DiceError, looksLikeDiceRequest, rollDice } from './rules/dice.js';
-import { MAX_SCENARIO_BYTES, ScenarioStore, isFormattedScenario, saveScenarioText } from './scenario.js';
-import { formatScenarioText } from './scenario-format.js';
 import { TRPG_ASSISTANT_TOOLS, trpgSpec } from './spec.js';
-import { TrpgStore, appendLog } from './state.js';
+import { TrpgStore } from './store/campaign-store.js';
+import { JournalStore } from './store/journal-store.js';
+import { TrpgModeStore } from './store/mode-store.js';
+import { RuleStore } from './store/rule-store.js';
+import { ScenarioStore } from './store/scenario-store.js';
 import { generateSuggestions } from './suggest.js';
-import { beginCampaign, createHandlers } from './tools.js';
-import type { MediaEntry } from '../../chat/types.js';
-import type { ExtraCommandInput, ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd } from '../types.js';
-
-/** `/剧本` 的下载超时。这是**命令路径**（群友在等回执），不该被一个慢下载挂住。 */
-const SAVE_TIMEOUT_MS = 15000;
-
-/**
- * `/剧本 [名字]` —— 把**被引用的那个文件**收进剧本库。
- *
- * ── 为什么是"引用一个文件"而不是"把正文贴在命令后面" ──
- *
- * 剧本动辄几千字，而 QQ 单条消息有长度上限。文件没有这个问题，而且**人写剧本本来就是在编辑器里
- * 写一个文件**。被引用那条的媒体已经在 `ingest.ts` 里并进 `input.media` 了（那条 `if (slashCommand
- * && repliedMedia.length)`），所以这里只要在 media 里找 `kind: 'file'` 就行 —— 不需要任何新口子。
- *
- * ── 两个"当场" ──
- *
- * ① `url` 是协议端给的**临时直链**（实测带签名），所以要**当场下**，不能存起来等下次用；
- * ② 下载有**超时**（这是命令路径，群友在等回执，不该被一个慢下载挂住）。
- *
- * ── 权限 ──
- *
- * 与其余命令一致（白名单会话里可敲）。**已知代价**：白名单群里任何群友都能存剧本、也能覆盖同名剧本。
- * 要收紧只需在这里加一条判据（同 `/能力` 的权限那一句话）。
- */
-export interface SaveScenarioDeps {
-  /**
-   * 注入点，**只给套件用**（生产路径一个都不传）。
-   *
-   * 为什么需要：这条路上有两件本机测不了的事 —— 起 Python 子进程抽文本、以及可能发生的一次
-   * 模型调用。仓库的测试约定是**不许启动真解释器**，而真模型调用要么联网要么依赖桩端点；
-   * 两者都会让"套件绿"变成"这台机器恰好能跑"。手法与 `agent/tools/document.ts` 的 `extract` 相同。
-   */
-  extract?: typeof extractDocumentText;
-  format?: typeof formatScenarioText;
-}
-
-export async function saveScenario(
-  input: { media: readonly MediaEntry[] },
-  name: string,
-  scenarios: ScenarioStore,
-  deps: SaveScenarioDeps = {}
-): Promise<string> {
-  // 名字由调用方决定（显式给的，或从文件名推的）—— 推不出来时它已经回过 `SCENARIO_USAGE` 了，
-  // 所以这里不必再兜一次。
-  const file = input.media.find((item) => item.kind === 'file');
-  if (!file) {
-    return '引用的那条消息里没有文件。\n' + SCENARIO_USAGE;
-  }
-  const shown = String(file.name ?? '').trim() || String(file.file ?? '').trim() || '（没有名字的文件）';
-  const url = typeof file.url === 'string' ? file.url : '';
-  if (!url) {
-    return `拿到了「${shown}」，但协议端没给下载地址（只给了 file_id）—— 这条路暂时下不来，`
-      + '把文件内容贴成一条消息、或者直接放进 `data/trpg/scenarios/` 都行。';
-  }
-
-  try {
-    const { buffer } = await safeFetchBinary(url, MAX_SCENARIO_BYTES, AbortSignal.timeout(SAVE_TIMEOUT_MS));
-    // 字节 → 文本交给**通用能力**（`media/document/`）：剧本因此可以直接传 .pdf / .docx，
-    // 而不只是 UTF-8 的 .md / .txt。那一步要起 Python 子进程，所以下面单独接一段错误 ——
-    // "下载失败"与"读不出来"是两件事，压成一句会让人往错的方向查。
-    let doc;
-    try {
-      doc = await (deps.extract ?? extractDocumentText)(buffer);
-    } catch (error) {
-      return `读「${shown}」失败：${errorMessage(error)}`;
-    }
-    // ── 先做**格式匹配** ──
-    //
-    // 判据是确定性的（有没有 frontmatter、能不能解析），不是"看起来像不像"。**格式本来就对的
-    // 文件一次模型调用都不发** —— 那是这条命令的快路径。上传的是 PDF 模组、一段裸设定，
-    // 或者 frontmatter 里的 JSON 写坏了，才让模型整理一遍。
-    const sourceLabel = FORMAT_LABEL[doc.format];
-    const usedModel = !isFormattedScenario(doc.text, name);
-    let finalText = doc.text;
-    if (usedModel) {
-      const formatted = await (deps.format ?? formatScenarioText)(doc.text, { name, source: sourceLabel });
-      if (!formatted.ok) return `${shown}：${formatted.message}`;
-      finalText = formatted.text;
-    }
-    const saved = saveScenarioText(name, { ...doc, text: finalText }, scenarios);
-    if (!saved.ok) return `${shown}：${saved.message}`;
-    const skeleton = [
-      Object.keys(saved.scenario.flags).length ? `${Object.keys(saved.scenario.flags).length} 条旗标` : '',
-      saved.scenario.characters.length ? `${saved.scenario.characters.length} 张人物卡` : ''
-    ].filter(Boolean).join('、');
-    // 来源格式要说出来。**整理过的那一次也要说**：它是"回执为什么慢了"与"内容为什么被重排过"
-    // 的唯一线索，不说的话群友只会看到一份与自己手里不一样的剧本，而不知道为什么。
-    const origin = [sourceLabel, ...(doc.pages === undefined ? [] : [`${doc.pages} 页`]),
-      ...(doc.encoding && doc.encoding !== 'utf-8' ? [`按 ${doc.encoding} 解码`] : [])].join('，');
-    const formattedNote = usedModel
-      ? `原文不是剧本格式，已让模型整理过（原文 ${doc.text.length} 字）。\n` : '';
-    return `${formattedNote}已存剧本「${saved.scenario.id}」：标题「${saved.scenario.title}」`
-      + `${skeleton ? `，带 ${skeleton}` : ''}，正文 ${saved.scenario.body.length} 字（来源 ${origin}）。`
-      + (saved.ignored.length ? `（忽略了不认识的字段：${saved.ignored.join('、')}）` : '')
-      + `\n开局：/开局 ${saved.scenario.id}`;
-  } catch (error) {
-    return `下载「${shown}」失败：${errorMessage(error)}`;
-  }
-}
-
-/**
- * 命令参数按**词**切（第一个词是命令本身，丢掉）。
- *
- * 与 `/掷骰` 那边**剥前缀**是有意的不同：`/掷骰` 的参数是一整条表达式（`3d6 + 2` 里的空格
- * 属于表达式），而这几条命令的参数是若干个独立的词（`/开局 灯塔 coc7`）。两者形状不同，
- * 别统一成一种 —— 统一之后必然有一边的解析错。
- */
-function wordsOf(input: ExtraCommandInput): string[] {
-  return String(input.text ?? '').trim().split(/\s+/).slice(1);
-}
-
-/**
- * `/跑团` 收到参数时回的话。**群友可见文案**，不属于提示词目录（同 `ROLL_USAGE`）。
- *
- * 存在的理由：拆掉子命令之后，`/跑团 开局 灯塔` 这种旧写法（或敲错）会落到 `/跑团` 上。
- * **不能静默忽略** —— 那样群友只会看到一张状态卡，而不知道自己敲的那条为什么没生效。
- */
-const COMMAND_USAGE = '这几条各自是一条命令：\n'
-  + '· `/跑团` —— 看当前局势（还没开局会给向导）\n'
-  + '· `/模式 [助手|DM]` —— 看 / 切换我当骰子助手还是当主持人\n'
-  + '· `/剧本 [名字]` —— 引用一份剧本文件收进库（不带名字就用文件名；没引用就是列出来）\n'
-  + '· `/开局 [剧本名] [规则表 id]` —— 不带名字是看有哪些剧本，带名字就开局\n'
-  + '· `/掷骰 3d6` —— 自己掷一次';
-
-/**
- * `/掷骰` 不带参数时的用法提示。**群友可见文案**，不属于提示词目录（同 `/画` 的用法提示）。
- *
- * 与 `rules/dice.ts` 的 `SYNTAX_HINT` 是两份，受众不同：这里写给**群友**（怎么敲这个命令），
- * 那里写给**模型**（工具参数该怎么填）。两份都列出支持形态是有意的 —— 它们都会被人照着抄。
- */
-const ROLL_USAGE = '用法：/掷骰 3d6 —— 支持 3d6、d20、1d100、2d6+3、2d6+1d4（多组相加）、'
-  + '4d6kh3（留高）、4d6kl3（留低）、(2d6+3)*2（括号与四则）、1d100b2（奖励骰）；也可以直接给一个数。';
+import { createHandlers } from './tools/index.js';
+import type { ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd } from '../types.js';
 
 /**
  * 兜底建议的冷却：同一个会话这么久之内最多触发一次。
@@ -189,25 +59,19 @@ const DM_TOOLS: readonly string[] = trpgSpec.tools.map((tool) => tool.name);
  */
 const CONTEXT_FLOOR = { maxContextMessages: 200, historyCount: 200, promptContextMaxChars: 60000 } as const;
 
-/**
- * 引用的那个文件叫什么（去掉扩展名）。取不到返回 `null`。
- *
- * 导出只为单测：它上面那条路（`/剧本` 不带名字）会真的去下载并**起 Python 抽文本**，
- * 而仓库的测试约定是不启动真解释器 —— 所以判据在这一层单独钉。
- */
-export function scenarioNameFromFile(media: readonly MediaEntry[]): string | null {
-  const file = media.find((item) => item.kind === 'file');
-  if (!file) return null;
-  const raw = String(file.name ?? file.file ?? '').trim();
-  return raw.replace(/\.[a-z0-9]+$/i, '').trim() || null;
-}
-
 export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
   const store = new TrpgStore();
   /** 规则表（`data/trpg/rules/`）。内置的两套由它**懒补齐**（首次用到规则时才写盘）。 */
   const rules = new RuleStore();
   /** 剧本库（`data/trpg/scenarios/`）。没有内置种子 —— 剧本是内容，得有人写。 */
   const scenarios = new ScenarioStore();
+  /**
+   * 战报（`data/trpg/journal/<会话>.jsonl`，append-only）。
+   *
+   * P2 起落地的是**写侧**：每次落盘的日志都镜像一条进去。读取与导出在 P6。
+   * **记在导出之前** —— 否则 P6 上线那天开始的团才有完整战报（决策 6）。
+   */
+  const journal = new JournalStore();
   /**
    * 每个会话的运行模式（`data/trpg/modes.json`）。缺省 = DM。
    *
@@ -226,138 +90,15 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
     return now - (lastSuggestAt.get(chatKey) ?? 0) < SUGGEST_COOLDOWN_MS;
   };
 
-  /**
-   * 剧本库里**此刻能用的**那些。
-   *
-   * 坏文件不进清单（它们本来也选不中），但它们仍然出现在设置页里 —— 那才是能修的地方。
-   * 抽成一个函数是因为**三处**要用（模型那份简报、向导、`/开局` 的候选），
-   * 各写一遍的话，加一种"不能用"的成因时必然漏掉其中一处。
-   */
-  const usableScenarios = () => scenarios.list().filter((item) => !item.problems.length);
-  const scenarioIds = (): string[] => usableScenarios().map((item) => item.id);
-
   return {
-    handlers: createHandlers({ store, rules, scenarios, rng: secureRng, deliverNote: deps.deliverNote }),
+    handlers: createHandlers({
+      store, rules, scenarios, journal, rng: secureRng, deliverNote: deps.deliverNote
+    }),
 
-    commandHandlers: {
-      /**
-       * `/跑团` —— **只报当前状态**。四个动作各有各的命令（2026-10-16 拆的）：
-       *
-       *   `/模式 [助手|DM]` → `/剧本 [名字]`（上传/列出，**可选**）→ `/开局 [剧本名] [规则表]`，
-       *   外加随时能敲的 `/掷骰 3d6`。
-       *
-       * ⚠️ **它不再接受任何子命令。** 原先三个动作挂在这里当 `words[0]` 分支，那张分支表就是
-       * `spec.commands` 词形列表的第二份定义 —— 而词形列表只有那一处（`names[0]` 同时是
-       * `commandHandlers` 的键）。拆开之后加一个动作 = 加一行声明 + 一个 handler。
-       * **带参数时不静默忽略**（旧写法 `/跑团 开局 灯塔` 会落到这里）：说清它们已经拆开了，
-       * 否则群友只会看到一张状态卡，而不知道自己敲的那条为什么没生效。
-       *
-       * 不带参数时按**这个会话此刻处在哪一步**给不同的东西（判据全是确定性的）：
-       *   · 助手模式 → 这个模式怎么用（它不注入状态，给一张"还没开团"的空卡会让人以为坏了）；
-       *   · 已经开局 → **玩家视角**的局势卡（玩的时候要看的就是它，零 LLM 成本）；
-       *   · 还没开局 → **向导**（正需要知道下一步敲什么）。
-       */
-      async '/跑团'(input) {
-        const mode = modes.read(input.chatKey);
-        if (wordsOf(input).length) return COMMAND_USAGE;
-        if (mode === 'assistant') {
-          return `当前是${MODE_LABEL.assistant}：发一个骰子表达式（3d6、d20、2d6+3、4d6kh3…）我就掷。\n`
-            + `要变成跑团（我当主持人）：\`/模式 DM\`。`;
-        }
-        const campaign = store.read(input.chatKey);
-        return campaign
-          ? renderStatusCard(campaign)
-          : renderWizard({ modeLabel: MODE_LABEL[mode], scenarios: scenarioIds() });
-      },
+    commandHandlers: createCommands({
+      store, rules, scenarios, modes, journal, rng: secureRng, sendPrivate: deps.sendPrivate
+    }),
 
-      /** `/模式 [助手|DM]` —— 看 / 切换这个群的形态。不带参数就是看当前的。 */
-      async '/模式'(input) {
-        const mode = modes.read(input.chatKey);
-        const wanted = wordsOf(input)[0];
-        if (!wanted) {
-          return `当前：${MODE_LABEL[mode]}\n`
-            + '· `/模式 助手` —— 只掷骰\n'
-            + '· `/模式 DM` —— 跑团，我当主持人';
-        }
-        const next = parseMode(wanted);
-        if (!next) return `不认识的模式「${wanted}」。可用的是：助手（骰子）、DM（跑团）。`;
-        if (next === mode) return `已经是${MODE_LABEL[mode]}了。`;
-        modes.write(input.chatKey, next);
-        // 切模式**不动战役存档**：切回 DM 时那一局还在原地等着（助手模式下它只是不被注入）。
-        const kept = next === 'assistant' && store.read(input.chatKey) ? '这一局的存档留着，切回 DM 就接着跑。' : '';
-        return `已切到${MODE_LABEL[next]}，**下一轮运行生效**。${kept}`;
-      },
-
-      /**
-       * `/剧本 [名字]` —— 把**引用的那个文件**收进剧本库（开一局的第 2 步，**可选**）。
-       *
-       * 不带名字时：引用了文件就用文件名当名字，没引用就是**列出剧本库**（清单里那两句正好
-       * 也说了怎么再传一份）。旧写法 `/跑团 存剧本 <名字>` 随子命令一起去掉了 —— 那是同一条
-       * 命令的第二份词形，留着就得在两处各写一遍。
-       */
-      async '/剧本'(input) {
-        const name = wordsOf(input)[0] ?? scenarioNameFromFile(input.media);
-        if (!name) return renderScenarioList(scenarioIds());
-        return saveScenario(input, name, scenarios);
-      },
-
-      /**
-       * `/开局 [剧本名] [规则表]` —— 开一局（第 3 步）。不带名字就是**选剧本**这一步。
-       *
-       * 它跟 DM 的 `campaign action=start` 走**同一个实现**（`beginCampaign`），所以两边的判据
-       * （已经开过局怎么拒、剧本读不到怎么办、规则表坏了怎么办）不可能漂移。人在群里敲这一条，
-       * 就不必指望模型从清单里挑对。
-       */
-      async '/开局'(input) {
-        const [wanted, rule] = wordsOf(input);
-        if (!wanted) {
-          return '选一份剧本开局：`/开局 <剧本名> [规则表 id]`\n'
-            + '（规则表 id 不填就用剧本推荐的那张）\n\n' + renderScenarioList(scenarioIds());
-        }
-        // 名字对得上就用那份剧本，对不上就当**标题**开一局（剧本是可选的，见 `/剧本`）。
-        // 这里没有第二份判据：两种情况都交给同一个 `beginCampaign` 去拒（已经开过局等）。
-        const useScenario = scenarios.read(wanted).ok;
-        const args = useScenario ? { scenario: wanted, rule } : { title: wanted, rule };
-        const result = beginCampaign(input.chatKey, args, { store, rules, scenarios });
-        if (result.isError) return String(result.content);
-        return String(result.content)
-          + (useScenario ? '' : `\n（剧本库里没有「${wanted}」，这一局**没有注入剧本** —— 想用剧本就先传一份）`);
-      },
-
-      /**
-       * `/掷骰 3d6` —— 玩家自己掷。同样零 LLM 成本。
-       *
-       * ⚠️ 这里**故意让 `DiceError` 抛出去**：`web/onebot/slash-commands.ts` 的外壳会把
-       * `error.message` **原样发进群**，而解析层的文案本来就是写给群友看的中文 + 可执行的下一步。
-       * 在这里 catch 成一句"掷骰失败"会把那些提示全丢掉 —— 而群里那位是唯一能照着改的人。
-       */
-      async '/掷骰'(input) {
-        const expr = String(input.text ?? '').replace(/^\/掷骰/u, '').trim();
-        if (!expr) return ROLL_USAGE;
-        const roll = rollDice(expr, secureRng);
-        // 掷骰记进这一局的日志：它是剧情的一部分，也是"这个点数不是我编的"的凭据。
-        // 没开局时照常掷（掷骰本身无害），只是没地方记。
-        const campaign = store.read(input.chatKey);
-        if (campaign) {
-          appendLog(campaign, 'roll', `${input.senderId || '有人'} 掷 ${formatRoll(roll)}`);
-          store.write(campaign);
-        }
-        return formatRoll(roll);
-      }
-    },
-
-    /**
-     * system prompt 的贡献：**人格 → （清单 + 剧本正文）→ 当前状态**，顺序不能反。
-     *
-     * 顺序即缓存：清单只在管理员改文件时变、剧本正文整局不变，而状态每轮都变。
-     * 把两个稳定的排在状态之前，system prompt 的公共前缀才能命中到状态变化点之前；
-     * 反过来的话，同一场团连着跑几轮会让**整段**系统提示每轮失效（见 `renderForModel` 顶部那段）。
-     *
-     * ⚠️ 本函数必须是**全函数**：装载时 `checkRuntimeShape` 会空着 `chatKey` 调它一次
-     * （只做段落名对账），`store.read('')` 返回 `null`，于是渲染出"还没有开局"那段 ——
-     * 不抛错、形状合法。这就是 `prompt(chatKey)` 要收参数、且不许抛的原因。
-     * 中间那段也**永远非空**（规则清单至少有两个内置的），所以 body 恒为三段。
-     */
     /**
      * 这个会话露哪些工具。**助手模式只给骰子**（`roll` + `say`）。
      *
@@ -386,7 +127,7 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
       if (!expr) return {};
       try {
         const roll = rollDice(expr, secureRng);
-        // 掷骰记进这一局的日志（同 `/掷骰`）。助手模式下通常没有战役 —— 有才记：那多半是
+        // 掷骰记进这一局的日志（同 `.r`）。助手模式下通常没有战役 —— 有才记：那多半是
         // "从 DM 切过来、以后还要切回去"的群，把这段补上比留个洞好。
         const campaign = store.read(input.chatKey);
         if (campaign) {
@@ -397,7 +138,7 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
       } catch (error) {
         // 走到这里的不是"解析不了"（那种在 `looksLikeDiceRequest` 就已经返回 `null`、静默拦下了），
         // 而是**解析得了、掷不出来**：`0d6`、`101d6` 这类越界的数量。它们确实是掷骰请求，
-        // 所以把**可读的原因**说出去 —— 那正是敲错的人需要的下一步（同 `/掷骰`：文案原样进群，
+        // 所以把**可读的原因**说出去 —— 那正是敲错的人需要的下一步（同 `.r`：文案原样进群，
         // 不换成一句"掷骰失败"）。
         return { reply: error instanceof DiceError ? error.message : `掷骰出错：${errorMessage(error)}` };
       }
@@ -429,6 +170,18 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
       };
     },
 
+    /**
+     * system prompt 的贡献：**人格 → （清单 + 剧本正文）→ 当前状态**，顺序不能反。
+     *
+     * 顺序即缓存：清单只在管理员改文件时变、剧本正文整局不变，而状态每轮都变。
+     * 把两个稳定的排在状态之前，system prompt 的公共前缀才能命中到状态变化点之前；
+     * 反过来的话，同一场团连着跑几轮会让**整段**系统提示每轮失效（见 `render/model.ts` 顶部那段）。
+     *
+     * ⚠️ 本函数必须是**全函数**：装载时 `checkRuntimeShape` 会空着 `chatKey` 调它一次
+     * （只做段落名对账），`store.read('')` 返回 `null`，于是渲染出"还没有开局"那段 ——
+     * 不抛错、形状合法。这就是 `prompt(chatKey)` 要收参数、且不许抛的原因。
+     * 中间那段也**永远非空**（规则清单至少有两个内置的），所以 body 恒为三段。
+     */
     prompt(chatKey) {
       // ── 助手模式：**空 body**（2026-10-16 改，原先是一份"骰子助手"人格）──
       //
@@ -446,7 +199,7 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
         body: [
           ...EXTRA_PROMPT_SECTIONS.trpg.body,
           renderBriefing(campaign, {
-            scenarios: usableScenarios().map((item) => ({ id: item.id, title: item.title })),
+            scenarios: usableScenarios(scenarios).map((item) => ({ id: item.id, title: item.title })),
             rules: rules.list().filter((item) => !item.problems.length)
               .map((item) => ({ id: item.id, name: item.name, description: item.description }))
           }),
@@ -494,7 +247,7 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
 
     // **没有 `dispose()`，是有意的。**
     //
-    // 本扩展不持有任何长期资源：状态是每次调用现读现写的小 JSON（`TrpgStore`），没有子进程、
+    // 本扩展不持有任何长期资源：状态是每次调用现读现写的小 JSON（三个 store），没有子进程、
     // 没有 socket、没有常驻计时器、没有大缓存（`lastSuggestAt` 只有冷却窗口内的几条，见上）。
     // 所以"空闲卸载"对它确实什么都不做 —— 与其写一个清空空 Map 的空 `dispose()` 假装释放了什么，
     // 不如**不写**，让这个事实裸露在这里。

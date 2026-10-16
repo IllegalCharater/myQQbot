@@ -39,8 +39,8 @@ import type { AppConfig } from '../core/config.js';
 import type { PromptPlan } from '../core/prompt-catalog.js';
 import type { ToolArguments, ToolContext, ToolDefinition, ToolResult } from '../agent/shared/types.js';
 import type {
-  ExtraCommand, ExtraCommandInput, ExtraConfigPatch, ExtraEntry, ExtraInterceptResult, ExtraMode,
-  ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd, ExtraSpec
+  ExtraCommand, ExtraCommandInput, ExtraCommandSpec, ExtraConfigPatch, ExtraEntry, ExtraInterceptResult,
+  ExtraMode, ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd, ExtraSpec
 } from './types.js';
 
 /**
@@ -103,6 +103,37 @@ export interface ExtraListRow {
 }
 
 export interface ExtraActionResult { ok: boolean; note: string }
+
+/**
+ * 一条命令声明 → **它的 `commandHandlers` 键**（见 `ExtraCommandSpec.subs`）。
+ *
+ *   • 不带 `subs`：键就是 `names[0]`（别名不占键，它们是同一条命令的其它叫法）；
+ *   • 带 `subs`：键是 `<names[0]> <子命令>` 那些串 —— **声明自己不占 `names[0]`**。
+ *
+ * 只有一处实现：`validateRegistry` 的查重、`checkRuntimeShape` 的两方向对账、以及
+ * `commandDefs()` 的产出全都调它。分开写的话，"声明与实现对不上"这件事会在三个地方
+ * 各有一套判据，而它们漂移的表现是装载期报错互相矛盾。
+ */
+function expandCommandKeys(spec: ExtraCommandSpec): string[] {
+  const main = String(spec.names?.[0] ?? '');
+  const subs = (spec.subs ?? []).map((sub) => String(sub ?? '').trim()).filter(Boolean);
+  return subs.length ? subs.map((sub) => `${main} ${sub}`) : [main];
+}
+
+/**
+ * 一条命令声明 → **所有可能匹配到一条消息的词**（查重用的就是它）。
+ *
+ * ⚠️ 它与 `expandCommandKeys` **不是一回事，别合并**：
+ *   • 键只有 `names[0]` 那一个（别名在同一条命令内部被规范化掉了）；
+ *   • 而**别名同样占命名空间** —— 甲的 `/天气` 与乙的 `['/查天气', '/天气']` 撞了，
+ *     表现是"先匹配到的先处理"，两个作者都以为自己的那个会被执行。
+ * 带 `subs` 时**别名也各自展开**（`.trpg new` 与 `.跑团 new` 都算），所以下面用 `names` 全量。
+ */
+function commandWords(spec: ExtraCommandSpec): string[] {
+  const names = (spec.names ?? []).map((name) => String(name ?? ''));
+  const subs = (spec.subs ?? []).map((sub) => String(sub ?? '').trim()).filter(Boolean);
+  return subs.length ? names.flatMap((name) => subs.map((sub) => `${name} ${sub}`)) : names;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -204,15 +235,33 @@ export function validateRegistry(
         problems.push(`${id}: 有一条命令没写 names（第一个是主命令词）`);
         continue;
       }
-      // 命令词**共用一个命名空间**（同一个扩展内、跨扩展都一样）：重了的话"先匹配到的先处理"
-      // 会静默地决定谁赢，而两个命令的作者都以为自己的那个会被执行。
+      const subs = spec.subs ?? [];
+      if (!Array.isArray(subs)) {
+        problems.push(`${id}.${names[0]}: subs 必须是一个数组（或者干脆不写）`);
+        continue;
+      }
+      // ⚠️ **前缀**：主流程命令是 `/`，跑团这一族的扩展用 `.`（OneDice 的手感）。
+      // 放松这一条是有意的：判据是"这个前缀在本仓库里已经被占用了"，而不是具体哪一个字符。
       for (const word of names) {
         const text = String(word ?? '');
-        if (!text.startsWith('/')) {
-          problems.push(`${id}.${names[0]}: 命令词「${text}」必须带斜杠开头`);
+        if (!text.startsWith('/') && !text.startsWith('.')) {
+          problems.push(`${id}.${names[0]}: 命令词「${text}」必须以 / 或 . 开头`);
           continue;
         }
         if (/\s/.test(text)) problems.push(`${id}.${names[0]}: 命令词「${text}」不能含空白`);
+      }
+      for (const sub of subs) {
+        const word = String(sub ?? '').trim();
+        if (!word) { problems.push(`${id}.${names[0]}: subs 里有一个空的子命令词`); continue; }
+        if (/\s/.test(word)) problems.push(`${id}.${names[0]}: 子命令词「${word}」不能含空白`);
+      }
+      // 命令词**共用一个命名空间**（同一个扩展内、跨扩展都一样）：重了的话"先匹配到的先处理"
+      // 会静默地决定谁赢，而两个命令的作者都以为自己的那个会被执行。
+      //
+      // ⚠️ 查重查的是**展开后**的词（`expandCommandKeys`）：带 `subs` 的声明自己不占 `names[0]`，
+      // 真正会被匹配的是 `<命令> <子命令>` 那些串 —— 拿原始 `names` 查会漏掉它们，
+      // 而两个扩展各写一个 `.trpg new` 正是最该被拦住的那种撞名。
+      for (const text of commandWords(spec)) {
         const owner = seenCommands.get(text);
         if (owner) problems.push(`${id}: 命令词 ${text} 与 ${owner} 重复`);
         else seenCommands.set(text, id);
@@ -239,7 +288,7 @@ export function checkRuntimeShape(entry: ExtraEntry, rt: ExtraRuntime): string |
   if (undeclaredTools.length) return `实现了却没有声明：${undeclaredTools.join('、')}`;
 
   // 命令同一套两个方向。没声明命令时 `commandHandlers` 允许缺席。
-  const declaredCommands = (entry.commands ?? []).map((spec) => spec.names?.[0]);
+  const declaredCommands = (entry.commands ?? []).flatMap(expandCommandKeys);
   const commandHandlers = isRecord(rt.commandHandlers) ? rt.commandHandlers : {};
   const missingCommands = declaredCommands.filter((name) => typeof commandHandlers[name] !== 'function');
   if (missingCommands.length) return `命令声明了却没有实现：${missingCommands.join('、')}`;
@@ -396,10 +445,28 @@ export class ExtrasRuntime {
         continue;
       }
       for (const spec of entry.commands ?? []) {
-        out.push({
-          names: spec.names,
-          run: (input) => this.#runCommand(entry.id, spec.names[0], input)
-        });
+        const subs = (spec.subs ?? []).map((sub) => String(sub ?? '').trim()).filter(Boolean);
+        if (!subs.length) {
+          // 普通命令：**别名一起带上**（`names` 整份给出去），规范化交给命令层 ——
+          // 每个解析器只需要认识主词（见 `canonicalize`）。
+          out.push({
+            names: spec.names,
+            run: (input) => this.#runCommand(entry.id, spec.names[0], input)
+          });
+          continue;
+        }
+        // 带 `subs` 的声明：**每条子命令各是一条普通命令**，此后没有任何地方知道
+        // "子命令"这个概念（见 `ExtraCommandSpec.subs`）。键取主命令词那种拼法，
+        // 所以别名 `'.跑团 new'` 与 `'.trpg new'` 落到**同一个** handler 上。
+        const canonical = String(spec.names[0] ?? '');
+        for (const name of spec.names) {
+          for (const sub of subs) {
+            out.push({
+              names: [`${name} ${sub}`],
+              run: (input) => this.#runCommand(entry.id, `${canonical} ${sub}`, input)
+            });
+          }
+        }
       }
     }
     return out;
@@ -541,7 +608,7 @@ export class ExtrasRuntime {
    * **这个会话**是否处于接管模式。
    *
    * 主流程的工具表 / 命令表 / 提示词都按它决定让不让位 —— **但 `/能力` 永远留着**，它是解除接管的
-   * 唯一入口（见 `slash-commands.ts` 的 `OVERRIDE_KEPT_COMMANDS`）。少了它，让一个会话被接管之后
+   * 唯一入口（见 `commands.ts` 的 `OVERRIDE_KEPT_COMMANDS`）。少了它，让一个会话被接管之后
    * 就再没有任何办法交还。
    */
   isOverridden(chatKey: string): boolean {
@@ -863,7 +930,7 @@ export class ExtrasRuntime {
   }
 
   /**
-   * 命令路径。**装载在这里发生**（入口是人），失败**抛出** —— `web/onebot/slash-commands.ts`
+   * 命令路径。**装载在这里发生**（入口是人），失败**抛出** —— `web/onebot/commands.ts`
    * 的外壳会把 `error.message` 原样发进群，那正是我们想要的（可执行的下一步）。
    */
   async #runCommand(id: string, name: string, input: ExtraCommandInput): Promise<string | null> {

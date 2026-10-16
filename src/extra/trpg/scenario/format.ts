@@ -20,11 +20,11 @@
 // 与 `suggest.ts` 同一条（那里有完整推导）：这条路径不挂在某个会话上，而
 // `SessionRegistry` 没有"只累加增量"的入口（`#persist` 对已结束的会话会重复累加），
 // 所以只把用量写进日志。
-import { chatCompletion } from '../../llm/llm.js';
-import { EXTRA_PROMPT_JOBS } from '../prompts.js';
-import { isFormattedScenario, parseScenario } from './scenario.js';
-import { MAX_CHARACTERS, MAX_FLAGS } from './state.js';
-import { MAX_SCENARIO_CHARS } from './types.js';
+import { chatCompletion } from '../../../llm/llm.js';
+import { EXTRA_PROMPT_JOBS } from '../../prompts.js';
+import { isFormattedScenario, parseScenario } from './parse.js';
+import { MAX_CHARACTERS, MAX_FLAGS } from '../model/limits.js';
+import { MAX_SCENARIO_CHARS } from '../types.js';
 
 /** 一次整理的等待上限。它挂在命令路径上（群友在等回执），但整理一份长文确实要一会儿。 */
 const FORMAT_TIMEOUT_MS = 60_000;

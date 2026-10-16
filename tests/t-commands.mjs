@@ -1,4 +1,4 @@
-// 斜杠命令的分发层（`src/web/onebot/slash-commands.ts`）。
+// 斜杠命令的分发层（`src/web/onebot/commands.ts`）。
 //
 // 这里验的是**接入层的分发**：判据、顺序、回执与失败话术，以及"判据只有一份"这条结构性质。
 // 各命令自己的语法不在这里重复验：
@@ -17,31 +17,31 @@ import { ROOT, load, stripComments } from './lib/src.mjs';
 dataDir('qqagent-slash-');
 const { ok, done } = checker();
 
-const { createSlashCommands } = await load('web/onebot/slash-commands.js');
+const { createCommandDispatcher } = await load('web/onebot/commands.js');
 // 命令分发器现在是**工厂**：命令表里还有扩展贡献的命令，而"谁在里面"会随装载/接管状态变，
 // 所以要现算。本段先用一张**只有主流程命令**的表 —— 扩展那部分在第 4 段单独验。
-const { isSlashCommand, handleSlashCommand } = createSlashCommands();
+const { isCommandEntry, handleCommandEntry } = createCommandDispatcher();
 
 /** 读**源码**（不是 dist 产物）。 */
 const readSource = (rel) => fs.readFileSync(path.join(ROOT, 'src', rel), 'utf8');
 
 // ── 1. 判据 ──────────────────────────────────────────────────────
 ok('认命令：`/词` 后面跟空白或直接结束',
-  isSlashCommand('/转写 https://example.com/a.mp4') && isSlashCommand('/画 一只猫')
-  && isSlashCommand('/画') && isSlashCommand('/转写') && isSlashCommand('/漫画 12345') && isSlashCommand('/漫画'));
+  isCommandEntry('/转写 https://example.com/a.mp4') && isCommandEntry('/画 一只猫')
+  && isCommandEntry('/画') && isCommandEntry('/转写') && isCommandEntry('/漫画 12345') && isCommandEntry('/漫画'));
 ok('认命令：**文本紧贴媒体段**时照样认得出（`segmentsToText` 用 join(\'\')，占位符是贴上来的）',
-  isSlashCommand('/转写[视频]') && isSlashCommand('/画[图片]')
-  && isSlashCommand('/漫画[图片]') && isSlashCommand('/能力[图片]'));
+  isCommandEntry('/转写[视频]') && isCommandEntry('/画[图片]')
+  && isCommandEntry('/漫画[图片]') && isCommandEntry('/能力[图片]'));
 ok('不认：`@` 不算边界（`/画@某人` 更像误触，没有放宽到"任何非字母数字"）',
-  !isSlashCommand('/画@某人') && !isSlashCommand('/转写@某人'));
+  !isCommandEntry('/画@某人') && !isCommandEntry('/转写@某人'));
 ok('不认：关键词连在一起的（`/画xx`、`/转写啦`、`/漫画123` 都不是命令）',
-  !isSlashCommand('/画xx') && !isSlashCommand('/转写啦') && !isSlashCommand('/漫画123'));
+  !isCommandEntry('/画xx') && !isCommandEntry('/转写啦') && !isCommandEntry('/漫画123'));
 ok('不认：没有斜杠、或斜杠不在开头（普通消息绝不能被当成命令）',
-  !isSlashCommand('画一只猫') && !isSlashCommand('帮我 /画 一只猫') && !isSlashCommand(''));
+  !isCommandEntry('画一只猫') && !isCommandEntry('帮我 /画 一只猫') && !isCommandEntry(''));
 ok('不认：展开后的合并转发正文以命令开头也不行（判据只吃"用户真正敲的那句"，见 commandText）',
-  !isSlashCommand('[合并转发 共2条]\n小明: /画 一只猫'));
+  !isCommandEntry('[合并转发 共2条]\n小明: /画 一只猫'));
 ok('空值/非字符串不抛（`commandText` 在只有媒体消息时可能是 undefined）',
-  isSlashCommand(null) === false && isSlashCommand(undefined) === false && isSlashCommand(123) === false);
+  isCommandEntry(null) === false && isCommandEntry(undefined) === false && isCommandEntry(123) === false);
 
 // ── 2. 分发与回执 ────────────────────────────────────────────────
 function deps({ failEnqueue = null, failSend = false } = {}) {
@@ -72,14 +72,14 @@ const input = (text, extra = {}) => ({
 
 {
   const { deps: d, log } = deps();
-  const handled = await handleSlashCommand(input('群友们晚上好'), d);
+  const handled = await handleCommandEntry(input('群友们晚上好'), d);
   ok('不是命令 → 返回 false，且一次都没碰队列与发送',
     handled === false && log.enqueued.length === 0 && log.sent.length === 0);
 }
 
 {
   const { deps: d, log } = deps();
-  const handled = await handleSlashCommand(input('/画 一只戴墨镜的鲸鱼'), d);
+  const handled = await handleCommandEntry(input('/画 一只戴墨镜的鲸鱼'), d);
   ok('`/画`：入队并回执（确定性路径，不经过模型）',
     handled === true && log.enqueued.length === 1 && log.enqueued[0].via === 'imageGen'
     && log.enqueued[0].prompt === '一只戴墨镜的鲸鱼' && log.enqueued[0].chatKey === 'group:10001',
@@ -96,7 +96,7 @@ const input = (text, extra = {}) => ({
 
 {
   const { deps: d, log } = deps();
-  await handleSlashCommand(input('/画 改成赛博朋克', {
+  await handleCommandEntry(input('/画 改成赛博朋克', {
     media: [{ kind: 'image', url: 'https://cdn.example.com/a.jpg' }]
   }), d);
   ok('`/画`：消息里（或它引用那条里）的图片被当作参考图递进队列（图生图）',
@@ -105,7 +105,7 @@ const input = (text, extra = {}) => ({
 
 {
   const { deps: d, log } = deps();
-  await handleSlashCommand(input('/画'), d);
+  await handleCommandEntry(input('/画'), d);
   ok('`/画` 没写描述：只回用法提示，**不入队**（别为一个空命令付一次出图的钱）',
     log.enqueued.length === 0 && log.sent.length === 1
     && String(log.sent[0].message) === '用法：/画 <画面描述>', JSON.stringify(log.sent));
@@ -113,14 +113,14 @@ const input = (text, extra = {}) => ({
 
 {
   const { deps: d, log } = deps({ failEnqueue: 'imageGen' });
-  await handleSlashCommand(input('/画 一只猫'), d);
+  await handleCommandEntry(input('/画 一只猫'), d);
   ok('入队失败时把**真实原因**原样发回群里（它是唯一能照着改的人），不吞成一句"命令执行失败"',
     log.sent.length === 1 && String(log.sent[0].message).includes('未配置'), JSON.stringify(log.sent));
 }
 
 {
   const { deps: d, log } = deps();
-  await handleSlashCommand(input('/转写 https://cdn.example.com/a.mp4'), d);
+  await handleCommandEntry(input('/转写 https://cdn.example.com/a.mp4'), d);
   ok('`/转写`：入队并回执（回执里的任务号是给敲命令的人看的进度凭据，与 `/画` 刻意不同）',
     log.enqueued.length === 1 && log.enqueued[0].via === 'transcription'
     && log.enqueued[0].url === 'https://cdn.example.com/a.mp4'
@@ -131,7 +131,7 @@ const input = (text, extra = {}) => ({
   // `/转写[视频]` 是**非首位的词形**，所以这条同时钉住"规范化真的做了"：不换回 `/转写` 的话，
   // 解析器认不出这个词，会走成一句用法提示（命令被认出来了、却什么都入不了队）。
   const { deps: d, log } = deps();
-  await handleSlashCommand(input('/转写[视频]', {
+  await handleCommandEntry(input('/转写[视频]', {
     media: [{ kind: 'video', url: 'https://cdn.example.com/b.mp4' }]
   }), d);
   ok('`/转写[视频]`（文本化产生的渲染形态）照样能执行 —— 命中非首位词形后规范回 `/转写`',
@@ -141,7 +141,7 @@ const input = (text, extra = {}) => ({
 
 {
   const { deps: d, log } = deps();
-  await handleSlashCommand(input('/转写 http://127.0.0.1/x.mp4'), d);
+  await handleCommandEntry(input('/转写 http://127.0.0.1/x.mp4'), d);
   ok('`/转写` 的内网地址被解析层拒绝时，那句可执行的提示原样进群（不是"命令执行失败"）',
     log.enqueued.length === 0 && log.sent.length === 1
     && String(log.sent[0].message).includes('禁止内网'), JSON.stringify(log.sent));
@@ -149,7 +149,7 @@ const input = (text, extra = {}) => ({
 
 {
   const { deps: d, log } = deps();
-  const handled = await handleSlashCommand(input('/漫画 12345'), d);
+  const handled = await handleCommandEntry(input('/漫画 12345'), d);
   ok('`/漫画 <ID>`：入队并回执',
     handled === true && log.enqueued.length === 1 && log.enqueued[0].via === 'jmcomic'
     && log.enqueued[0].comicId === '12345' && String(log.sent[0].message).includes('在下了'),
@@ -166,7 +166,7 @@ const input = (text, extra = {}) => ({
 
 {
   const { deps: d, log } = deps();
-  await handleSlashCommand(input('/漫画'), d);
+  await handleCommandEntry(input('/漫画'), d);
   ok('`/漫画` 没写 ID：只回用法提示，**不入队**', log.enqueued.length === 0 && log.sent.length === 1
     && String(log.sent[0].message) === '用法：/漫画 <漫画ID>', JSON.stringify(log.sent));
 }
@@ -174,7 +174,7 @@ const input = (text, extra = {}) => ({
 {
   // 去重/格式这类拒绝来自领域模块（`enqueueJmcomicDownload` 抛中文文案），原样进群。
   const { deps: d, log } = deps({ failEnqueue: 'jmcomic' });
-  await handleSlashCommand(input('/漫画 12345'), d);
+  await handleCommandEntry(input('/漫画 12345'), d);
   ok('`/漫画` 被领域层拒绝（重复提交等）时，那句中文文案原样进群',
     log.sent.length === 1 && String(log.sent[0].message).includes('未配置'), JSON.stringify(log.sent));
 }
@@ -183,13 +183,13 @@ const input = (text, extra = {}) => ({
   // 回执发不出去是接入链路的收尾动作，不该把 OneBot 的入站回调打成未处理异常。
   const { deps: d } = deps({ failSend: true });
   let threw = false;
-  try { await handleSlashCommand(input('/画 一只猫'), d); } catch { threw = true; }
+  try { await handleCommandEntry(input('/画 一只猫'), d); } catch { threw = true; }
   ok('回执发送失败**不抛**（消息本身已经落档了，抛出去只会污染入站回调）', threw === false);
 }
 
-ok('命令表按顺序匹配、先命中的先处理（`isSlashCommand` 与 `handleSlashCommand` 用的是同一张表）',
-  isSlashCommand('/画 一只猫') === true
-  && isSlashCommand('/转写 https://example.com/a.mp4') === true);
+ok('命令表按顺序匹配、先命中的先处理（`isCommandEntry` 与 `handleCommandEntry` 用的是同一张表）',
+  isCommandEntry('/画 一只猫') === true
+  && isCommandEntry('/转写 https://example.com/a.mp4') === true);
 
 // ── 4. 扩展命令：走同一只外壳，且遮蔽不了内置；接管时主流程命令让位但 `/能力` 留着 ──
 //
@@ -213,61 +213,61 @@ console.log('\n── 扩展命令与接管模式 ──');
   };
 
   const { deps: d, log } = deps();
-  const attach = createSlashCommands(() => ({ override: false, commands: [extraCommands['/天气']] }), extrasPort);
+  const attach = createCommandDispatcher(() => ({ override: false, commands: [extraCommands['/天气']] }), extrasPort);
   ok('附加模式：扩展命令被认出来，且走的是同一个 runCommand 外壳（回执由命令层发出）',
-    attach.isSlashCommand('/天气 北京') === true
-    && await attach.handleSlashCommand(input('/天气 北京'), d) === true
+    attach.isCommandEntry('/天气 北京') === true
+    && await attach.handleCommandEntry(input('/天气 北京'), d) === true
     && String(log.sent.at(-1)?.message) === '天气：北京',
     JSON.stringify(log.sent));
 
   {
     const { deps: d2 } = deps({ failSend: true });
     let threw = false;
-    try { await attach.handleSlashCommand(input('/天气 北京'), d2); } catch { threw = true; }
+    try { await attach.handleCommandEntry(input('/天气 北京'), d2); } catch { threw = true; }
     ok('扩展命令的回执发送失败**也不抛**（与内置命令同一只外壳）', threw === false);
   }
   {
     const { deps: dThrow, log: logThrow } = deps();
-    const throwing = createSlashCommands(() => ({
+    const throwing = createCommandDispatcher(() => ({
       override: false,
       commands: [{
         names: ['/爆炸'],
         run: async () => { throw new Error('用法：/爆炸 <参数>'); }
       }]
     }), extrasPort);
-    await throwing.handleSlashCommand(input('/爆炸'), dThrow);
+    await throwing.handleCommandEntry(input('/爆炸'), dThrow);
     ok('扩展命令抛出的中文**原样**进群（不吞成"命令执行失败"）',
       String(logThrow.sent.at(-1)?.message) === '用法：/爆炸 <参数>', JSON.stringify(logThrow.sent));
   }
 
   // 内置命令在前 ⇒ 扩展声明同样的文案也遮蔽不了它（那条扩展命令是死代码，而不是覆盖）。
-  const shadow = createSlashCommands(() => ({
+  const shadow = createCommandDispatcher(() => ({
     override: false,
     commands: [{ ...extraCommands['/天气'], names: ['/画'] }]
   }), extrasPort);
   {
     const { deps: d3, log: log3 } = deps();
-    await shadow.handleSlashCommand(input('/画 一只猫'), d3);
+    await shadow.handleCommandEntry(input('/画 一只猫'), d3);
     ok('扩展遮蔽不了内置：`/画` 仍然走内置那条（入队而不是回一句扩展文案）',
       log3.enqueued.length === 1 && log3.enqueued[0].via === 'imageGen', JSON.stringify(log3.enqueued));
   }
 
   // 接管模式：主流程三条命令让位，**但 `/能力` 必须留着** —— 它是解除接管的唯一入口。
-  const override = createSlashCommands(() => ({ override: true, commands: [] }), extrasPort);
+  const override = createCommandDispatcher(() => ({ override: true, commands: [] }), extrasPort);
   ok('接管模式：主流程的三条功能命令让位',
-    override.isSlashCommand('/转写 https://e.com/a.mp4') === false
-    && override.isSlashCommand('/画 一只猫') === false
-    && override.isSlashCommand('/漫画 12345') === false);
-  ok('接管模式：`/能力` 仍然认（否则装得上、卸不掉）', override.isSlashCommand('/能力') === true);
+    override.isCommandEntry('/转写 https://e.com/a.mp4') === false
+    && override.isCommandEntry('/画 一只猫') === false
+    && override.isCommandEntry('/漫画 12345') === false);
+  ok('接管模式：`/能力` 仍然认（否则装得上、卸不掉）', override.isCommandEntry('/能力') === true);
   {
     // **接管按会话隔离**：同一个进程里，A 群让位而 B 群照常。判据按会话取，所以两边看的是
     // 两张不同的表 —— 漏了这一步的表现是"接管变成了全局的"，谁也不报错。
-    const perChat = createSlashCommands((chatKey) => ({ override: chatKey === 'group:100', commands: [] }), extrasPort);
+    const perChat = createCommandDispatcher((chatKey) => ({ override: chatKey === 'group:100', commands: [] }), extrasPort);
     ok('接管按会话隔离：A 群让位、B 群照常（`/能力` 两边都在）',
-      perChat.isSlashCommand('/画 一只猫', 'group:100') === false
-      && perChat.isSlashCommand('/画 一只猫', 'group:200') === true
-      && perChat.isSlashCommand('/能力', 'group:100') === true
-      && perChat.isSlashCommand('/能力', 'group:200') === true);
+      perChat.isCommandEntry('/画 一只猫', 'group:100') === false
+      && perChat.isCommandEntry('/画 一只猫', 'group:200') === true
+      && perChat.isCommandEntry('/能力', 'group:100') === true
+      && perChat.isCommandEntry('/能力', 'group:200') === true);
   }
   {
     // `/能力 加载` 必须把**敲命令的那个会话**传下去 —— 接管按会话隔离，少了它就装不上。
@@ -277,14 +277,14 @@ console.log('\n── 扩展命令与接管模式 ──');
       load: async (id, reason, chatKey) => { seen.push([id, chatKey]); return { ok: true, note: 'ok' }; }
     };
     const { deps: dLoad } = deps();
-    const cmds = createSlashCommands(() => ({ override: false, commands: [] }), port);
-    await cmds.handleSlashCommand(input('/能力 加载 x', { chatKey: 'group:777' }), dLoad);
+    const cmds = createCommandDispatcher(() => ({ override: false, commands: [] }), port);
+    await cmds.handleCommandEntry(input('/能力 加载 x', { chatKey: 'group:777' }), dLoad);
     ok('`/能力 加载` 把敲命令的那个会话传给运行时（接管按会话隔离）',
       JSON.stringify(seen) === JSON.stringify([['x', 'group:777']]), JSON.stringify(seen));
   }
   {
     const { deps: d4, log: log4 } = deps();
-    await override.handleSlashCommand(input('/能力 卸载 anything'), d4);
+    await override.handleCommandEntry(input('/能力 卸载 anything'), d4);
     ok('接管模式下 `/能力 卸载` 真的调到了扩展运行时',
       extrasPort.unloads.includes('anything'), JSON.stringify(extrasPort.unloads));
     ok('`/能力 加载/卸载` 的回执把运行时那句话原样带回群里',
@@ -292,20 +292,20 @@ console.log('\n── 扩展命令与接管模式 ──');
   }
   {
     const { deps: d5, log: log5 } = deps();
-    await override.handleSlashCommand(input('/能力'), d5);
+    await override.handleCommandEntry(input('/能力'), d5);
     ok('`/能力` 无子命令时列出注册表与装载状态',
       String(log5.sent.at(-1)?.message).includes('假扩展'), JSON.stringify(log5.sent));
   }
   {
     const { deps: d6, log: log6 } = deps();
-    await override.handleSlashCommand(input('/能力 加载'), d6);
+    await override.handleCommandEntry(input('/能力 加载'), d6);
     ok('`/能力 加载` 没给 id 时只回用法（不去调运行时）',
       String(log6.sent.at(-1)?.message).includes('用法'), JSON.stringify(log6.sent));
   }
   {
     const { deps: d7, log: log7 } = deps();   // 注意：这份 deps 里没有 extras
-    const bare = createSlashCommands();
-    await bare.handleSlashCommand(input('/能力'), d7);
+    const bare = createCommandDispatcher();
+    await bare.handleCommandEntry(input('/能力'), d7);
     ok('没有扩展运行时端口时 `/能力` 如实说不可用，不假装成功',
       String(log7.sent.at(-1)?.message).includes('不可用'), JSON.stringify(log7.sent));
   }
@@ -314,25 +314,25 @@ console.log('\n── 扩展命令与接管模式 ──');
   {
     const before = extrasPort.unloads.length;
     const { deps: dAlias, log: logAlias } = deps();
-    const plain = createSlashCommands(() => ({ override: false, commands: [] }), extrasPort);
+    const plain = createCommandDispatcher(() => ({ override: false, commands: [] }), extrasPort);
     ok('内置命令的别名被认出来（`/能力` 的另一个叫法）',
-      plain.isSlashCommand('/扩展') === true && plain.isSlashCommand('/扩展 加载 x') === true);
-    await plain.handleSlashCommand(input('/扩展 卸载 anything'), dAlias);
+      plain.isCommandEntry('/扩展') === true && plain.isCommandEntry('/扩展 加载 x') === true);
+    await plain.handleCommandEntry(input('/扩展 卸载 anything'), dAlias);
     ok('内置命令命中别名后**照样解析得出子命令**（说明被规范回了主命令词）',
       extrasPort.unloads.length === before + 1, JSON.stringify(extrasPort.unloads));
-    ok('别名同样要跟边界（`/扩展包` 不是命令）', plain.isSlashCommand('/扩展包') === false);
+    ok('别名同样要跟边界（`/扩展包` 不是命令）', plain.isCommandEntry('/扩展包') === false);
   }
   {
     // 用法提示里印的仍是主命令词 —— 别名只是"另一个叫法"，提示该给一个肯定能用的写法。
     const { deps: dUsage, log: logUsage } = deps();
-    const plain = createSlashCommands(() => ({ override: false, commands: [] }), extrasPort);
-    await plain.handleSlashCommand(input('/扩展 加载'), dUsage);
+    const plain = createCommandDispatcher(() => ({ override: false, commands: [] }), extrasPort);
+    await plain.handleCommandEntry(input('/扩展 加载'), dUsage);
     ok('用法提示里印的是主命令词 `/能力`（别名不改文案）',
       String(logUsage.sent.at(-1)?.message).includes('/能力 加载'), JSON.stringify(logUsage.sent));
   }
   {
     const { deps: d, log } = deps();
-    const withAlias = createSlashCommands(() => ({
+    const withAlias = createCommandDispatcher(() => ({
       override: false,
       commands: [{
         names: ['/天气', '/weather', '/tq'],
@@ -341,11 +341,11 @@ console.log('\n── 扩展命令与接管模式 ──');
       }]
     }), extrasPort);
     ok('扩展命令：声明的词形都被认出来',
-      withAlias.isSlashCommand('/weather 北京') === true && withAlias.isSlashCommand('/tq 北京') === true
-      && withAlias.isSlashCommand('/weather') === true);
+      withAlias.isCommandEntry('/weather 北京') === true && withAlias.isCommandEntry('/tq 北京') === true
+      && withAlias.isCommandEntry('/weather') === true);
     ok('扩展命令：词形同样要跟边界（`/weatherx`、`/tqx` 都不是命令）',
-      withAlias.isSlashCommand('/weatherx') === false && withAlias.isSlashCommand('/tqx') === false);
-    await withAlias.handleSlashCommand(input('/weather 北京'), d);
+      withAlias.isCommandEntry('/weatherx') === false && withAlias.isCommandEntry('/tqx') === false);
+    await withAlias.handleCommandEntry(input('/weather 北京'), d);
     ok('扩展命令：命中非首位的词形时，把开头那个词换成主命令词再交给处理函数',
       String(log.sent.at(-1)?.message) === '主词=/天气 参数=北京', JSON.stringify(log.sent));
   }
@@ -354,12 +354,12 @@ console.log('\n── 扩展命令与接管模式 ──');
 // ── 5. 判据只有一份（这条是这一层唯一能被机检的结构性质）─────────
 {
   const ingestSrc = stripComments(readSource('web/onebot/ingest.ts'));
-  const commandsSrc = stripComments(readSource('web/onebot/slash-commands.ts'));
-  ok('ingest.ts 里不再有任何命令正则（判据只许在 slash-commands.ts 一处）',
+  const commandsSrc = stripComments(readSource('web/onebot/commands.ts'));
+  ok('ingest.ts 里不再有任何命令正则（判据只许在 commands.ts 一处）',
     !ingestSrc.includes('^\\/画') && !ingestSrc.includes('^\\/转写')
     && !ingestSrc.includes('isDrawCommand') && !ingestSrc.includes('isTranscriptionCommand'),
     'ingest.ts 里又长出了命令判据 —— 两份判据漂移时不会有任何报错');
-  ok('slash-commands.ts 里两条命令的词形都在，且**不再为渲染形态单开特例**',
+  ok('commands.ts 里两条命令的词形都在，且**不再为渲染形态单开特例**',
     /names:\s*\[\s*'\/转写'\s*\]/.test(commandsSrc) && /names:\s*\[\s*'\/画'\s*\]/.test(commandsSrc)
     && !commandsSrc.includes('/转写[视频]'),
     '`/转写[视频]` 又回到词形列表里了 —— 边界统一之后它是多余的（见 startsWithWord）');
@@ -369,7 +369,7 @@ console.log('\n── 扩展命令与接管模式 ──');
     !/\bmatch\s*:/.test(commandsSrc), '`match` 回来了 —— 判据又变成两份了');
   ok('ingest.ts 只用同一个判据决定 wakeEligible（命令 → 已读历史，不进窗口）',
     /wakeEligible: !slashCommand/.test(ingestSrc)
-    && /const slashCommand = commands\.isSlashCommand\(commandText, chatKey\)/.test(ingestSrc));
+    && /const slashCommand = commands\.isCommandEntry\(commandText, chatKey\)/.test(ingestSrc));
   ok('命令表存的是**函数引用**，没有按键分发（与装配清单同一形态）',
     !/COMMANDS\[/.test(commandsSrc) && !/COMMANDS\.get\(/.test(commandsSrc));
 }
