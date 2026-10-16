@@ -382,42 +382,8 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     // meta/心跳等事件忽略
   }
 
-  /**
-   * 探针用的"把一条 group_upload 说清楚"：**只打字段名与少数标识值**，url 只打前缀。
-   *
-   * 与 `qq/onebot.ts` 里那个 `describeForProbe` 同一个判据（要回答的是"字段长什么样"，
-   * 不是把用户内容与临时凭据整份落进日志）。两份而不共用，是因为一个在 `qq/`（协议客户端）、
-   * 一个在 `web/onebot/`（那个 OneBot 端自己的状态），跨层搬一个只服务于临时探针的帮手不划算 ——
-   * 探针删掉时这两段一起删。
-   */
-  function describeNoticeForProbe(event: OneBotEvent): string {
-    const file = isRecord(event.file) ? event.file : {};
-    const parts: string[] = [];
-    for (const [key, value] of Object.entries(file)) {
-      const raw = typeof value === 'string' ? value : JSON.stringify(value ?? null);
-      if (key === 'id' || key === 'file_id' || key === 'name' || key === 'busid' || key === 'size') {
-        parts.push(`${key}=${raw.slice(0, 120)}`);
-      } else {
-        parts.push(`${key}<${typeof value}:${raw.length}>`);
-      }
-    }
-    return `group=${String(event.group_id ?? '')} user=${String(event.user_id ?? '')} `
-      + `file{ ${parts.join(' ') || '(空)'} }`;
-  }
-
   function handle(event: OneBotEvent): Promise<void> {
     if (!event || typeof event !== 'object') return Promise.resolve();
-
-    // ⚠️ **探针（2026-10-16，只打日志、不改行为）** —— 群文件上传在 OneBot v11 里是一个
-    // `notice`（`notice_type: 'group_upload'`），而**它不进任何消息**，所以"引用那条消息"
-    // 永远拿不到它。跑团想支持"引用一份剧本文件、从它里面抓正文"，就必须先知道协议端到底推哪种形态：
-    //   • 消息里的 `file` 段 → 那条路能走（被引用那条的媒体已经并进 `input.media`）；
-    //   • 只有这条 notice → "引用"这条路走不通，得另设计（比如上传即入库）。
-    // 另一条同名的探针在 `qq/onebot.ts` 的 `extractMediaFromSegments` 里。
-    if (event.post_type === 'notice' && event.notice_type === 'group_upload') {
-      console.warn('[probe:file] 收到 group_upload 通知：', describeNoticeForProbe(event));
-    }
-
     if ((event.post_type === 'message' || event.post_type === 'message_sent')
       && event.message_type === 'group' && event.group_id != null) {
       const id = String(event.group_id);

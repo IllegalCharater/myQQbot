@@ -69,20 +69,21 @@ try {
 // ── 5. Python 工具：脚本路径锚点与"文件真的在" ──
 // 这一条是**改名的唯一守卫**。`spawn` 一个不存在的脚本不会在编译期报错，只会让漫画下载
 // 与搜图 worker 一起在运行期失败；而脚本路径是从 ROOT 拼出来的，所以它属于本套件的主题。
-const { JMCOMIC_SCRIPT, PIC_IMAGE_SEARCH_SCRIPT } = await load('core/python-runtime.js');
+const { JMCOMIC_SCRIPT, PIC_IMAGE_SEARCH_SCRIPT, DOCUMENT_SCRIPT } = await load('core/python-runtime.js');
 ok('PYTHON_TOOLS_DIR 指向 ROOT 下的 python-tools 且存在',
   paths.PYTHON_TOOLS_DIR === path.join(REPO_DIR, 'python-tools') && fs.existsSync(paths.PYTHON_TOOLS_DIR),
   `拿到 ${paths.PYTHON_TOOLS_DIR}`);
-ok('两个 Python 脚本都真的在 python-tools/ 里（改名/搬家会在这里红，而不是运行期才炸）',
-  fs.existsSync(JMCOMIC_SCRIPT) && fs.existsSync(PIC_IMAGE_SEARCH_SCRIPT),
+ok('三个 Python 脚本都真的在 python-tools/ 里（改名/搬家会在这里红，而不是运行期才炸）',
+  fs.existsSync(JMCOMIC_SCRIPT) && fs.existsSync(PIC_IMAGE_SEARCH_SCRIPT) && fs.existsSync(DOCUMENT_SCRIPT),
   `jmcomic=${JMCOMIC_SCRIPT} exists=${fs.existsSync(JMCOMIC_SCRIPT)}；` +
-  `picImageSearch=${PIC_IMAGE_SEARCH_SCRIPT} exists=${fs.existsSync(PIC_IMAGE_SEARCH_SCRIPT)}`);
+  `picImageSearch=${PIC_IMAGE_SEARCH_SCRIPT} exists=${fs.existsSync(PIC_IMAGE_SEARCH_SCRIPT)}；` +
+  `document=${DOCUMENT_SCRIPT} exists=${fs.existsSync(DOCUMENT_SCRIPT)}`);
 // 注意这里取 `paths.PYTHON_TOOLS_DIR` 而不是从 python-runtime 解构：后者只 import 它、
 // 并不 re-export（本文件第 2 段那句"只转出、不引入本文件作用域"讲的就是这类误会）。
 // 脚本常量只能来自 python-runtime —— 那是"脚本在哪"的唯一落点。
-ok('两个脚本都落在同一个目录里（"只有一个 Python 工具目录"这件事的机检形态）',
-  path.dirname(JMCOMIC_SCRIPT) === paths.PYTHON_TOOLS_DIR
-  && path.dirname(PIC_IMAGE_SEARCH_SCRIPT) === paths.PYTHON_TOOLS_DIR);
+ok('三个脚本都落在同一个目录里（"只有一个 Python 工具目录"这件事的机检形态）',
+  [JMCOMIC_SCRIPT, PIC_IMAGE_SEARCH_SCRIPT, DOCUMENT_SCRIPT]
+    .every((script) => path.dirname(script) === paths.PYTHON_TOOLS_DIR));
 ok('依赖清单与脚本同目录，且只此一份',
   fs.existsSync(path.join(paths.PYTHON_TOOLS_DIR, 'requirements.txt')),
   `缺少 ${path.join(paths.PYTHON_TOOLS_DIR, 'requirements.txt')}`);

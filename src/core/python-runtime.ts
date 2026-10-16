@@ -17,6 +17,9 @@ export const JMCOMIC_SCRIPT: string = path.join(PYTHON_TOOLS_DIR, 'jmcomic_downl
 /** 搜图 worker（PicImageSearch 常驻进程）。 */
 export const PIC_IMAGE_SEARCH_SCRIPT: string = path.join(PYTHON_TOOLS_DIR, 'pic_image_search_worker.py');
 
+/** 文档抽取（pdf / docx / txt / md → 文本）。**一次一进程**，不是常驻 worker。 */
+export const DOCUMENT_SCRIPT: string = path.join(PYTHON_TOOLS_DIR, 'document_extract.py');
+
 /**
  * 统一的解释器环境变量。**只认这一个。**
  *

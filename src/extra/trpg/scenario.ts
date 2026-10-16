@@ -31,9 +31,18 @@ import path from 'node:path';
 import { DATA_DIR } from '../../core/paths.js';
 import { MAX_CHARACTERS, MAX_FLAGS, normalizeCharacter, normalizeFlag, safeFileName, text } from './state.js';
 import { MAX_SCENARIO_CHARS } from './types.js';
+import type { DocumentText } from '../../media/document/index.js';
 import type { TrpgCharacter, TrpgFlag } from './types.js';
 
 export const SCENARIOS_DIR = path.join(DATA_DIR, 'trpg', 'scenarios');
+
+/**
+ * 下载剧本文件时的大小上限。
+ *
+ * 一份 4000 字的中文剧本在 UTF-8 里约 12KB，256KB 已经很宽 —— 这个数的用途是"别让人传一个
+ * 200MB 的东西把内存塞满"，不是限制正文（正文由 `MAX_SCENARIO_CHARS` 管）。
+ */
+export const MAX_SCENARIO_BYTES = 256 * 1024;
 
 export interface ScenarioSkeleton {
   title: string;
@@ -184,6 +193,51 @@ export function parseScenario(raw: unknown, id: string): ScenarioLookup {
       body: trimmed
     }
   };
+}
+
+/**
+ * 这份文本是不是**规定的剧本格式** —— 开头有一个 frontmatter 块，且整份能解析。
+ *
+ * ⚠️ 它**不等于** `parseScenario(...).ok`：那一个对**没有 frontmatter** 的文本也成功
+ * （整份当正文、标题取文件名）。那是给手写 `.md` 留的宽容口子，不是"格式匹配成功"。
+ *
+ * `/跑团 存剧本` 拿它决定要不要让模型整理一遍（见 `scenario-format.ts`）。两类都算
+ * "不是规定格式"：**裸正文**（没 frontmatter），或**有 frontmatter 但解析报错**
+ * （JSON 写坏、正文超长…）—— 后一类模型同样修得了。
+ */
+export function isFormattedScenario(raw: unknown, id = 'scenario'): boolean {
+  const source = String(raw ?? '').replace(/^﻿/, '').replace(/\r\n/g, '\n');
+  const lines = source.split('\n');
+  let start = 0;
+  while (start < lines.length && !lines[start].trim()) start++;
+  // 只看"开头有没有那一行" —— 闭合那一步交给 parseScenario（它自己会报"没有闭合"）。
+  if (start >= lines.length || !FRONTMATTER_START.test(lines[start])) return false;
+  return parseScenario(source, id).ok;
+}
+
+/**
+ * 抽取结果 → 落进剧本库。
+ *
+ * ⚠️ **"字节 → 文本"这一步不在这里**，它由通用能力 `media/document/` 做（而且要起 Python
+ * 子进程）。这一层刻意保持**同步、纯**（同它上面那个 `parseScenario`），于是它能在不启动任何
+ * 解释器的前提下被测。分开的判据是"**要不要碰外部世界**"：写盘要（在 store 里）、解字节不要。
+ *
+ * 剧本因此可以直接传 `.pdf` / `.docx`。**判断"这是不是规定格式"也不在这里**（那是
+ * `isFormattedScenario` 的事，而且它的答案决定接下来要不要走 `scenario-format.ts` 那次模型调用）——
+ * 本函数只管一件事：把一份**已经确定能解析**的正文写进去。
+ */
+export function saveScenarioText(name: string, doc: DocumentText, store: ScenarioStore): ScenarioLookup {
+  // 抽取器会按自己的上限截断。**截断过的正文必须当场拒**，不能落库 ——
+  // 截断是在人还能改的时候不说、跑起来才少半段，而那时没人知道少了什么
+  // （同 `MAX_SCENARIO_CHARS` 那条约定的理由）。
+  if (doc.truncated) {
+    return {
+      ok: false,
+      message: `这份文件太长了（共 ${doc.chars} 字，超过单份剧本能读的上限）—— `
+        + '剧本只放世界观与主线，细节请拆成旗标与人物卡，或者换一份短一点的'
+    };
+  }
+  return store.write(name, doc.text);
 }
 
 interface CacheEntry { mtimeMs: number; lookup: ScenarioLookup }

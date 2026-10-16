@@ -236,5 +236,52 @@ console.log('\n=== 9. 语音段 ===');
   ok('命令侧认 video|audio', criterion2.test(mediaSrc), '命令侧判据没放宽');
 }
 
+// ── 10. 群文件段（跑团的「引用一份剧本文件」靠它）─────────────────────────────
+//
+// **夹具逐字照抄真机实测**（2026-10-16，SnowLuma，探针拿到的原文）：
+//     file=test.md file_id=d5df8391f95b09df4de35ea1c783c368_f14a71fa-c936-11f1-ad09-6dfb0de8648e
+//     file_size=1 name=test.md size=4 id=<69 字符> url=http://180.101.246.192:80/asn.…（552 字符）
+//     file_hash=<85 字符>
+// 照抄是刻意的：这一支的全部依据就是"协议端真的这么发"，编一个更好看的夹具等于把那份实测丢掉。
+console.log('\n=== 10. 群文件段 ===');
+{
+  const { extractMediaFromSegments: protocolMedia } = await load('qq/onebot.js');
+  const REAL = {
+    type: 'file',
+    data: {
+      file: 'test.md',
+      file_id: 'd5df8391f95b09df4de35ea1c783c368_f14a71fa-c936-11f1-ad09-6dfb0de8648e',
+      file_size: 1,
+      name: 'test.md',
+      size: 4,
+      id: 'x'.repeat(69),
+      url: `http://180.101.246.192:80/asn.${'y'.repeat(540)}`,
+      file_hash: 'z'.repeat(85)
+    }
+  };
+  const hit = protocolMedia([REAL]).find((m) => m.kind === 'file');
+  ok('群文件段产出了 kind:file 条目（真机实测的字段名逐字可用）', !!hit, JSON.stringify(protocolMedia([REAL])));
+  ok('带上了 url（**这是"能直接下载"的全部依据**：带 url 就不必再换一次 get_group_file_url）',
+    String(hit?.url).startsWith('http://180.101.246.192:80/asn.'), String(hit?.url).slice(0, 40));
+  ok('带上了文件名与 file_id（url 过期时的后手）',
+    hit?.name === 'test.md' && hit?.file === 'test.md'
+    && hit?.fileId === 'd5df8391f95b09df4de35ea1c783c368_f14a71fa-c936-11f1-ad09-6dfb0de8648e',
+    JSON.stringify(hit));
+  ok('带上了 size（数字，不是字符串）', hit?.size === 4, String(hit?.size));
+
+  // 对照：既没 url 也没 file_id 的文件段不产出条目 —— 与 record 那条同一个判据
+  // （一条既下不来又换不到地址的条目只会让下游白找一轮）。
+  ok('对照：既没 url 也没 file_id 的文件段不产出条目',
+    protocolMedia([{ type: 'file', data: { name: 'x.md' } }]).filter((m) => m.kind === 'file').length === 0);
+  ok('对照：只有 file_id 时**仍然产出**（那一档是留给"协议端哪天不给 url"的后手，不是死代码）',
+    protocolMedia([{ type: 'file', data: { name: 'x.md', file_id: 'f1' } }])
+      .filter((m) => m.kind === 'file').length === 1);
+
+  // 文本化不改：文件在消息正文里仍是占位符（模型靠 media 里的条目知道有文件，不靠正文）。
+  const { segmentsToText } = await load('qq/onebot.js');
+  ok('对照：文件在文本里仍是 [文件test.md] 占位符（这一步只加 media，不改文本化）',
+    (await segmentsToText([REAL])).includes('[文件test.md]'));
+}
+
 // `done()` 自己会打印汇总（含通过/失败计数），别再手写一遍。
 process.exit(done() ? 0 : 1);

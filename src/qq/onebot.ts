@@ -774,49 +774,31 @@ export function extractMediaFromSegments(segments: unknown): Array<Record<string
       // 卡片：结构化字段 + 封面图（封面已在 parseCardSegment 里拆成 kind:'image'）
       media.push(...parseCardSegment(d).media);
     } else if (seg.type === 'file') {
-      // ⚠️ **探针（2026-10-16，只打日志、不改行为）** —— 别以为这是"已经支持收文件了"。
+      // 群文件。**实测确认（2026-10-16，SnowLuma）**：这一个段把下面这些字段全带上了 ——
+      //   file=test.md  file_id=d5df8391…_f14a71fa-…  name=test.md  size=4  file_hash=…
+      //   url=http://180.101.246.192:80/asn.…（552 字符，签名在查询串里）
+      // 所以"引用一份文件、从它里面抓正文"这条路是通的：带 `url` 就直接下，不必再换一次
+      // `get_group_file_url`（那一档仍然留着 —— `file_id` 也带着，协议端哪天不给 url 就用它）。
       //
-      // 群友上传的群文件在入站消息里长什么样，**本机没法验证**：仓库里所有 `upload_group_file`
-      // 都是**发**的方向（转写全文、漫画 PDF），收的方向一行代码都没有，而协议端实际下发的
-      // 字段与文档时有出入。跑团想要"引用一份剧本文件、从它里面抓取正文"，所以得先知道
-      // 这个段到底带不带 `url`（带就直接下载；只带 `file_id` 就还得先换一次 `get_group_file_url`）。
-      //
-      // 拿到真实形态之后：把这一支改成产出 `{ kind:'file', file, fileId, url, name }` 之类的
-      // media 条目（那样 `/跑团 存剧本` 就能从 `input.media` 里找到它 —— 被引用那条的媒体
-      // 已经在 `ingest.ts` 里并进来了），然后删掉这条日志。
-      console.warn('[probe:file] 收到 file 段：', describeForProbe(d));
-    } else if (typeof seg.type === 'string' && PROBE_SEGMENT_TYPES.has(seg.type)) {
-      // 同样只打日志。这几个是 OneBot 规范里**可能承载文件**的段名，一并看清。
-      console.warn(`[probe:file] 收到 ${seg.type} 段：`, describeForProbe(d));
+      // ⚠️ `url` 是**临时直链**（带签名），不是长期 id：要下就当场下，别存起来等下次用。
+      // 与 `record` 那条同一个判据：**两样都没有才不产出条目** —— 一条既没 url 又没 file_id 的
+      // 条目只会让下游白找一轮。
+      const fileUrl = String(d.url ?? '').trim();
+      const fileId = String(d.file_id ?? '').trim();
+      const size = Number(d.size);
+      if (fileUrl || fileId) {
+        media.push({
+          kind: 'file',
+          name: String(d.name ?? d.file ?? '').trim(),
+          file: String(d.file ?? '').trim(),
+          fileId,
+          ...(Number.isFinite(size) && size >= 0 ? { size } : {}),
+          ...(fileUrl ? { url: fileUrl } : {})
+        });
+      }
     }
   }
   return media;
-}
-
-/** 规范里可能与"用户传了一个文件"有关的段名（探针用）。 */
-const PROBE_SEGMENT_TYPES = new Set(['onlinefile', 'file_id', 'node']);
-
-/**
- * 探针用的"把一段说清楚"：**只打字段名与少数标识值**，url 只打前缀。
- *
- * 判据是"探针要回答的是字段长什么样"，而不是把用户内容与临时凭据整份落进日志 ——
- * 这与 `safeErrorDetail`（日志里不许出现 URL 与本机路径）是同一条纪律，只是这里
- * 为了判断"带不带 url"必须留一小截。
- */
-function describeForProbe(data: Record<string, unknown>): string {
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(data)) {
-    const raw = typeof value === 'string' ? value : JSON.stringify(value ?? null);
-    // 只留判断形态够用的那几样，其余只报"有这个字段 + 多长"。
-    if (key === 'file' || key === 'file_id' || key === 'name' || key === 'busid' || key === 'size') {
-      parts.push(`${key}=${raw.slice(0, 120)}`);
-    } else if (key === 'url' || key === 'path') {
-      parts.push(`${key}=${raw.slice(0, 30)}…(共 ${raw.length} 字符)`);
-    } else {
-      parts.push(`${key}<${typeof value}:${raw.length}>`);
-    }
-  }
-  return parts.join(' ') || '(空)';
 }
 
 /**

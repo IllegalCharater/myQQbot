@@ -262,6 +262,20 @@ export function checkRuntimeShape(entry: ExtraEntry, rt: ExtraRuntime): string |
     return `prompt 覆盖了不存在或不允许覆盖的段落：${badSections.join('、')}` +
       `（可用：${SYSTEM_SECTION_IDS.filter((id) => !SYSTEM_FRAMEWORK_SECTIONS.includes(id)).join('、')}）`;
   }
+
+  // `toolsFor` 也**空着会话调一次**，理由与上面那句逐字相同：它抛了就等于拒绝装载，
+  // 而症状会表现成"这个扩展装不上"。
+  // ⚠️ 这里**只查"不抛 + 是数组"**，不查名字对不对：那是按会话的，装载期只拿得到 `''`，
+  // 而真正的过滤与记日志在 `#allowedTools` 里（运行期每个会话各查一次）。
+  let allowed;
+  try {
+    allowed = rt.toolsFor?.('');
+  } catch (error) {
+    return `toolsFor() 抛错：${errorMessage(error)}`;
+  }
+  if (allowed !== undefined && !Array.isArray(allowed)) {
+    return 'toolsFor() 必须返回一个工具名数组（或者干脆不写这个方法，表示"这个会话不限"）';
+  }
   return null;
 }
 
@@ -321,7 +335,11 @@ export class ExtrasRuntime {
     const out: ToolDefinition[] = [];
     for (const entry of this.#activeEntries(chatKey)) {
       if (!isExtraEnabled(entry, config)) continue;
+      // 形态按会话定（跑团：一个群当骰子助手、另一个群当 DM）。`null` = 这个扩展不限，
+      // 表就是 `spec.tools` 的全部。
+      const allowed = this.#allowedTools(entry, chatKey);
       for (const spec of entry.tools) {
+        if (allowed && !allowed.has(spec.name)) continue;
         out.push({
           name: spec.name,
           description: spec.description,
@@ -698,6 +716,33 @@ export class ExtrasRuntime {
     const override = this.#overrideEntry(chatKey);
     if (override) return [override];
     return this.#registry.filter((entry) => this.#loaded.get(entry.id)?.attach === true);
+  }
+
+  /**
+   * 这个会话允许的工具名。`null` = 不限（扩展没提供 `toolsFor`，或它抛了）。
+   *
+   * 两件事都只记日志、不抛：这是在**运行期**、在别人的一轮运行里被调的，抛出去会把
+   * 一整轮对话打掉，而"某一次取工具名失败"远不该有那个代价。回落方向也是安全的那一侧
+   * （退回全部工具 = 退化成这个钩子不存在之前的行为）。
+   */
+  #allowedTools(entry: ExtraEntry, chatKey: string): Set<string> | null {
+    const rt = this.#loaded.get(entry.id)?.rt;
+    if (!rt || typeof rt.toolsFor !== 'function') return null;
+    let names: readonly string[];
+    try {
+      names = rt.toolsFor(chatKey) ?? [];
+    } catch (error) {
+      this.#deps.log(`[extras] ${entry.id} 的 toolsFor 抛错，本会话按"全部工具"处理：${errorMessage(error)}`);
+      return null;
+    }
+    // 只认声明过的名字：多出来的只可能是拼错的字符串，放进去会让模型看到一个
+    // `execute` 一定报"未知工具"的入口。
+    const declared = new Set(entry.tools.map((spec) => spec.name));
+    const unknown = names.filter((name) => !declared.has(String(name)));
+    if (unknown.length) {
+      this.#deps.log(`[extras] ${entry.id} 的 toolsFor 返回了没声明的工具名：${unknown.join('、')}（已忽略）`);
+    }
+    return new Set(names.map(String).filter((name) => declared.has(name)));
   }
 
   /**

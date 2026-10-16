@@ -23,7 +23,7 @@ const { ok, done } = checker();
 
 const { createExtrasRuntime } = await load('extra/runtime.js');
 const { EXTRA_REGISTRY } = await load('extra/registry.js');
-const { EXTRA_PROMPT_TEXT, EXTRA_PROMPT_SECTIONS } = await load('extra/prompts.js');
+const { EXTRA_PROMPT_TEXT, EXTRA_PROMPT_SECTIONS, EXTRA_PROMPT_JOBS } = await load('extra/prompts.js');
 const { buildToolDefs } = await load('agent/tools/index.js');
 
 // ── 可推进的假计时器 ──────────────────────────────────────────────────────────
@@ -97,7 +97,7 @@ const cmd = (name) => ({ names: [name] });
  */
 function makeFakeEntry(id, names, {
   defaultEnabled = true, mode = 'attach', commands = [], body = null, dispose = null, prompt = null,
-  overrideTools = null, onRunEnd = null
+  overrideTools = null, onRunEnd = null, toolsFor = null
 } = {}) {
   const counters = { load: 0, dispose: 0, run: 0, command: 0, runEnd: 0 };
   /** 宿主递给 `load()` 的口子 —— 扩展要拿它做"只有宿主才知道怎么做"的事。 */
@@ -129,6 +129,7 @@ function makeFakeEntry(id, names, {
       const rt = { handlers };
       if (commands.length) rt.commandHandlers = commandHandlers;
       if (prompt) rt.prompt = () => prompt;
+      if (toolsFor) rt.toolsFor = toolsFor;
       if (onRunEnd) rt.onRunEnd = (session) => { counters.runEnd += 1; return onRunEnd(session); };
       rt.dispose = dispose === null ? () => { counters.dispose += 1; } : dispose;
       return rt;
@@ -190,6 +191,88 @@ function makeFakeEntry(id, names, {
   const disabled = makeRuntime([entry], { ...DEFAULT_EXTRAS, enabled: { lazy: false } });
   const refused = await disabled.load('lazy');
   ok('配置里关着的扩展装载被拒（闸门绕不过去）', refused.ok === false && String(refused.note).includes('关闭'));
+}
+
+// ── 2b. `toolsFor`：一个扩展按会话说"我此刻露哪些工具" ──────────────────────
+//
+// 跑团用它实现"助手模式只暴露骰子"（同一个扩展：一个群当骰子机器人、另一个群当 DM）。
+// 这一段的每一条都对应一种**不会报错地坏掉**的形态：钩子没生效 → 模型看到它这个形态下
+// 不该看到的工具；返回值没过筛 → 表里留着一个 `execute` 必报"未知工具"的入口；
+// 钩子抛错 → 一整轮运行被打掉（而它只是想换个工具表）。
+{
+  const shaped = makeFakeEntry('shaped', ['say', 'campaign'], {
+    toolsFor: (chatKey) => (chatKey === 'group:assistant' ? ['say'] : ['say', 'campaign'])
+  });
+  const plain = makeFakeEntry('plain', ['only']);
+  const runtime = makeRuntime([shaped.entry, plain.entry], DEFAULT_EXTRAS);
+  await runtime.load('shaped');
+  await runtime.load('plain');
+
+  const shown = (chatKey) => runtime.toolDefs(chatKey).filter((d) => d.name !== 'only').map((d) => d.name).join();
+  ok('提供了 toolsFor 的扩展**按会话**取子集',
+    shown('group:assistant') === 'say' && shown('group:dm') === 'say,campaign',
+    `${shown('group:assistant')} / ${shown('group:dm')}`);
+  ok('**同一个扩展在不同会话里可以露不同的表**（这正是它存在的理由）',
+    shown('group:assistant') !== shown('group:dm'));
+  ok('没提供 toolsFor 的扩展照旧出全部（钩子是纯增量的，不影响别人）',
+    runtime.toolDefs('group:assistant').map((d) => d.name).includes('only')
+    && runtime.toolDefs('group:dm').map((d) => d.name).includes('only'));
+  await runtime.stop();
+}
+
+// 钩子返回没声明的名字：**滤掉并记日志**，不抛（这是运行期、在别人的一轮对话里被调的）。
+{
+  const logs = [];
+  const ent = makeFakeEntry('typo', ['say'], { toolsFor: () => ['say', 'sya'] });
+  const runtime = createExtrasRuntime([ent.entry], {
+    getConfig: () => ({ extras: DEFAULT_EXTRAS }), builtinToolNames: [], log: (...args) => logs.push(args.join(' '))
+  });
+  await runtime.load('typo');
+  ok('toolsFor 返回没声明的名字 → 被滤掉（不然模型会拿到一个 execute 必报"未知工具"的入口）',
+    runtime.toolDefs(G).map((d) => d.name).join() === 'say',
+    JSON.stringify(runtime.toolDefs(G).map((d) => d.name)));
+  ok('并且把这件事记进日志（静默少一个工具是最难查的一类）',
+    logs.some((line) => line.includes('sya')), JSON.stringify(logs));
+  await runtime.stop();
+}
+
+// 钩子抛错：**回落成"全部工具"**，不是把这一轮打掉。方向也是安全的那一侧
+// （退回这个钩子不存在之前的行为，而不是变成"一个工具都没有"）。
+//
+// ⚠️ 夹具必须让**空会话那次调用成功**（装载时会拿 `''` 探一次，那边抛了就直接拒绝装载）——
+// 要测的是"运行期某个真实会话上抛了"这条，两者是不同的分支。
+{
+  const logs = [];
+  const ent = makeFakeEntry('boom', ['say', 'campaign'], {
+    toolsFor: (chatKey) => { if (chatKey) throw new Error('我算不出来'); return ['say', 'campaign']; }
+  });
+  const runtime = createExtrasRuntime([ent.entry], {
+    getConfig: () => ({ extras: DEFAULT_EXTRAS }), builtinToolNames: [], log: (...args) => logs.push(args.join(' '))
+  });
+  await runtime.load('boom');
+  ok('toolsFor 抛错 → 本会话按"全部工具"处理（不是空表，也不是把运行打掉）',
+    runtime.toolDefs(G).length === 2, JSON.stringify(runtime.toolDefs(G).map((d) => d.name)));
+  ok('并且记日志（否则"这个群怎么忽然多出两个工具"没有任何线索）',
+    logs.some((line) => line.includes('我算不出来')), JSON.stringify(logs));
+  await runtime.stop();
+}
+
+// 装载期**空着会话调一次**：抛了就等于拒绝装载（同 `prompt` 那条）。
+// 症状是"这个扩展装不上"，而它与工具表毫无关系 —— 那是最难查的一类因果错位。
+{
+  const ent = makeFakeEntry('badhook', ['say'], {
+    toolsFor: (chatKey) => { if (!chatKey) throw new Error('必须要会话'); return ['say']; }
+  });
+  const runtime = makeRuntime([ent.entry], DEFAULT_EXTRAS);
+  const result = await runtime.load('badhook');
+  ok('toolsFor 对空会话抛错 → 拒绝装载（判据与 prompt 一致）',
+    result.ok === false && /toolsFor\(\) 抛错/.test(result.note), JSON.stringify(result));
+
+  const wrongShape = makeFakeEntry('badshape', ['say'], { toolsFor: () => 'say' });
+  const rt2 = makeRuntime([wrongShape.entry], DEFAULT_EXTRAS);
+  const r2 = await rt2.load('badshape');
+  ok('toolsFor 返回的不是数组 → 也拒绝装载（形状错了不该等到运行期才发现）',
+    r2.ok === false && /必须返回一个工具名数组/.test(r2.note), JSON.stringify(r2));
 }
 
 // ── 3. 命令触发装载（入口是人） ───────────────────────────────────────────────
@@ -731,6 +814,20 @@ await withFakeTimers(async (timers) => {
   ok('EXTRA_PROMPT_SECTIONS 的键集合与注册表的扩展 id 逐个对上',
     sectionKeys.length > 0 && JSON.stringify(sectionKeys) === JSON.stringify([...registryIds].sort()),
     `表里 ${sectionKeys.join('、')}；注册表 ${[...registryIds].sort().join('、')}`);
+
+  // 第三张表：扩展**自己发起的一次模型调用**的指令（不是工具说明、也不是常驻段落）。
+  //
+  // ⚠️ 对账方向与上面两张表**不同**：这里只查**子集**，不查相等。判据是"一个扩展需不需要
+  // 一次性任务"是它自己的事（`clock` 就没有），要求每个扩展都占一行只会逼人填个空对象；
+  // 而真正要防的是反过来的那种：扩展改名/搬走之后，它那份任务文案**静静留在表里没人用**。
+  const jobKeys = Object.keys(EXTRA_PROMPT_JOBS).sort();
+  const orphanJobs = jobKeys.filter((id) => !registryIds.includes(id));
+  ok('EXTRA_PROMPT_JOBS 的键都是注册表里真的有的扩展（没有孤儿文案）',
+    jobKeys.length > 0 && orphanJobs.length === 0,
+    `表里 ${jobKeys.join('、')}；孤儿 ${orphanJobs.join('、')}`);
+  ok('每个任务文案都有 system 与 user，且 user 是函数（动态部分由调用方传，不写死字面量）',
+    Object.values(EXTRA_PROMPT_JOBS).every((jobs) => Object.values(jobs).every(
+      (job) => typeof job.system === 'string' && job.system.length > 0 && typeof job.user === 'function')));
 
   // "core 能 import extra"之所以不成环，全靠 `extra/prompts.ts` 自己不 import 任何东西。
   const promptsSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/extra/prompts.ts'), 'utf8'));

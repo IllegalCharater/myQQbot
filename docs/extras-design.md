@@ -37,7 +37,7 @@
 ```text
 src/extra/
 ├─ types.ts          契约（ExtraSpec / ExtraRuntime / ExtraCommandSpec / ExtraPromptContribution）—— 不 import 本模块任何文件
-├─ prompts.ts        扩展的固定指令 EXTRA_PROMPT_TEXT / EXTRA_PROMPT_SECTIONS —— **必须无 import**（§7）
+├─ prompts.ts        扩展的固定指令 EXTRA_PROMPT_TEXT / EXTRA_PROMPT_SECTIONS / EXTRA_PROMPT_JOBS —— **必须无 import**（§7）
 ├─ registry.ts       静态清单 EXTRA_REGISTRY，每行 { ...xSpec, load }
 ├─ runtime.ts        ExtrasRuntime：装载表 + 由它派生的三张表 + 校验 + 运行结束钩子
 ├─ clock/            参考扩展（attach）：把整条链跑起来并可观察，刻意只有最小形态
@@ -75,7 +75,9 @@ export const EXTRA_REGISTRY: readonly ExtraEntry[] = [
 
 `spec.ts` 被注册表**静态** import，`impl.ts` 永远走 `import()`。
 
-`ExtraRuntime` 提供 `handlers`（工具名 → 执行函数）、可选的 `commandHandlers`、可选的 `prompt()` 与 `dispose()`。
+`ExtraRuntime` 提供 `handlers`（工具名 → 执行函数）、可选的 `commandHandlers`、可选的 `prompt(chatKey)`、可选的 `toolsFor(chatKey)` 与可选的 `dispose()`。
+
+**`toolsFor(chatKey)`：一个扩展按会话说"我此刻露哪些工具"**（2026-10-16 加）。不写 = `spec.tools` 全部。跑团用它实现"**助手模式只暴露骰子**"—— 同一个扩展，一个群当骰子机器人、另一个群当 DM。三条边界：**只能返回声明过的名字**（多出来的被 `toolDefs()` 滤掉并记日志，不抛 —— 这是运行期、在别人的一轮对话里被调的）；**必须收 `chatKey` 且必须是全函数**（装载时会空着会话调一次，抛了就等于拒绝装载，而症状是"这个扩展装不上"，与工具表毫无关系）；**它让工具表按会话变化**，切换形态打散一次提示词缓存（频次由人控制）。判据与 `Override` 那条同源：**模型看到的与它真能用的必须是同一套东西** —— 留着两个用不上的工具、只在提示词里求模型别调，等于每轮多花一段前缀、还给它一次调错的机会。
 
 **为什么是"名字 → 函数"的映射而不是单个 `execute(name, …)`**：只有这样名字集合才**可枚举**。写成单个 `execute` 的话，运行时无法在不真的执行一次的前提下知道实现认哪些名字，那句"装载时校验声明与实现对得上"就只能退化成"凭声明相信它" —— 而声明与实现分居两处，正是这套设计唯一的漂移点。查表本身**不是**被禁的"字符串式业务注册表"：它是扩展自己实现的内部细节，键来自 `spec`（注册表静态数据），不参与任何跨模块分发。
 
@@ -205,7 +207,9 @@ export const SYSTEM_FRAMEWORK_SECTIONS = ['security', 'toolProtocol'] as const;
 
 **贡献随装载状态变化**（装载后出现、卸载后消失）。它**不是**"对话中途变"：`runAgent` 开头拼一次、整个工具循环都用它 —— 真实语义是"装载后，下一次运行生效"。
 
-文案只许写在 `extra/prompts.ts`（模型可见的固定指令的唯一落点）：`EXTRA_PROMPT_TEXT` 按**工具名**索引、`EXTRA_PROMPT_SECTIONS` 按**扩展 id** 索引，两张表各自与注册表**两个方向**对账。群友可见的文案（命令用法、回执）**不在这里** —— 它们跟命令的实现放在一起。
+文案只许写在 `extra/prompts.ts`（模型可见的固定指令的唯一落点），那里有**三张表**：`EXTRA_PROMPT_TEXT`（按**工具名**索引，每轮进请求前缀）、`EXTRA_PROMPT_SECTIONS`（按**扩展 id** 索引，往 system prompt 里加的段落）、`EXTRA_PROMPT_JOBS`（按**扩展 id** 索引，扩展**自己发起的一次模型调用**的指令 —— 既不是工具说明、也不是常驻段落，比如跑团"把任意文本整理成剧本格式"那一次 / 2026-10-16 加）。
+
+**前两张要求与注册表逐个相等，JOBS 只要求子集**（判据见 §5.2）。三张表的动态部分一律**由调用方传进来**，不在表里拼字面量 —— 该文件零 import，拿不到 `MAX_SCENARIO_CHARS` 那些常量，写成字面量就是等它漂移。群友可见的文案（命令用法、回执）**不在这里** —— 它们跟命令的实现放在一起。
 
 ### 5.1 `prompt(chatKey)`：按会话渲染，且必须是全函数
 
@@ -299,13 +303,13 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 
 | 套件 | 管什么 |
 |---|---|
-| `tests/t-extras.mjs`（115 条 —— 注册表多一个扩展就多一条"spec.ts 不 import 实现"的源级断言） | **模型零装载入口**、装载/卸载改变工具表、命令触发装载、**接管按会话隔离**（同一进程里 A 让位 B 照常）、**生命时间对两种模式都生效**、多会话共用一个实现、配置播种（含脏值忽略）、TTL 与在途、`stop()` 幂等与超时、注册表自检、名字对账（工具 + 命令两个方向）、提示词覆盖段名校验（含框架契约**不许覆盖** / `capabilityProtocol` **可以**覆盖）、**`overrideTools` 三条**（接管必须声明 `sendTool` / 名字必须真的在 `tools` 里 / 附加模式不许写）、提示词计划随装载状态、真实现跑一遍、`buildToolDefs()` 默认行为逐字不变、两张提示词表与注册表两个方向对账、源级断言（`registry.ts` 的 load 是字面量 import 且无静态 impl import；各 `spec.ts` 不 import impl；`prompts.ts` 无 import） |
+| `tests/t-extras.mjs`（135 条 —— 注册表多一个扩展就多一条"spec.ts 不 import 实现"的源级断言） | **模型零装载入口**、装载/卸载改变工具表、命令触发装载、**接管按会话隔离**（同一进程里 A 让位 B 照常）、**生命时间对两种模式都生效**、多会话共用一个实现、配置播种（含脏值忽略）、TTL 与在途、`stop()` 幂等与超时、注册表自检、名字对账（工具 + 命令两个方向）、提示词覆盖段名校验（含框架契约**不许覆盖** / `capabilityProtocol` **可以**覆盖）、**`overrideTools` 三条**（接管必须声明 `sendTool` / 名字必须真的在 `tools` 里 / 附加模式不许写）、提示词计划随装载状态、真实现跑一遍、`buildToolDefs()` 默认行为逐字不变、**`toolsFor` 五条**（按会话取子集 / 不影响别人 / 没声明的名字被滤掉 / 抛错回落成全部 / 空会话抛错即拒绝装载）、三张提示词表与注册表对账（TEXT/SECTIONS 两个方向逐个相等，JOBS 查子集）、源级断言（`registry.ts` 的 load 是字面量 import 且无静态 impl import；各 `spec.ts` 不 import impl；`prompts.ts` 无 import） |
 | `tests/t-reply.mjs`（66 条） | **system 段序 + 段分隔符 + 空计划是空操作 + 覆盖不可碰框架契约 + 接管只留框架契约 + 接管时能力段（含其中的工具名）一概不注入 + 框架段的工具名跟着接管者走（`sendTool` 换名、`finishTool: null` 不提）** |
 | `tests/t-slash-commands.mjs` | `/能力` 的用法与失败话术、扩展命令走同一只 `runCommand` 外壳、扩展遮蔽不了内置、接管时主流程命令让位而 `/能力` 保留 |
 | `tests/t-tool-protocol.mjs` | 协议纠正；`capabilityProtocol` 里那条漫画规则；**`recordSent` 真的记账 + 真的发 `session-update`**（缺 `at` 时不写 `"undefined"`） |
 | `tests/t-lifecycle.mjs` / `t-tasks.mjs` | `extras.runtime` 的 id 对账与 entry 顺序 |
 | `tests/t-admin.mjs` | 真起 app 验 `/api/extras`（含 `mode`）与 `extras` 配置回显 |
-| `tests/t-trpg.mjs`（145 条） | **第一个功能完整的接管扩展**：状态层的上限与归一化（含旧形状迁移）、4 个工具的正反路径、**可见性两套投影（含一条专门的泄漏断言）**、行动经济（去重 / 配额 / 新 `ctx` 即新回合）、`reveal` 与它的回流条目、**`onRunEnd` 的六条判据**（起真假模型端点 —— 不这样的话"没发条目"在生成失败时也是绿的，那是**假绿**）、两条命令（含「非法表达式**抛**出去让外壳原样发进群」）、`prompt(chatKey)` 的人格前/状态后、**源级断言：掷骰路径上不许出现 `Math.random`**、以及**真起 `createApp()` 的端到端**（接管会话只剩跑团那 4 个工具、system prompt 是跑团人格且不含主人格、能力段让位、`say` 那一轮真的被判成 `done`、`trpg-note` 能唤醒一轮并把标签送进正文、对照组是没被接管的群照常） |
+| `tests/t-trpg.mjs`（231 条） | **第一个功能完整的接管扩展**：状态层的上限与归一化（含旧形状迁移）、4 个工具的正反路径、**可见性两套投影（含一条专门的泄漏断言）**、行动经济（去重 / 配额 / 新 `ctx` 即新回合）、`reveal` 与它的回流条目、**`onRunEnd` 的六条判据**（起真假模型端点 —— 不这样的话"没发条目"在生成失败时也是绿的，那是**假绿**）、两条命令（含「非法表达式**抛**出去让外壳原样发进群」）、`prompt(chatKey)` 的人格前/状态后、**源级断言：掷骰路径上不许出现 `Math.random`**、以及**真起 `createApp()` 的端到端**（接管会话只剩跑团那 4 个工具、system prompt 是跑团人格且不含主人格、能力段让位、`say` 那一轮真的被判成 `done`、`trpg-note` 能唤醒一轮并把标签送进正文、对照组是没被接管的群照常） |
 | `tests/t-trpg-rules.mjs`（109 条） | 与对话链无关的纯函数规则引擎（见 `docs/ts-migration-plan.md`）；含**两张检定等级表的穷举自检** |
 | `tests/t-extras.mjs` 第 16 段 | **运行结束钩子**（`runEnded`）：只有接管那个会话的扩展收得到、关掉扩展立即收不到、没有 `onRunEnd` 的实现静默跳过、钩子抛错不往上抛、`load(deps)` 收得到宿主的口子 |
 

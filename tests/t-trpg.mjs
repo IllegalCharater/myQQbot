@@ -11,6 +11,7 @@
 // （那一层只管扩展自己那几个）。少了这一段，把内置工具重新拼回去不会有任何东西变红，
 // 而症状是"接管之后模型手里同时有跑团工具和 25 个内置工具，人格指令却在叫它用 say"。
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { checker, dataDir, fakeModelServer, toolCall } from './lib/harness.mjs';
 import { ROOT, load, stripComments } from './lib/src.mjs';
@@ -25,11 +26,14 @@ const {
   formatCheck, formatRoll, renderForModel, renderForPlayers, renderStatusCard
 } = await load('extra/trpg/render.js');
 const { createHandlers } = await load('extra/trpg/tools.js');
-const { createRuntime } = await load('extra/trpg/impl.js');
+const { createRuntime, saveScenario } = await load('extra/trpg/impl.js');
 const { DiceError, rollDice } = await load('extra/trpg/rules/dice.js');
 const { createLedger, consume, recall, remember } = await load('extra/trpg/rules/economy.js');
 const { RuleStore } = await load('extra/trpg/rule-store.js');
-const { ScenarioStore } = await load('extra/trpg/scenario.js');
+const { ScenarioStore, isFormattedScenario, parseScenario, saveScenarioText } = await load('extra/trpg/scenario.js');
+const { formatScenarioText, stripFence } = await load('extra/trpg/scenario-format.js');
+const { MODE_LABEL, TrpgModeStore, parseMode } = await load('extra/trpg/mode.js');
+const { TRPG_ASSISTANT_TOOLS } = await load('extra/trpg/spec.js');
 const { beginCampaign } = await load('extra/trpg/tools.js');
 const { EXTRA_REGISTRY } = await load('extra/registry.js');
 
@@ -693,6 +697,229 @@ const status = (key) => store.read(key);
     && /没有叫/.test(scenarios.read('散记').message));
   ok('删一个不存在的剧本返回 false（不抛）', scenarios.remove('查无此剧本') === false);
   ok('内置规则表也允许删（它就是文件）', rules.remove('broken') === true && !rules.list().some((r) => r.id === 'broken'));
+
+  // ── `/跑团 存剧本`：群友引用一份文件把它收进剧本库 ──
+  //
+  // 下载那一步（`safeFetchBinary`）要发网络请求，所以这里只测**它前后两半**：
+  // 前半是"从 media 里认不认得出那个文件"（早退分支，不用网络），后半是"拿到文本之后怎么办"
+  // （`saveScenarioText`，纯函数）。中间那两步（下载、抽字节）在别处守着 —— 抽取那一条在
+  // `t-document.mjs`，它自带的假子进程让它能在不启动解释器的前提下跑。
+  const fileEntry = (over = {}) => ({
+    kind: 'file', name: 'test.md', file: 'test.md',
+    fileId: 'd5df8391f95b09df4de35ea1c783c368_f14a71fa-c936-11f1-ad09-6dfb0de8648e',
+    size: 4, url: 'http://180.101.246.192:80/asn.x', ...over
+  });
+  const save = (media, name, key = 'group:950') => commands['/跑团']({
+    chatKey: key, senderId: '10001', text: `/跑团 存剧本 ${name}`, media, replyToMessageId: null
+  });
+
+  ok('不给名字时回用法，并说清"先发文件、再引用它"',
+    /用法/.test(String(await save([fileEntry()], ''))) && /引用/.test(String(await save([fileEntry()], ''))));
+  ok('引用的那条里没有文件 → 明说 + 回用法（不是一句"失败"）',
+    /没有文件/.test(String(await save([], '甲'))) && /用法/.test(String(await save([], '甲'))));
+  ok('有文件但协议端没给 url → 明说"只给了 file_id"并给出两条替代路（贴正文 / 直接放目录）',
+    /没给下载地址/.test(String(await save([fileEntry({ url: undefined })], '甲')))
+    && /data\/trpg\/scenarios/.test(String(await save([fileEntry({ url: undefined })], '甲'))));
+
+  // 后半：**文本** → 落库（`saveScenarioText`，同步纯函数）。
+  //
+  // ⚠️ **"字节 → 文本"这一步不在这里测**了：它 2026-10-16 搬到了通用能力 `media/document/`
+  // （四种格式一个 Python worker），要起子进程 —— 而本套件的规矩是不启动任何解释器。
+  // 搬走时一起带走的是**那三条编码判据**（空字节、U+FFFD 绝对量+占比、编码阶梯），
+  // 它们现在由 `t-document.mjs` 守着（对 `document_extract.py` 做源级断言 + 对 Node 侧的
+  // 错误透传做行为断言）。这一层从此只收 `DocumentText`，所以它又能纯着测了。
+  const doc = (text, over = {}) => ({ format: 'text', text, chars: text.length, truncated: false, ...over });
+
+  const FM = (title, body) => `---\ntitle: ${title}\n---\n${body}`;
+
+  ok('正常文本能落库（含 frontmatter）',
+    saveScenarioText('上传的', doc(FM('传上来的', '正文')), scenarios).ok === true
+    && scenarios.read('上传的').scenario.title === '传上来的');
+
+  ok('抽取器截断过的正文**当场拒**（截断 = 人还能改的时候不说、跑起来才少半段）',
+    /太长/.test(saveScenarioText('截断的', doc('正文', { chars: 99999, truncated: true }), scenarios).message ?? ''));
+
+  ok('对照：没被截断的正文照常落库（上一条才不是假绿）',
+    saveScenarioText('短的', doc(FM('短的', '正文')), scenarios).ok === true);
+
+  ok('落库失败（正文超过单份剧本的上限）时把原因原样带回',
+    /太长/.test(saveScenarioText('超长', doc(FM('x', '字'.repeat(5000))), scenarios).message ?? ''));
+
+  // ── 格式匹配 → 不合规才让模型整理 ────────────────────────────────────────
+  //
+  // 判据是**确定性**的（有没有 frontmatter、能不能解析），所以"格式本来就对"的文件
+  // **一次模型调用都不发** —— 那是这条命令的快路径，也是这一段最要紧的断言：
+  // 把判据写反（`!isFormattedScenario`）会让每一份剧本都白烧一次调用，而没有任何东西会红。
+  const PLAIN = '这座灯塔三年前就废弃了。守塔人换了三任。';
+  const FORM = '---\ntitle: 灯塔\nscene: 码头\n---\n正文';
+
+  ok('裸正文**不是**规定格式 —— 虽然 `parseScenario` 照样收得下它（那是给手写 .md 留的宽容口子，不是"格式匹配成功"）',
+    isFormattedScenario(PLAIN) === false && parseScenario(PLAIN, 'x').ok === true);
+  ok('有闭合 frontmatter 且能解析 → 是规定格式', isFormattedScenario(FORM) === true);
+  ok('有 frontmatter 但里面 JSON 写坏 → **不是**规定格式（这一类模型修得了，所以要走整理）',
+    isFormattedScenario('---\ntitle: x\nflags: {坏的\n---\n正文') === false);
+  ok('frontmatter 没闭合 → 不是规定格式', isFormattedScenario('---\ntitle: x\n正文') === false);
+
+  ok('模型套的代码块被剥掉（提示词说了不要套，而它经常套 —— 留着会让正文以 ``` 开头）',
+    stripFence('```markdown\n' + FORM + '\n```') === FORM
+    && stripFence(FORM) === FORM
+    && stripFence('以下是整理结果：\n```\n' + FORM + '\n```') === FORM);
+
+  {
+    const model = await fakeModelServer({ model: 'stub-format' });
+    const { updateConfig } = await load('core/config.js');
+    updateConfig({ api: { baseUrl: model.url, model: 'stub-format' } });
+
+    model.script = [{ content: FORM }];
+    const hit = await formatScenarioText(PLAIN, { name: '灯塔', source: 'PDF' });
+    ok('模型整理成功 → 返回的是**规定格式**的文本（后置条件）',
+      hit.ok === true && isFormattedScenario(hit.text, '灯塔'), JSON.stringify(hit));
+    const asked = String(model.requests[0]?.messages?.find((m) => m.role === 'user')?.content ?? '');
+    ok('请求里带上了原文、剧本名、来源格式与**动态传进去的字数上限**（不是提示词里写死的字面量）',
+      asked.includes(PLAIN) && asked.includes('灯塔') && /PDF/.test(asked) && /最多 \d+ 字/.test(asked),
+      asked.slice(-200));
+
+    model.script = [{ content: '抱歉，我做不到。' }];
+    const bad = await formatScenarioText(PLAIN, { name: '灯塔', source: '文本' });
+    ok('模型没按格式输出时**如实失败** —— 而不是把一份没有骨架的东西当剧本落库（那会变成"开局了但什么都没注入"）',
+      bad.ok === false && /不是剧本格式/.test(bad.message), JSON.stringify(bad));
+
+    updateConfig({ api: { baseUrl: 'http://127.0.0.1:1/', model: 'nope' } });
+    const down = await formatScenarioText(PLAIN, { name: 'x', source: '文本' });
+    ok('模型调不通时给一句可读的失败（不抛、也不假装成功）',
+      down.ok === false && /出错/.test(down.message), JSON.stringify(down));
+  }
+
+  // ── `/跑团 存剧本` 的完整那条路（回环下载 + 两个注入点）────────────────────
+  //
+  // 两件本机测不了的事都在这里被换掉：起 Python 抽文本、以及可能的那次模型调用。
+  // 换掉它们**不是**在验假货 —— 验的是这一段真正的逻辑：**什么时候该调模型**。
+  {
+    const payload = Buffer.from('随便什么字节，抽取被换掉了');
+    const server = http.createServer((_req, res) => { res.writeHead(200); res.end(payload); });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${server.address().port}/f.md`;
+
+    const { updateConfig, getConfig } = await load('core/config.js');
+    const before = getConfig().security?.allowPrivateImageHosts;
+    updateConfig({ security: { allowPrivateImageHosts: true } });
+    try {
+      const model = await fakeModelServer({ model: 'stub-format2' });
+      updateConfig({ api: { baseUrl: model.url, model: 'stub-format2' } });
+      const media = [{ kind: 'file', name: 'f.md', file: 'f.md', url }];
+      const saves = new ScenarioStore(path.join(DIR, 'scenarios-fmt'));
+      const extract = (text) => async () => ({ format: 'text', text, chars: text.length, truncated: false });
+
+      model.requests = [];
+      model.script = [{ content: '这条不该被用到' }];
+      const fast = await saveScenario({ media }, '现成的', saves, { extract: extract(FORM) });
+      ok('格式本来就对 → **一次模型调用都不发**（快路径；判据写反的话每条都会白烧一次，而没有任何东西会红）',
+        model.requests.length === 0 && /已存剧本「现成的」/.test(fast) && !/模型整理/.test(fast), fast);
+
+      model.requests = [];
+      model.script = [{ content: '```markdown\n' + FORM + '\n```' }];
+      const viaModel = await saveScenario({ media }, '整理过的', saves, { extract: extract(PLAIN) });
+      ok('格式不对 → 让模型整理一次，落库的是**模型给的版本**（不是原文）',
+        model.requests.length === 1 && saves.read('整理过的').scenario.title === '灯塔', viaModel);
+      ok('回执里点明"让模型整理过"（它同时解释了两件事：回执为什么慢、内容为什么被重排过）',
+        /已让模型整理/.test(viaModel) && /原文 20 字/.test(viaModel), viaModel);
+
+      model.requests = [];
+      model.script = [{ content: '我做不到' }];
+      const failed = await saveScenario({ media }, '失败了的', saves, { extract: extract(PLAIN) });
+      ok('模型整理失败时如实报错，**既不落库也不假装成功**',
+        /不是剧本格式/.test(failed) && saves.read('失败了的').ok === false, failed);
+    } finally {
+      updateConfig({ security: { allowPrivateImageHosts: before === true } });
+      server.close();
+      server.closeAllConnections?.();
+    }
+  }
+}
+
+// ── 5d. 运行模式：DM / 助手 ─────────────────────────────────────────────────
+//
+// 模式决定**三件事**，而三件事都必须按同一个会话取：露哪些工具（`toolsFor`）、给哪份人格
+// （`prompt`）、跑不跑兜底建议（`onRunEnd`，在下面第 6 段 ⑨ 里验）。夹具刻意用**同一个 store
+// 实例**去写、用 `createRuntime()` 造出来的运行时去读 —— 那正是生产里的形状（同一个文件、
+// 两个实例），而不是"我以为它读得到"。
+{
+  const entry = EXTRA_REGISTRY.find((item) => item.id === 'trpg');
+  const modes = new TrpgModeStore();
+  const runtime = createRuntime();
+
+  ok('没记录的会话 = **DM 模式**（缺省是那个更完整的形态，而不是"什么都没开"）',
+    modes.read('group:never-set') === 'dm');
+
+  ok('敲的那个词认得出来（中英各一份；认不出返回 null，而不是默默当成某一个）',
+    parseMode('助手') === 'assistant' && parseMode('dice') === 'assistant'
+    && parseMode('DM') === 'dm' && parseMode('主持人') === 'dm'
+    && parseMode('随便') === null && parseMode('') === null);
+
+  modes.write('group:mode-a', 'assistant');
+  ok('切到助手模式读得回来', modes.read('group:mode-a') === 'assistant');
+
+  ok('**助手模式下只露骰子**（say + roll）—— "仅能"是结构上的事实，不是提示词里的一句请求',
+    JSON.stringify([...runtime.toolsFor('group:mode-a')].sort())
+    === JSON.stringify([...TRPG_ASSISTANT_TOOLS].sort()),
+    JSON.stringify(runtime.toolsFor('group:mode-a')));
+  ok('DM 模式露全部四个（名单从 spec 派生，不在这里另抄一份）',
+    runtime.toolsFor('group:mode-b').length === entry.tools.length,
+    JSON.stringify(runtime.toolsFor('group:mode-b')));
+  ok('**助手名单是声明过的工具名的子集**（拼错一个名字的表现是静默少一个工具，所以钉在这里）',
+    TRPG_ASSISTANT_TOOLS.every((name) => entry.tools.some((tool) => tool.name === name))
+    && JSON.stringify([...TRPG_ASSISTANT_TOOLS].sort()) === JSON.stringify(['roll', 'say']),
+    JSON.stringify(TRPG_ASSISTANT_TOOLS));
+
+  const assistantBody = runtime.prompt('group:mode-a').body;
+  ok('助手模式的人格只有一段，而且是骰子助手（不是"跑团主持人"）',
+    assistantBody.length === 1 && /【骰子助手】/.test(assistantBody[0])
+    && !/【跑团主持人】/.test(assistantBody[0]),
+    JSON.stringify(assistantBody.map((text) => text.slice(0, 12))));
+  ok('助手模式**不注入清单、剧本与状态**（那些东西的存在本身就在暗示"你可以叙事、可以改状态"）',
+    !/【当前跑团状态】/.test(assistantBody[0]) && !/剧本/.test(assistantBody[0]),
+    assistantBody[0].slice(-160));
+
+  const dmBody = runtime.prompt('group:mode-b').body;
+  ok('对照：DM 模式仍是三段（人格 → 清单+剧本 → 状态），首段是主持人',
+    dmBody.length === 3 && /【跑团主持人】/.test(dmBody[0]) && /【当前跑团状态】/.test(dmBody[2]),
+    JSON.stringify(dmBody.map((text) => text.slice(0, 12))));
+
+  modes.write('group:mode-a', 'dm');
+  ok('切回 DM = **那条记录被删掉**（"文件里有的"永远是真的切过的）',
+    !('group:mode-a' in modes.all()) && modes.read('group:mode-a') === 'dm');
+
+  // 坏键 / 坏值 / 坏文件：一律当缺省，**不抛** —— 一个坏文件不该让跑团起不来。
+  fs.mkdirSync(path.dirname(modes.file), { recursive: true });
+  fs.writeFileSync(modes.file, JSON.stringify({
+    'group:ok': 'assistant', '不是会话键': 'assistant', 'group:bad': '乱写'
+  }));
+  ok('坏键与坏值一律当缺省，读得出来的照读',
+    modes.read('group:ok') === 'assistant' && modes.read('不是会话键') === 'dm'
+    && modes.read('group:bad') === 'dm');
+  fs.writeFileSync(modes.file, '这不是 JSON');
+  ok('文件坏了也当缺省（同一个文件坏掉不该让跑团起不来）', modes.read('group:ok') === 'dm');
+  fs.rmSync(modes.file, { force: true });
+
+  // ── `/跑团 模式` 这条命令 ──
+  const commands = createRuntime().commandHandlers;
+  const tell = (text, chatKey = 'group:mode-c') => commands['/跑团']({
+    chatKey, senderId: '10001', text, media: [], replyToMessageId: null
+  });
+
+  ok('/跑团 模式 不带参数 → 报当前模式与两条可用命令',
+    /当前：/.test(String(await tell('/跑团 模式'))) && /助手/.test(String(await tell('/跑团 模式'))));
+  ok('/跑团 模式 助手 → 记住，并回一句"下一轮生效"',
+    /已切到/.test(String(await tell('/跑团 模式 助手'))) && modes.read('group:mode-c') === 'assistant');
+  ok('助手模式下不带参数敲 /跑团 → 给的是**这个模式怎么用**，不是一张"还没开团"的空状态卡',
+    /发一个骰子表达式/.test(String(await tell('/跑团'))) && !/还没有开团/.test(String(await tell('/跑团'))));
+  ok('/跑团 模式 DM → 切回来', /已切到/.test(String(await tell('/跑团 模式 DM')))
+    && modes.read('group:mode-c') === 'dm');
+  ok('重复切到同一个模式时说清"已经是了"，不假装做了什么',
+    /已经是/.test(String(await tell('/跑团 模式 DM'))) && String(await tell('/跑团 模式 DM')).includes(MODE_LABEL.dm));
+  ok('不认识的模式 → 列出可用的两个（不默默当成某一个）',
+    /不认识的模式/.test(String(await tell('/跑团 模式 随便'))) && modes.read('group:mode-c') === 'dm');
+  ok('帮助里列了「模式」这一条', /\/跑团 模式/.test(String(await tell('/跑团 乱写'))));
 }
 
 // ── 6. 注册表接点与 `onRunEnd` ──────────────────────────────────────────────
@@ -819,6 +1046,24 @@ const status = (key) => store.read(key);
     sessions.length === 2 && /撬开木箱/.test(sessions[1].text)
     && !/以下是几个选项/.test(sessions[1].text) && !/很长的解释/.test(sessions[1].text),
     sessions[1]?.text);
+
+  // ⑨ **助手模式**：上面每一条都成立，但它整轮不说话是常态、而"给几个行动方向"在骰子助手的
+  // 语境里毫无意义 —— 所以模式这一条要能**单独**把兜底挡掉（不然它会白烧一次调用，
+  // 还把助手叫醒去说一堆它这个形态下不该说的话）。
+  const assistantModes = new TrpgModeStore();
+  seed('group:926');
+  assistantModes.write('group:926', 'assistant');
+  arm();
+  await withSink.onRunEnd({ chatKey: 'group:926', status: 'noreply', sentCount: 0, trigger: [person] });
+  ok('助手模式下**不跑兜底**（真人推动 + 沉默两个条件都成立也不跑）',
+    sessions.length === 2, JSON.stringify(sessions.map((item) => item.chatKey)));
+
+  // 对照：把同一个会话切回 DM，同样的一次必须**真的生成**（否则上一条是假绿）。
+  assistantModes.write('group:926', 'dm');
+  arm();
+  await withSink.onRunEnd({ chatKey: 'group:926', status: 'noreply', sentCount: 0, trigger: [person] });
+  ok('对照：切回 DM 之后同样的一次真的生成了（上一条才不是假绿）',
+    sessions.length === 3 && sessions[2].chatKey === 'group:926', JSON.stringify(sessions.map((item) => item.chatKey)));
 }
 
 // ── 7. 行动经济账本（纯逻辑）──────────────────────────────────────────────
@@ -888,7 +1133,8 @@ console.log('\n=== 端到端：真起 app（createApp + start）===');
     persona: { roleText: '你是一条小鱼。', botName: '小鲸鱼', selfNickname: '小鲸鱼' },
     store: { contextSliderPos: 95, historyCount: 10, maxContextMessages: 0 },
     reply: { maxWaitMs: 0, maxPerMinute: 0 },
-    extras: { enabled: { trpg: true }, override: { 'group:701': 'trpg' } }
+    // 两个群都绑给 trpg：701 走缺省的 DM，703 在下面切成助手（同一个扩展、两种形态）。
+    extras: { enabled: { trpg: true }, override: { 'group:701': 'trpg', 'group:703': 'trpg' } }
   });
 
   const { createApp } = await load('web/app.js');
@@ -977,6 +1223,27 @@ console.log('\n=== 端到端：真起 app（createApp + start）===');
     JSON.stringify(plainTools));
   ok('没被接管的群拿的是主人格（对照组：上一条不是假绿）',
     /你是「小鲸鱼」/.test(plainSystem) && !/【跑团主持人】/.test(plainSystem));
+
+  // 第三个群：**同一个接管扩展，但切成助手模式** —— 这是"按会话换形态"在真 app 里的样子。
+  //
+  // 比上面那几条单元强的地方在于：这里的工具表与系统提示是经**完整注入链**
+  // （`app.ts` → `Orchestrator` → `WakeScheduler` → `agent-runner`）走出来的，
+  // 而不是直接读 `toolsFor()` 的返回值 —— "钩子接上了"与"钩子真的影响了模型看到的东西"
+  // 是两件事，只有这一段能证明后者。
+  new TrpgModeStore().write('group:703', 'assistant');
+  const dice = await runOnce('group:703', '3d6', [{ content: '（测试：这一轮不说话）' }]);
+  const diceTools = (dice?.tools ?? []).map((tool) => tool.function?.name);
+  const diceSystem = String((dice?.messages ?? []).find((m) => m.role === 'system')?.content ?? '');
+  ok('**助手模式（真 app）：模型只拿到 say 与 roll**（同一个扩展、另一个会话）',
+    JSON.stringify([...diceTools].sort()) === JSON.stringify(['roll', 'say']), JSON.stringify(diceTools));
+  ok('助手模式（真 app）：system prompt 是骰子助手，而不是 DM 人格',
+    /【骰子助手】/.test(diceSystem) && !/【跑团主持人】/.test(diceSystem));
+  ok('助手模式（真 app）：**这个群仍然被接管** —— 内置工具一个都没有（不是"退回主流程"）',
+    !diceTools.includes('send_message') && !diceTools.includes('finish'), JSON.stringify(diceTools));
+  ok('助手模式（真 app）：框架契约两段仍然在（那是运行契约，与当 DM 还是当骰子机器无关）',
+    /【安全规则/.test(diceSystem) && /【工作方式/.test(diceSystem));
+  ok('助手模式（真 app）：清单、剧本与状态一概不注入（那些的存在本身就在暗示"你可以叙事"）',
+    !/【当前跑团状态】/.test(diceSystem), diceSystem.slice(-200));
 
   // ── 接管会话里，模型调 say 的那一轮必须被记成 done ──
   //

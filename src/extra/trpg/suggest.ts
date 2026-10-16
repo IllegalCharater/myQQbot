@@ -21,6 +21,7 @@
 // 账面上少算这几百个 token。要补齐得给 `SessionRegistry` 加一个"只累加增量"的入口，
 // 那是它自己的一处设计隐患（`#persist` 对已结束的会话会重复累加），不该由这个扩展顺手改。
 import { chatCompletion } from '../../llm/llm.js';
+import { EXTRA_PROMPT_JOBS } from '../prompts.js';
 import { MAX_LOG_RENDER } from './state.js';
 import type { TrpgCampaign } from './types.js';
 
@@ -73,17 +74,15 @@ export async function generateSuggestions(campaign: TrpgCampaign): Promise<strin
     try {
       const result = await chatCompletion({
         messages: [
-          {
-            role: 'system',
-            content: '你是跑团主持人的助手。你只输出行动选项，不写任何别的东西。'
-          },
+          { role: 'system', content: EXTRA_PROMPT_JOBS.trpg.suggest.system },
           {
             role: 'user',
-            content: `${suggestionContext(campaign)}\n\n`
-              + `给玩家 ${MIN_OPTIONS}-${MAX_OPTIONS} 个眼下可以执行的行动选项。`
-              + `每行一个，以「- 」开头，每个不超过 ${MAX_OPTION_CHARS} 个字，要具体到能直接做。`
-              + '只输出选项本身：不要解释、不要分析、不要写"你想做什么"这类话，'
-              + '也不要出现"检定/掷骰/先攻/选项/建议"这些词。'
+            content: EXTRA_PROMPT_JOBS.trpg.suggest.user({
+              context: suggestionContext(campaign),
+              min: MIN_OPTIONS,
+              max: MAX_OPTIONS,
+              maxOptionChars: MAX_OPTION_CHARS
+            })
           }
         ],
         temperature: 0.8,

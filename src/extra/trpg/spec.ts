@@ -10,6 +10,17 @@ import type { ExtraSpec } from '../types.js';
 
 const PROMPTS = EXTRA_PROMPT_TEXT;
 
+/**
+ * **助手模式**暴露的工具名 —— 只有掷骰与发言。
+ *
+ * 它住在 `spec.ts` 而不是 `impl.ts`，是为了紧挨着它**必须是其子集**的那个东西（下面的 `tools`）：
+ * `toolsFor()` 会滤掉没声明的名字（只记日志，不抛），而 `tests/t-trpg.mjs` 有一条断言直接钉
+ * "这里的每个名字都真的声明过"。把这份名单放在别处，拼错一个名字的表现是**静默少一个工具**。
+ *
+ * 不含 `campaign` / `character`：助手模式不管状态，连状态都不注入（见 `impl.ts` 的 `prompt()`）。
+ */
+export const TRPG_ASSISTANT_TOOLS: readonly string[] = ['say', 'roll'];
+
 /** 工具参数里那个"名字 → 数值"的表（属性/技能）。建卡与改卡共用这一个形状。 */
 const STATS_SCHEMA = {
   type: 'object',

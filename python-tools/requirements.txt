@@ -3,6 +3,7 @@
 #
 #   python-tools/jmcomic_download.py      → jmcomic（漫画下载）
 #   python-tools/pic_image_search_worker.py → PicImageSearch（搜图 worker）
+#   python-tools/document_extract.py      → pypdf（读 PDF；docx / txt / md 只用标准库）
 #
 # 安装（两个工具共用一个解释器，路径由配置项 `python.path` 指定）：
 #
@@ -24,3 +25,8 @@ jmcomic
 # 表现成「某字段空了」而不是「搜图挂了」，所以放宽比钉死更安全。
 # 想钉死就在目标解释器上先跑 `pic_image_search_worker.py --self-check`，再把版本写进这里。
 PicImageSearch
+
+# 文档抽取（python-tools/document_extract.py）—— **只有 PDF 需要它**。
+# .docx 走标准库 zipfile + xml.etree，.txt/.md 直接解码，两者永远可用；
+# 所以没装 pypdf 时，读 PDF 会明确回一句"MISSING_PDF_LIB + 怎么装"，而不是整个能力不可用。
+pypdf

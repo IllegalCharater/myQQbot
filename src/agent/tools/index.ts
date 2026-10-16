@@ -1,5 +1,6 @@
 import { adminTools } from './admin-tools.js';
 import { chatActionTools } from './chat-actions.js';
+import { documentTools } from './document.js';
 import { historyMediaTools } from './history-media.js';
 import { hotSearchTools } from './hot-search.js';
 import { imageGenTools } from './image-gen.js';
@@ -23,6 +24,9 @@ export function buildToolDefs(extra: readonly ToolDefinition[] = []): ToolDefini
     ...chat,
     ...history,
     ...imageSourceTools(),
+    // 读一份**群友发上来的文件**，紧挨着读消息媒体那几个（`reverse_image_source` 读图、
+    // 这个读文档，两者都是"从某条消息里取一份内容交给模型"）。
+    ...documentTools(),
     ...hotSearchTools(),
     ...transcriptionTools(),
     ...imageGenTools(),

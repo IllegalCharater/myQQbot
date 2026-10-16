@@ -246,7 +246,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 所有模型可见的固定指令（内置 persona、system/user 固定段、工具 description、历史压缩与记忆整理指令）只允许写在 `src/core/prompt-catalog.ts`，业务模块引用其中的 `PROMPT_CATALOG`；`src/agent/prompting/prompt-builder.ts` 只负责动态变量、聊天记录格式化、条件选择与预算裁剪。UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词目录。
 
-工具 description 在这份目录里分成**两块**：`TOOL_PROMPT_TEXT`（内置工具，其名字与顺序是硬约束）与 `src/extra/prompts.ts` 的 `EXTRA_PROMPT_TEXT`（扩展工具，随时可加；由本目录 import 并转发）。扩展的 `spec.ts` 只许引用后者，且 `TOOL_PROMPT_TEXT` 里那一行必须是**同一个对象引用**（转发），不是拷贝 —— 详见「扩展能力（extra）」一节。**`src/extra/prompts.ts` 是这份目录唯一一个住在别处的部分，也是 `LAYER_ALLOW` 里唯一那条反向依赖例外，它必须保持无 import。** 扩展往 system prompt 里追加/覆盖的段落另有一张表 `EXTRA_PROMPT_SECTIONS`（按**扩展 id** 索引，与注册表对账），同样在那个文件里。
+工具 description 在这份目录里分成**两块**：`TOOL_PROMPT_TEXT`（内置工具，其名字与顺序是硬约束）与 `src/extra/prompts.ts` 的 `EXTRA_PROMPT_TEXT`（扩展工具，随时可加；由本目录 import 并转发）。扩展的 `spec.ts` 只许引用后者，且 `TOOL_PROMPT_TEXT` 里那一行必须是**同一个对象引用**（转发），不是拷贝 —— 详见「扩展能力（extra）」一节。**`src/extra/prompts.ts` 是这份目录唯一一个住在别处的部分，也是 `LAYER_ALLOW` 里唯一那条反向依赖例外，它必须保持无 import。** 扩展自己那三张表都在那个文件里、各按自己的键与注册表对账：`EXTRA_PROMPT_TEXT`（按**工具名**，每轮进请求前缀）、`EXTRA_PROMPT_SECTIONS`（按**扩展 id**，往 system prompt 里加的段落）、`EXTRA_PROMPT_JOBS`（按**扩展 id**，扩展**自己发起的一次模型调用**的指令 —— 既不是工具说明、也不是常驻段落）。**前两张要求与注册表逐个相等，JOBS 只要求子集**（一个扩展需不需要一次性任务是它自己的事，而真正要防的是"扩展搬走了、文案还留在表里"）。
 
 工具**结果**串一般留在各自工具文件里（它带动态数据或错误文案）；唯一的例外是 `transcribe_video` 的回执话术 `TOOL_PROMPT_TEXT.transcribe_video.receipt`——它没有动态成分，且要解决的是"诱导模型说哪句话"而不是"返回什么数据"，所以按固定指令处理。**它必须整句取自目录，不许在工具文件里拼状态串**：带上任务号（`job.id`）会让模型回一句"任务已派上（任务 xxxx）"，而 `description` 与 `capabilityProtocol` 第 2 条是同一件事的另外两个面，分居两地就调不齐。
 
@@ -299,7 +299,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 ### 形态：声明静态、实现按需加载
 
 ```text
-src/extra/prompts.ts    扩展的固定指令（EXTRA_PROMPT_TEXT / EXTRA_PROMPT_SECTIONS）—— **必须无 import**（见下文 LAYER_ALLOW）
+src/extra/prompts.ts    扩展的固定指令（EXTRA_PROMPT_TEXT / EXTRA_PROMPT_SECTIONS / EXTRA_PROMPT_JOBS）—— **必须无 import**（见下文 LAYER_ALLOW）
 src/extra/<x>/spec.ts   纯数据（id / title / displayDesc / mode / defaultEnabled / 工具与命令声明），**重东西一个字都不许有**
 src/extra/<x>/impl.ts   createRuntime(deps: ExtraRuntimeDeps): ExtraRuntime，重东西全在这里
 src/extra/registry.ts   静态清单，每行 { ...xSpec, load: (deps) => import('./x/impl.js')… }
@@ -309,6 +309,8 @@ src/extra/registry.ts   静态清单，每行 { ...xSpec, load: (deps) => import
 
 - **为什么是参数、不是让扩展自己 import**：那条链要碰 `ChatStore` 与 `Orchestrator`，而 `extra → agent` 是反向依赖（`check-layers` 会拦）；组装是 `web/` 的活。扩展只说"这是一条什么、正文是什么"（`ExtraNote`），**怎么落库由宿主决定** —— 那一层连 `ChatMessage` 的形状都不必知道。
 - **⚠️ `load` 的说明符必须仍是字面量**：`t-extras.mjs` 有一条源级断言钉这条，判据是"函数引用 + 字面量说明符"两件事，所以它允许参数列表里有内容（`(deps)`），但写成一个变量就会打红（那样 tsc 看不见它、打包脚本也搬不进包）。
+
+**一个扩展还可以按会话说"我此刻露哪些工具"**（`ExtraRuntime.toolsFor(chatKey)`，2026-10-16 加）：不写这个方法 = `spec.tools` 全部。跑团用它实现"**助手模式只暴露骰子**"—— 同一个扩展在一个群当骰子机器人、在另一个群当 DM。三条边界：**只能返回声明过的名字**（多出来的被 `toolDefs()` 滤掉并记日志，不抛 —— 那是运行期、在别人的一轮对话里被调的）；**必须收 `chatKey` 且必须是全函数**（装载时会空着会话调一次，抛了就等于拒绝装载，而症状是"这个扩展装不上"，与工具表毫无关系）；**它让工具表按会话变化**（切换形态打散一次提示词缓存，频次由人控制）。判据是"模型看到的与它真能用的必须是同一套东西"：留着两个用不上的工具在那里、只在提示词里求模型别调，等于每轮多花一段前缀、还给它一次调错的机会。
 
 **加一个扩展 = 建一个目录 + 在 `registry.ts` 加一行。** 工具 description 仍然只在提示词目录里写（模型可见的固定指令的唯一落点），但扩展那一块**单独一个文件**：`src/extra/prompts.ts` 的 `EXTRA_PROMPT_TEXT`，由 `core/prompt-catalog.ts` import 并**原样转发**进 `TOOL_PROMPT_TEXT`（同一个对象引用，不是拷贝 —— 拷贝会各自漂移），于是 `PROMPT_CATALOG.tools.<工具名>` 这条统一路径对内置与扩展一样成立。**加扩展不要往 `TOOL_PROMPT_TEXT` 加新键**，去 `extra/prompts.ts` 加。两份表分开的理由是**权威来源不同**：`TOOL_PROMPT_TEXT` 的每一项对应 `agent/tools/index.ts` 里内置拼装的一个工具（名字与顺序是硬约束、逐字钉着），而扩展随时可加。**⚠️ `extra/prompts.ts` 必须保持叶子模块（不许有 import）**，它是 `LAYER_ALLOW` 那条例外的全部依据。
 
@@ -381,6 +383,25 @@ web/app.ts   toolDefs: () => [...buildToolDefs(), ...extras.toolDefs()]
 
 **怎么开启（三步，缺一不可）**：设置页打开「跑团（TRPG）」（`extras.enabled.trpg`，**改完要重启**）→ 想长期固定的写进 `data/config.json` 的 `extras.override`（`{"group:123": "trpg"}`，开机播种）→ 或者在那个群敲 `/能力 加载 trpg`（内存绑定、不落盘）。**默认关**是刻意的：仓库里所有重能力（搜图 / 转写 / 出图）都默认关，跑团比它们更重。
 
+### 两种模式：DM / 助手
+
+**同一个扩展、同一个群，按会话切成两种形态。** 模式写在 `data/trpg/modes.json`（键是 `group:<群号>`，值只有非缺省的那些），群里敲 `/跑团 模式 助手` / `/跑团 模式 DM` 切，**下一轮运行生效**。缺省是 `dm`，所以没切过的会话在文件里**没有记录**（`write` 回缺省时会把那条删掉 —— "文件里有的"永远是真的切过的）。
+
+| | `dm`（缺省） | `assistant` |
+|---|---|---|
+| 人格 | 跑团主持人（`EXTRA_PROMPT_SECTIONS.trpg.body`） | 骰子助手（`assistantBody`），**只有一段** |
+| 工具 | 四个 | **`say` + `roll`**（`spec.ts` 的 `TRPG_ASSISTANT_TOOLS`） |
+| 注入 | 人格 → 清单+剧本 → 状态 | 只注入人格 |
+| 兜底建议 | 跑 | **不跑** |
+
+三条边界：
+
+- **模式决定三件事，而三件事必须按同一个会话取**：`toolsFor`（露哪些工具）、`prompt`（给哪份人格）、`onRunEnd`（跑不跑兜底）。它们都收 `chatKey`，所以这件事不需要任何跨会话机制 —— 但也正因为分散在三处，`impl.ts` 里那个 `TrpgModeStore` **只有一个实例**。
+- **助手模式不注入清单/剧本/状态**，也不跑兜底：那几样的**存在本身**就在暗示"你可以叙事、可以改状态"，而兜底在骰子助手的语境里毫无意义（它整轮不说话是常态），跑下去只会白烧一次调用、还把助手叫醒去说一堆它不该说的话。
+- **切模式不动战役存档**：切回 DM 时那一局还在原地（助手模式下它只是不被注入）。`/跑团` 不带参数在助手模式下给的是**"这个模式怎么用"**，而不是一张"这个群还没开团"的空状态卡 —— 后者会让人以为助手模式坏了。
+
+**判定是确定性的**（`modes.read(chatKey)` 读一个小文件），不是"看模型说了什么"。
+
 **那条分界：叙事归模型，状态归代码。**
 
 - 代码持有并钳制 HP / SAN / 属性技能 / 场景 / 剧情旗标 / 可见性（`state.ts` 的上限）；模型只能**请求**改动（`character` / `campaign`），请求带着"从多少变到多少"进日志。
@@ -443,18 +464,27 @@ web/app.ts   toolDefs: () => [...buildToolDefs(), ...extras.toolDefs()]
 
 - `/掷骰`、`/跑团` 只在**被接管的那个会话**里存在（`commandDefs()` 对非接管会话直接跳过 override 模式的扩展），所以别的群看不到跑团这件事存在。这**不是**"泄漏没测出来"，是设计。
 - 跑团**没有 `dispose()`**，因为它的确不持有任何长期资源（状态是每次现读现写的小 JSON）。空闲卸载对它等于什么都没做 —— 与其写个清空 Map 的空壳假装释放了什么，不如不写。
+- **助手模式仍然受"响应档位"约束**（这条是它与"纯命令机器人"最容易被忽略的差别）：模式只决定**露什么工具、给什么人格**，而"这一批消息要不要惊动模型"是 `evaluateWindowTrigger` 的事 —— 一个把参与度档位调低的群，会连"3d6"都不理。缺省档位（`contextSliderPos: 95` → 4 档「全部响应」）下不会碰到它；真要在低档位群里当骰子机器人，要么把那个群调高，要么让群友 @ 它。**扩展侧没有任何钩子能改这件事**（响应策略是 core 的概念），所以这里如实记下来而不是假装它不存在。
+- **斜杠命令不受模式影响**：`/掷骰`、`/跑团 模式`、甚至 `/跑团 开局`、`/跑团 存剧本` 在助手模式下**照样敲得动** —— 那些是**人**的动作（"仅能执行 onedice 指令"约束的是模型），而且切回 DM 时那一局最好还在原地。
 - **没有"回合超时自动推进"**：跑团完全被动，由玩家的消息驱动。要加就得进 `LONG_TERM_TASKS`（三处登记）。
 - **真机冒烟不在套件里**：真 OneBot + 真模型下"DM 会不会真的调工具改状态""它会不会照提示词每轮自己给选项""它看到【跑团笔记】/【行动建议】两个标签会不会做出不同反应"只能人工看。套件能证明的是接线对（工具表、提示词、账本、收尾状态、标签分得开），**证明不了模型用得对**。
 - **`runEnded` 的 `chatKey` 语义**：`SessionRecord.chatKey` 直接传下去，扩展靠它 `store.read` 与 `deliverNote`。`trigger` 在类型上是 `unknown`，`app.ts` 收窄失败时给空数组（于是"不是真人推动的" ⇒ 不兜底），这个方向是安全的。
-- ⚠️ **收文件的通道还没有，而且"协议端到底送什么"本机验不了（2026-10-16 挂起）**：`extractMediaFromSegments` 只处理 `image` / `face` / `record` / `forward` / `json`，`segmentsToText` 把 `file` 段渲染成 `[文件X.md]` 就完了 —— 仓库里所有 `upload_group_file` 都是**发**的方向，收的方向一行代码都没有。想支持"引用一份剧本文件"就必须先知道协议端推哪种形态（消息里的 `file` 段？`notice_type: group_upload`？json 卡片？）。
-  **两处只打日志的探针已经埋好**（`qq/onebot.ts` 的 `extractMediaFromSegments` + `web/onebot/ingest.ts` 的 `handle`，都打 `[probe:file]` 前缀，**不改任何行为**）：群友往群里传一个文件、引用它发一条消息，日志里就会出现它的**字段名与少数标识值**（`url` 只打前 30 字符 —— 探针要回答的是"字段长什么样"，不是把用户内容与临时凭据整份落进日志）。
-  三种结果各自的下一步写在两处探针的注释里：**带 url 的 `file` 段**最省事（加一支 media 条目即可，被引用那条的媒体已经在 `ingest.ts:282-284` 并进 `input.media` 了）；**只带 `file_id`** 要先换一次 `get_group_file_url`；**只有 `group_upload` notice** 说明"引用"这条路走不通（那条 notice 不进任何消息），得改设计。**拿到结果、写完之后记得把这两处探针删掉。**
-- **`/跑团 存剧本` 还没写**（同上，等探针结果）。注意它要读的是**被引用那条的完整正文**时不能拿 `reply.text` —— 那是引用预览，被 `REPLY_PREVIEW_MAX = 300` 截断（`ingest.ts:146`）。
+- **群文件收下了（2026-10-16 真机实测定的形态）**：`extractMediaFromSegments` 原来不认 `file` 段（`segmentsToText` 把它渲染成 `[文件X.md]` 就完了），而仓库里所有 `upload_group_file` 都是**发**的方向 —— 所以"协议端到底送什么"本机验不了，先埋了两处只打日志的探针（`[probe:file]` 前缀）跑了一次真机。
+  **实测结论（SnowLuma）：消息里就是一个 `file` 段，字段全带** —— `file` / `file_id` / `name` / `size` / `url`（552 字符带签名的 **http 直链**）/ `file_hash`。所以"引用一份文件、从它里面抓正文"这条路是通的：**带 `url` 就直接下**，不必再换一次 `get_group_file_url`（`file_id` 也存着，留作"协议端哪天不给 url"的后手）。
+  两条边界：① **`url` 是临时直链**（带签名），要下就当场下、别存起来等下次用；② 判据与 `record` 那条一致 —— **既没 url 又没 file_id 才不产出条目**。新增的夹具在 `t-media-source.mjs` 第 10 段，**逐字照抄真机日志**（编一个更好看的夹具等于把那份实测丢掉）。探针已删。
+- **`/跑团 存剧本 <名字>` 靠"引用一份文件"**：被引用那条的媒体已经在 `ingest.ts` 的 `if (slashCommand && repliedMedia.length)` 里并进 `input.media`，所以这里只要在 media 里找 `kind: 'file'` —— **不需要任何新口子**。下载走 `safeFetchBinary`（QQ 文件直链是公网地址，不受 `allowPrivateImageHosts` 影响），**有 15 秒超时**（这是命令路径，群友在等回执）。
+  **"字节 → 文本"2026-10-16 交给了通用能力 `media/document/`**（.pdf / .docx / .txt / .md 都能传了，此前只收 UTF-8 的 .md/.txt），所以这一半只剩 `saveScenarioText(name, doc, store)` —— 它收 `DocumentText` 而不是字节，**同步纯函数**，于是能在不启动任何解释器的前提下被测。  **接着做格式匹配**（`isFormattedScenario`）：判据是**确定性**的（开头有没有 frontmatter、整份能不能解析），不猜。**格式本来就对的文件一次模型调用都不发** —— 那是这条命令的快路径；不对的（PDF 模组、一段裸设定、frontmatter 里 JSON 写坏了）才让模型整理一遍（`scenario-format.ts`，提示词在 `EXTRA_PROMPT_JOBS.trpg.formatScenario`），落库的是**模型给的版本**，回执里点明"已让模型整理过"（它同时解释两件事：回执为什么慢、内容为什么被重排过）。
+  四条边界：**抽取器截断过的正文当场拒**（截断 = 人还能改的时候不说、跑起来才少半段，同 `MAX_SCENARIO_CHARS` 的约定）；**模型整理出来的东西要再过一遍 `parseScenario` 才落库**（后置条件是"返回的文本一定是规定格式"，不满足就如实报错 —— 信任它就会变成"开局了但什么都没注入"）；**下载失败与读不出来分开报**（"下载「X」失败" vs "读「X」失败"，两件事，压成一句会让人往错的方向查）；**回执里带来源格式与解码痕迹**（PDF 没有 frontmatter，标题会退化成文件名 —— 不说的话群友会以为"我明明写了 title"；非 UTF-8 是我们替它猜的一档，更不能默默做）。
+  已知代价：白名单群里**任何群友**都能存剧本、也能覆盖同名剧本（要收紧只需在 handler 里加一句判据，同 `/能力` 的权限）。
 
-- 守护：`tests/t-trpg-rules.mjs`（140 条：逐面核对解析与求值、`kh`/`kl` 与 `k`/`q` 等价、多组/括号/四则/乘方、奖惩骰的 `combine` 两条边界、21 种非法输入的 `code` 与文案、200 组不变式、坏随机源被夹回、**穷举校验真的抓得住两类坏表**（漏兜底 / 顺序写反）、**条件表达式的白名单与拒绝路径**（函数调用、属性访问、下标、赋值、分号、注释、字符串一律拒，除零抛错）、**规则表存储**（懒补齐种子、坏表拒绝且照样列表、改了文件不重启也生效）、「同一个骰面在两种判定下结论相反」证明接缝真的存在）、`tests/t-trpg.mjs`（185 条：状态层上限与归一化**含旧形状迁移**、4 个工具的正反路径、**剧本解析与开局注入**（骨架落进状态、正文快照、改了文件不影响正在跑的团）、**规则表回落与拒绝**、`/跑团 开局` 命令与工具共用实现、工作台列表与删除、`prompt` 的三段段序、**可见性两套投影（含一条专门的泄漏断言）**、行动经济（去重/配额/新 ctx 即新回合）、`reveal` 与它的回流条目、**`onRunEnd` 的六条判据（起真假模型端点，因为"没发条目"在生成失败时也是绿的 —— 那是假绿）**、**源级断言：掷骰路径上不许出现 `Math.random`、`node:crypto` 只在 `entropy.ts`**、以及真起 `createApp()` 的端到端：接管会话的模型请求里只剩跑团那 4 个、system prompt 是跑团人格且不含主人格、能力段让位、`say` 那一轮真的被判成 `done`、`trpg-note` 能唤醒一轮并把标签送进正文、`/api/extras` 标成 override，对照组是**没被接管的群照常**）。
-- `tests/t-extras.mjs` 第 16 段（`runEnded`：只有接管那个会话的扩展收得到、关掉扩展立即收不到、没有 `onRunEnd` 的实现静默跳过、钩子抛错不往上抛、`load(deps)` 收得到宿主的口子）。
+- 守护：`tests/t-trpg-rules.mjs`（140 条：逐面核对解析与求值、`kh`/`kl` 与 `k`/`q` 等价、多组/括号/四则/乘方、奖惩骰的 `combine` 两条边界、21 种非法输入的 `code` 与文案、200 组不变式、坏随机源被夹回、**穷举校验真的抓得住两类坏表**（漏兜底 / 顺序写反）、**条件表达式的白名单与拒绝路径**（函数调用、属性访问、下标、赋值、分号、注释、字符串一律拒，除零抛错）、**规则表存储**（懒补齐种子、坏表拒绝且照样列表、改了文件不重启也生效）、「同一个骰面在两种判定下结论相反」证明接缝真的存在）、`tests/t-trpg.mjs`（231 条：状态层上限与归一化**含旧形状迁移**、4 个工具的正反路径、**剧本解析与开局注入**（骨架落进状态、正文快照、改了文件不影响正在跑的团）、**规则表回落与拒绝**、`/跑团 开局` 命令与工具共用实现、工作台列表与删除、**两种模式（`toolsFor` 的工具子集、`prompt` 的两份人格、`/跑团 模式` 的四种回答、`onRunEnd` 的"助手不兜底"+对照组，以及**真起 app** 断言助手会话只拿到 say/roll、system 是骰子助手）**、**`/跑团 存剧本` 的早退分支、`saveScenarioText` 的四条分支（正常/截断/对照/超长）、格式匹配的四条判据、模型整理的三条（含"格式本来就对 → 一次调用都不发"这条**成本性质**，以及"模型给的东西不合规时如实失败"）**（三条编码判据随实现搬进 Python，改由 `t-document.mjs` 守）、`prompt` 的三段段序、**可见性两套投影（含一条专门的泄漏断言）**、行动经济（去重/配额/新 ctx 即新回合）、`reveal` 与它的回流条目、**`onRunEnd` 的六条判据（起真假模型端点，因为"没发条目"在生成失败时也是绿的 —— 那是假绿）**、**源级断言：掷骰路径上不许出现 `Math.random`、`node:crypto` 只在 `entropy.ts`**、以及真起 `createApp()` 的端到端：接管会话的模型请求里只剩跑团那 4 个、system prompt 是跑团人格且不含主人格、能力段让位、`say` 那一轮真的被判成 `done`、`trpg-note` 能唤醒一轮并把标签送进正文、`/api/extras` 标成 override，对照组是**没被接管的群照常**）。
+- `tests/t-media-source.mjs` 第 10 段（**群文件段**：真机实测的字段逐字可用、带 url、只有 file_id 时仍产出、两样都没有才不产出、文本化仍是 `[文件X.md]` 占位符）、`tests/t-extras.mjs` 第 16 段（`runEnded`：只有接管那个会话的扩展收得到、关掉扩展立即收不到、没有 `onRunEnd` 的实现静默跳过、钩子抛错不往上抛、`load(deps)` 收得到宿主的口子）。
 
 **那条端到端堵的是一个真实的守护空白**：`web/app.ts` 里 `isOverridden(chatKey) ? mine : [...BUILTIN_TOOLS, ...mine]` 是"接管时内置工具让位"的**唯一**实现处，而 `extras.toolDefs()` 那一层的断言**看不见它**（那一层只管扩展自己那几个）。实测探针：把那一行改成总是拼上内置工具 → 全部既有套件里只有 `t-trpg.mjs` 会红，而它报出的正是"接管会话拿到 25 个内置工具 + 4 个跑团工具"。
+
+**先记两条本轮（格式匹配 / 模型整理）的探针**：把 `saveScenario` 里那个判据取反（`!isFormattedScenario` → `isFormattedScenario`）→ `t-trpg` 红 4 条，报出的是"一份裸正文被原样存成了剧本、没走模型"；把 `scenario-format.ts` 里"模型输出必须是规定格式"那条后置检查去掉 → `t-trpg` 红 2 条，报出的是"模型说'我做不到'，而它被当成了剧本存进去"。两条都不影响启动与聊天 —— 所以没有断言就真的没人会发现。
+
+**模式那两条探针也实测过**：把 `toolsFor` 改成恒返回全部 → `t-trpg` 红 2 条（真 app 那条报出的是"助手会话拿到四个工具"）；把 `prompt` 的模式分支去掉 → 红 4 条（助手会话拿到 DM 人格 + 状态段）。两条都不影响启动与聊天。
 
 **另有三条 2026-10-16 探针实测的结论，写在这里免得下一个人重踩**：① **换熵源没有任何行为断言看得见** —— 把 `impl.ts` 的 `secureRng` 换成 `Math.random`，**其余全部套件照绿**（掷骰本来就随机），所以本节第 7 段只能从源码文本上守；② 假模型端点的脚本是**消耗式**的，而 `arm()` 若赋回同一个数组引用等于没装（那个数组已经被 shift 空了）—— 第一版就是这么假绿的；③ 端到端里 `runOnce` 取"这一轮的第一个请求"，**必须先等上一轮（含它的后续轮次）落地**再取基线，否则会串台成"对照组拿到接管会话的工具表"。
 
@@ -481,6 +511,33 @@ web/app.ts   toolDefs: () => [...buildToolDefs(), ...extras.toolDefs()]
 - 新增长期后台任务必须能显式启停，**不得靠模块加载期或构造函数副作用启动**。启停点已收敛成一条硬规则：**长期任务一律在 `src/web/app.ts` 的 `start()` 里启动、在 `stop()` 里停止**。**S11c 起这条规则由 `src/web/runtime/lifecycle.ts` 的装配清单（`LIFECYCLE`）驱动**：`start()` 只调 `await startLifecycle(deps)`，`stop()` 只调 `await stopLifecycle(deps)`，`app.ts` 里**不再出现任何一条硬编码的任务启停调用**（`lifecycleDeps()` 只负责把真模块递进去——"装的是什么"在 app，"按什么顺序装"在清单）。清单的三条可机检性质：① `start`/`stop` 存**函数引用**（不是名字），运行期只有 `for...of`，没有 `LIFECYCLE[动态键]`/`.find(`/`.get(`；② `ids` 只作**对账元数据**，运行期从不读；③ **import 它不启动任何东西**。**顺序即语义**：start 正序 = 清单顺序，stop **逆序**，于是"停长期任务排在 `onebot.close()` **之前**"（在途的 QQ 上传调用还依赖传输层）由"`onebot.reconnect` 排第一位"自动满足，不再靠人记。**往清单里插一行时位置就是行为**——插错地方不会有任何编译错误，只有 `t-lifecycle.mjs` 第 3 段的顺序断言会红。可参照的现成实现有：`price.feed`、两个 jmcomic 任务、`onebot.reconnect`、`transcription.worker`，以及 `hot-search.daily-broadcast`（`HotSearchScheduler.start/stop`，`node-cron` 句柄可销毁并等待在途播报）；`image-gen.worker` 是**唯一不加清单级闸门**的一条（队列空载时不持有任何东西，而把闸门提到清单里会让"配置关着"报成"画图服务尚未启动"，见该行 note）。**配置刷新路径刻意不接清单**：`applyConfigPatch` 只直接刷新确实支持热刷新的价格表与热搜计划，避免误调无条件任务。`stop()` 里 `abortAll()` **不进清单**（它管的是中止在跑的会话）。**`conformance` 列今天只剩 `jmcomic.worker` 是 `partial`**，成因是"停不掉**正在执行**的那一次下载"。新增任务时**要动三处**：`LONG_TERM_TASKS`（+ `tests/t-tasks.mjs` 的 `EXPECTED_IDS`）、`web/runtime/lifecycle.ts` 的 `LIFECYCLE`（+ `tests/t-lifecycle.mjs` 的 `EXPECTED_ENTRY_IDS` 与两条顺序期望），以及 `app.ts` 的 `lifecycleDeps()`；**只改一处会被套件拦下**。
 - 请求作用域计时器（LLM/HTTP 超时、重试退避、限速与拟人停顿、会话防抖、单次扫描轮询、启动期端口轮询等）**不是长期任务**，不要纳入任务表——判定标准与清单见上一条。
 - 改长期任务相关代码前先看 `tests/t-timers.mjs` 的 `withFakeTimers()`：它替换的是**全局** `setTimeout`/`setInterval`/`clearInterval`（`dist/` 里编译成裸标识符，所以拦得住）。两条坑写在它的注释里——假句柄必须放**原对象**进记录数组（放拷贝会把 `unrefCalled` 冻在 `false`，断言永远假绿），以及 `try/finally` 必须恢复（被测模块是模块级单例，漏恢复会污染同进程后续用例）。**第三条是 S10c 踩出来的**：断言"某处排定被取消"时，夹具必须让**新的排定真的不会发生**（例如测试 `connect()` 的取消时，要让 `new WebSocket` 构造成功）——否则被替换路径上的新排定会顺手清掉旧句柄，被测的那一行删不删都一样，探针会拿到**假的绿**（实测踩到，见设计稿 §9.5 第 16 项②）。**另有一处已知的守护空白**：`jmcomic` 的u505cu4e4bu540eu4e0du8bb8u518du628au5df2u7ecfu53efu8dd1u7684u53d6u5b8c那道闸门（原先在 `runWorker` 的 `while (runtime && …)`，2026-10-10 拆目录后落在 `media/jmcomic/queue.ts` 的 `next` 钩子里）删掉不会让任何套件变红（要观察到差别得让夹具里有两个可跑任务，而第二个会过继给后面的真起 app 段去碰真 onebot），它只有注释在守——别以为它被管着。
+
+## 读文档（pdf / docx / txt / md）
+
+`read_document` 工具 + `src/media/document/` 能力：把一份文件读成文本交给模型（跑团剧本是它的第一个消费者）。
+
+**四种格式全走一个 Python worker**（`python-tools/document_extract.py`），而不是"文本在 Node、PDF 在 Python"那种写法 —— 后者会让"这个后缀归谁"变成两份知识，而它们必然漂移，表现是**同一个文件改个后缀就从能读变成不能读**，且没有任何报错。但**只有 PDF 需要外部库**（`pypdf`）：`.docx` 走标准库 `zipfile` + `xml.etree`，`.txt`/`.md` 直接解码 —— 所以没装 pypdf 时读 txt/md/docx 照常，只有 PDF 会明确回一句 `MISSING_PDF_LIB` + "怎么装"。
+
+- **字节走 stdin，不落临时文件**：于是没有"临时文件什么时候删""路径会不会越界"这两件事（jmcomic 那套 `validatePdf` 的路径核对就是前车之鉴）。argv 里因此**只有脚本与 `--max-chars`**，不含任何用户内容（文件名、URL、正文都不进命令行）。结果走 stdout 一帧 `__QQ_AGENT_RESULT__{json}`，与 jmcomic、搜图 worker 同形。
+- **格式靠嗅探字节，不靠后缀**：`%PDF-` → OLE2 魔数 → `PK` → 最后才是"NUL 判文本"。**顺序即语义** —— 反过来的话，一份正文里恰好含 NUL 的 PDF 会被当成二进制拒掉，而报错指向"这不是文本"。旧版 `.doc`（OLE2）有**专门**一句话（"用 Word 另存为 .docx"），不是笼统的"不支持"。
+- **编码阶梯 `utf-8 → gbk`，且用哪一档要如实报出去**。中文文档里 GBK 太常见，直接拒掉会让"另存为 UTF-8 再传一次"成为用户唯一的路；而猜错的表现是**通顺的乱码**，所以结果里带 `encoding`，工具的表头会印"按 gbk 解码"。乱码判据同时要**绝对量**与**占比**（`broken >= 10 且 broken/len > 1%`）—— 只看占比会误杀"恰好含一两个坏字节的短文件"，只看绝对量会放过一篇短乱码。（这三条判据 2026-10-16 从 `extra/trpg/scenario.ts` 的 `decodeScenarioFile` 搬进 Python，那次搬家的代价见下面「守护」那条。）
+- **失败要分档**：`MISSING_PDF_LIB`（装完就能读）与其余（这份文件读不了）**绝不能合成一档** —— 合成之后用户会拿着一个本来能读的 PDF 反复重传。抽出来是空的也**别说成成功**（扫描件会走到这里，空正文会被当成"文件本来就没内容"）。
+- **这一层只管"字节 → 文本"，不负责把文件弄到手**。取字节归调用方（工具用 `safeFetchBinary`，跑团命令用它自己那 15 秒超时的那次），因为两条路的**上限与超时完全不同**，收进来只会给一个函数开三个参数。判据是"要不要碰外部世界"：写盘/下载要，解字节不要。
+- **工具两个入口（`messageId` / `url`）共用一个实现**，判据与跑团那次合并七个工具是同一条：工具 schema 是**每次请求前缀**的一部分。代价也是同一条 —— `required` 不能按入口分支，所以"两个都没给""两个都给"只能靠执行体里那两句中文报错兜住。`messageId` 那条**顺着 `reply.mid` 回退**（群友把剧本发上来、再引用它说一句话，模型手里那条消息上是没有文件的），与 `get_message_images` 是同一个病的两种形态，所以**走回退时结果里点名文件来自哪条消息**。
+- **它走 `webSearch` 那本额度**（`takeWebBudget`）：一定发一次外部请求，而且每次还要起一个 Python 子进程 —— 比 `web_fetch` 更重。分开记一本账会让"模型卡在这条路上反复重试"没有任何闸门拦住。
+
+**与跑团的接线**（"后续获取剧本信息从这个工具中获得"的落点）：`/跑团 存剧本` 的"字节 → 文本"改调 `media/document`，所以剧本现在可以直接传 `.pdf` / `.docx`（此前只收 UTF-8 的 `.md`/`.txt`，其他一律拒）。那一步**不在 `scenario.ts` 里** —— 它留着 `saveScenarioText(name, doc, store)`，收的是 `DocumentText` 而不是字节，于是这一层仍是**同步纯函数**，能在不启动任何解释器的前提下被测。紧接着还有一步**格式匹配**（`isFormattedScenario`：开头有没有 frontmatter、整份能不能解析）——**对的文件一次模型调用都不发**，不对的交给 `scenario-format.ts` 让模型整理一遍。两条不变量：**抽取器截断过的正文当场拒**（截断 = 人还能改的时候不说、跑起来才少半段，同 `MAX_SCENARIO_CHARS` 那条约定的理由）；**下载失败与读不出来分开报**（两件事，压成一句会让人往错的方向查）。
+
+**已知边界**：
+
+- **真解释器不在套件里**。Node 侧的子进程是假的（普通对象字面量，`DocumentChild` 是最小结构类型），所以套件验的是"帧怎么翻译、失败怎么分档、argv 里有什么"；**Python 自己抽得对不对只能人工冒烟**（本机实测过 txt/md/docx 与 OLE2/NUL 拒绝路径；PDF 那一支是用**桩 pypdf** 验的接线，真库的抽取质量要装了依赖再跑一次）。
+- **Python 侧只能从源码文本上守**（同 `t-image-source.mjs` 对 worker 的做法），断言必须**锚定到具体调用**（`startswith(OLE2_MAGIC)`）而不是裸常量名 —— 常量定义在文件顶部，拿它比顺序会**永远通过**。
+- **`timer` 故意不 unref**（同 `core/python-probe.ts` 那条）：这里的超时是唯一的兜底，"启动了却永不退出的解释器"不持有任何句柄，unref 掉的计时器会被无视 → 顶层 await 永远不结算 → Node 以**退出码 13** 走掉。实测症状是**套件在"超时"那一条静默中止、后面的断言一次都没跑**（本套件初版又踩了一次）。
+- **搬家带走的那三条编码判据**（空字节、U+FFFD 比例、编码阶梯）原先由 `t-trpg.mjs` 针对 `decodeScenarioFile` 行为断言，现在只能对 `.py` 做源级断言 —— **射程变窄了**：源码断言挡得住"这段判据被删掉/改反"，挡不住"它跑起来不对"。这是把逻辑搬进 Python 的真实代价，记在这里。
+
+- 守护：`tests/t-document.mjs`（48 条：帧 → 结果、字节逐字进 stdin、argv 无用户内容、六种失败各自的 code 与文案、不看 `close` 只看帧、`stdout` 分块、两个入口的早退分支、`reply.mid` 回退与它的对照、**回环 HTTP 真取字节**、表头（格式/页数/总字数/截断提示/解码痕迹）、以及 `document_extract.py` 的源码断言）、`t-paths.mjs` 第 5 段（三个脚本都在 `python-tools/` 且同目录）、`t-agent-structure.mjs`（`read_document` 在工具表里的位置）、`t-trpg.mjs`（`saveScenarioText` 的纯函数分支）。
+
+**探针实测三条**（不是推断）：去掉 `saveScenarioText` 里的截断判断 → `t-trpg` 红 1 条；去掉 `read_document` 的 `reply.mid` 回退 → `t-document` 红 2 条（对照那条仍绿，说明它不是假绿）；把 `MISSING_PDF_LIB` 并进通用失败 → `t-document` 红 1 条。
 
 ## 图片链路
 
@@ -534,7 +591,7 @@ web/app.ts   toolDefs: () => [...buildToolDefs(), ...extras.toolDefs()]
 
 **Python 工具只有一个目录、一份依赖、一个解释器配置**（2026-09-29 统一）：
 
-- 脚本一律放 `python-tools/`（当前两个：`jmcomic_download.py`、`pic_image_search_worker.py`），依赖合并进 `python-tools/requirements.txt`——**不要在工具旁边另开一份依赖清单**，两份必然漂移，最后没人知道该装哪个。新脚本的路径常量加进 `src/core/python-runtime.ts`（**不要**在调用方自己 `path.join(ROOT, 'python-tools', 'x.py')`：脚本改名不会编译报错，只会在运行期炸，而 `spawn` 一个不存在的文件连日志都不会有）。
+- 脚本一律放 `python-tools/`（当前三个：`jmcomic_download.py`、`pic_image_search_worker.py`、`document_extract.py`），依赖合并进 `python-tools/requirements.txt`——**不要在工具旁边另开一份依赖清单**，两份必然漂移，最后没人知道该装哪个。新脚本的路径常量加进 `src/core/python-runtime.ts`（**不要**在调用方自己 `path.join(ROOT, 'python-tools', 'x.py')`：脚本改名不会编译报错，只会在运行期炸，而 `spawn` 一个不存在的文件连日志都不会有）。
 - 解释器只从 `python.path` 读，解析链唯一实现在 `src/core/python-runtime.ts` 的 `resolvePythonCommand()`：**随包内置的运行时 → `python.path` → `QQ_AGENT_PYTHON` → `conda run`（环境由 `python.condaEnv` 决定：环境名走 `-n`、环境目录走 `-p`、留空则不带选择器）**。**内置层排在链首是有意的**（2026-10-13 定）：它是我们自己装好依赖、跟着包发出去的那一份，也是唯一"确定能用"的解释器，而后面三层都是这台机器上的猜测；**代价是带内置运行时的包里 `python.path` 不生效**，所以设置页提示、使用说明与 README 都写明了这句话和两条出路（删掉 `resources/app/python-runtime/`，或换一个不带 `--with-python` 的包）——不然就是本项目最忌讳的那类故障：填了、看着生效、实际用的是别的。后三层顺序不变（配置 > 环境变量 > conda）且**必须**排在 conda 之前：conda 那一级的 command 是未必存在的命令名，解析永不失败、失败发生在 `spawn` 那一刻。**源码里不许再有机器相关的绝对路径**：conda 那一级原是一行写死的 `E:\anaconda\envs\my_bot\python.exe`（`windows-direct` 那一档），只对作者的机器成立、换环境只能改代码，现已整级交给配置（出厂值仍是 `my_bot`，升级不改变既有行为）。**不要再给新工具加一个自己的解释器环境变量或配置项**——两个工具用同一个解释器的前提下，各给一个变量的结果就是"装了 A 库的那个环境跑不了 B"，而报错会指向库缺失，排查方向完全错。守护在 `tests/t-jmcomic.mjs` 第 1b-2（内置层：`bundledDir` 顶替那个目录 —— 空目录必须跳过、有解释器时必须命中且**压过** `python.path` 与环境变量）与 1b-3 段（conda 环境三种形态 + 一条剥了注释的反向断言：`WINDOWS_DIRECT_PYTHON`/`anaconda` 不许回到源码里）；那一段的开头用一个 `NO_RUNTIME` 包装把**其余每一条**调用都顶掉内置层，否则"仓库根恰好放了一份运行时"就会让它们集体变红。设置页那一栏的接线与"出厂默认值两边逐字相同"在 `tests/t-panel-wiring.mjs`。
 - `JMCOMIC_PYTHON` 已于 2026-09-29 **正式废弃并从解析链删除**（旧别名支持的代价就是上一条那句话）。同一原因，`resolvePythonCommand()` 的返回值现在带 `source`（`config`/`env-primary`/`bundled`/`conda`），设置页靠它显示"当前生效的是哪一层"（conda 那一档还会把**完整命令连 `-n`/`-p` 一起**印出来 —— 只印 `conda.exe` 的话"到底在跑哪个环境"在面板上就看不出来了）。**探测/自检的安全网已从环境变量搬进夹具的 `config.json`**：`tests/t-jmcomic.mjs` 把 `python.path` 写成一个不存在的程序（`config` 层优先级最高，比任何环境变量都硬），保证那个套件永远不真的 spawn conda 去下载漫画。**别再退回环境变量做法** —— 那会让"某台机器上有这个变量"决定套件的红绿；而且安全网死掉本身是**静默**的（真下载与"任务压根没跑"看起来一样），所以它另配了一条正向断言（任务失败文本必须含"无法启动 Python"）。
 - 旧字段 `jmcomic.pythonPath` 已并入 `python.path`，靠 `normalizeConfigShape` **迁移**（不是纯删）。这里有一条容易漏的：`updateConfig` 走 `deepMerge(getConfig(), patch)`，**只加键不删键**，所以迁移里必须显式 `delete root.jmcomic`，否则旧键会永远留在用户的 `config.json` 里——守护在 `tests/t-jmcomic.mjs` 第 4 段（去掉 `delete` 会同时打红内存与落盘两条断言）。`python.path` 为空串是**合法值**（含义是"走自动探测链"），所以 `save.js` 里不要像 `ffmpegPath` 那样兜一个非空默认值——**这条现在有机检守护**（`tests/t-panel-wiring.mjs` 的「Python 工具设置」段：兜底必须仍是 `p.path || ''`，出现非空字面量就红），因为"好心兜一个默认值"把留空变成写死路径后，症状只是搜图/漫画悄悄不可用。
@@ -757,6 +814,7 @@ web/app.ts   toolDefs: () => [...buildToolDefs(), ...extras.toolDefs()]
 - `t-ui-render.mjs`
 - `t-image-gen.mjs`（出图：两层提示词、单并发队列、`/画` 命令与 `generate_image` 工具、回流条目在窗口/提示词/档位三处的落点）
 - `t-slash-commands.mjs`（斜杠命令分发层：判据唯一、回执与失败话术、与 `wakeEligible` 同源）
+- `t-document.mjs`（读文档：抽取管线、失败分档、`read_document` 的两个入口与 `reply.mid` 回退；**Python 侧只做源码断言**，真解释器是人工冒烟项）
 
 事件、端口与长期任务相关改动重点关注：
 
