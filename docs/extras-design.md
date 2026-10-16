@@ -44,13 +44,15 @@ src/extra/
 └─ trpg/             第一个功能完整的**接管**扩展（override）。目录内部按职责分：
    ├─ spec.ts        纯数据（4 个工具 + 2 条命令 + overrideTools）
    ├─ impl.ts        createRuntime(deps)：只做接线（handlers / commandHandlers / prompt / onRunEnd）
-   ├─ state.ts       状态层：上限、归一化**含旧形状迁移**、读写（`data/trpg/<会话>.json`）
-   ├─ render.ts      展示层：给模型的状态段 / **给群友的玩家视角**（两份独立函数）/ 掷骰与检定的结果格式
+   ├─ state.ts       状态层：上限、归一化**含旧形状迁移**、读写（`data/trpg/<会话>.json`）+ `safeFileName`
+   ├─ rule-store.ts  规则表存储（`data/trpg/rules/`，种子懒补齐、坏表拒绝、按 mtime 缓存）
+   ├─ scenario.ts    剧本存储（`data/trpg/scenarios/`，极简 frontmatter 解析 + 同一套归一化）
+   ├─ render.ts      展示层：给模型的状态段 / **给群友的玩家视角**（两份独立函数）/ 掷骰与检定的结果格式 / 清单+剧本那一段
    ├─ tools.ts       4 个工具的实现（校验 → 改状态 → 把"发生了什么"回给模型）+ 行动经济账本
    ├─ suggest.ts     DM 整轮沉默时的兜底建议（生成 + 解析）
    ├─ entropy.ts     唯一熵源（`node:crypto`）—— 规则层不许 import 它，由调用方注入
    ├─ types.ts       领域类型 + `HIDDEN_FIELDS`（**不 import 本模块任何文件**，防成环）
-   └─ rules/         纯函数规则引擎（dice.ts / percentile.ts / check.ts / economy.ts），**与对话链完全无关**
+   └─ rules/         纯函数规则引擎（dice.ts / percentile.ts / condition.ts / check.ts / economy.ts），**与对话链完全无关**
 ```
 
 **宿主递给扩展的口子**（`ExtraRuntimeDeps`，§7 与 `types.ts`）：`load(deps)` 收下它，目前只有一个成员 `deliverNote(chatKey, note)` —— 把一条机器条目送进会话。**为什么是参数而不是让扩展自己 import**：那条链要碰 `ChatStore` 与 `Orchestrator`，而 `extra → agent` 是反向依赖（层级闸门会拦），组装是 `web/` 的活。扩展只说"这是一条什么、正文是什么"，**怎么落库由宿主决定**。

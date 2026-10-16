@@ -88,7 +88,12 @@ export const trpgSpec: ExtraSpec = {
           },
           title: { type: 'string', description: PROMPTS.campaign.title },
           system: { type: 'string', description: PROMPTS.campaign.system },
-          rule: { type: 'string', enum: ['generic', 'coc7'], description: PROMPTS.campaign.rule },
+          // ⚠️ **不写 `enum`**：规则表是 `data/trpg/rules/` 里的数据文件，管理员随时可以加，而本
+          // 文件是**静态纯数据**（注册表静态 import 它，不许 I/O）—— 拼不出"磁盘上此刻有哪些"。
+          // 代价是少了 schema 这一层保护，靠两件事补偿：可用清单注入 system prompt（`renderBriefing`），
+          // 以及填错时回执里明说用了哪一个（`beginCampaign`）。
+          rule: { type: 'string', description: PROMPTS.campaign.rule },
+          scenario: { type: 'string', description: PROMPTS.campaign.scenario },
           scene: { type: 'string', description: PROMPTS.campaign.scene },
           restart: { type: 'boolean', description: PROMPTS.campaign.restart },
           flags: {

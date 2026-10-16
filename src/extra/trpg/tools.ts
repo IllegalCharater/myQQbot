@@ -26,17 +26,18 @@
 import { normalizeMessageList } from '../../core/util.js';
 import { err, errorMessage, ok, recordSent, sentTextEntries } from '../../agent/tools/shared.js';
 import { DiceError, rollDice } from './rules/dice.js';
-import { getCheckRule, resolveCheck } from './rules/check.js';
+import { resolveCheck } from './rules/check.js';
 import { createLedger, consume, recall, remember } from './rules/economy.js';
 import { formatCheck, formatRoll } from './render.js';
 import {
-  MAX_CHARACTERS, MAX_FLAGS, MAX_NOTES, MAX_POOL, MAX_STAT, MAX_STATS_PER_CHARACTER,
+  MAX_CHARACTERS, MAX_FLAGS, MAX_NOTES, MAX_POOL, MAX_RULE_CHARS, MAX_STAT, MAX_STATS_PER_CHARACTER,
   MIN_STAT, appendLog, clampInt, emptyCampaign, findCharacter, text
 } from './state.js';
 import { HIDDEN_FIELDS } from './types.js';
 import type { ActionLedger } from './rules/economy.js';
-import type { CheckRule } from './rules/check.js';
 import type { DiceRng } from './rules/dice.js';
+import type { RuleStore } from './rule-store.js';
+import type { ScenarioStore, TrpgScenario } from './scenario.js';
 import type { TrpgStore } from './state.js';
 import type { HiddenField, TrpgCampaign, TrpgCharacter } from './types.js';
 import type { ToolArguments, ToolContext, ToolResult } from '../../agent/shared/types.js';
@@ -53,6 +54,10 @@ export interface TrpgNote {
 /** 组装根递给跑团的口子。 */
 export interface TrpgToolDeps {
   store: TrpgStore;
+  /** 规则表（从 `data/trpg/rules/` 读，坏表会拒绝而不是静默用别的）。 */
+  rules: RuleStore;
+  /** 剧本库（从 `data/trpg/scenarios/` 读）。 */
+  scenarios: ScenarioStore;
   /** **必填**：规则层没有默认随机源（见 `rules/dice.ts` 的文件头）。生产用 `entropy.ts` 的 `secureRng`。 */
   rng: DiceRng;
   /** 把一条机器条目送进会话（落存档 + 入窗 + 通知面板）。缺省时不做任何事（测试与未接线时）。 */
@@ -60,7 +65,7 @@ export interface TrpgToolDeps {
 }
 
 export function createHandlers(deps: TrpgToolDeps): Record<string, Handler> {
-  const { store, rng } = deps;
+  const { store, rules, scenarios, rng } = deps;
   const deliverNote = deps.deliverNote;
 
   /** 每个回合（= 每次 agent 运行）一本账。见文件头那段说明。 */
@@ -127,26 +132,8 @@ export function createHandlers(deps: TrpgToolDeps): Record<string, Handler> {
 
   // ── campaign 的四个 action ──────────────────────────────────────────────────
 
-  const startCampaign = (ctx: ToolContext, args: ToolArguments): ToolResult => {
-    const existing = store.read(ctx.chatKey);
-    if (existing && args?.restart !== true) {
-      return err(`这个会话已经有《${existing.title}》在跑了（${existing.characters.length} 张人物卡）。`
-        + '改设定用 action=scene/flag、改人用 character；真要推倒重来，把 restart 设成 true'
-        + '——那会清掉现有的卡与全部记录，先跟群友说一声');
-    }
-    const title = text(args?.title, 60);
-    if (!title) return err('要给这场团起个名字（title）');
-    // 规则表**显式指定**（不从 system 那串自由文本里猜），认不出来的 id 一律回落到通用那套 ——
-    // 但**记的是规范化之后的 id**，免得存档里躺着一个 `COC7` 让下一个人以为它生效了。
-    const rule = getCheckRule(text(args?.rule, 32));
-    const campaign = emptyCampaign(ctx.chatKey, { title, system: text(args?.system, 60), rule: rule.id });
-    campaign.scene = text(args?.scene, 400);
-    appendLog(campaign, 'scene', `开团：《${campaign.title}》${campaign.system ? `（${campaign.system}）` : ''}`
-      + ` ｜ 检定规则：${rule.name}`);
-    store.write(campaign);
-    return ok(`《${campaign.title}》已经开局，检定规则表是 ${rule.id}（${rule.name}）。`
-      + '接下来用 character 的 action=create 给玩家和主要 NPC 建卡，然后开始叙事（发言记得用 say）。');
-  };
+  const startCampaign = (ctx: ToolContext, args: ToolArguments): ToolResult =>
+    beginCampaign(ctx.chatKey, args, { store, rules, scenarios });
 
   const setScene = (ctx: ToolContext, args: ToolArguments): Promise<ToolResult> => {
     const scene = text(args?.scene, 400);
@@ -498,9 +485,15 @@ export function createHandlers(deps: TrpgToolDeps): Record<string, Handler> {
         const structured = args?.target !== undefined && args?.target !== null && args?.target !== '';
         let line: string;
         try {
-          line = structured
-            ? `${formatCheck(resolveCheck(args?.expr, args?.target, { rng, rule: getCheckRule(campaign.rule) }))}`
-            : formatRoll(rollDice(args?.expr, rng));
+          if (structured) {
+            const lookup = rules.read(campaign.rule);
+            // 规则表坏了就**拒绝**，不换一套顶上去：静默换一套会让"同一个骰面在两局里判出不同的档"
+            // 变成一个没人能解释的现象。代价只是这个会话暂时做不了检定（`/掷骰` 不受影响）。
+            if (!lookup.ok) return err(lookup.message);
+            line = formatCheck(resolveCheck(args?.expr, args?.target, { rng, rule: lookup.rule }));
+          } else {
+            line = formatRoll(rollDice(args?.expr, rng));
+          }
         } catch (error) {
           return diceError(error);
         }
@@ -513,8 +506,87 @@ export function createHandlers(deps: TrpgToolDeps): Record<string, Handler> {
   };
 }
 
-// ── 纯助手 ───────────────────────────────────────────────────────────────────
+// ── 开局（**两个入口共用一个实现**）─────────────────────────────────────────
 
+export interface BeginDeps {
+  store: TrpgStore;
+  rules: RuleStore;
+  scenarios: ScenarioStore;
+}
+
+/**
+ * 开一局。**命令与工具走的是这一个函数** —— 两个入口只是取参数的来源不同
+ * （`/跑团 开局 <剧本> [规则]` vs `campaign action=start`），判据必须是同一套：
+ * 已经开过局时怎么拒、剧本读不到时怎么办、规则表坏了怎么办，三处都不许有第二份答案。
+ *
+ * 剧本注入是**快照**（见 `types.ts` 的 `TrpgCampaign.scenario`）：骨架落进状态、正文复制进存档，
+ * 此后与那个剧本文件再无关系。改剧本不该影响正在跑的团。
+ */
+export function beginCampaign(chatKey: string, args: ToolArguments, deps: BeginDeps): ToolResult {
+  const existing = deps.store.read(chatKey);
+  if (existing && args?.restart !== true) {
+    return err(`这个会话已经有《${existing.title}》在跑了（${existing.characters.length} 张人物卡）。`
+      + '改设定用 action=scene/flag、改人用 character；真要推倒重来，把 restart 设成 true'
+      + '——那会清掉现有的卡与全部记录，先跟群友说一声');
+  }
+
+  // 剧本先读：读不到就**直接拒绝**，别开出一个"标题有了、骨架没有"的半截团。
+  const wanted = text(args?.scenario, 40);
+  let scenario: TrpgScenario | null = null;
+  if (wanted) {
+    const found = deps.scenarios.read(wanted);
+    if (!found.ok) return err(found.message);
+    scenario = found.scenario;
+  }
+
+  // 标题：显式给的优先，其次剧本的，最后从文件名兜底（剧本的 title 没写时用的就是它的 id）。
+  const title = text(args?.title, 60) || scenario?.title || '';
+  if (!title) {
+    return err('要给这场团起个名字（title）—— 或者指定一份带标题的剧本（scenario）');
+  }
+
+  // 规则：显式给的 > 剧本推荐的 > generic。取表这一步分两种失败，处理不同：
+  //   • 引用的表**不存在** → 回落 generic，并把那句 note 原样写进回执（静默回落是本仓库
+  //     最忌讳的那类故障："填了、看着生效、实际用的是别的"）；
+  //   • 表**本身有问题** → 拒绝开局，把问题报上去让人去修（不是"随便换一套继续跑"）。
+  const ruleLookup = deps.rules.read(text(args?.rule, MAX_RULE_CHARS) || scenario?.rule || '');
+  if (!ruleLookup.ok) return err(ruleLookup.message);
+  const rule = ruleLookup.rule;
+
+  const campaign = emptyCampaign(chatKey, {
+    title, system: text(args?.system, 60), rule: rule.id
+  });
+  campaign.scene = text(args?.scene, 400) || scenario?.scene || '';
+
+  if (scenario) {
+    campaign.scenario = { id: scenario.id, body: scenario.body };
+    // 骨架落进状态。**预置的在前、同名不覆盖**：将来若支持"往已经跑着的团里补一份剧本"，
+    // 场上的事实该赢过纸上的设定。
+    campaign.flags = { ...scenario.flags, ...campaign.flags };
+    for (const card of scenario.characters) {
+      if (!campaign.characters.some((existingCard) => existingCard.name === card.name)) {
+        campaign.characters.push(card);
+      }
+    }
+  }
+
+  appendLog(campaign, 'scene',
+    `开团：《${campaign.title}》${campaign.system ? `（${campaign.system}）` : ''} ｜ 检定规则：${rule.name}`
+    + (scenario
+      ? ` ｜ 剧本：${scenario.id}（预置 ${Object.keys(scenario.flags).length} 条旗标、${scenario.characters.length} 张人物卡）`
+      : ''));
+  deps.store.write(campaign);
+
+  return ok(`《${campaign.title}》已经开局，检定规则表是 ${rule.id}（${rule.name}）。`
+    + (scenario
+      ? `剧本「${scenario.id}」已注入：` + (scenario.body ? `正文 ${scenario.body.length} 字，` : '没有正文，')
+        + `预置 ${Object.keys(scenario.flags).length} 条旗标、${campaign.characters.length} 张人物卡。`
+      : '')
+    + (ruleLookup.note ? `注意：${ruleLookup.note}。` : '')
+    + '接下来用 character 的 action=create 补上玩家角色，然后开始叙事（发言记得用 say）。');
+}
+
+// ── 纯助手 ───────────────────────────────────────────────────────────────────
 /** 认得出 `DiceError` 就把它的中文文案原样回给模型；别的异常才走通用文案。 */
 function diceError(error: unknown): ToolResult {
   if (error instanceof DiceError) return err(error.message);

@@ -788,5 +788,31 @@ ok("S4 拆出的两个名字 UI 都订上了：config-applied / orchestrator-pau
   subscribed.includes('config-applied') && subscribed.includes('orchestrator-pause'));
 ok("旧的 'status' 事件名订阅端已不再出现", !subscribed.includes('status'));
 
+// ── 跑团工作台（剧本与规则表的列表 + 删除） ────────────────────────────────
+//
+// 用户明确划的界是"面板只能删，不能编辑、不能上传"，所以这一节钉两件事：
+// 那一栏真的挂上了，以及**删除是破坏性动作、必须先说清再动手**。
+// ⚠️ 这些是**源码文本**断言（`ui/` 是浏览器原生 ES Module，套件跑不了它）—— 它们证明接线在，
+// 证明不了点下去真的对。
+{
+  const sectionsSrc2 = readUI('js/views/settings/sections.js');
+  ok('设置页导航里有「跑团」那一栏', /\['trpg', '跑团'\]/.test(settingsJs));
+  ok('那一栏真的接到了渲染函数（导航项加了、section 没接是"点了没反应"的经典形态）',
+    /trpg: \(\) => renderTrpgSection\(/.test(settingsJs)
+    && /export function renderTrpgSection/.test(sectionsSrc2));
+  ok('工作台只读列表 + 删除：**没有**编辑或上传的入口',
+    /data-trpg-del=/.test(sectionsSrc2) && !/data-trpg-edit|data-trpg-upload/.test(sectionsSrc2));
+
+  ok('删除按钮**先 confirm**（破坏性动作不能点一下就没了）',
+    /if \(!confirm\(/.test(settingsJs) && /data-trpg-del/.test(settingsJs));
+  ok('确认文案说清删的是什么、以及**正在跑的那一局不受影响**（否则没人敢点）',
+    /删除\$\{what\}「\$\{id\}」/.test(settingsJs) && /正在跑的那一局不受影响/.test(settingsJs));
+  ok('删完**重新拉一次**列表（只改内存里的 state 会让页面与服务端不一致）',
+    /await loadSettings\(\)/.test(settingsJs));
+  ok('坏文件在面板上**看得见问题**（跳过它只会让管理员看到"少了一个"）',
+    /problems/.test(sectionsSrc2) && /item\.problems/.test(sectionsSrc2));
+  ok('内置规则表在列表里标出来（可以删，但要看得出它是内置的）', /item\.builtin/.test(sectionsSrc2));
+}
+
 console.log(`\n════ 通过 ${pass} / 失败 ${fail} ════`);
 process.exit(fail === 0 ? 0 : 1);

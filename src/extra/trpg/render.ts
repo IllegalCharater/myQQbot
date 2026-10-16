@@ -204,6 +204,48 @@ function logLine(entry: TrpgCampaign['log'][number]): string {
   return `#${entry.seq} [${entry.kind}] ${entry.text}`;
 }
 
+// ── 剧本与清单（system prompt 的中间那一段）──────────────────────────────────
+
+/**
+ * 中间段要用的清单。**由 `impl.ts` 现读目录拿到** —— 渲染层不做 I/O（它连 config 都不碰）。
+ */
+export interface BriefingCatalog {
+  scenarios: readonly { id: string; title: string }[];
+  rules: readonly { id: string; name: string; description: string }[];
+}
+
+/**
+ * `prompt(chatKey)` 的**中间段**：可用清单 + 这一局的剧本正文。
+ *
+ * 它排在人格之后、状态之前 —— 顺序即缓存：清单只在管理员改文件时变、正文整局不变，
+ * 而状态每轮都变。把这两个稳定的放前面，system prompt 的公共前缀才能命中到状态变化点之前。
+ *
+ * 段内也是同一个道理：**清单在前、正文在后**（清单对所有群都一样，正文只有这一局是）。
+ *
+ * ⚠️ **这一段永远非空**（规则清单至少有两个内置的）：`promptPlan()` 会滤掉空串，段数飘忽会让
+ * "body 有几段"这件事没法断言。
+ */
+export function renderBriefing(campaign: TrpgCampaign | null, catalog: BriefingCatalog): string {
+  const lines: string[] = ['【剧本与规则】'];
+
+  lines.push('这一局能选的剧本（开局时用 scenario 指定它的名字）：'
+    + (catalog.scenarios.length
+      ? catalog.scenarios.map((item) => `${item.id}${item.title && item.title !== item.id ? `（${item.title}）` : ''}`).join('、')
+      : '（还没有任何剧本 —— 让管理员往 data/trpg/scenarios/ 里放一份，或在群里用 `/跑团 存剧本` 存一份）'));
+  lines.push('这一局能选的检定规则（开局时用 rule 指定它的 id）：'
+    + catalog.rules.map((item) => `${item.id}${item.description ? `（${item.description}）` : ''}`).join('；'));
+
+  const ref = campaign?.scenario;
+  if (ref?.id) {
+    lines.push('', `这一局的剧本是「${ref.id}」${ref.body ? '，正文如下：' : '（它没有正文，只有骨架）'}`);
+    if (ref.body) lines.push(ref.body);
+  } else {
+    lines.push('', '这一局没有注入剧本 —— 设定与主线由你自己发挥（或者让群友先挑一份再开局）。');
+  }
+
+  return lines.join('\n');
+}
+
 // ── 掷骰 / 检定结果的展示 ────────────────────────────────────────────────────
 //
 // 这两份文本是**模型唯一能看到的骰子真相**（`roll` 工具的结果），也是 `/掷骰` 命令发给群友

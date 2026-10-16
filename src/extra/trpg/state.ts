@@ -15,8 +15,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../../core/paths.js';
-import { HIDDEN_FIELDS } from './types.js';
-import type { HiddenField, TrpgCampaign, TrpgCharacter, TrpgFlag, TrpgLogEntry } from './types.js';
+import { HIDDEN_FIELDS, MAX_SCENARIO_CHARS } from './types.js';
+import type { HiddenField, TrpgCampaign, TrpgCharacter, TrpgFlag, TrpgLogEntry, TrpgScenarioRef } from './types.js';
 
 // ── 上限 ─────────────────────────────────────────────────────────────────────
 /** 一个会话最多几场？——一场。这条常量只是把那个决定写下来，不参与判断。 */
@@ -33,7 +33,11 @@ export const MAX_FLAG_VALUE_CHARS = 160;
 export const MAX_SCENE_CHARS = 400;
 export const MAX_TITLE_CHARS = 60;
 export const MAX_SYSTEM_CHARS = 60;
-export const MAX_RULE_CHARS = 32;
+/**
+ * 规则表 id 的长度上限。**它同时是文件名的上限**，所以只写在这一处：`rule-store.ts` 从这里取，
+ * 免得两个文件各写一个数然后漂移（漂移的表现是"长 id 在存档里被截短、于是指向另一个文件"）。
+ */
+export const MAX_RULE_CHARS = 64;
 export const MAX_NAME_CHARS = 24;
 /** 属性/技能值的合法区间。防的是模型给出 `1e9` 或 `NaN` 这种让它自己以后都算不明白的数。 */
 export const MIN_STAT = -999;
@@ -52,6 +56,36 @@ const TRPG_DIR = path.join(DATA_DIR, 'trpg');
  */
 function safeName(chatKey: string): string {
   return String(chatKey).replace(/[^a-z0-9_]/gi, '_');
+}
+
+/**
+ * **用户起的名字** → 安全的文件名。中文原样保留。
+ *
+ * ⚠️ 这与上面那个 `safeName` 是**两件事，别合并**：
+ *   • `safeName` 管的是**会话标识**（`group:123` 这种 ASCII 串），它的判据是"与目录里其它
+ *     文件平级、不会串台"。它把所有非 ASCII 换成 `_` —— 对 `group:123` 无所谓。
+ *   • 本函数管的是**人起的名字**（剧本名、规则表 id）。同一个替换会把 `灯塔` 与 `雨港`
+ *     一起变成 `__`，**两个不同的剧本撞成同一个文件** —— 那是数据丢失，不是"名字不好看"。
+ *
+ * 所以这里只清"当文件名不安全"的东西：Windows 非法字符与控制字符 → 尾随的点与空格
+ * （Windows 上 `灯塔.` 与 `灯塔` 是同一个文件，写下去会被重定向）→ 保留字加前缀
+ * （`CON` / `PRN` / `AUX` / `NUL` / `COM1..9` / `LPT1..9` 在 Windows 上是设备名，建不出来）。
+ * 另外必须挡住 `.` 与 `..`（它们是目录本身与上一层）。
+ *
+ * 空串 = 这个名字不能当文件名，调用方要拒绝它而不是拿一个默认值顶上（顶上去就成了"用户以为
+ * 存了 A、实际存的是别的东西"）。**这一条同时是路径安全的全部依据**：返回值里不可能再有
+ * 分隔符或 `..`，所以 `path.join(dir, safeFileName(x))` 一定落在 dir 里。
+ */
+export function safeFileName(name: unknown, maxChars = 40): string {
+  const cleaned = String(name ?? '')
+    // 路径分隔符与 Windows 非法字符 + 控制字符。`/` 与 `\` 在这里就没了，所以不可能穿目录。
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
+    .replace(/[. ]+$/, '')       // Windows 不允许尾随的点与空格
+    .replace(/^[. ]+/, '')       // 也不允许以点开头（否则 `.` / `..` 与隐藏文件的歧义）
+    .trim();
+  if (!cleaned) return '';
+  const reserved = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(cleaned);
+  return (reserved ? `_${cleaned}` : cleaned).slice(0, Math.max(1, maxChars));
 }
 
 export function campaignFile(chatKey: string): string {
@@ -77,8 +111,13 @@ export function clampInt(value: unknown, min: number, max: number, fallback: num
   return Math.min(max, Math.max(min, Math.round(n)));
 }
 
-/** 一张卡归一化：丢弃畸形字段、裁掉越界值、砍掉多余的备注。 */
-function normalizeCharacter(raw: unknown): TrpgCharacter | null {
+/**
+ * 一张卡归一化：丢弃畸形字段、裁掉越界值、砍掉多余的备注。
+ *
+ * **导出**是因为剧本里的预置人物卡要走**同一套**判据（`scenario.ts`）—— 另写一份必然漂移，
+ * 而漂移的表现是"手写 json 能被夹回、剧本里的却被原样收下"。
+ */
+export function normalizeCharacter(raw: unknown): TrpgCharacter | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const source = raw as Record<string, unknown>;
   const name = text(source.name, MAX_NAME_CHARS);
@@ -198,6 +237,7 @@ export function normalizeCampaign(raw: unknown, chatKey: string): TrpgCampaign |
     system: text(source.system, MAX_SYSTEM_CHARS),
     rule: text(source.rule, MAX_RULE_CHARS),
     scene: text(source.scene, MAX_SCENE_CHARS),
+    scenario: normalizeScenario(source.scenario),
     flags,
     characters,
     log: trimmed,
@@ -215,7 +255,7 @@ export function normalizeCampaign(raw: unknown, chatKey: string): TrpgCampaign |
  * 把某条改成暗线是一个**显式动作**（`action=flag` 带 `visible=false`），不是升级的副作用。
  * 同 `jmcomic.pythonPath` 与 `bookmarkFirst` 那两处迁移的取舍。
  */
-function normalizeFlag(raw: unknown): TrpgFlag {
+export function normalizeFlag(raw: unknown): TrpgFlag {
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     const entry = raw as Record<string, unknown>;
     return {
@@ -224,6 +264,19 @@ function normalizeFlag(raw: unknown): TrpgFlag {
     };
   }
   return { value: text(raw, MAX_FLAG_VALUE_CHARS), visible: true };
+}
+
+/**
+ * 存档里那份剧本快照的归一化。
+ *
+ * `body` 的截断上限用的是 `MAX_SCENARIO_CHARS`：写入侧（`scenario.ts` 的解析）**超限就拒绝**，
+ * 所以这里的截断只对"手改过的存档"生效 —— 读路径永远要比写路径宽，否则一个被改坏的字段
+ * 会让整局读不出来。
+ */
+function normalizeScenario(raw: unknown): TrpgScenarioRef {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { id: '', body: '' };
+  const source = raw as Record<string, unknown>;
+  return { id: text(source.id, 40), body: text(source.body, MAX_SCENARIO_CHARS) };
 }
 
 /** 开一场新团。不落盘 —— 由调用方决定什么时候写。 */
@@ -238,6 +291,7 @@ export function emptyCampaign(
     system: text(system, MAX_SYSTEM_CHARS),
     rule: text(rule, MAX_RULE_CHARS),
     scene: '',
+    scenario: { id: '', body: '' },
     flags: {},
     characters: [],
     log: [],

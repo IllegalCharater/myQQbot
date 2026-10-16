@@ -16,7 +16,10 @@ export const state = {
   consolidating: {}, consolidateResult: {}, usageRange: '7',
   // 扩展能力：注册表由 GET /api/extras 提供（ui/ 够不着 src/，只能经端点拿）。
   // 它只是"有哪些扩展"的列表，开关值与两个数字在 state.config.extras 里。
-  extras: []
+  extras: [],
+  // 跑团工作台：剧本与规则表由 GET /api/trpg/workshop 提供（同样因为 ui/ 够不着 src/）。
+  // 面板**只读它 + 删**，不编辑也不上传。
+  trpg: { scenarios: [], rules: [] }
 };
 
 export const TOOL_META = {

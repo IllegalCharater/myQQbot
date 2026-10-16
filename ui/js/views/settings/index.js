@@ -11,7 +11,7 @@ import {
   renderAllowSection, renderApiSection, renderDesktopSection, renderMemorySettingsSection,
   renderHotSearchSection, renderOnebotSection, renderPersonaSection, renderPythonSection,
   renderSearchSection, renderTranscriptionSection, renderImageSourceSection, renderImageGenSection,
-  renderBookmarkRows, renderExtrasSection
+  renderBookmarkRows, renderExtrasSection, renderTrpgSection
 } from './sections.js';
 import { parseList, saveConfig } from './save.js';
 import { openBlocklistModal } from '../../parts/blocklist.js';
@@ -21,14 +21,16 @@ import { openMemoryModelPicker, openModelAddModal, openModelDeleteModal, openMod
 import { openWhitelistPicker } from '../../parts/whitelist.js';
 
 export async function loadSettings() {
-  const [cfg, tplData, provData, visionData, priceData, extrasData] = await Promise.all([
+  const [cfg, tplData, provData, visionData, priceData, extrasData, trpgData] = await Promise.all([
     api('/api/config'),
     api('/api/persona-templates').catch(() => ({ templates: [] })),
     api('/api/providers').catch(() => ({ providers: [] })),
     api('/api/vision/results').catch(() => ({ results: {}, scanning: false })),
     api('/api/model-prices').catch(() => ({ prices: [], current: null })),
     // 注册表由后端提供（ui/ 够不着 src/）。拿不到时退化成空列表，不影响别的区块。
-    api('/api/extras').catch(() => ({ extras: [] }))
+    api('/api/extras').catch(() => ({ extras: [] })),
+    // 跑团的剧本与规则表同理（它们住在数据目录里，浏览器看不到）。
+    api('/api/trpg/workshop').catch(() => ({ scenarios: [], rules: [] }))
   ]);
   state.config = cfg;
   state.providers = provData.providers || [];
@@ -36,6 +38,7 @@ export async function loadSettings() {
   state.visionScanning = !!visionData.scanning;
   state.modelPrices = priceData || { prices: [], current: null };
   state.extras = extrasData.extras || [];
+  state.trpg = { scenarios: trpgData.scenarios || [], rules: trpgData.rules || [] };
   state.personaTemplates = {};
   for (const t of tplData.templates || []) state.personaTemplates[t.id] = { name: t.name, text: t.text, builtin: !!t.builtin };
   renderSettings();
@@ -89,6 +92,7 @@ export function renderSettingsSidebar() {
     ['transcription', '音视频转写'],
     ['image-gen', '图像生成'],
     ['extras', '扩展能力'],
+    ['trpg', '跑团'],
     ['python', 'Python 工具'],
     ['chat', '聊天设置'],
     ['desktop', '桌面端'],
@@ -134,6 +138,7 @@ export function renderSettingsSection(c) {
     transcription: () => renderTranscriptionSection(c),
     'image-gen': () => renderImageGenSection(c),
     extras: () => renderExtrasSection(c),
+    trpg: () => renderTrpgSection(c),
     python: () => renderPythonSection(c),
     chat: () => renderChatSection(c),
     desktop: () => renderDesktopSection(c),
@@ -149,6 +154,29 @@ export function renderSettingsSection(c) {
 }
 
 export function bindSettingsEvents(c) {
+  // ── 跑团工作台：删除剧本 / 规则表 ──
+  //
+  // 逐行绑（行是每次渲染新生成的，所以不会叠监听 —— 与其它按 id 取的按钮同一个写法）。
+  // 两处都必须**先 confirm**，且文案说清删的是什么、什么不受影响。
+  $$('[data-trpg-del]').forEach((btn) => btn.addEventListener('click', async () => {
+    const kind = btn.dataset.trpgDel === 'scenario' ? 'scenario' : 'rule';
+    const id = btn.dataset.trpgId || '';
+    const what = kind === 'scenario' ? '剧本' : '规则表';
+    const tail = kind === 'scenario'
+      ? '正在跑的那一局不受影响（开局时已经把它复制进存档了），只是以后不能再用它开局。'
+      : '正在跑的那一局不受影响（它记的是规则表的 id）。删掉之后引用它的局会回落成 generic。';
+    if (!confirm(`删除${what}「${id}」？\n\n${tail}`)) return;
+    btn.disabled = true;
+    try {
+      await api(`/api/trpg/${kind === 'scenario' ? 'scenarios' : 'rules'}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      // 删完必须**重新拉一次**：只改内存里的 state 会让页面显示一份与服务端不一致的列表。
+      await loadSettings();
+    } catch (error) {
+      btn.disabled = false;
+      alert(`删除失败：${error?.message || error}`);
+    }
+  }));
+
   const testImageSource = $('#test-image-source-btn');
   if (testImageSource) testImageSource.addEventListener('click', async () => {
     const out = $('#image-source-test-result'); out.textContent = '测试中…';

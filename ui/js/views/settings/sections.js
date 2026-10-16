@@ -836,3 +836,77 @@ export function renderPersonaSaveBar() {
       <span id="persona-save-result" class="muted"></span>
     </div>`;
 }
+
+/**
+ * 「跑团」工作台：**剧本与规则表的列表 + 删除**。
+ *
+ * 用户明确划的界：面板**不能编辑、不能上传** —— 剧本在群里用 `/跑团 存剧本` 存（或管理员直接把
+ * 文件放进数据目录），规则表直接编辑文件。所以这里只有两件事：看得见有哪些、删得掉不要的。
+ *
+ * 数据来自 `GET /api/trpg/workshop`（`ui/` 够不着 `src/`，只能经端点拿，同 `/api/extras`）。
+ * 坏文件也列出来并把问题摆在明面上 —— 跳过它只会让管理员看到"少了一个"而不知道出了什么事。
+ */
+export function renderTrpgSection() {
+  const data = state.trpg || { scenarios: [], rules: [] };
+  const scenarios = Array.isArray(data.scenarios) ? data.scenarios : [];
+  const rules = Array.isArray(data.rules) ? data.rules : [];
+
+  const problemRow = (problems) => (problems?.length
+    ? `<div class="hint" style="color:var(--danger,#d33)">⚠ ${esc(problems.join('；'))}</div>` : '');
+
+  const scenarioRows = scenarios.length
+    ? scenarios.map((item) => `
+      <div class="field-row" data-trpg-row="scenario" style="align-items:center;gap:8px">
+        <div class="field" style="flex:1">
+          <label>${esc(item.id)} <span class="muted">${item.title && item.title !== item.id ? `· ${esc(item.title)}` : ''}</span>
+            <span class="muted">· 正文 ${esc(String(item.chars ?? 0))} 字</span></label>
+          ${problemRow(item.problems)}
+        </div>
+        <div class="field" style="flex:0 0 auto">
+          <button class="btn btn-small btn-danger" data-trpg-del="scenario" data-trpg-id="${esc(item.id)}">删除</button>
+        </div>
+      </div>`).join('')
+    : '<div class="hint">还没有任何剧本。在群里引用一份剧本文件敲 <code>/跑团 存剧本 &lt;名字&gt;</code>，'
+      + '或者把 <code>.md</code> 直接放进 <code>data/trpg/scenarios/</code>。</div>';
+
+  const ruleRows = rules.length
+    ? rules.map((item) => `
+      <div class="field-row" data-trpg-row="rule" style="align-items:center;gap:8px">
+        <div class="field" style="flex:1">
+          <label>${esc(item.id)} <span class="muted">· ${esc(item.name || '')}</span>
+            ${item.builtin ? '<span class="muted">· 内置</span>' : ''}</label>
+          ${problemRow(item.problems)}
+        </div>
+        <div class="field" style="flex:0 0 auto">
+          <button class="btn btn-small btn-danger" data-trpg-del="rule" data-trpg-id="${esc(item.id)}">删除</button>
+        </div>
+      </div>`).join('')
+    : '<div class="hint">还没有任何规则表（内置的两套会在第一次用到时自动写进目录）。</div>';
+
+  return `
+    <h3>跑团</h3>
+    <div class="hint" style="margin-bottom:10px">
+      「跑团」扩展的<strong>剧本</strong>与<strong>检定规则表</strong>。两者都住在数据目录里，这一页只做
+      <strong>看得见、删得掉</strong> —— 编辑与上传不在这里：剧本在群里用
+      <code>/跑团 存剧本 &lt;名字&gt;</code> 存（或直接放文件），规则表直接改文件。
+    </div>
+    <div class="hint" style="margin-bottom:10px">
+      开局时用 <code>/跑团 开局 &lt;剧本名&gt; [规则表 id]</code>（人敲，零成本），
+      或者让 DM 调 <code>campaign</code> 的 <code>action=start</code> 带上 <code>scenario</code> / <code>rule</code>。
+      可用清单每一轮都会注入 DM 的上下文，所以它知道有哪些能选。
+    </div>
+
+    <h4>剧本</h4>
+    <div class="hint" style="margin-bottom:6px">目录：<code>data/trpg/scenarios/&lt;名字&gt;.md</code>。
+      格式是「<code>---</code> 包起来的几行骨架 + 正文」，见 README。</div>
+    ${scenarioRows}
+
+    <h4 style="margin-top:14px">检定规则表</h4>
+    <div class="hint" style="margin-bottom:6px">目录：<code>data/trpg/rules/&lt;id&gt;.json</code>。
+      <strong>内置的两套也在这里，也能删</strong> —— 删掉之后引用它的那一局会回落成 generic 并在回执里说明。</div>
+    ${ruleRows}
+
+    <div class="hint" style="margin-top:10px">
+      改完剧本或规则表<strong>不必重启</strong>：两者都是每次现读的（按文件修改时间缓存）。
+    </div>`;
+}

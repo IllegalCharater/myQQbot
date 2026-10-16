@@ -4,21 +4,29 @@
 // 每一条都用注入的确定随机源跑，逐面核对 `dice` / `kept` / `total` 三个数，
 // 而不是"结果落在合法区间里"这种什么都证明不了的断言。
 //
-// 没有文件、没有网络、没有子进程 —— 被测的两个模块是纯函数，连 config 都不 import。
+// 顶层三分之二是纯函数：没有文件、没有网络、没有子进程 —— 规则层连 config 都不 import。
 // `scripts/check-layers.mjs` 有一条闸门钉着这件事（`extra/trpg/rules/**` 不许 import 到该目录之外）。
+// 最后一段（§13）例外：它测的是**规则表的存储**（`rule-store.ts`），那个模块当然要读盘 ——
+// 所以它在临时数据目录里跑（`DIR`），而规则层本身仍然拿不到任何 I/O 能力。
+import path from 'node:path';
 import { checker, dataDir } from './lib/harness.mjs';
 import { load } from './lib/src.mjs';
 
 // 与别的套件同一条纪律：先造临时数据目录，再 load 任何模块。
-// （这两个模块当下不碰 DATA_DIR，但保持这个顺序，将来它们真要用地时不会静默写进真 data/。）
-dataDir('qqagent-trpg-rules-');
+const DIR = dataDir('qqagent-trpg-rules-');
 
 const { ok, done } = checker();
 const { DiceError, rollDice } = await load('extra/trpg/rules/dice.js');
 const {
-  COC7_RULE, GENERIC_RULE, LEVEL_RULES, check, defaultJudge, getCheckRule, resolveCheck
+  BUILTIN_RULE_FILES, GENERIC_RULE, RuleError, check, compileRule, defaultJudge, resolveCheck, toVars, verifyRule
 } = await load('extra/trpg/rules/check.js');
+const { ConditionError, compileCondition } = await load('extra/trpg/rules/condition.js');
 const { combine, formatPercentile, rollPercentile } = await load('extra/trpg/rules/percentile.js');
+const { RuleStore } = await load('extra/trpg/rule-store.js');
+const { safeFileName } = await load('extra/trpg/state.js');
+
+/** 内置的 COC 表 —— 它现在是**种子数据**，用同一套编译路径编出来（不再是一个写死的常量）。 */
+const COC7_RULE = compileRule(BUILTIN_RULE_FILES.coc7);
 
 /**
  * 让第 i 颗骰子掷出 `want[i]`（骰子面数 `n`）。
@@ -399,38 +407,196 @@ const anyRng = () => 0.5;
       error instanceof DiceError && /1d100/.test(error.message), String(error.message));
   }
 
-  ok('getCheckRule：认得大小写，认不出来的回落 generic（读取路径不抛错）',
-    getCheckRule('coc7').id === 'coc7' && getCheckRule('COC7').id === 'coc7'
-    && getCheckRule('nope').id === 'generic' && getCheckRule(undefined).id === 'generic');
-  ok('LEVEL_RULES 就是那两张表（配置里能写的 id 只有它们）',
-    LEVEL_RULES.map((rule) => rule.id).join(',') === 'generic,coc7');
+  ok('内置的两套表都能过穷举校验（源码里的种子本身不许是坏的）',
+    verifyRule(GENERIC_RULE).length === 0 && verifyRule(COC7_RULE).length === 0,
+    JSON.stringify([...verifyRule(GENERIC_RULE), ...verifyRule(COC7_RULE)]));
 
-  // ── 穷举：每一组取值都有等级匹配，且每个等级都被匹配到过 ──
-  const sweep = (rule, build) => {
-    const seen = new Set();
-    let gap = '';
-    for (const input of build()) {
-      try { seen.add(check(rule, input).name); }
-      catch (error) { gap = `${rule.id}: ${error.message}`; break; }
-    }
-    ok(`${rule.id}：穷举全部取值，每一组都有等级匹配（最后一条必须无条件匹配）`, !gap, gap);
-    const missing = rule.levels.map((level) => level.name).filter((name) => !seen.has(name));
-    ok(`${rule.id}：每个等级都真的能被匹配到（否则是等级顺序有误）`,
-      missing.length === 0, missing.join(','));
-  };
-  sweep(GENERIC_RULE, function* () {
-    for (let target = 0; target <= 30; target++)
-      for (let roll = 1; roll <= 20; roll++)
-        yield { total: roll, dice: [roll], kept: [roll], faces: 20, target };
+  // ── 穷举校验**真的抓得住**两类坏表 ──
+  //
+  // 这两条是本节的要点：`verifyRule` 的价值全在"不跑就发现不了"上 —— 漏了兜底等级与
+  // 等级顺序写反，都只有等玩家恰好掷出那个点数才暴露，而那时你已经在跑了。
+  const good = BUILTIN_RULE_FILES.generic.levels;
+  const missingFallback = compileRule({
+    id: 'bad1', name: '漏了兜底', levels: good.slice(0, 3)   // 去掉最后那条 `true`
   });
-  sweep(COC7_RULE, function* () {
-    for (let target = 0; target <= 100; target++)
-      for (let roll = 1; roll <= 100; roll++)
-        yield { total: roll, dice: [roll], kept: [roll], faces: 100, target };
+  ok('漏掉无条件兜底那一级 → 校验报"某组取值一个等级都匹配不上"',
+    verifyRule(missingFallback).some((p) => /一个等级都匹配不上/.test(p)),
+    JSON.stringify(verifyRule(missingFallback)));
+
+  const wrongOrder = compileRule({
+    id: 'bad2', name: '顺序写反',
+    levels: [
+      { name: 'success', label: '成功', success: true, condition: 'total >= target' },
+      { name: 'critical', label: '大成功', success: true, condition: 'count == 1 and roll == faces' },
+      { name: 'failure', label: '失败', success: false, condition: 'true' }
+    ]
   });
+  ok('特例排在通例之后 → 校验报"某个等级永远匹配不到"',
+    verifyRule(wrongOrder).some((p) => /匹配不到/.test(p) && /critical/.test(p)),
+    JSON.stringify(verifyRule(wrongOrder)));
+
+  // 单条坏条件不该让整张表编不出来（它只该让**那一级**报错，并指出是哪一级）。
+  let compileProblem = '';
+  try {
+    compileRule({ id: 'bad3', name: 'x', levels: [{ name: 'a', label: 'A', success: true, condition: 'total >= ' }] });
+  } catch (error) {
+    compileProblem = error instanceof RuleError ? error.problems.join('；') : `不是 RuleError: ${error}`;
+  }
+  ok('编译失败时指明是**哪一级**、问题是什么',
+    /第 1 级/.test(compileProblem) && /判定条件/.test(compileProblem), compileProblem);
 }
 
-// ── 12. 颗数真的按表达式来（rng 调用次数是唯一的证据）──────────────────────
+// ── 12. 条件表达式：白名单之外的一切都拒绝 ─────────────────────────────────
+//
+// 规则文件是**用户内容**（`data/trpg/rules/*.json` 由管理员写），所以这一节守的是
+// "它绝不能变成一段能跑的代码"。`eval` / `new Function` 一次都不许出现。
+{
+  const vars = { total: 15, target: 10, count: 3, faces: 6, roll: 0, max: 6, min: 2 };
+  const evalWith = (src, over = {}) => compileCondition(src)({ ...vars, ...over });
+
+  ok('算术、比较、布尔与括号都能用',
+    evalWith('total >= target') === true
+    && evalWith('total >= target and count == 3') === true
+    && evalWith('target > total or true') === true
+    && evalWith('not (target > total)') === true
+    && evalWith('(total - target) * 2 == 10') === true
+    && evalWith('total % 4 == 3') === true);
+
+  ok('`/` 是真除法、`//` 是向下取整（照 Python 的读法）',
+    evalWith('7 / 2 == 3.5') === true && evalWith('7 // 2 == 3') === true
+    && evalWith('(-7) // 2 == -4') === true);
+
+  ok('七个变量都在（含派生量 max / min，以及"单颗时才是面值"的 roll）',
+    evalWith('roll == 5', { roll: 5 }) === true
+    && evalWith('max == 6 and min == 2') === true
+    && evalWith('faces == 6') === true
+    && evalWith('count == 3') === true);
+
+  ok('`true` / `false` 字面量可用（兜底那一级就靠它）',
+    evalWith('true') === true && evalWith('false') === false);
+
+  // ── 拒绝路径：白名单之外的一切 ──
+  const refuses = (src, label) => {
+    try {
+      compileCondition(src);
+      ok(label, false, '居然编过了');
+    } catch (error) {
+      ok(label, error instanceof ConditionError && !!error.message, String(error));
+    }
+  };
+  refuses('sqrt(total)', '函数调用被拒（不只有括号，还有前面的名字）');
+  refuses('roll.constructor', '属性访问被拒');
+  refuses('dice[0]', '下标被拒（`dice` 本身也不是可用变量）');
+  refuses('total = 3', '赋值被拒（`=` 不是比较）');
+  refuses('roll == 1; true', '分号被拒（后面还有内容）');
+  refuses('roll == 1 # 注释', '注释被拒');
+  refuses('"abc"', '字符串被拒');
+  refuses('notARealVariable', '不认识的变量被拒，且文案列出可用的那几个');
+  refuses('(total >= target', '括号没闭合');
+  refuses('', '空条件被拒');
+  refuses('x'.repeat(300), '超长条件被拒');
+  refuses('1 +', '残缺表达式被拒');
+
+  try { compileCondition('sqrt(total)'); } catch (error) {
+    ok('报错文案带上位置与"支持的写法"（人照着就能改对）',
+      /第 1 个字符|第 1 个/.test(error.message) && /支持的写法/.test(error.message), error.message);
+  }
+  try { compileCondition('1 / 0 == 1'); compileCondition('total / (target - 10)')(vars); } catch (error) {
+    ok('除零**抛错**而不是给个 Infinity 让后面的比较悄悄变成 false',
+      /除零/.test(String(error.message)), String(error.message));
+  }
+
+  // ⚠️ 数据化没有表达力损失：`generic` 那条"单颗骰掷出最大面算大成功"必须能用数据写出来。
+  const crit = compileCondition(BUILTIN_RULE_FILES.generic.levels[0].condition);
+  ok('内置表里那条最刁的条件（单颗 + 面数>1 + 掷出最大面）能被数据表达',
+    crit({ ...vars, count: 1, faces: 20, roll: 20 }) === true
+    && crit({ ...vars, count: 1, faces: 20, roll: 19 }) === false
+    && crit({ ...vars, count: 2, faces: 20, roll: 20 }) === false);
+}
+
+// ── 13. 规则表的存储：种子、列表、读取、坏表拒绝 ────────────────────────────
+{
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const dir = path.join(DIR, 'rules');
+  const store = new RuleStore(dir);
+
+  ok('首次用到规则时把内置的补齐到目录里（懒执行，构造时不写盘）',
+    !fs.existsSync(dir) && store.list().length >= 2 && fs.existsSync(path.join(dir, 'generic.json')),
+    JSON.stringify(store.list().map((r) => r.id)));
+
+  const seeded = fs.readFileSync(path.join(dir, 'generic.json'), 'utf8');
+  ok('补齐的是**种子**：文件内容与源码里那份逐字一致（种子即初始状态）',
+    JSON.parse(seeded).levels.length === BUILTIN_RULE_FILES.generic.levels.length);
+
+  // 已存在的文件一律不动：升级不该覆盖管理员改过的表。
+  fs.writeFileSync(path.join(dir, 'generic.json'), JSON.stringify({ name: '我改过的', levels: [
+    { name: 'ok', label: '行', success: true, condition: 'true' }
+  ] }), 'utf8');
+  store.list();
+  ok('再 ensureBuiltins 不会覆盖已存在的文件（管理员改过的表留着）',
+    JSON.parse(fs.readFileSync(path.join(dir, 'generic.json'), 'utf8')).name === '我改过的');
+
+  ok('内置表在列表里标出来（可以删，但删了看得出是内置的）',
+    store.list().find((r) => r.id === 'coc7')?.builtin === true
+    && store.list().find((r) => r.id === 'generic')?.builtin === true);
+
+  const lookup = store.read('coc7');
+  ok('读一张正常的表：拿到编译好的规则，且没有回落提示',
+    lookup.ok === true && lookup.rule.id === 'coc7' && lookup.note === '');
+  ok('读表按 mtime 缓存：同一个文件连读两次拿到同一个对象',
+    store.read('coc7').rule === store.read('coc7').rule);
+
+  const missing = store.read('查无此表');
+  ok('引用的表不存在 → **回落 generic 并给一句 note**（静默回落是最忌讳的那类故障）',
+    missing.ok === true && missing.rule.id === 'generic' && /不存在/.test(missing.note), JSON.stringify(missing));
+
+  // 坏表：**拒绝**，不静默换一套 —— 静默换一套会让"同一个骰面在两局里判出不同的档"没人能解释。
+  fs.writeFileSync(path.join(dir, 'broken.json'),
+    JSON.stringify({ name: '坏的', levels: [{ name: 'a', label: 'A', success: true, condition: 'total >= ' }] }), 'utf8');
+  const broken = store.read('broken');
+  ok('坏表**拒绝**而不是回落到别的表（配置错误就该当场可见）',
+    broken.ok === false && /有问题/.test(broken.message), JSON.stringify(broken));
+  ok('坏表照样出现在列表里并带上问题（跳过它只会让管理员看到"少了一个"）',
+    store.list().some((r) => r.id === 'broken' && r.problems.length > 0),
+    JSON.stringify(store.list().find((r) => r.id === 'broken')));
+
+  fs.rmSync(path.join(dir, 'broken.json'));
+  ok('删掉之后列表里也没了，且读取回落到"不存在"那条路',
+    !store.list().some((r) => r.id === 'broken') && store.read('broken').note !== '');
+
+  // ── 改了文件要**不重启就生效** ──
+  //
+  // ⚠️ 这两条补的是**探针实测出来的守护空白**：把 `#load` 里"按 mtime 失效"改成"永不失效"，
+  // 上面全部断言照样绿 —— 而设置页上明明写着"改完剧本或规则表**不必重启**：两者都是每次现读的"。
+  // 规则表**只能手工改文件**（它没有 write 方法），所以 mtime 是唯一的失效路径，
+  // 这条断言就是那句承诺的唯一凭据。
+  //
+  // 判据是"改了之后读到新的一版"，所以 mtime 必须**真的变**：两条内容等长，光靠写盘
+  // 在有些文件系统上会落在同一个 mtime 刻度里（那样断言会假红/假绿都说不准），
+  // 这里显式把 mtime 推到未来。
+  const live = path.join(dir, 'live.json');
+  const version = (name) => JSON.stringify({ name, levels: [{ name: 'a', label: 'A', success: true, condition: 'true' }] });
+  fs.writeFileSync(live, version('第一版'), 'utf8');
+  ok('第一次读拿到第一版', store.read('live').rule?.name === '第一版');
+  fs.writeFileSync(live, version('第二版'), 'utf8');
+  const future = new Date(Date.now() + 5000);
+  fs.utimesSync(live, future, future);
+  ok('改了文件之后**不重启也读到新的一版**（按 mtime 失效，不是永不失效的缓存）',
+    store.read('live').rule?.name === '第二版', String(store.read('live').rule?.name));
+
+  // id 即文件名：**路径安全**靠 `safeFileName`，所以从命令 / URL 来的 id 穿不出目录。
+  // （这一条必须在这里正面测，不能靠"文件没被删掉"间接推 —— 那在删错文件时也是绿的。）
+  ok('用户起的名字过路径安全：中文保留、分隔符与 `..` 被清、Windows 保留字加前缀',
+    safeFileName('../etc/passwd') === 'etcpasswd'
+    && safeFileName('..') === '' && safeFileName('.') === ''
+    && safeFileName('CON') === '_CON' && safeFileName('com1') === '_com1'
+    && safeFileName('灯塔') === '灯塔' && safeFileName('灯塔.') === '灯塔'
+    && safeFileName('') === '' && safeFileName('  ') === '');
+  ok('remove 一个不存在的表返回 false（不抛）', store.remove('查无此表') === false);
+}
+
+// ── 14. 颗数真的按表达式来（rng 调用次数是唯一的证据）──────────────────────
 {
   const box = counting(rollOf(6, 1, 2, 3, 4, 5, 6));
   const r = rollDice('6d6', box.rng);

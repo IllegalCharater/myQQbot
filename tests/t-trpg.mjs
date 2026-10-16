@@ -28,9 +28,14 @@ const { createHandlers } = await load('extra/trpg/tools.js');
 const { createRuntime } = await load('extra/trpg/impl.js');
 const { DiceError, rollDice } = await load('extra/trpg/rules/dice.js');
 const { createLedger, consume, recall, remember } = await load('extra/trpg/rules/economy.js');
+const { RuleStore } = await load('extra/trpg/rule-store.js');
+const { ScenarioStore } = await load('extra/trpg/scenario.js');
+const { beginCampaign } = await load('extra/trpg/tools.js');
 const { EXTRA_REGISTRY } = await load('extra/registry.js');
 
 const store = new TrpgStore();
+/** 规则表存在临时数据目录的 `rules/` 下（内置两套由它懒补齐，所以这里不用自己造）。 */
+const ruleStore = new RuleStore(path.join(DIR, 'rules'));
 
 /** 假 `ToolContext`：工具只碰 `chatKey` / `sender` / `session` / `emit` 四样。 */
 function fakeCtx(chatKey, over = {}) {
@@ -57,6 +62,7 @@ function fakeCtx(chatKey, over = {}) {
 const notes = [];
 const handlers = createHandlers({
   store,
+  rules: ruleStore,
   // 固定随机源：工具层的断言关心的是"接线对不对"，不是骰子分布（那在 t-trpg-rules 里）。
   rng: () => 0.5,
   deliverNote: (chatKey, note) => notes.push({ chatKey, ...note })
@@ -466,9 +472,20 @@ const status = (key) => store.read(key);
   // `prompt(chatKey)`：真实现的接线。
   const runtime = createRuntime();
   const plan = runtime.prompt(key);
-  ok('prompt(chatKey) 把人格放在**前面**、状态放在**后面**（公共前缀能命中到状态段之前）',
-    plan.body.length === 2 && /【跑团主持人】/.test(plan.body[0]) && /【当前跑团状态】/.test(plan.body[1]),
+  ok('prompt(chatKey) 的段序是**人格 → 清单与剧本 → 状态**（公共前缀能命中到状态变化点之前）',
+    plan.body.length === 3 && /【跑团主持人】/.test(plan.body[0])
+    && /【剧本与规则】/.test(plan.body[1]) && /【当前跑团状态】/.test(plan.body[2]),
     JSON.stringify(plan.body.map((t) => t.slice(0, 20))));
+  ok('中间那一段**永远非空**（规则清单至少有两个内置的）—— 段数飘忽会让"body 有几段"没法断言',
+    plan.body[1].length > 0 && Array.isArray(runtime.prompt('').body) && runtime.prompt('').body.length === 3);
+  ok('清单里列着可用规则（模型才知道 rule 能填什么）',
+    /generic/.test(plan.body[1]) && /coc7/.test(plan.body[1]), plan.body[1].slice(0, 200));
+  ok('没开局的会话在清单里明说"还没有任何剧本"',
+    /还没有任何剧本/.test(runtime.prompt('group:999')?.body[1] ?? ''));
+  ok('没开团的会话拿到的是"还没开局"那段（状态段最后一条）',
+    /还没有开局/.test(runtime.prompt('group:999')?.body[2] ?? ''));
+  ok('空会话不抛（装载时 checkRuntimeShape 就是这么调它的）',
+    Array.isArray(runtime.prompt('')?.body) && runtime.prompt('').body.length === 3);
   ok('人格段是一整块（含换行），不是被空行拆散的数组',
     plan.body[0].includes('\n') && plan.body[0].includes('状态归系统管'));
   ok('人格段写明了"一回合只有一次主行动 / 额外行动要声明来源"（否则配额会被当成故障）',
@@ -478,9 +495,7 @@ const status = (key) => store.read(key);
   ok('人格段写明了 [暗线] / [对玩家隐藏] 的含义（标注是模型唯一的判据）',
     /\[暗线\]/.test(plan.body[0]) && /\[对玩家隐藏/.test(plan.body[0]));
   ok('没开团的会话拿到的是"还没开局"那段',
-    /还没有开局/.test(runtime.prompt('group:999')?.body[1] ?? ''));
-  ok('空会话不抛（装载时 checkRuntimeShape 就是这么调它的）',
-    Array.isArray(runtime.prompt('')?.body) && runtime.prompt('').body.length === 2);
+    /还没有开局/.test(runtime.prompt('group:999')?.body[2] ?? ''));
 
   // 命令处理函数。
   const commands = runtime.commandHandlers;
@@ -517,7 +532,170 @@ const status = (key) => store.read(key);
     String(statusReceipt).slice(0, 200));
 }
 
-// ── 5. 注册表接点与 `onRunEnd` ──────────────────────────────────────────────
+// ── 5. 剧本与规则：解析、开局注入、清单注入、工作台 ──────────────────────────
+//
+// 这一节的判据是"注入真的发生了"：骨架落进状态、正文进上下文、清单能被模型看到。
+// 三件事少了任何一件的症状都是"开局了，但跟没注入一样"，而没有报错。
+{
+  const scenarios = new ScenarioStore(path.join(DIR, 'trpg', 'scenarios'));
+  const rules = new RuleStore(path.join(DIR, 'trpg', 'rules'));
+  const begin = (key, args) => beginCampaign(key, args, { store, rules, scenarios });
+
+  // ── 解析：带骨架的完整剧本 ──
+  const full = [
+    '---',
+    'title: 废弃灯塔',
+    'rule: coc7',
+    'scene: 午夜，码头',
+    'flags: {"灯塔已熄":"是","真凶是守塔人":{"value":"是","visible":false}}',
+    'characters: [{"name":"守塔人","visible":false,"hpMax":12,"stats":{"侦查":70}}]',
+    '---',
+    '这座灯塔三年前就废弃了。',
+    '守塔人其实是……'
+  ].join('\n');
+  const written = scenarios.write('灯塔', full);
+  ok('写一份带骨架的剧本：四个字段都解析出来了',
+    written.ok === true && written.scenario.title === '废弃灯塔' && written.scenario.rule === 'coc7'
+    && written.scenario.scene === '午夜，码头' && written.scenario.body === '这座灯塔三年前就废弃了。\n守塔人其实是……',
+    JSON.stringify(written));
+  ok('旗标支持 `{"value":..., "visible":false}` 这种带可见度的写法（暗线）',
+    written.scenario.flags['灯塔已熄']?.value === '是'
+    && written.scenario.flags['真凶是守塔人']?.visible === false);
+  ok('人物卡里的 `visible: false` 真的把它藏起来了（文件里写 `visible`、字段叫 `discovered`，**这里必须做映射**）',
+    written.scenario.characters[0]?.discovered === false
+    && written.scenario.characters[0]?.hpMax === 12
+    && written.scenario.characters[0]?.stats.侦查 === 70,
+    JSON.stringify(written.scenario.characters));
+
+  // ── 解析：没 frontmatter / 坏 frontmatter ──
+  ok('没有 frontmatter 时整份当正文（"就贴一段设定"也要能用）',
+    scenarios.write('散记', '这是一段随手的设定。').ok === true
+    && scenarios.read('散记').scenario.body === '这是一段随手的设定。'
+    && scenarios.read('散记').scenario.title === '散记');
+
+  const noColon = scenarios.write('坏的', '---\ntitle 废弃灯塔\n---\n正文');
+  ok('frontmatter 某行没冒号 → 报第几行（读它的人正在手改这个文件）',
+    noColon.ok === false && /第 1 行/.test(noColon.message) && /冒号/.test(noColon.message), noColon.message);
+
+  const badJson = scenarios.write('坏的2', '---\nflags: {不是 JSON}\n---\n正文');
+  ok('flags 不是合法 JSON → 报字段名 + 该怎么写',
+    badJson.ok === false && /flags/.test(badJson.message) && /JSON/.test(badJson.message), badJson.message);
+
+  const unclosed = scenarios.write('坏的3', '---\ntitle: x\n正文');
+  ok('frontmatter 没闭合 → 明说缺的是哪一行 `---`',
+    unclosed.ok === false && /闭合/.test(unclosed.message), unclosed.message);
+
+  const tooLong = scenarios.write('长的', `---\ntitle: x\n---\n${'字'.repeat(5000)}`);
+  ok('正文超长**当场拒绝**（不是截断：截断是在人还能改的时候不说、跑起来才少半段）',
+    tooLong.ok === false && /太长/.test(tooLong.message) && /4000/.test(tooLong.message), tooLong.message);
+
+  const unknownKey = scenarios.write('多字段', '---\ntitle: x\n作者: 某人\n---\n正文');
+  ok('认不出来的字段被忽略并记下来（多打一个字不该让整份剧本报废）',
+    unknownKey.ok === true && unknownKey.ignored.includes('作者'), JSON.stringify(unknownKey));
+
+  // ── 名字即文件名：路径安全（中文保留，见 §7 的 safeFileName 断言）──
+  ok('剧本名过路径安全之后才当文件名',
+    scenarios.write('../逃逸', '---\ntitle: x\n---\n正文').ok === true
+    && !scenarios.list().some((item) => item.id.includes('/')),
+    JSON.stringify(scenarios.list().map((item) => item.id)));
+  ok('空名字被拒（不许拿一个默认值顶上）', scenarios.write('   ', '正文').ok === false);
+
+  // ── 开局：把剧本**快照**进这一局 ──
+  const started = begin('group:930', { scenario: '灯塔' });
+  const campaign = store.read('group:930');
+  ok('开局时剧本的骨架落进了状态（标题 / 场景 / 旗标 / 人物卡）',
+    started.isError !== true && campaign.title === '废弃灯塔' && campaign.scene === '午夜，码头'
+    && campaign.flags['灯塔已熄']?.value === '是' && campaign.flags['真凶是守塔人']?.visible === false
+    && campaign.characters.length === 1 && campaign.characters[0].discovered === false,
+    JSON.stringify({ title: campaign.title, scene: campaign.scene, flags: campaign.flags, chars: campaign.characters.length }));
+  ok('剧本正文是**快照**进存档的（改剧本文件不该影响正在跑的团）',
+    campaign.scenario.id === '灯塔' && /这座灯塔三年前就废弃了/.test(campaign.scenario.body));
+  ok('剧本推荐的规则表被采用（没显式传 rule 时）', campaign.rule === 'coc7', campaign.rule);
+  ok('回执说清了注入了什么（否则群里看不出剧本有没有生效）',
+    /剧本「灯塔」已注入/.test(String(started.content)) && /预置 2 条旗标/.test(String(started.content)),
+    String(started.content));
+
+  // 快照的对照断言：改掉剧本文件，正在跑的团**一个字都不变**。
+  scenarios.write('灯塔', '---\ntitle: 改过的\n---\n新的正文');
+  ok('改了剧本文件之后，已经开着的那一局逐字不变（快照，不是引用）',
+    store.read('group:930').title === '废弃灯塔'
+    && /这座灯塔三年前就废弃了/.test(store.read('group:930').scenario.body));
+  ok('但**新开**的一局用的是改过之后的版本',
+    begin('group:931', { scenario: '灯塔' }).isError !== true && store.read('group:931').title === '改过的');
+
+  // ── 开局：几种失败与回落 ──
+  ok('剧本不存在 → 拒绝开局（不给自己编一个标题开半截团）',
+    begin('group:932', { scenario: '查无此剧本' }).isError === true
+    && /没有叫/.test(String(begin('group:932', { scenario: '查无此剧本' }).content)));
+  ok('既没给标题也没给剧本 → 拒绝，并说清两个办法',
+    /title/.test(String(begin('group:933', {}).content)) && /scenario/.test(String(begin('group:933', {}).content)));
+  ok('可以用 `title` 覆写剧本的标题',
+    begin('group:934', { scenario: '灯塔', title: '我的团' }).isError !== true
+    && store.read('group:934').title === '我的团');
+
+  const fallback = begin('group:935', { title: 'x', rule: '查无此表' });
+  ok('规则表不存在 → 回落到 generic **并把那句 note 写进回执**（静默回落最忌讳）',
+    /generic/.test(String(fallback.content)) && /不存在/.test(String(fallback.content))
+    && store.read('group:935').rule === 'generic', String(fallback.content));
+
+  // 坏规则表：**拒绝开局**，不静默换一套。
+  fs.writeFileSync(path.join(rules.dir, 'broken.json'),
+    JSON.stringify({ name: '坏', levels: [{ name: 'a', label: 'A', success: true, condition: 'total >= ' }] }), 'utf8');
+  const broken = begin('group:936', { title: 'x', rule: 'broken' });
+  ok('规则表本身坏了 → 拒绝开局（静默换一套会让"同一个骰面在两局里判出不同的档"没人能解释）',
+    broken.isError === true && /有问题/.test(String(broken.content)), String(broken.content));
+
+  ok('已经开过局时再开局被拒（命令与工具**共用**这一条判据）',
+    begin('group:930', { scenario: '散记' }).isError === true
+    && /已经有/.test(String(begin('group:930', { scenario: '散记' }).content)));
+
+  // ── 清单注入：模型才知道 rule / scenario 能填什么 ──
+  const runtime = createRuntime();
+  const briefing = runtime.prompt('group:930').body[1];
+  ok('上下文里列着可用的剧本与规则（含刚写进去的那份）',
+    /灯塔/.test(briefing) && /generic/.test(briefing) && /coc7/.test(briefing), briefing.slice(0, 300));
+  ok('这一局的剧本正文进了上下文，且标明是"给你看的设定"',
+    /这座灯塔三年前就废弃了/.test(briefing) && /这一局的剧本是「灯塔」/.test(briefing), briefing.slice(0, 300));
+  ok('没注入剧本的会话明说"由你自己发挥"',
+    /没有注入剧本/.test(runtime.prompt('group:999')?.body[1] ?? ''));
+  ok('坏规则表**不进清单**（它本来也选不中），但仍在工作台列表里',
+    !/broken/.test(briefing) && rules.list().some((r) => r.id === 'broken'));
+
+  // ── `/跑团 开局` 命令：与工具共用同一个实现 ──
+  const commands = runtime.commandHandlers;
+  const cmd = (text, key = 'group:940') => commands['/跑团']({
+    chatKey: key, senderId: '10001', text, media: [], replyToMessageId: null
+  });
+  const opened = await cmd('/跑团 开局 灯塔');
+  ok('`/跑团 开局 <剧本>` 真的开了一局，且与工具注入的东西一致',
+    /剧本「灯塔」已注入/.test(String(opened)) && store.read('group:940').title === '改过的'
+    && store.read('group:940').scenario.id === '灯塔', String(opened));
+  ok('`/跑团 开局` 不带剧本名时回用法（而不是静默）', /用法/.test(String(await cmd('/跑团 开局'))));
+  ok('不认识的子命令列出可用的那些（而不是当普通消息忽略）',
+    /不认识的子命令/.test(String(await cmd('/跑团 存档 灯塔'))));
+  ok('不带参数时仍是玩家视角的状态卡（**原语义一个字没变**）',
+    /【跑团笔记】/.test(String(await cmd('/跑团', 'group:930')))
+    && !/线人/.test(String(await cmd('/跑团', 'group:907'))));
+
+  // ── 工作台：列表 + 删除 ──
+  ok('工作台列表来自磁盘（列出来的，一定是真的有的）',
+    scenarios.list().some((item) => item.id === '灯塔')
+    && scenarios.list().every((item) => typeof item.title === 'string'));
+  // 坏文件**直接落盘**（`write` 会拒绝且**不写** —— 那是对命令路径的取舍：别把垃圾持久化）。
+  // 而管理员手放的文件是另一回事：它在盘上，就该看得见、看得见问题。
+  fs.mkdirSync(scenarios.dir, { recursive: true });
+  fs.writeFileSync(path.join(scenarios.dir, '坏的.md'), ['---', 'title 缺冒号', '---', '正文'].join('\n'), 'utf8');
+  ok('坏剧本照样列出来并带上问题（跳过它只会让管理员看到"少了一个"）',
+    scenarios.list().some((item) => item.id === '坏的' && item.problems.length > 0),
+    JSON.stringify(scenarios.list().find((item) => item.id === '坏的')));
+  ok('删掉之后列表里没了，且再读会明确说"没有叫…的剧本"',
+    scenarios.remove('散记') === true && !scenarios.list().some((item) => item.id === '散记')
+    && /没有叫/.test(scenarios.read('散记').message));
+  ok('删一个不存在的剧本返回 false（不抛）', scenarios.remove('查无此剧本') === false);
+  ok('内置规则表也允许删（它就是文件）', rules.remove('broken') === true && !rules.list().some((r) => r.id === 'broken'));
+}
+
+// ── 6. 注册表接点与 `onRunEnd` ──────────────────────────────────────────────
 {
   const entry = EXTRA_REGISTRY.find((item) => item.id === 'trpg');
   ok('trpg 注册在注册表里，是接管模式', !!entry && entry.mode === 'override');
@@ -643,7 +821,7 @@ const status = (key) => store.read(key);
     sessions[1]?.text);
 }
 
-// ── 6. 行动经济账本（纯逻辑）──────────────────────────────────────────────
+// ── 7. 行动经济账本（纯逻辑）──────────────────────────────────────────────
 {
   const ledger = createLedger();
   ok('主行动每回合只有一次', consume(ledger, '阿飞', '').ok === true
@@ -669,7 +847,7 @@ const status = (key) => store.read(key);
   ok('行动者不同也不是同一次调用', recall(dedupe, '酒保', 'roll', { expr: '1d20' }) === null);
 }
 
-// ── 7. 源级断言：掷骰的熵源只能是那一个 ──────────────────────────────────────
+// ── 8. 源级断言：掷骰的熵源只能是那一个 ──────────────────────────────────────
 //
 // ⚠️ **这一节补的是一条探针实测出来的守护空白**：把 `impl.ts` 里的 `secureRng` 换成
 // `Math.random`，**其余全部套件仍然全绿** —— 掷骰结果本来就随机，没有任何行为断言看得出熵源换了。
@@ -698,7 +876,7 @@ const status = (key) => store.read(key);
     !/from\s*'\.\.\//.test(rules) && !/from\s*'node:/.test(rules));
 }
 
-// ── 8. 端到端：真起 app，接管一个群，看模型实际收到什么 ──────────────────────
+// ── 9. 端到端：真起 app，接管一个群，看模型实际收到什么 ──────────────────────
 console.log('\n=== 端到端：真起 app（createApp + start）===');
 {
   const model = await fakeModelServer({ model: 'stub-trpg' });

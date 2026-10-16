@@ -11,11 +11,13 @@
 import { isPersonMessage } from '../../chat/store.js';
 import { EXTRA_PROMPT_SECTIONS } from '../prompts.js';
 import { secureRng } from './entropy.js';
-import { formatRoll, renderForModel, renderStatusCard } from './render.js';
+import { formatRoll, renderBriefing, renderForModel, renderStatusCard } from './render.js';
+import { RuleStore } from './rule-store.js';
 import { rollDice } from './rules/dice.js';
+import { ScenarioStore } from './scenario.js';
 import { TrpgStore, appendLog } from './state.js';
 import { generateSuggestions } from './suggest.js';
-import { createHandlers } from './tools.js';
+import { beginCampaign, createHandlers } from './tools.js';
 import type { ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd } from '../types.js';
 
 /**
@@ -37,6 +39,10 @@ const SUGGEST_COOLDOWN_MS = 3 * 60 * 1000;
 
 export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
   const store = new TrpgStore();
+  /** 规则表（`data/trpg/rules/`）。内置的两套由它**懒补齐**（首次用到规则时才写盘）。 */
+  const rules = new RuleStore();
+  /** 剧本库（`data/trpg/scenarios/`）。没有内置种子 —— 剧本是内容，得有人写。 */
+  const scenarios = new ScenarioStore();
   /** 每个会话上次兜底的时间。只留冷却窗口内的，所以它自然有界（见 `coolingDown`）。 */
   const lastSuggestAt = new Map<string, number>();
 
@@ -48,18 +54,40 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
   };
 
   return {
-    handlers: createHandlers({ store, rng: secureRng, deliverNote: deps.deliverNote }),
+    handlers: createHandlers({ store, rules, scenarios, rng: secureRng, deliverNote: deps.deliverNote }),
 
     commandHandlers: {
       /**
-       * `/跑团` —— 看这一局的**玩家视角**笔记。**零 LLM 成本**的确定性快路径（同 `/转写` 那个取舍）：
-       * 群友想确认"我现在几点血"不该惊动模型、也不该花一次模型调用。
+       * `/跑团` —— 不带参数时看这一局的**玩家视角**笔记。**零 LLM 成本**的确定性快路径
+       * （同 `/转写` 那个取舍）：群友想确认"我现在几点血"不该惊动模型、也不该花一次模型调用。
        *
        * ⚠️ 它给的是**玩家视角**（`renderStatusCard` → `renderForPlayers`）：藏起来的人物与暗线
        * 旗标**根本不会出现**。给模型看的那一份（含全部隐藏信息）只在 `prompt()` 里走。
+       *
+       * 子命令 `开局 <剧本> [规则]` —— 与 DM 的 `campaign action=start` 走**同一个实现**
+       * （`beginCampaign`），所以两边的判据（已经开过局怎么拒、剧本读不到怎么办、规则表坏了
+       * 怎么办）不可能漂移。人在群里敲这一条，就不必指望模型从清单里挑对。
        */
       async '/跑团'(input) {
-        return renderStatusCard(store.read(input.chatKey));
+        // 按**词**切而不是正则剥前缀：子命令的参数是若干个词（`/跑团 开局 灯塔 coc7`），
+        // 而 `/掷骰` 那边剥前缀是因为它的参数是一整条表达式。两者形状不同，别统一。
+        const words = String(input.text ?? '').trim().split(/\s+/).slice(1);
+
+        if (!words.length) return renderStatusCard(store.read(input.chatKey));
+
+        if (words[0] === '开局' || words[0] === '开团') {
+          const [, scenario, rule] = words;
+          if (!scenario) {
+            return '用法：/跑团 开局 <剧本名> [规则表 id]\n'
+              + '剧本名见设置页「跑团」那一栏；规则表 id 不填就用剧本推荐的那张。';
+          }
+          const result = beginCampaign(input.chatKey, { scenario, rule }, { store, rules, scenarios });
+          return String(result.content);
+        }
+
+        return `不认识的子命令「${words[0]}」。可用的是：\n`
+          + '· `/跑团` —— 看你们已经知道的那份局势\n'
+          + '· `/跑团 开局 <剧本名> [规则表 id]` —— 用某份剧本开一局';
       },
 
       /**
@@ -85,18 +113,31 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
     },
 
     /**
-     * system prompt 的贡献：**人格（稳定）+ 当前状态（易变）**，顺序不能反。
+     * system prompt 的贡献：**人格 → （清单 + 剧本正文）→ 当前状态**，顺序不能反。
      *
-     * 反了的代价是同一条纪律的老问题：状态每轮都变，把它放前面会让 system prompt 的
-     * **整段**公共前缀每轮失效（见 `renderForModel` 顶部那段）。
+     * 顺序即缓存：清单只在管理员改文件时变、剧本正文整局不变，而状态每轮都变。
+     * 把两个稳定的排在状态之前，system prompt 的公共前缀才能命中到状态变化点之前；
+     * 反过来的话，同一场团连着跑几轮会让**整段**系统提示每轮失效（见 `renderForModel` 顶部那段）。
      *
      * ⚠️ 本函数必须是**全函数**：装载时 `checkRuntimeShape` 会空着 `chatKey` 调它一次
      * （只做段落名对账），`store.read('')` 返回 `null`，于是渲染出"还没有开局"那段 ——
      * 不抛错、形状合法。这就是 `prompt(chatKey)` 要收参数、且不许抛的原因。
+     * 中间那段也**永远非空**（规则清单至少有两个内置的），所以 body 恒为三段。
      */
     prompt(chatKey) {
+      const campaign = store.read(chatKey);
       return {
-        body: [...EXTRA_PROMPT_SECTIONS.trpg.body, renderForModel(store.read(chatKey))]
+        body: [
+          ...EXTRA_PROMPT_SECTIONS.trpg.body,
+          renderBriefing(campaign, {
+            // 坏文件不进清单（它们本来也选不中），但它们仍然出现在设置页里 —— 那才是能修的地方。
+            scenarios: scenarios.list().filter((item) => !item.problems.length)
+              .map((item) => ({ id: item.id, title: item.title })),
+            rules: rules.list().filter((item) => !item.problems.length)
+              .map((item) => ({ id: item.id, name: item.name, description: item.description }))
+          }),
+          renderForModel(campaign)
+        ]
       };
     },
 

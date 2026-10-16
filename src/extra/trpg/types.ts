@@ -14,6 +14,17 @@ export const HIDDEN_FIELDS = ['stats', 'pools', 'notes'] as const;
 export type HiddenField = (typeof HIDDEN_FIELDS)[number];
 
 /**
+ * 剧本正文的长度上限。
+ *
+ * 它**每轮都进 system prompt**，所以这个数是成本不是洁癖。一份典型剧本的世界观 + 主线在
+ * 2–4k 字；再长就该拆成旗标/人物卡（那两样本来就是给"以后还要记得的事实"用的）。
+ * 超限**当场拒绝**（而不是截断）：截断是在人还能改的时候不说、等到跑起来才少半段，而那时
+ * 没人知道少了什么。落在这里而不是 `scenario.ts`，是因为 `state.ts` 的归一化也要用，
+ * 而 `scenario.ts` 反过来 import `state.ts` —— 放本文件（零 import）两边都拿得到。
+ */
+export const MAX_SCENARIO_CHARS = 4000;
+
+/**
  * 一张人物卡。
  *
  * ⚠️ **这里是"确定性状态"的家**：HP / SAN / 属性 / 技能都由**代码**持有并钳制，模型只能通过
@@ -80,6 +91,13 @@ export interface TrpgFlag {
   visible: boolean;
 }
 
+/** 存档里那一份剧本的快照（见 `TrpgCampaign.scenario`）。`id` 空串 = 没注入剧本。 */
+export interface TrpgScenarioRef {
+  id: string;
+  /** 正文。开局时从剧本文件里复制过来，之后与那个文件再无关系。 */
+  body: string;
+}
+
 /** 一场跑团的全部状态。一个会话最多一场。 */
 export interface TrpgCampaign {
   chatKey: string;
@@ -96,6 +114,14 @@ export interface TrpgCampaign {
   rule: string;
   /** 当前场景的一句话描述。 */
   scene: string;
+  /**
+   * 这一局用过的剧本 —— **开局时快照进来的，不是引用**。
+   *
+   * 为什么是快照：改剧本文件不该影响正在跑的团；存档要自洽（备份/恢复一致）；正文的落点与
+   * "这一局的状态是一个文件"这条既有约定一致。代价是存档会大一点（正文最多
+   * `MAX_SCENARIO_CHARS` 字）。`id` 空串 = 这一局没注入剧本（照旧由 DM 自己发挥）。
+   */
+  scenario: TrpgScenarioRef;
   /** 剧情旗标：键 → `{ value, visible }`。 */
   flags: Record<string, TrpgFlag>;
   characters: TrpgCharacter[];
