@@ -54,7 +54,7 @@ export const trpgSpec: ExtraSpec = {
   displayDesc: PROMPTS.say.displayDesc,
   /**
    * **接管模式**：装载即让**那个会话**的模型侧整体换掉 —— 工具表只剩下面这 4 个、
-   * 命令表只剩跑团那 24 条词形（12 条声明，其中 4 条带 `subs`、2 条是裸命令；外加永远在的
+   * 命令表只剩跑团那 25 条词形（12 条声明，其中 4 条带 `subs`、4 条是裸命令；外加永远在的
    * `/能力`）、system prompt 换成"框架契约 + 跑团人格"。存档、上下文窗口、记忆、后台任务照常。
    */
   mode: 'override',
@@ -200,8 +200,11 @@ export const trpgSpec: ExtraSpec = {
    * 而且查的是**展开后**的串（两个扩展各写一个 `.trpg start` 正是最该被拦住的那种撞名）。
    */
   commands: [
-    // 会话这一族：起局 → 报名 → 确认 → 开跑 → 收团，加上形态与剧本。
-    { names: ['.trpg'], subs: ['new', 'join', 'status', 'start', 'end', 'mode', 'scenario'] },
+    // 会话这一族：起局 → 报名 → 确认 → 开跑 → 收团，加上形态、剧本与核对。
+    // ⚠️ `check` **追加在末尾**，与 `commands/index.ts` 那张表的行序对应（那份表也把
+    // `.trpg check` 排在 `.trpg scenario` 之后、裸 `.trpg` 之前）。顺序只对同前缀的词有意义，
+    // 这里两个都是两词命令、互不遮蔽，但**读起来一致**省得下一个人以为漏了一条。
+    { names: ['.trpg'], subs: ['new', 'join', 'status', 'start', 'end', 'mode', 'scenario', 'check'] },
     // **裸命令兜底**：排在所有子命令之后 —— 只在"一个子命令都没匹配上"时命中，回用法清单。
     { names: ['.trpg'] },
     // 人物卡那一族。同样先子命令、后裸命令（顺序即行为）。

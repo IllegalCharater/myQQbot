@@ -23,7 +23,8 @@ const { ok, done } = checker();
 // 那是它存在的意义（能脱离平台独立测试），也是这个套件大半断言的对象。
 const {
   TrpgStore, appendLog, campaignFile, clampInt, emptyCampaign, findCharacter, normalizeCampaign, text,
-  formatCheck, formatRoll, renderForModel, renderForPlayers, renderStatusCard,
+  formatCheck, formatRoll, renderForModel, renderForPlayers, renderStatusCard, describeStruct,
+  renderBriefing, renderRuleNotes,
   createHandlers, createRuntime, saveScenario, scenarioNameFromFile,
   RuleStore, ScenarioStore, isFormattedScenario, parseScenario, saveScenarioText,
   formatScenarioText, stripFence, MODE_LABEL, TrpgModeStore, parseMode, TRPG_ASSISTANT_TOOLS, beginCampaign,
@@ -31,6 +32,9 @@ const {
 } = await load('extra/trpg/index.js');
 const { DiceError, looksLikeDiceRequest, rollDice } = await load('extra/trpg/rules/dice.js');
 const { createLedger, consume, recall, remember } = await load('extra/trpg/rules/economy.js');
+const {
+  compileRuleSet, describeMechanic, EMPTY_RULE_SET
+} = await load('extra/trpg/rules/rule-set.js');
 const { EXTRA_REGISTRY } = await load('extra/registry.js');
 
 /**
@@ -572,6 +576,183 @@ const status = (key) => store.read(key);
     String(statusReceipt).slice(0, 200));
 }
 
+// ── 4b. 剧情结构的一行式概览（`describeStruct`，P7-a）──────────────────────
+//
+// 抽出来的结构躺在 `.struct.json` 里，而 DM 每轮只看到**压缩过的**正文 —— 这一行式概览是
+// "抽取到底有没有用"的唯一出口。它不进上下文，那这份结构等于没抽，而且**不会有任何报错**。
+//
+// 三条判据各自对应一种"安静地坏掉"：
+//   ① 空结构必须返回**空串**（调用方靠它决定印不印）。返回一段光秃秃的标题会让每一次
+//      "没抽到东西"的开局都多一截噪音，而噪音是每轮都进 system prompt 的成本。
+//   ② 每一类有**条数上限**，截掉几条要说出来 —— 静默截断的表现是"抽出来的比原文里有的少"。
+//   ③ 待核项那一句是**说给模型听的**：它不知道该核对什么，但"有些条目没核对上"这件事
+//      直接决定它敢不敢把某条当硬规则用。**逐条列是 `.trpg check` 的活**，这里只给计数。
+{
+  const structOf = (over = {}) => ({
+    summary: '', scenes: [], npcs: [], clues: [], items: [], mechanics: [], warnings: [], ...over
+  });
+
+  ok('空结构 → 空串（调用方靠它决定印不印）',
+    describeStruct(structOf()) === '');
+  ok('只有待核项、一条内容都没有 → 也是空串（"没抽到东西"与"抽到了但有疑问"是两件事）',
+    describeStruct(structOf({ warnings: ['第 1 片没抽出来：超时'] })) === '');
+
+  const rich = describeStruct(structOf({
+    summary: '废弃灯塔与守夜人',
+    scenes: [{ name: '灯塔', summary: '一层门厅', npcs: ['守夜人'], clues: ['缺页的航海日志'] }],
+    npcs: [{ name: '守夜人', summary: '话少', attitude: '敌意', location: '灯塔', discovered: true }],
+    clues: [{ text: '缺页的航海日志', visible: true, location: '灯塔' }],
+    items: [{ name: '铜钥匙', summary: '', location: '灯塔' }],
+    mechanics: [{
+      type: 'check_modifier', triggerText: '在灯塔里', effectText: '侦察 -20',
+      note: '浓雾', sourceQuote: '雾里什么都看不清'
+    }]
+  }));
+  ok('每一类各印一行，首行说明它是"按它来铺"的',
+    /^【剧情结构】（从剧本原文里抽出来的，按它来铺）/.test(rich), rich);
+  ok('概要 / 场景（带在场与线索）/ NPC（带态度与位置）/ 线索 / 道具逐类印出来',
+    /概要：废弃灯塔与守夜人/.test(rich)
+    && /场景（按顺序）：灯塔（在场：守夜人，线索：缺页的航海日志）/.test(rich)
+    && /NPC：守夜人（敌意，灯塔）/.test(rich)
+    && /线索：缺页的航海日志/.test(rich)
+    && /道具：铜钥匙（灯塔）/.test(rich), rich);
+  ok('机制印成"当 X 时，Y（类型）"（X 来自 `triggerText`，Y 优先取 `effectText`）',
+    /特殊机制（检定与伤害要照它来）：当在灯塔里时，侦察 -20（check_modifier）/.test(rich), rich);
+  ok('机制没有 `triggerText` 时**不印那个半截从句**（"当…时，"后面空着比没有更难看）',
+    /特殊机制（检定与伤害要照它来）：浓雾（narrative_hook）$/.test(describeStruct(structOf({
+      mechanics: [{ type: 'narrative_hook', triggerText: '', effectText: '', note: '浓雾', sourceQuote: '' }]
+    }))));
+
+  // 上限与边界。这一段**每轮都进 system prompt**，所以上限是成本不是洁癖。
+  const tenClues = (count) => structOf({
+    clues: Array.from({ length: count }, (_unused, index) => ({ text: `线索${index + 1}`, visible: true, location: '' }))
+  });
+  ok('每一类封顶 8 条，**截掉几条要说出来**（静默截断的表现是"抽出来的比原文里有的少"，一处线索都没有）',
+    /线索：线索1；线索2；线索3；线索4；线索5；线索6；线索7；线索8（还有 2 条）$/.test(describeStruct(tenClues(10))),
+    describeStruct(tenClues(10)));
+  ok('正好 8 条时**不印**"还有 0 条"（边界；写错会多一句永远为 0 的话）',
+    !/还有 0 条/.test(describeStruct(tenClues(8))) && /线索8$/.test(describeStruct(tenClues(8))),
+    describeStruct(tenClues(8)));
+
+  ok('场景没有名字时退回 `summary`（模型偶尔只给一句描述）',
+    /场景（按顺序）：一层门厅$/.test(describeStruct(structOf({
+      scenes: [{ name: '', summary: '一层门厅', npcs: [], clues: [] }]
+    }))));
+  ok('道具没有位置时只印名字（不印一个空的括号）',
+    /道具：铜钥匙$/.test(describeStruct(structOf({ items: [{ name: '铜钥匙', summary: '', location: '' }] }))));
+
+  const warned = describeStruct(structOf({
+    summary: 'x',
+    warnings: ['第 1 条机制的引文在原文里找不到：雾里什么都看不清', '第 2 片没抽出来：超时']
+  }));
+  ok('待核项给的是**计数 + 该怎么对待**（"别当成板上钉钉的设定"是说给模型听的）',
+    /（有 2 条抽取结果没核对上，仅供参考 —— 别把它们当成板上钉钉的设定）$/.test(warned), warned);
+  ok('待核项**不逐条列**（逐条列是 `.trpg check` 的活；这里每轮进提示词，逐条列会吃掉预算）',
+    !/雾里什么都看不清/.test(warned) && !/超时/.test(warned), warned);
+
+  // 顺序即缓存：这一段每轮都进 system prompt，同一份结构两次渲染抖一个字符就整段前缀失效。
+  ok('同一份结构渲染两次逐字相同（纯代码、确定性）',
+    describeStruct(structOf({
+      npcs: [{ name: '守夜人', summary: '', attitude: '', location: '', discovered: true }]
+    })) === describeStruct(structOf({
+      npcs: [{ name: '守夜人', summary: '', attitude: '', location: '', discovered: true }]
+    })));
+}
+
+// ── 4c. 这一局的特殊规则进提示词（`renderRuleNotes`，P7-e）──────────────────
+//
+// `rules/rule-set.ts` 已经把模组自己的机制编译成**真的会参与判定**的东西（`roll` / `.ra` / `.rh`
+// 的目标值会被它改），可 DM **看不到它改了什么** —— 它只知道"点数对不上"。这一节就是把机制
+// 摊平给 DM 看，走 `renderBriefing` 的中间段（**不进 `campaign.log` 那 60 条上限**）。
+//
+// 三条判据各自对应一种"安静地坏掉"：
+//   ① **三档不能合并**：`undefined`（这一局没有规则集）/ `null`（读不出来）/ 一份集合。
+//      合并之后每一个还没开团的会话都会拿到一句"规则扩展坏了"（写这一节时真的这么写过一次）。
+//   ② **判定的那几条一条都不许截断** —— 机制少一条意味着"目标值被改了而 DM 不知道为什么"，
+//      而 `describeStruct` 那边每类封顶 8 条是对的（少一条线索只是少点风味）。两条相反。
+//   ③ 每一条都走 `describeMechanic`（与三条工具的回执同一份）—— 各拼一遍必然漂移，
+//      而"回执里说的"与"提示词里说的"对不上时，没有任何人会去核对。
+{
+  const compiled = (mechanics) => {
+    const made = compileRuleSet({ version: 1, mechanics });
+    if (!made.ok) throw new Error(`夹具编译不过：${made.problems.join('；')}`);
+    return made.set;
+  };
+  const fog = {
+    type: 'check_modifier', note: '灯塔的浓雾',
+    trigger: { op: 'scene', value: '灯塔' },
+    effect: { handler: 'penalty_to_check', params: { value: 20 } },
+    sourceQuote: '浓雾里看不远'
+  };
+  const cold = {
+    type: 'narrative_hook', note: '海风很冷',
+    trigger: { op: 'scene', value: '码头' },
+    effect: { handler: 'narrate', params: {} },
+    sourceQuote: '风从海上灌进来'
+  };
+
+  ok('空集 → 空串（"没有特殊规则"与"这一局没有规则集"对模型是同一件事）',
+    renderRuleNotes(EMPTY_RULE_SET) === '', renderRuleNotes(EMPTY_RULE_SET));
+  ok('`null` → 一句"读不出来"（那时每一次检定都会报错，不说的话 DM 只会以为工具坏了）',
+    /^【这一局的特殊规则】读不出来/.test(renderRuleNotes(null))
+    && /检定与先攻都会报错/.test(renderRuleNotes(null)),
+    renderRuleNotes(null));
+
+  const notes = renderRuleNotes(compiled([fog]));
+  ok('首行说明这是"这一本模组自己的规矩"',
+    /^【这一局的特殊规则】（这一本模组自己的规矩，判定照它来）/.test(notes), notes);
+  ok('每一条判定的机制各占一行，且那一行**逐字就是** `describeMechanic`（与三条工具的回执同一份）',
+    notes.split('\n')[1] === `· ${describeMechanic(compiled([fog]).mechanics[0])}`
+    && /· 灯塔的浓雾（check_modifier \/ 场景：灯塔）/.test(notes), notes);
+
+  const mixed = renderRuleNotes(compiled([fog, cold]));
+  ok('不参与判定的（`narrate`）并进"按叙事处理"那一行，**不单独占一条**'
+    + '（单独列会让 DM 以为它也算数）',
+    mixed.includes('按叙事处理：') && /海风很冷/.test(mixed)
+    && mixed.split('\n').filter((line) => line.includes('海风很冷')).length === 1
+    && mixed.split('\n').filter((line) => line.startsWith('· ')).length === 2, mixed);
+
+  // ⚠️ 这一条是**反方向**的对照：`describeStruct` 每类封顶 8 条，这里一条都不许封。
+  const many = Array.from({ length: 10 }, (_unused, index) => ({
+    ...fog, note: `机制${index + 1}`, trigger: { op: 'scene', value: `场景${index + 1}` }
+  }));
+  const manyNotes = renderRuleNotes(compiled(many));
+  ok('**判定的机制一条都不截断**（10 条全在）—— 少一条 = 目标值被改了而 DM 不知道为什么',
+    manyNotes.split('\n').filter((line) => line.startsWith('· ')).length === 10
+    && /机制10（check_modifier \/ 场景：场景10）/.test(manyNotes), manyNotes);
+
+  const warned = renderRuleNotes(compiled([{ ...cold, type: 'weather_effect' }]));
+  ok('降级的账要如实说出去（认不出的 type → 按叙事处理），并指向 `.trpg check` 看是哪几条',
+    /有 1 条机制没能编译成判定/.test(warned) && /\.trpg check/.test(warned), warned);
+  // ⚠️ 措辞的判据（P7-f 修）：认不出的 `type` **降级成了 `narrate`、确实在集合里**（上面那行
+  // "按叙事处理"里就有它），所以只能说它"没能编译成**判定**"，不能说"没编译**进来**"。
+  // 四种 warning 里只有"超过 `MAX_MECHANICS`"那一种是真的没进集合。
+  ok('那句话说的是"没能编译成判定"而不是"没编译进来" —— 降级的那条**就在集合里**，'
+    + '说成"没进来"是字面假话，而模型正是照它判断该不该认那条设定',
+    warned.includes('按叙事处理：') && warned.includes('海风很冷')
+    && !warned.includes('没编译进来'), warned);
+
+  ok('同一份规则集渲染两次逐字相同（纯代码、确定性；它每轮都进 system prompt，抖一个字符就整段前缀失效）',
+    renderRuleNotes(compiled([fog, cold])) === renderRuleNotes(compiled([fog, cold])));
+
+  // ── 接进中间段：三档的区别**必须**体现在 `renderBriefing` 上（那才是模型真正看到的东西）──
+  const camp = emptyCampaign('group:0', { title: 'T', system: '', rule: 'generic' });
+  const brief = (set) => renderBriefing(camp, {
+    scenarios: [], rules: [], ...(set === undefined ? {} : { set })
+  });
+  ok('⚠️ 调用方**没给** `set`（还没开局）→ 一个字都不印'
+    + '（写成 `set ?? null` 会让每一个还没开团的会话都拿到一句"规则扩展坏了"）',
+    !brief(undefined).includes('这一局的特殊规则'), brief(undefined));
+  ok('`set: null`（有战役、但那份规则扩展读不出来）→ 印"读不出来"',
+    brief(null).includes('读不出来'), brief(null));
+  ok('`set: EMPTY_RULE_SET` → 也不印（与"这一局没有扩展"是同一个意思）',
+    !brief(EMPTY_RULE_SET).includes('这一局的特殊规则'), brief(EMPTY_RULE_SET));
+  const briefed = brief(compiled([fog]));
+  ok('有机制 → 印出来，且排在剧本正文/结构**之后**（它与正文同稳定度，都在状态之前）',
+    briefed.includes('· 灯塔的浓雾（check_modifier / 场景：灯塔）')
+    && briefed.indexOf('【剧本与规则】') < briefed.indexOf('【这一局的特殊规则】'), briefed);
+}
+
 // ── 5. 剧本与规则：解析、开局注入、清单注入、工作台 ──────────────────────────
 //
 // 这一节的判据是"注入真的发生了"：骨架落进状态、正文进上下文、清单能被模型看到。
@@ -700,6 +881,75 @@ const status = (key) => store.read(key);
     /没有注入剧本/.test(runtime.prompt('group:999')?.body[1] ?? ''));
   ok('坏规则表**不进清单**（它本来也选不中），但仍在工作台列表里',
     !/broken/.test(briefing) && rules.list().some((r) => r.id === 'broken'));
+
+  // ── 抽取产物的三站通路：落盘 → 快照 → 中间段（P7-a）──
+  //
+  // 抽出来的结构要真的走到 DM 眼前，得经过三站：`writeExtras` 落盘 → `beginCampaign` 抄进快照
+  // → `renderBriefing` 印进中间段。**任何一站断了都不会报错**：`.struct.json` 安安静静躺在
+  // 磁盘上、工作台里也看得见，而 DM 手里的提示词一个字都没有 —— 那正是"抽了半天没人用"的样子。
+  // 所以三站各钉一条，另配一条"快照不是引用"的对照（与上面 `灯塔` 那组同形）。
+  const SNAP_STRUCT = {
+    summary: '灯塔与守夜人',
+    scenes: [{ name: '灯塔', summary: '', npcs: ['守夜人'], clues: [] }],
+    npcs: [{ name: '守夜人', summary: '', attitude: '敌意', location: '灯塔', discovered: true }],
+    clues: [], items: [], mechanics: [], warnings: []
+  };
+  scenarios.write('结构团', '---\ntitle: 结构团\n---\n正文一句。');
+  ok('伴生文件写得进去（`.md` 已经是好的，写伴生是第二步；写失败也不回滚 `.md`）',
+    scenarios.writeExtras('结构团', {
+      struct: SNAP_STRUCT,
+      ruleExt: { version: 1, mechanics: [], warnings: [] },
+      raw: [{ heading: '一', text: '原文第一片' }, { heading: '二', text: '原文第二片' }]
+    }).ok === true);
+
+  const snapStart = begin('group:937', { scenario: '结构团' });
+  ok('开局把结构**抄进快照**（`campaign.scenario.struct`）',
+    snapStart.isError !== true && store.read('group:937')?.scenario?.struct?.summary === '灯塔与守夜人',
+    String(snapStart.content));
+  ok('规则扩展也一起进快照（P7-c 的产物在 P7-a 先把通路铺好）',
+    store.read('group:937')?.scenario?.ruleExt?.version === 1,
+    JSON.stringify(store.read('group:937')?.scenario?.ruleExt));
+  ok('原文切片只留**计数**进快照（正文一个字都不进 —— 它每轮进 system prompt）',
+    scenarios.read('结构团').scenario.rawParts === 2,
+    String(scenarios.read('结构团').scenario.rawParts));
+  ok('工作台列表也认得出这一份有结构、有几片原文（`.trpg check` 与设置页读的是同一份数据）',
+    scenarios.list().find((item) => item.id === '结构团')?.hasStruct === true
+    && scenarios.list().find((item) => item.id === '结构团')?.rawParts === 2,
+    JSON.stringify(scenarios.list().find((item) => item.id === '结构团')));
+
+  const snapBody = runtime.prompt('group:937')?.body ?? [];
+  ok('结构并进**中间那一段**，不是新开一段（`body` 恒为 3 段；段数飘忽就没法断言）',
+    snapBody.length === 3, JSON.stringify(snapBody.map((part) => part.slice(0, 24))));
+  ok('DM 的提示词里真的印着【剧情结构】与它抽出来的人',
+    /【剧情结构】（从剧本原文里抽出来的，按它来铺）/.test(snapBody[1] ?? '')
+    && /NPC：守夜人（敌意，灯塔）/.test(snapBody[1] ?? ''),
+    (snapBody[1] ?? '').slice(-500));
+  ok('段内顺序：正文在前、结构紧跟其后（两者同稳定度，一起排在状态段之前才能命中前缀缓存）',
+    (snapBody[1] ?? '').indexOf('正文一句。') >= 0
+    && (snapBody[1] ?? '').indexOf('正文一句。') < (snapBody[1] ?? '').indexOf('【剧情结构】'));
+  ok('原文切片**不进提示词**（它只保底给人看；进了就等于每轮把整份模组塞进上下文）',
+    !/原文第一片/.test(snapBody[1] ?? '') && !/原文第二片/.test(snapBody[1] ?? ''));
+
+  // 快照的对照断言：改掉**伴生文件**，正在跑的团一个字都不变（与 `灯塔` 那组同形，
+  // 但这里改的是 `.struct.json` 而不是 `.md` —— 它是另一条缓存路径，见 `#signature`）。
+  scenarios.writeExtras('结构团', { struct: { ...SNAP_STRUCT, summary: '改过的' } });
+  ok('改了结构文件之后，已经开着的那一局逐字不变（快照，不是引用）',
+    store.read('group:937')?.scenario?.struct?.summary === '灯塔与守夜人'
+    && /概要：灯塔与守夜人/.test(runtime.prompt('group:937')?.body[1] ?? ''));
+  ok('但**新开**的一局用的是改过之后的那一版（手改 `.struct.json` 不重启也生效）',
+    begin('group:938', { scenario: '结构团' }).isError !== true
+    && /概要：改过的/.test(runtime.prompt('group:938')?.body[1] ?? ''),
+    (runtime.prompt('group:938')?.body[1] ?? '').slice(-400));
+
+  ok('手写的剧本（一个伴生都没有）不印结构小节（这是绝大多数剧本的正常状态）',
+    !/【剧情结构】/.test(runtime.prompt('group:930')?.body[1] ?? ''));
+
+  scenarios.write('坏结构团', '---\ntitle: 坏结构团\n---\n正文。');
+  scenarios.writeExtras('坏结构团', { struct: '这不是一个对象' });
+  ok('结构文件坏了不掀翻剧本：照样开得了局，但对模型**沉默**（它没法修，印一句"结构坏了"只会让它以为这一局缺了东西）',
+    begin('group:939', { scenario: '坏结构团' }).isError !== true
+    && !/【剧情结构】/.test(runtime.prompt('group:939')?.body[1] ?? ''),
+    (runtime.prompt('group:939')?.body[1] ?? '').slice(-300));
 
   // ── `.trpg new` 命令：与工具共用同一个实现（P2 起建局归 new，start 只推状态） ──
   const commands = runtime.commandHandlers;
@@ -863,6 +1113,10 @@ const status = (key) => store.read(key);
       const media = [{ kind: 'file', name: 'f.md', file: 'f.md', url }];
       const saves = new ScenarioStore(path.join(DIR, 'scenarios-fmt'));
       const extract = (text) => async () => ({ format: 'text', text, chars: text.length, truncated: false });
+      // P7-a 之后 `usedModel` 那条路**先走抽取管线**，`format` 是它的后备。下面三条验的正是
+      // 后备那条路，所以注入一个"必定失败"的管线 —— 于是它们逐字照旧（一次调用、同样的文案）。
+      // **不注入的话它们会变成假绿**：管线会真的去调那个假端点，而它的脚本是消耗式的。
+      const noPipeline = async () => ({ ok: false, message: '（本用例验的是后备那条路）' });
 
       model.requests = [];
       model.script = [{ content: '这条不该被用到' }];
@@ -879,17 +1133,90 @@ const status = (key) => store.read(key);
 
       model.requests = [];
       model.script = [{ content: '```markdown\n' + FORM + '\n```' }];
-      const viaModel = await saveScenario({ media }, '整理过的', saves, { extract: extract(PLAIN) });
-      ok('格式不对 → 让模型整理一次，落库的是**模型给的版本**（不是原文）',
+      const viaModel = await saveScenario({ media }, '整理过的', saves,
+        { extract: extract(PLAIN), analyze: noPipeline });
+      ok('格式不对 + 管线没成 → 退回让模型整理一次，落库的是**模型给的版本**（不是原文）',
         model.requests.length === 1 && saves.read('整理过的').scenario.title === '灯塔', viaModel);
       ok('回执里点明"让模型整理过"（它同时解释了两件事：回执为什么慢、内容为什么被重排过）',
         /已让模型整理/.test(viaModel) && /原文 20 字/.test(viaModel), viaModel);
+      ok('退回整理时**明说抽取没成**（只说"整理过"，管理员会以为那份剧本有剧情结构）',
+        /剧情抽取没成/.test(viaModel) && /没有剧情结构/.test(viaModel), viaModel);
 
       model.requests = [];
       model.script = [{ content: '我做不到' }];
-      const failed = await saveScenario({ media }, '失败了的', saves, { extract: extract(PLAIN) });
+      const failed = await saveScenario({ media }, '失败了的', saves,
+        { extract: extract(PLAIN), analyze: noPipeline });
       ok('模型整理失败时如实报错，**既不落库也不假装成功**',
         /不是剧本格式/.test(failed) && saves.read('失败了的').ok === false, failed);
+      // 两条原因**都要在**：管线那句说的是"哪一片、哪一步没成"，后备那句说的是"连整理都没成"。
+      // 只说一句会把一半事实丢掉，而排查的人正是靠这一半去分辨"模型不行"还是"文件不行"。
+      ok('管线与后备**都**没成时，两条原因都在回执里',
+        /本用例验的是后备那条路/.test(failed) && /退一步只做格式整理也没成/.test(failed), failed);
+
+      // ── 管线成了的那条路 ──
+      //
+      // 注入一个成功的管线（生产实现会真的发 N+1 次调用，本机不能发），验的是**接线**：
+      // 落库的是管线给的正文、伴生文件真的写下去了、回执把"抽了几片/用了几次/丢了几个字/
+      // 有没有待核项"都说出来。**抽取质量本身只能人工冒烟**（见 `t-trpg-extract.mjs` 文件头）。
+      const STRUCT = {
+        summary: '废弃灯塔与守夜人',
+        scenes: [{ name: '灯塔', summary: '一层门厅', npcs: ['守夜人'], clues: ['缺页的航海日志'] }],
+        npcs: [{ name: '守夜人', summary: '话少', attitude: '敌意', location: '灯塔' }],
+        clues: [{ text: '缺页的航海日志', visible: true, location: '灯塔' }],
+        items: [{ name: '铜钥匙', summary: '', location: '灯塔' }],
+        mechanics: [{
+          type: 'check_modifier', triggerText: '在灯塔里', effectText: '侦察 -20',
+          note: '浓雾', sourceQuote: '雾里什么都看不清'
+        }],
+        warnings: ['第 1 条机制的引文在原文里找不到：雾里什么都看不清']
+      };
+      const pipeline = async () => ({
+        ok: true,
+        result: {
+          body: FORM, struct: STRUCT,
+          chunks: [{ index: 0, heading: '灯塔', chars: PLAIN.length, text: PLAIN }],
+          totalChars: PLAIN.length, droppedChars: 300, calls: 2, ms: 1234
+        }
+      });
+      model.requests = [];
+      model.script = [{ content: '这条不该被用到' }];
+      const drawn = await saveScenario({ media }, '抽过的', saves,
+        { extract: extract(PLAIN), analyze: pipeline });
+      ok('管线成了 → 落库的是管线合成的正文（标题来自它），而且**一次模型调用都没发**（注入的就是管线本身）',
+        model.requests.length === 0 && saves.read('抽过的').scenario.title === '灯塔', drawn);
+      ok('抽取产物落成**伴生文件**：`.struct.json` 真的写下去了（不是只记在内存里）',
+        saves.read('抽过的').scenario.struct !== undefined
+        && saves.read('抽过的').scenario.rawParts === 1,
+        JSON.stringify(saves.list().find((item) => item.id === '抽过的')));
+      ok('回执把抽取的账说清楚：几类各几条、切了几片、用了几次调用',
+        /抽出了 1 个场景、1 个 NPC、1 条线索、1 件道具、1 条机制/.test(drawn)
+        && new RegExp(`原文 ${PLAIN.length} 字切成 1 片，用了 2 次调用`).test(drawn), drawn);
+      ok('**"没进抽取的字数"单独说**：它是管理员判断"要不要手工再传一次"的唯一依据',
+        /还有 300 字超出片数上限没进抽取/.test(drawn), drawn);
+      ok('待核项有计数、并**指向 `.trpg check`**（只报条数的话，管理员没法追问是哪几条 —— '
+        + 'P7-b 之前这里写的是"记在 <id>.struct.json 里"，那个文件名群友打不开）',
+        /待核项 1 条 —— 敲 `\.trpg check 抽过的` 逐条看。/.test(drawn), drawn);
+      ok('走管线时**不再**说"已让模型整理过"（那句话会把"抽取"降格成"整理"，误导管理员）',
+        !/已让模型整理/.test(drawn), drawn);
+      ok('抽取成功的回执照旧以"开局怎么敲"收尾（回执的形状不因为走了管线而变）',
+        typeof drawn === 'string' && /开局：\.trpg new 抽过的/.test(drawn), drawn);
+
+      // 管线合成出来的正文**仍然要过 `parseScenario`** —— 抽取不是"绕过正文上限"的后门。
+      // 一份 30 页模组被"压缩"成 5 万字（模型没照提示词做）时，这条路必须**如实拒绝**：
+      // 放进去的话，下一轮 system prompt 会被一份超长正文顶爆，而没有人知道是谁放进来的。
+      model.requests = [];
+      const overlong = await saveScenario({ media }, '抽过头了', saves, {
+        extract: extract(PLAIN),
+        analyze: async () => ({
+          ok: true,
+          result: {
+            body: `---\ntitle: x\n---\n${'字'.repeat(5000)}`,
+            struct: STRUCT, chunks: [], totalChars: 5000, droppedChars: 0, calls: 1, ms: 1
+          }
+        })
+      });
+      ok('管线合成的正文超长 → 落库**如实失败**（抽取不是绕过正文上限的后门），而且不落盘',
+        /太长/.test(overlong) && saves.read('抽过头了').ok === false, overlong);
     } finally {
       updateConfig({ security: { allowPrivateImageHosts: before === true } });
       server.close();
@@ -1091,12 +1418,12 @@ const status = (key) => store.read(key);
 
   ok('**每条命令各自是一个 handler**（加一个动作 = 加一行声明 + 一个 handler）',
     ['.trpg new', '.trpg join', '.trpg status', '.trpg start', '.trpg end', '.trpg mode',
-      '.trpg scenario', '.trpg', '.pc new', '.pc roll', '.pc confirm', '.pc show', '.pc save', '.pc',
+      '.trpg scenario', '.trpg check', '.trpg', '.pc new', '.pc roll', '.pc confirm', '.pc show', '.pc save', '.pc',
       '.combat start', '.combat next', '.combat end', '.combat',
       '.log export', '.log',
       '.ra', '.rh', '.st', '.r']
       .every((name) => typeof commands[name] === 'function')
-    && Object.keys(commands).length === 24, JSON.stringify(Object.keys(commands)));
+    && Object.keys(commands).length === 25, JSON.stringify(Object.keys(commands)));
 
   const wizard = String(await tell('.trpg status'));
   ok('还没开局时 `.trpg status` 给的是**向导**（已经开局给的是局势卡，那是另一段的事）',
@@ -1158,6 +1485,214 @@ const status = (key) => store.read(key);
     && scenarioNameFromFile([{ kind: 'file', name: '   ' }]) === null
     && scenarioNameFromFile(file('.md')) === null,
     JSON.stringify(scenarioNameFromFile(file('.md'))));
+}
+
+// ── 5g2. `.trpg check <名字>`（P7-b）：把抽取结果摊开给管理员看 ────────────────
+//
+// 抽取管线（P7-a）把一份非结构化模组变成三样东西（`.md` / `.struct.json` / `.raw/`），而
+// **抽得对不对、有没有条目被上限裁掉、引文对不对得上原文，管理员在群里一处都看不到**。
+// 这条命令就是那个出口。它零模型调用、零写入，所以这里可以随便敲。
+//
+// ⚠️ 它与 `commands/check.ts`（`.ra` / `.rh` / `.st`）**不是一件事**，名字像只是巧合。
+{
+  const commands = createRuntime().commandHandlers;
+  const tell = (text, chatKey = 'group:chk') => callIn(commands)(text, chatKey, []);
+  // 与其余段落一样用**独立的 store 实例**：它读的是同一批文件（目录的薄视图），
+  // 所以不必给 `ExtrasRuntime` 开一个"取某个扩展内部对象"的口子。
+  const scenarios = new ScenarioStore();
+
+  // 夹具：一份"抽过、且抽得不算干净"的剧本（两条待核项），一份"抽得很干净"的，
+  // 一份"手写的、压根没抽过"的，以及两种坏法（形状不对 / JSON 半截）。
+  const BODY = '正文一句。';
+  scenarios.write('核对团', `---\ntitle: 核对团\nrule: coc7\n---\n${BODY}`);
+  scenarios.writeExtras('核对团', {
+    struct: {
+      summary: '灯塔与守夜人',
+      scenes: [{ name: '灯塔', summary: '', npcs: ['守夜人'], clues: [] }],
+      npcs: [{ name: '守夜人', summary: '', attitude: '敌意', location: '灯塔', discovered: true }],
+      clues: [{ text: '门厅的血迹', visible: true, location: '灯塔' }],
+      items: [],
+      mechanics: [{ type: 'narrative_hook', triggerText: '', effectText: '灯灭时别回头', note: '', sourceQuote: '' }],
+      warnings: ['引文对不上：守夜人不吃普通伤害', '原文太长，只抽了前 3 片']
+    },
+    ruleExt: { version: 1, mechanics: [], warnings: [] },
+    raw: [{ heading: '一', text: '原文第一片' }, { heading: '二', text: '原文第二片' }, { heading: '三', text: '原文第三片' }]
+  });
+  scenarios.write('干净团', `---\ntitle: 干净团\n---\n${BODY}`);
+  scenarios.writeExtras('干净团', {
+    struct: { summary: '', scenes: [], npcs: [], clues: [], items: [], mechanics: [], warnings: [] }
+  });
+  scenarios.write('无结构团', `---\ntitle: 无结构团\n---\n${BODY}`);
+  scenarios.write('形状坏团', `---\ntitle: 形状坏团\n---\n${BODY}`);
+  scenarios.writeExtras('形状坏团', { struct: '这不是一个对象' });
+  scenarios.write('半截团', `---\ntitle: 半截团\n---\n${BODY}`);
+  fs.writeFileSync(scenarios.structFile('半截团'), '{ "summary": ', 'utf8');
+  scenarios.write('多警告团', `---\ntitle: 多警告团\n---\n${BODY}`);
+  scenarios.writeExtras('多警告团', {
+    struct: {
+      summary: '', scenes: [], npcs: [], clues: [], items: [], mechanics: [],
+      warnings: Array.from({ length: 11 }, (_, i) => `第 ${i + 1} 条没核对上`)
+    }
+  });
+
+  const checked = String(await tell('.trpg check 核对团'));
+  ok('`.trpg check <名字>` 把统计**逐项**摊开（标题、推荐规则表、正文字数、切片数、五类计数）',
+    checked.startsWith('【剧本核对】核对团')
+    && checked.includes('标题：核对团（推荐规则表：coc7）')
+    && checked.includes(`正文 ${BODY.length} 字，原文切片 3 片`)
+    && checked.includes('剧情结构：1 个场景、1 个 NPC、1 条线索、0 件道具、1 条机制'), checked);
+  ok('待核项**逐条**印出来 —— `.trpg scenario` 的回执只报得出条数，逐条看正是这条命令的存在理由',
+    checked.includes('待核项（2 条）：')
+    && checked.includes('· 引文对不上：守夜人不吃普通伤害')
+    && checked.includes('· 原文太长，只抽了前 3 片'), checked);
+  ok('下一步给的是**真能敲的词形**，而且指出要改哪个文件、改完敲什么',
+    checked.includes('要开局：.trpg new 核对团')
+    && checked.includes('data/trpg/scenarios/核对团.struct.json')
+    && checked.includes('再敲一次 `.trpg check 核对团`'), checked);
+  ok('没有待核项时明说"没有"（把那一节省掉的话，"没有"与"没印"分不出来）',
+    String(await tell('.trpg check 干净团')).includes('待核项：没有。'),
+    String(await tell('.trpg check 干净团')));
+
+  const bare = String(await tell('.trpg check'));
+  ok('不带名字 = 用法 + 剧本库清单（复用 `renderScenarioList`，与另两处同一份拼法）',
+    bare.includes('用法：.trpg check <剧本名>') && /剧本库里/.test(bare), bare);
+
+  const missing = String(await tell('.trpg check 不存在的东西'));
+  ok('剧本库里没有这个名字 → 明说没有 + 现在有什么（`read()` 的文案本来就有那句，**不拼第二遍**）',
+    missing.includes('不存在的东西') && missing.includes('现在有：')
+    && missing.indexOf('现在有：') === missing.lastIndexOf('现在有：'), missing);
+
+  const noExtras = String(await tell('.trpg check 无结构团'));
+  ok('手写的、格式本来就对的剧本**没有抽取产物** —— 如实说一句，并给出"要抽就重传一次"那条路',
+    noExtras.includes('还没有抽取产物') && noExtras.includes('.trpg scenario 无结构团'), noExtras);
+
+  const brokenShape = String(await tell('.trpg check 形状坏团'));
+  ok('伴生结构形状不对 → 说"形状不对"，**不谎报"没有抽取产物"**（抽过，只是文件坏了）',
+    brokenShape.includes('形状不对') && !brokenShape.includes('还没有抽取产物'), brokenShape);
+
+  const halfJson = String(await tell('.trpg check 半截团'));
+  ok('伴生文件是半截 JSON → 说"没有可用的"并指向「伴生文件」那一段（成因与上一条不同，两条都得说清）',
+    halfJson.includes('剧情结构：没有可用的') && halfJson.includes('伴生文件：') && /解不开/.test(halfJson),
+    halfJson);
+
+  const many = String(await tell('.trpg check 多警告团'));
+  ok('待核项超过 8 条时**截断并说还有几条**（回执不该长到刷屏；全量都在 struct.json 里）',
+    many.includes('待核项（11 条）：') && many.includes('还有 3 条没列'), many);
+
+  // ── 规则扩展那一段（P7-f）：三类**分开列** ──
+  //
+  // 判据只有一条：`effect.handler` 是不是 `narrate`（编译期定的，不是这里猜的）。非分不可的
+  // 理由是"可执行的那几条**真的会改检定与伤害**" —— 混在一张单子里，管理员没法回答
+  // "这份模组到底改了什么判定"这个唯一要紧的问题。
+  scenarios.write('机制团', `---\ntitle: 机制团\n---\n${BODY}`);
+  scenarios.writeExtras('机制团', {
+    ruleExt: {
+      version: 1,
+      mechanics: [
+        {
+          type: 'check_modifier', note: '灯塔的浓雾', trigger: { op: 'scene', value: '灯塔' },
+          effect: { handler: 'penalty_to_check', params: { value: 20 } }, sourceQuote: '浓雾里看不远'
+        },
+        {
+          type: 'narrative_hook', note: '灯灭时别回头', trigger: { op: 'scene', value: '灯塔' },
+          effect: { handler: 'narrate', params: {} }, sourceQuote: '别回头'
+        },
+        {
+          type: 'weather_effect', note: '风很冷', trigger: { op: 'scene', value: '码头' },
+          effect: { handler: 'narrate', params: {} }, sourceQuote: '风很冷'
+        }
+      ]
+    }
+  });
+  const mechCheck = String(await tell('.trpg check 机制团'));
+  ok('规则扩展那一段**先给账**：可执行 / 只作叙事提示 / 编译时没进判定 各几条',
+    mechCheck.includes('规则扩展：可执行 1 条、只作叙事提示 2 条、编译时没进判定 1 条'), mechCheck);
+  ok('**可执行的**逐条列全（一条都不截断 —— 少印一条 = 管理员以为这份模组没这条规则）',
+    mechCheck.includes('可执行的（检定与伤害照它来）：')
+    && mechCheck.includes('· 灯塔的浓雾（check_modifier / 场景：灯塔）'), mechCheck);
+  ok('**只作叙事提示的**另起一段、排在那一段之后（混在一起会让管理员以为它也算数）',
+    mechCheck.includes('只作叙事提示的（不参与判定，DM 拿它当氛围参考）：')
+    && mechCheck.includes('· 灯灭时别回头（narrative_hook / 场景：灯塔）')
+    && mechCheck.indexOf('只作叙事提示的') > mechCheck.indexOf('可执行的（'), mechCheck);
+  ok('**编译时没进判定的**原文逐字带出 —— 认不出的 type 也在这一档（它降级成了叙事，不是消失了，'
+    + '所以上面"只作叙事提示"那一段里**也有它**）',
+    mechCheck.includes('编译时没进判定的：')
+    && mechCheck.includes('· 第 3 条机制的 type「weather_effect」我不认识，已按纯叙事处理（不影响判定）')
+    && mechCheck.includes('· 风很冷（narrative_hook / 场景：码头）'), mechCheck);
+
+  // "没有扩展"与"扩展是空的"**不是同一句话**：前者检定按基础规则表走，后者文件确实在。
+  ok('没有 `.rule.json` 的剧本明说"没有"，并点出后果（检定按基础规则表走）',
+    noExtras.includes('规则扩展：没有 —— 这份剧本的检定按基础规则表走。'), noExtras);
+  ok('有 `.rule.json` 但一条机制都没有 → 说"空的"（与上一条分开：文件确实在，只是里面没东西）',
+    checked.includes('规则扩展：空的（文件在，但里面一条机制都没有）。'), checked);
+  ok('有 `.rule.json` 时**多给一句**"改哪份文件"（机制与结构分居两份文件，只说 struct.json '
+    + '会让人以为改那儿就能改规则）',
+    checked.includes('规则扩展要改：编辑 data/trpg/scenarios/核对团.rule.json'), checked);
+  ok('对照：没有 `.rule.json` 的剧本**不说**这句（让人去改一份不存在的文件，比不说更坏）',
+    !noExtras.includes('规则扩展要改：'), noExtras);
+
+  // 扩展坏了：**逐条**列出来，并点出后果。
+  scenarios.write('坏扩展团', `---\ntitle: 坏扩展团\n---\n${BODY}`);
+  scenarios.writeExtras('坏扩展团', {
+    ruleExt: {
+      version: 1,
+      mechanics: [{
+        type: 'check_modifier', note: '浓雾', trigger: { op: 'scene', value: '灯塔' },
+        effect: { handler: 'reduce_damage', params: {} }, sourceQuote: '看不远'
+      }]
+    }
+  });
+  const badExt = String(await tell('.trpg check 坏扩展团'));
+  ok('扩展坏了 → 明说"读不出来"，并点出**后果**（用它的那一局开局会被拒）—— '
+    + '只说一堆问题的话，管理员不知道它此刻有没有生效',
+    badExt.includes('规则扩展：读不出来（这份规则扩展坏了，用它的那一局开局会被拒）：')
+    && badExt.includes('· 第 1 条机制：effect.handler 写的是「reduce_damage」，我不认识它'), badExt);
+  ok('⚠️ 扩展坏了时**不印**"可执行的 / 只作叙事提示的"那两段（编译没通过，一条机制都没成立）',
+    !badExt.includes('可执行的（检定与伤害照它来）：')
+    && !badExt.includes('只作叙事提示的（'), badExt);
+  ok('群友可见的回执里不含 Markdown 的 `**`（QQ 不认，星号会原样显示）',
+    !mechCheck.includes('**') && !badExt.includes('**') && !checked.includes('**'),
+    mechCheck.split('\n').filter((line) => line.includes('**')).join(' ｜ '));
+
+  // 正在用这份剧本的那一局：那时"去开一局"是**错的**提示。
+  ok('对照（先说结论）：还没开局的那个会话，给的是"要开局"', checked.includes('要开局：.trpg new 核对团'));
+  ok('`.trpg new 核对团` 真的开了一局（下面那条的前提，不成立的话它会静默变成假绿）',
+    !String(await tell('.trpg new 核对团', 'group:chk-live')).startsWith('这份剧本'));
+  const live = String(await tell('.trpg check 核对团', 'group:chk-live'));
+  ok('正在用这份剧本的那一局**优先说**，并且不再劝你"去开一局"',
+    live.includes('正在用这份剧本') && !live.includes('要开局：'), live);
+
+  // ── 用法清单的守护（补一个**空白**）──
+  //
+  // `COMMAND_USAGE`（裸 `.trpg` 的回执）是"这一族有哪些命令"的**唯一**清单位置，而它此前
+  // 没有任何守护：加一条子命令、忘了加一行，表现只是"群友敲错时看到的清单少一条"，不报任何错。
+  // `.trpg check` 自己就是这么加上去的（加之前 grep `COMMAND_USAGE` 零命中）。
+  //
+  // ⚠️ **正方向对裸命令是"顺带成立"的**：`.trpg` / `.pc` / `.combat` / `.log` 在清单里只作为前缀
+  // 出现（`.trpg new …`），`includes('`.trpg')` 由那条子命令的条目顺带满足 —— 所以对四个裸命令
+  // 它查不出新东西（裸命令本来也不需要单独一行：它回的就是这份清单）。对**两词命令**它才是真判据。
+  // 真正有判别力的是**反方向**：清单里提到的每个命令都必须真的存在，它守的是
+  // "教群友敲一条已经不存在的命令"。
+  const usage = String(await tell('.trpg'));
+  const specs = EXTRA_REGISTRY.find((item) => item.id === 'trpg')?.commands ?? [];
+  const declared = specs.flatMap((spec) => (spec.subs ?? []).length
+    ? spec.subs.map((sub) => `${spec.names[0]} ${sub}`)
+    : [spec.names[0]]);
+  const absent = declared.filter((word) => !usage.includes('`' + word));
+  ok('每个声明过的命令词形都在用法清单里（少一行不会有任何报错，表现只是群友看到的清单少一条）',
+    absent.length === 0, absent.join('、') || `${declared.length} 个词形逐个查过`);
+  // ⚠️ 判据对**带 subs 的那一族**必须比到第二个词：只认首词的话，`.trpg list` 这种"家族前缀对、
+  // 子命令不存在"的条目会被放过 —— 而它正是这条断言要拦的东西（教群友敲一条敲不动的命令）。
+  const families = new Set(specs.filter((spec) => (spec.subs ?? []).length).map((spec) => spec.names[0]));
+  const stale = [...usage.matchAll(/`([^`]+)`/g)].map((match) => match[1].split(/\s+/))
+    .filter((words) => {
+      if (declared.includes(words.slice(0, 2).join(' '))) return false;
+      if (families.has(words[0])) return true;
+      return !declared.includes(words[0]);
+    })
+    .map((words) => words.join(' '));
+  ok('对照：清单里提到的每个命令都真的声明过（留着一条已删掉的命令 = 教群友敲一条敲不动的命令）',
+    stale.length === 0, stale.join('、') || '清单里提到的每一条都查过');
 }
 
 // ── 5h. 会话全链路（P2）：建团 → 报名 → 建卡 → 确认 → 开跑 → 收团 ──────────
@@ -1989,6 +2524,7 @@ const status = (key) => store.read(key);
   for (const text of [
     '.trpg', '.trpg status', '.trpg join', '.trpg start', '.trpg end', '.trpg mode', '.trpg scenario',
     '.trpg 乱写', '.trpg start 现成的', '.trpg scenario 灯塔',
+    '.trpg check', '.trpg check 灯塔', '.trpg check 没有这份',
     '.pc', '.pc new 阿飞', '.pc roll', '.pc confirm', '.pc show', '.pc save',
     '.combat', '.combat start', '.combat next', '.combat end',
     '.log', '.log export',
@@ -2060,6 +2596,241 @@ const status = (key) => store.read(key);
     stripComments(readTs('extra/trpg/rules/dice.ts')).includes('**'));
 }
 
+// ── 5r. 规则集的**唯一取用口**与三处钩子（P7-d）───────────────────────────────
+//
+// 这一段证明三件事，每件都有一个"少一处就静默"的形状：
+//   ① 六处消费点全走 `ruleSetFor`：**失败形状逐字不变**（前缀不同是刻意的，句身同一句）；
+//   ② 三处钩子真的挂在行为上，而且**每一处都有负对照**；
+//   ③ `beginCampaign` 在规则扩展坏时**拒绝开局，而且什么都没落盘**。
+//
+// ⚠️ 这里**不重测** P7-a/P7-b：抽取管线在 `t-trpg-extract.mjs`，`.trpg check` 的回执在 5g2 段。
+{
+  // `createRuntime()` 自己建五个 store（默认目录 = `<DATA_DIR>/trpg*`），且**不暴露它们** ——
+  // 所以断言要用的存档/剧本/规则表必须由**同目录**的实例去写去读。文件级的 `ruleStore`
+  // 指向的是 `DIR/rules`，**不是** `DIR/trpg/rules`，所以这里另起一套。
+  const rtRules = new RuleStore();
+  const rtScenarios = new ScenarioStore();
+  const campStore = new TrpgStore();
+  const rt = createRuntime();
+  const rtPriv = createRuntime({ sendPrivate: async () => {} });
+  const tell = (line, chatKey) => callIn(rt.commandHandlers)(line, chatKey, []);
+  const tellPriv = (line, chatKey) => callIn(rtPriv.commandHandlers)(line, chatKey, []);
+  const callRt = (name, ctx, args) => rt.handlers[name](ctx, args);
+
+  // 坏表：`condition` 是个半截表达式，`compileRule` 会拒它。
+  fs.mkdirSync(rtRules.dir, { recursive: true });
+  fs.writeFileSync(path.join(rtRules.dir, 'rt-broken.json'),
+    JSON.stringify({ name: '坏', levels: [{ name: 'a', label: 'A', success: true, condition: 'total >= ' }] }),
+    'utf8');
+  // ⚠️ **运行时取，不写死**：那句话由 `rule-store.ts` 拼（含表 id 与 `problems.join('；')`）。
+  // 手抄一份进断言的话，改一次文案就红一片，而它想守的是"六处报的是同一句话"。
+  const BROKEN = rtRules.read('rt-broken').message;
+  ok('夹具：坏表读出来是 `ok:false` 且带一句话（下面九条断言全挂在它上面）',
+    typeof BROKEN === 'string' && BROKEN.startsWith('规则表「rt-broken」有问题：'), BROKEN);
+  campStore.write(emptyCampaign('group:971', { title: '坏表团', system: '', rule: 'rt-broken' }));
+  const brokenCtx = () => fakeCtx('group:971');
+
+  // ── ① 六处消费点：换成 `ruleSetFor` 之后失败形状逐字不变 ──
+  const rollBroken = await callRt('roll', brokenCtx(), { expr: '1d100', target: 70, reason: '看雾' });
+  ok('消费点 1（`roll` 工具）：基础表坏了 → `错误：` + 那句话',
+    body(rollBroken) === `错误：${BROKEN}`, body(rollBroken));
+
+  const combatBroken = await callRt('campaign', brokenCtx(), { action: 'combat', sub: 'start' });
+  ok('消费点 2（`campaign` 工具的战斗分支）：同上',
+    body(combatBroken) === `错误：${BROKEN}`, body(combatBroken));
+
+  const cmdCombat = await tell('.combat start', 'group:971');
+  ok('消费点 3（`.combat start`）：带自己的前缀 `规则表读不出来，排不了先攻：`',
+    cmdCombat === `规则表读不出来，排不了先攻：${BROKEN}`, cmdCombat);
+
+  const cardFixture = await callRt('character', brokenCtx(),
+    { action: 'create', name: '阿飞', ownerId: '10001', stats: { 侦查: 45 }, hpMax: 10 });
+  ok('夹具：坏表团里照样建得出卡（`character` 的建卡不碰规则集）',
+    cardFixture.isError !== true, body(cardFixture));
+
+  const pcRoll = await tell('.pc roll', 'group:971');
+  ok('消费点 4（`.pc roll`）：裸的那句话，不带前缀',
+    pcRoll === BROKEN, pcRoll);
+
+  const raBroken = await tell('.ra 侦查', 'group:971');
+  ok('消费点 5（`.ra`）：`DiceError` 抛出的那句话原样进群', raBroken === BROKEN, raBroken);
+
+  const rhBroken = await tellPriv('.rh 侦查', 'group:971');
+  ok('消费点 5b（`.rh`）：与 `.ra` 共用同一个 `judge`，所以也是同一句话', rhBroken === BROKEN, rhBroken);
+
+  const newBroken = await tell('.trpg new 坏表新团 rt-broken', 'group:979');
+  ok('消费点 6（`.trpg new` → `beginCampaign`）：`错误：` + 那句话',
+    newBroken === `错误：${BROKEN}`, newBroken);
+
+  const stripped = [rollBroken, combatBroken, cmdCombat, pcRoll, raBroken, rhBroken, newBroken]
+    .map((item) => String(typeof item === 'string' ? item : item.content)
+      .replace(/^错误：/, '').replace(/^规则表读不出来，排不了先攻：/, ''));
+  ok('六处报的是**同一句话**（前缀不同是刻意的，句身逐字相同）—— 统一取用口的全部意义',
+    new Set(stripped).size === 1 && stripped[0] === BROKEN, [...new Set(stripped)].join(' ｜ '));
+
+  // ── 夹具：三份剧本（`write` 必须排在 `writeExtras` 之前 —— write 会清掉伴生）──
+  const ext = (...mechanics) => ({ version: 1, mechanics });
+  const mech = (over = {}) => ({
+    type: 'check_modifier', note: '灯塔的浓雾',
+    trigger: { op: 'scene', value: '灯塔' },
+    effect: { handler: 'penalty_to_check', params: { value: 20 } },
+    sourceQuote: '浓雾里看不远', ...over
+  });
+  const immune = (name) => ({
+    type: 'conditional_immunity', note: `${name}不吃普通伤害`,
+    trigger: { op: 'actor', value: name },
+    effect: { handler: 'immune_to_damage', params: {} },
+    sourceQuote: '刀枪不入'
+  });
+  const w1 = rtScenarios.write('规则模组', '---\ntitle: 规则模组\nscene: 灯塔\n---\n浓雾笼罩着灯塔。\n');
+  const w2 = rtScenarios.writeExtras('规则模组', { ruleExt: ext(mech()) });
+  const w3 = rtScenarios.write('免疫模组', '---\ntitle: 免疫模组\n---\n守夜人刀枪不入。\n');
+  const w4 = rtScenarios.writeExtras('免疫模组', { ruleExt: ext(immune('守夜人')) });
+  const w5 = rtScenarios.write('坏规则模组', '---\ntitle: 坏规则模组\n---\n一份写坏了的规则。\n');
+  const w6 = rtScenarios.writeExtras('坏规则模组',
+    { ruleExt: ext({ ...mech(), effect: { handler: 'reduce_damage', params: {} } }) });
+  ok('夹具：三份剧本 + 三份伴生都写得进去（写不进去的话下面全是空转）',
+    [w1, w2, w3, w4, w5, w6].every((item) => item.ok === true),
+    JSON.stringify([w1, w2, w3, w4, w5, w6].map((item) => item.ok)));
+
+  // ── ② 三处钩子 ──
+  const newVisible = await tell('.trpg new 规则模组', 'group:972');
+  ok('`.trpg new` 的回执**原样印进群**，所以机制段一个字都不许出现（机制名可能带暗线信息）',
+    newVisible.includes('剧本「规则模组」已注入') && !newVisible.includes('这一场景下生效的规则'), newVisible);
+  const snap972 = campStore.read('group:972');
+  ok('对照：那一局存档里确实有 scene=灯塔 与冻结的 ruleExt —— 上一条不是空转',
+    snap972?.scene === '灯塔' && snap972?.scenario?.ruleExt !== undefined,
+    `${snap972?.scene} / ${snap972?.scenario?.ruleExt !== undefined}`);
+
+  // ── ②b. 规则说明进提示词（P7-e 的端到端：`impl.prompt` → `renderBriefing`）──
+  //
+  // 4c 段那些是 `renderRuleNotes` 的单元。**接线**要单独钉：`impl.ts` 少算一次 `ruleSetFor`、
+  // 或者把"没有战役"与"有战役但读不出来"合成一档，单元断言照样全绿，而模型什么都看不到
+  // （或者反过来 —— 每一个还没开团的会话都拿到一句"规则扩展坏了"）。
+  const plan972 = rt.prompt('group:972');
+  ok('端到端：那一局的特殊规则真的进了 system prompt 的中间段',
+    plan972.body.length === 3
+    && plan972.body[1].includes('· 灯塔的浓雾（check_modifier / 场景：灯塔）'),
+    plan972.body[1].slice(-300));
+  ok('端到端：段序仍是"人格 → 清单/正文/结构/规则 → 状态"（新内容并进中间段，段数不变）',
+    /【跑团主持人】/.test(plan972.body[0]) && /【剧本与规则】/.test(plan972.body[1])
+    && /【当前跑团状态】/.test(plan972.body[2]),
+    JSON.stringify(plan972.body.map((text) => text.slice(0, 16))));
+  const plan998 = rt.prompt('group:998');
+  ok('端到端：**没开团的会话一个字都不印**（三档一合并，这里就会冒出一句"规则扩展坏了"）',
+    !plan998.body[1].includes('这一局的特殊规则'), plan998.body[1]);
+
+  const started973 = await callRt('campaign', fakeCtx('group:973'), { action: 'start', scenario: '规则模组' });
+  ok('`campaign action=start`（模型那一侧）**要**报一遍这一场景压着哪些规则',
+    body(started973).includes('这一场景下生效的规则')
+    && body(started973).includes('· 灯塔的浓雾（check_modifier / 场景：灯塔）'), body(started973));
+  const log973 = campStore.read('group:973')?.log.find((entry) => entry.text.startsWith('生效机制：'));
+  ok('机制那条日志标 `visible: false`（不进玩家视角、不进战报）',
+    log973?.visible === false, JSON.stringify(log973));
+
+  const rolled973 = await callRt('roll', fakeCtx('group:973'), { expr: '1d100', target: 70, reason: '看雾' });
+  ok('`roll` 钩子（正）：目标值真的被机制改了（70 − 20 = 50），而且明说了是谁改的',
+    body(rolled973).includes('｜ 对 50 →')
+    && body(rolled973).includes('这一局的规则改了目标值：灯塔的浓雾'), body(rolled973));
+
+  await tell('.trpg new 规则模组', 'group:974');
+  const setScene974 = await callRt('campaign', fakeCtx('group:974'), { action: 'scene', scene: '码头' });
+  ok('夹具：场景换到「码头」之后，机制段**整段消失**（`sceneNotes` 无命中时返回空串）',
+    body(setScene974) === '场景已更新：码头', body(setScene974));
+  const rolled974 = await callRt('roll', fakeCtx('group:974'), { expr: '1d100', target: 70, reason: '看码头' });
+  ok('`roll` 钩子（负对照）：同一个机制、场景换成「码头」之后目标值一点没动',
+    body(rolled974).includes('｜ 对 70 →')
+    && !body(rolled974).includes('这一局的规则改了目标值'), body(rolled974));
+
+  const bare973 = await callRt('roll', fakeCtx('group:973'), { expr: '1d100', reason: '随便掷' });
+  ok('确定性分界：没有 target 的裸掷骰**不参与**机制（它压根不是检定）',
+    !body(bare973).includes('这一局的规则改了目标值') && !body(bare973).includes('对 '), body(bare973));
+
+  // 钩子 B：`character` 的伤害闸门
+  await callRt('campaign', fakeCtx('group:975'), { action: 'start', scenario: '免疫模组' });
+  await callRt('character', fakeCtx('group:975'), { action: 'create', name: '守夜人', hpMax: 10 });
+  const blocked975 = await callRt('character', fakeCtx('group:975'), { action: 'update', name: '守夜人', hpDelta: -3 });
+  ok('`character` 伤害闸门（正）：免疫命中时**拒绝**这次改动，并说清是哪条机制挡的',
+    body(blocked975).includes('「守夜人」这一下挨不着：守夜人不吃普通伤害（conditional_immunity / 角色：守夜人）')
+    && body(blocked975).includes('这一局的规则挡掉了这次伤害'), body(blocked975));
+  ok('闸门排在一切改动之前：被拒之后卡上的 HP 一点没动（也不落盘）',
+    campStore.read('group:975')?.characters.find((card) => card.name === '守夜人')?.hp === 10,
+    String(campStore.read('group:975')?.characters.find((card) => card.name === '守夜人')?.hp));
+
+  await callRt('character', fakeCtx('group:975'), { action: 'create', name: '阿飞', hpMax: 10 });
+  const hit975 = await callRt('character', fakeCtx('group:975'), { action: 'update', name: '阿飞', hpDelta: -3 });
+  ok('`character` 伤害闸门（负对照）：没被机制护着的人照常扣血',
+    hit975.isError !== true && body(hit975).includes('HP 7/10'), body(hit975));
+
+  await callRt('character', fakeCtx('group:975'), { action: 'create', name: '教授', hpMax: 0, sanMax: 10 });
+  const san975 = await callRt('character', fakeCtx('group:975'), { action: 'update', name: '教授', sanDelta: -5 });
+  ok('边界：闸门只认 `hpDelta < 0` —— SAN 掉下去照常（免疫伤害不是免疫恐惧）',
+    san975.isError !== true && body(san975).includes('SAN 5/10'), body(san975));
+
+  // 钩子 C：`campaign` 的场景机制报告 + 降级分支（手改坏存档里冻结的 ruleExt）
+  const rig = emptyCampaign('group:976', { title: '手改团', system: '', rule: 'generic' });
+  rig.scene = '灯塔';
+  rig.scenario = { id: 'rig', body: '', ruleExt: ext({ ...mech(), effect: { handler: 'reduce_damage', params: {} } }) };
+  campStore.write(rig);
+  const degraded = await callRt('campaign', fakeCtx('group:976'), { action: 'scene', scene: '灯塔' });
+  ok('降级（手改了存档里冻结的 ruleExt）：场景照常换，但**明说规则集读不出来**',
+    body(degraded).includes('场景已更新：灯塔')
+    && body(degraded).includes('（这一局的规则集读不出来 —— 按基础规则表照常跑，但那些特殊机制都没生效）'),
+    body(degraded));
+  ok('对照：降级那一次**没有**写 `生效机制：` 日志（不能假装很太平）',
+    !campStore.read('group:976')?.log.some((entry) => entry.text.startsWith('生效机制：')),
+    JSON.stringify(campStore.read('group:976')?.log.map((entry) => entry.text)));
+
+  // ── ③ 开局：坏扩展拒绝，且什么都没落盘 ──
+  const refused = await callRt('campaign', fakeCtx('group:977'), { action: 'start', scenario: '坏规则模组' });
+  ok('`beginCampaign` 在规则扩展坏时**拒绝开局**，并把是哪一条、错在哪说清',
+    refused.isError === true && body(refused).includes('这份剧本的规则扩展有问题，开局停了：')
+    && body(refused).includes('effect.handler 写的是「reduce_damage」'), body(refused));
+  // 给**真文件名**：不点名的话管理员得自己猜该去改哪份文件，而 `.rule.json` 这个名字
+  // 除了这里没有任何地方告诉过他。
+  ok('拒绝时点名要改的那份文件（`data/trpg/scenarios/<剧本>.rule.json`）',
+    body(refused).includes('改完 data/trpg/scenarios/坏规则模组.rule.json 再开一次。'), body(refused));
+  ok('拒绝的文案里不含 Markdown 的 `**`（QQ 不认，星号会原样显示）',
+    !body(refused).includes('**'), body(refused));
+  ok('对照：被拒的那一局**什么都没落盘**（那道闸门排在 emptyCampaign 与任何一次 store.write 之前）',
+    campStore.read('group:977') === null && !fs.existsSync(campStore.file('group:977')),
+    String(campStore.read('group:977')));
+
+  // **逐条**：两条问题各占一行 `· `，不是用 `；` 连成一句。
+  // ⚠️ 这一条**需要两条问题的夹具**才判别得了 —— 上面那份只有一条，分不出"逐条"与"合并"。
+  const w7 = rtScenarios.write('双坏规则模组', '---\ntitle: 双坏规则模组\n---\n两条都写坏了。\n');
+  const w8 = rtScenarios.writeExtras('双坏规则模组', {
+    ruleExt: ext(
+      { ...mech(), effect: { handler: 'reduce_damage', params: {} } },
+      { ...mech(), note: '没写触发条件', trigger: undefined }
+    )
+  });
+  ok('夹具：两条问题的剧本写得进去（写不进去的话下面两条是空转）',
+    w7.ok === true && w8.ok === true, JSON.stringify([w7.ok, w8.ok]));
+
+  const refusedTwo = await callRt('campaign', fakeCtx('group:980'), { action: 'start', scenario: '双坏规则模组' });
+  const refuseLines = body(refusedTwo).split('\n');
+  const refuseBullets = refuseLines.filter((line) => line.startsWith('· '));
+  ok('两条问题**各占一行**（`· ` 打头），不是 `；` 连成一句 —— 压成一句就再没人知道该改哪一条',
+    refusedTwo.isError === true && refuseBullets.length === 2, body(refusedTwo));
+  ok('那两行**逐字**是编译期写好的原文（这一层不重写它们：重写一份必然与 `rules/rule-set.ts` 漂移）',
+    refuseBullets.some((line) => line.includes('第 1 条机制：effect.handler 写的是「reduce_damage」，我不认识它'))
+    && refuseBullets.some((line) => line.includes('第 2 条机制（check_modifier）没写 trigger')), body(refusedTwo));
+  ok('对照：被拒的那一局同样什么都没落盘（逐条这条路与单条那条走的是同一道闸门）',
+    campStore.read('group:980') === null && !fs.existsSync(campStore.file('group:980')),
+    String(campStore.read('group:980')));
+
+  // 两条坏路的**形状对照**：判据是"此刻那个人能去改哪一份文件"。基础表那一头的分条能力住在
+  // `rule-store.ts` 里（它已经把 `problems` 连成一句了），这里再拆一次就是第二份判据 ——
+  // 而且六个消费点报的也正是那一句，改写它会变成"开局时说的"与"跑起来报的"不是同一句话。
+  ok('对照：**基础表**坏掉那一路仍是一句话（`错误：…`），只有规则扩展那一路逐条摊开',
+    newBroken === `错误：${BROKEN}` && !newBroken.includes('开局停了'), newBroken);
+
+  const plain978 = await callRt('campaign', fakeCtx('group:978'), { action: 'start', title: '光板团' });
+  ok('对照：没有规则扩展的一局，`campaign action=start` 一个字都不多说',
+    plain978.isError !== true && !body(plain978).includes('这一场景下生效的规则'), body(plain978));
+}
+
 // ── 6. 注册表接点与 `onRunEnd` ──────────────────────────────────────────────
 {
   const entry = EXTRA_REGISTRY.find((item) => item.id === 'trpg');
@@ -2077,7 +2848,7 @@ const status = (key) => store.read(key);
     JSON.stringify((entry.commands ?? []).map((spec) => spec.names[0]))
     === JSON.stringify(['.trpg', '.trpg', '.pc', '.pc', '.combat', '.combat', '.log', '.log', '.ra', '.rh', '.st', '.r'])
     && JSON.stringify((entry.commands ?? [])[0].subs)
-      === JSON.stringify(['new', 'join', 'status', 'start', 'end', 'mode', 'scenario'])
+      === JSON.stringify(['new', 'join', 'status', 'start', 'end', 'mode', 'scenario', 'check'])
     && (entry.commands ?? [])[1].subs === undefined
     && JSON.stringify((entry.commands ?? [])[2].subs) === JSON.stringify(['new', 'roll', 'confirm', 'show', 'save'])
     && (entry.commands ?? [])[3].subs === undefined
@@ -2634,6 +3405,63 @@ console.log('\n=== 端到端：真起 app（createApp + start）===');
   const again = await fetch(`http://127.0.0.1:${port}/api/trpg/journals/group_901`, { headers, method: 'DELETE' });
   ok('再删一次是 404（报"成功"会让面板以为删掉了）—— 而 `remove()` 的返回值就是这条判据',
     again.status === 404, String(again.status));
+
+  // ── 端到端：开局后，DM 的检定请求里目标值真的被机制改了（P7-d）──
+  //
+  // 这一段补的是**装配层**那一环：上面 5r 段验的是"`roll` 工具在给定的战役上算出正确的
+  // 目标值"，而这里验的是"真 app 里跑一整轮之后，那个改过的数**真的送到了模型手里**"。
+  //
+  // ⚠️ **它能证明什么、不能证明什么，写清楚**：`web/app.ts` 对规则集**没有**新增任何装配
+  // （它只是 `createRuntime()`，与 5r 段同一份实现），所以这里证明的是"工具结果一路穿过
+  // 工具循环进了下一轮请求"，**不是**"模型会照那条机制叙事"。后者只有真机看得出来。
+  //
+  // 战役由**测试侧**的 `new TrpgStore()` 写盘：扩展那个实例与它读的是同一个文件
+  // （`TrpgStore` 没有内存缓存，每次 `read()` 都从盘上重新归一化），所以这是有效的布置手段。
+  const rigStore = new TrpgStore();
+  const rigCamp = emptyCampaign('group:701', { title: '机制团', system: '', rule: 'generic' });
+  rigCamp.scene = '灯塔';
+  rigCamp.scenario = {
+    id: 'rig', body: '',
+    ruleExt: {
+      version: 1,
+      mechanics: [{
+        type: 'check_modifier', note: '灯塔的浓雾',
+        trigger: { op: 'scene', value: '灯塔' },
+        effect: { handler: 'penalty_to_check', params: { value: 20 } },
+        sourceQuote: '浓雾里看不远'
+      }]
+    }
+  };
+  rigStore.write(rigCamp);
+
+  await settle();
+  const mechMark = model.requests.length;
+  model.script = [
+    { tool_calls: [toolCall('roll', { expr: '1d100', target: 70, reason: '看雾' }, 'r7')] },
+    { tool_calls: [toolCall('say', { text: '（测试）雾太浓，什么都看不清。' }, 's7')] },
+    { content: null }
+  ];
+  const mechEntry = core.store.appendIncoming('group:701', {
+    mid: Date.now(), ts: Date.now(), senderId: '10001', senderName: '张三', text: '我朝灯塔那边看'
+  });
+  core.orchestrator.onIncoming('group:701', mechEntry);
+  core.orchestrator.forceWake('group:701');
+  await settle();
+
+  const mechRound = model.requests.slice(mechMark);
+  const calledRoll = mechRound.some((req) => (req?.messages ?? []).some((msg) =>
+    (msg.tool_calls ?? []).some((call) => call.function?.name === 'roll')));
+  ok('夹具：这一轮模型真的调了 `roll`（不调的话下面两条都是空转的绿）',
+    calledRoll, JSON.stringify(mechRound.length));
+  // 工具结果是**下一轮请求**里的 `role: 'tool'` 消息 —— 把整轮摊平了找那句话。
+  const mechTools = mechRound.flatMap((req) => req?.messages ?? [])
+    .filter((msg) => msg.role === 'tool').map((msg) => String(msg.content ?? '')).join('\n');
+  ok('真 app 端到端：目标值真的被这一局的机制改了（70 − 20 = 50），不是只改在工具那一层',
+    /｜ 对 50 →/.test(mechTools), mechTools.slice(-400));
+  ok('真 app 端到端：那句话也跟着进了模型看到的工具结果（不说的话模型只会觉得点数对不上）',
+    mechTools.includes('这一局的规则改了目标值：灯塔的浓雾'), mechTools.slice(-400));
+
+  await core.stop();
 
   await core.stop();
 }

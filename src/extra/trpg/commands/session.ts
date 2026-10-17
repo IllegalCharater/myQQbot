@@ -7,7 +7,7 @@
 //   `.trpg status`               看局势（`preparing` 时直接给向导）
 //   `.trpg start`                全员确认后 `preparing → active`
 //   `.trpg end`                  收团：回摘要 + 清掉这一局的存档
-//   `.trpg mode` / `.trpg scenario`  形态与剧本（见各自文件）
+//   `.trpg mode` / `.trpg scenario` / `.trpg check`  形态、剧本与核对（见各自文件）
 //
 // ⚠️ **`.trpg start` 不再负责建局**（P2 改）：建局是 `.trpg new`，`start` 只把
 // `preparing` 推成 `active`。模型那条 `campaign action=start` 仍然是"建局即开跑"（`active`）——
@@ -37,8 +37,10 @@ const COMMAND_USAGE = '这几条各自是一条命令：\n'
   + '· `.trpg end` —— 收团（回一份摘要，这一局的存档清掉）\n'
   + '· `.trpg mode [助手|DM]` —— 看 / 切换我当骰子助手还是当主持人\n'
   + '· `.trpg scenario [名字]` —— 引用一份剧本文件收进库\n'
-  + '· `.pc new <角色名>` —— 建人物卡（另外还有 `.pc confirm` / `.pc show` / `.pc save`）\n'
+  + '· `.trpg check <剧本名>` —— 看这份剧本抽出了什么、有哪些待核项\n'
+  + '· `.pc new <角色名>` —— 建人物卡（另外还有 `.pc roll` / `.pc confirm` / `.pc show` / `.pc save`）\n'
   + '· `.combat start` —— 排一次先攻并公布（另外还有 `.combat next` / `.combat end`）\n'
+  + '· `.log export` —— 把这一局的战报导成一份 .md 发进群\n'
   + '· `.ra <技能>` —— 自己检定（群里出结果）\n'
   + '· `.rh <技能>` —— 暗骰（只有你自己看得到）\n'
   + '· `.st <技能> <值>` —— 确认之前改自己的技能\n'

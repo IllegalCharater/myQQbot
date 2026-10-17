@@ -148,6 +148,15 @@
   7b 段 8 条（**宿主那一半**：叠增量 / 不动 `runs` / 读模型同源 / 零增量不写盘 / 会话结束照旧加 `runs` /
   组装根真的接上了）。**三条探针实测**：把 `runs: 0` 改成 `1` → 红 2 条；去掉零值早退 → 红 1 条；
   把 `app.ts` 的接线换成 `() => {}` → 红 1 条。
+- ⬜ **（只记录，2026-10-17 按决定 7：不进本阶段开发计划）** 抽取管线的模型调用
+  （`scenario/extract/prompt.ts` 的 `askModel`）与单次格式整理（`scenario/format.ts` 的
+  `formatScenarioText`）**同样不进 token 账**。修法与上面那条同源（`ExtraRuntimeDeps.recordUsage`
+  → `sessions.addExtraUsage`），但**量级不同**：P7 把"传一份剧本"从**一次**调用放大成**最多 6 次**
+  （`MAX_CHUNKS`），所以这个缺口比 `.rh` 那一次大得多。
+  今天唯一的用量凭据是那两处各自打的日志行（`[trpg] 剧本抽取用量（…，不进 token 账…）`）——
+  它是**刻意留的**，别在补账时顺手删掉：补完之后它仍是"这一份模组花了多少"的最近一处线索。
+  接线落点：`askModel` 拿到 `result.usage` 之后上报（与 `suggest.ts` 逐字同形），
+  **不要加进 `ExtractDeps` / `AskPort`** —— 那会把"记账"塞进测试要注入的假端点接口里。
 - `.trpg scenario` 命令路径上"用文件名当名字"那一段**没有端到端断言**（要真下载 + 起 Python），只有
   `scenarioNameFromFile` 的单元断言。**结构性缺口，不修** —— 仓库的测试约定不许启动真解释器。
 - 换熵源（把 `secureRng` 换成 `Math.random`）**没有任何行为断言看得见**，只有源码文本断言。
@@ -498,7 +507,8 @@ npm run test:all
 1. **P0 是"纯搬运"，必须零行为变化**。它单独成阶段就是为了让 diff 可审 —— 混进功能改动会让"搬对了没有"无法验证。
 2. **`.r` 与助手模式的 OneDice 前缀重叠**：`intercept` 会剥 `.r` / `。r` / `r`（`rules/dice.ts:632`）。命令优先于 `intercept`（`ingest.ts:309` 的 `slashCommand ? null : …`），所以 `.r 3d6` 走命令、`3d6` 走拦截，两者都零 LLM 成本，不冲突。
 3. **私聊会在那个人的私聊存档里留下 `我：…`**（`SendQueue.appendSelf`）。这是有意的：那是暗骰唯一的持久痕迹，玩家能往回翻。代价是"从没聊过天的私聊"会出现在存档列表里。
-4. **暗骰的私密叙事要花一次模型调用**（独立 `chatCompletion`，不进 token 账 —— 与 `suggest.ts` 同一个已知缺口）。若不想花，`.rh` 可以先只发点数。
+4. **暗骰的私密叙事要花一次模型调用**（独立 `chatCompletion`；**2026-10-17 起进 token 账** ——
+   `ExtraRuntimeDeps.recordUsage`，见 E 类第 1 条）。若不想花，`.rh` 可以先只发点数。
 5. **战斗的指针不拦越权**（决策 9）：顺序错了不会有任何机制发现，只能靠 DM 照提示词走。
 6. **`campaign.log` 的 60 条上限不动**：战报靠 jsonl，提示词预算不受影响。代价是"开局到 P6 之间"的团没有完整战报。
 7. **`subs` 展开只改 `runtime.ts`**：这是本次唯一动到共享层的地方，`t-extras.mjs` 的名字对账断言要同步（两个方向都要覆盖展开后的集合）。

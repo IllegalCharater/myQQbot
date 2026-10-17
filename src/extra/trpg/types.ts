@@ -148,6 +148,16 @@ export interface TrpgScenarioRef {
   id: string;
   /** 正文。开局时从剧本文件里复制过来，之后与那个文件再无关系。 */
   body: string;
+  /**
+   * 抽取出来的剧情结构（P7-a）。**原样存，不在这里解释** —— 本文件不许 import 本模块的
+   * 任何东西（见文件头），所以它的类型只能是 `unknown`，唯一解释处是
+   * `scenario/extract/schema.ts` 的 `parseStruct`。
+   *
+   * 它随快照**冻结**（同 `body`）：改剧本文件不影响正在跑的这一局。
+   */
+  struct?: unknown;
+  /** 抽取出来的规则扩展（P7-c 起产出）。唯一解释处是 `rules/rule-set.ts` 的 `compileRuleSet`。 */
+  ruleExt?: unknown;
 }
 
 /**

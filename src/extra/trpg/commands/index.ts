@@ -29,6 +29,7 @@ import { createCombatCommand, createCombatUsageCommand } from './combat.js';
 import { createLogCommand, createLogUsageCommand } from './log.js';
 import { createModeCommand } from './mode.js';
 import { createScenarioCommand } from './scenario.js';
+import { createVerifyCommand } from './verify.js';
 import { createDiceCommand } from './dice.js';
 import type { CommandHandler } from './shared.js';
 import type { JournalReadPort } from './log.js';
@@ -77,6 +78,9 @@ export function createCommands(deps: CommandDeps): Record<string, CommandHandler
     ['.trpg end', (command) => createEndCommand({ ...base, command })],
     ['.trpg mode', (command) => createModeCommand({ ...base, command })],
     ['.trpg scenario', (command) => createScenarioCommand({ ...base, command })],
+    // 核对抽取结果（P7-b）：零模型调用、零写入。**排在自己的子命令之后、裸 `.trpg` 之前**
+    // （顺序即行为，见文件头那条）。
+    ['.trpg check', (command) => createVerifyCommand({ ...base, command })],
     ['.trpg', () => createUsageCommand()],
     ['.pc new', (command) => createCharacterNewCommand({ ...base, command })],
     ['.pc roll', (command) => createCharacterRollCommand({ ...base, command })],

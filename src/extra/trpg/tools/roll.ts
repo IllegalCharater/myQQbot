@@ -8,9 +8,11 @@
 import { err, ok } from '../../../agent/tools/shared.js';
 import { text } from '../model/limits.js';
 import { appendLog } from '../model/campaign.js';
-import { formatCheck, formatRoll } from '../render/format.js';
+import { mechanicContextOf, ruleSetFor } from '../model/rule-set.js';
+import { describeCheckModifiers, formatCheck, formatRoll } from '../render/format.js';
 import { resolveCheck } from '../rules/check.js';
 import { rollDice } from '../rules/dice.js';
+import { applyCheckModifiers } from '../rules/rule-set.js';
 import { diceError } from './shared.js';
 import type { Handler, ToolGates } from './shared.js';
 import type { DiceRng } from '../rules/dice.js';
@@ -47,20 +49,32 @@ export function createRollHandler({ store, rules, rng, gates }: RollHandlerDeps)
       // 那句写给模型的文案（"目标值必须是一个数，收到「难」"），而不是在这里悄悄降级成一次掷骰。
       const structured = args?.target !== undefined && args?.target !== null && args?.target !== '';
       let line: string;
+      let note = '';
       try {
         if (structured) {
-          const lookup = rules.read(campaign.rule);
-          // 规则表坏了就**拒绝**，不换一套顶上去：静默换一套会让"同一个骰面在两局里判出不同的档"
-          // 变成一个没人能解释的现象。代价只是这个会话暂时做不了检定（`/掷骰` 不受影响）。
-          if (!lookup.ok) return err(lookup.message);
-          line = formatCheck(resolveCheck(args?.expr, args?.target, { rng, rule: lookup.rule }));
+          const found = ruleSetFor(campaign, rules);
+          // 基础表坏了、或这一局的规则扩展编译不过，就**拒绝**，不换一套顶上去：静默换一套会让
+          // "同一个骰面在两局里判出不同的档"变成一个没人能解释的现象。代价只是这个会话暂时
+          // 做不了检定（`.r` 那条路不受影响）。
+          if (!found.ok) return err(found.message);
+          // ⚠️ 目标值**不是数时不碰它**：`resolveCheck` 会抛出那句写给模型的文案（"目标值必须是
+          // 一个数，收到「难」"），而那句话里带着**原文**。先在这里 `Number()` 一次再传进去的话，
+          // 模型看到的会变成「收到「NaN」」—— 一条既有文案就这么被悄悄改掉了，没有任何断言会红。
+          const goal = Number(args?.target);
+          const mods = Number.isFinite(goal)
+            ? applyCheckModifiers(found.set, mechanicContextOf(campaign, actor, ''), goal)
+            : null;
+          line = formatCheck(resolveCheck(args?.expr, mods ? mods.target : args?.target, {
+            rng, judge: mods?.judge, rule: found.base
+          }));
+          if (mods) note = describeCheckModifiers(mods);
         } else {
           line = formatRoll(rollDice(args?.expr, rng));
         }
       } catch (error) {
         return diceError(error);
       }
-      const body = `${line}${reason ? `（${reason}）` : ''}`;
+      const body = `${line}${reason ? `（${reason}）` : ''}${note ? `\n${note}` : ''}`;
       appendLog(campaign, structured ? 'check' : 'roll', body);
       return settle(ctx, 'roll', actor || '判定', args,
         ok(`${body}\n${structured ? '检定' : '掷骰'}不会自动发言：要报给群里就用 say。`));

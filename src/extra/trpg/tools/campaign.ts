@@ -4,10 +4,12 @@
 // 请求前缀的一部分 —— 每多一个工具就打散一次提示词缓存。分支用 `action`，取值域在 schema 里是 `enum`。
 import { err, errorMessage, ok } from '../../../agent/tools/shared.js';
 import { MAX_FLAGS, text } from '../model/limits.js';
-import { appendLog, findCharacter } from '../model/campaign.js';
+import { appendLog, findCharacter, mirrorLog } from '../model/campaign.js';
 import { advanceCombat, currentActor, endCombat, immobileNames, startCombat } from '../model/combat.js';
+import { ruleSetFor, sceneMechanics } from '../model/rule-set.js';
 import { beginCampaign } from '../model/session.js';
-import { formatInitiative, formatOrder } from '../render/format.js';
+import { describeSceneMechanics, formatInitiative, formatOrder } from '../render/format.js';
+import { describeMechanic } from '../rules/rule-set.js';
 import { changeNote } from './shared.js';
 import type { Handler, ToolGates, TrpgNote } from './shared.js';
 import type { JournalPort } from '../model/campaign.js';
@@ -35,8 +37,47 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
   const { store, rules, scenarios, rng, gates, deliverNote, journal } = deps;
   const { gate, settle, withCampaign } = gates;
 
-  const startCampaign = (ctx: ToolContext, args: ToolArguments): ToolResult =>
-    beginCampaign(ctx.chatKey, args, { store, rules, scenarios, journal });
+  /**
+   * 这一局面下**此刻**压着哪些规则（P7-d 的 `campaign` 钩子：换场景与开局各报一次）。
+   *
+   * 三条边界：
+   * - **读不出来时明说一句，不假装很太平**（`sceneMechanics` 给 `null` 就是那个意思）。
+   *   正常路径上走不到：`beginCampaign` 已经拒绝过坏扩展，能到这儿只有"有人手改了
+   *   `data/trpg/<会话>.json` 里冻结的那份 `ruleExt`"。
+   * - **触发详情记日志时标 `visible: false`**：机制名可能来自暗线旗标（`describeTrigger`），
+   *   而日志会镜像进战报、战报会被 `.log export` 发进群。
+   * - ⚠️ **只在 `campaign` 工具这一侧调**（回执只给模型）。`beginCampaign` 的回执被
+   *   `.trpg new` 原样印进群，见 `describeSceneMechanics` 那段说明。
+   *
+   * 返回空串 = 什么都不用说（也没有写日志，调用方按 `seq` 变没变判断要不要落盘）。
+   */
+  const sceneNotes = (campaign: TrpgCampaign): string => {
+    const hits = sceneMechanics(campaign, rules);
+    if (!hits) {
+      return '\n（这一局的规则集读不出来 —— 按基础规则表照常跑，但那些特殊机制都没生效）';
+    }
+    if (!hits.length) return '';
+    appendLog(campaign, 'state', `生效机制：${hits.map(describeMechanic).join('；')}`, false);
+    return describeSceneMechanics(hits);
+  };
+
+  const startCampaign = (ctx: ToolContext, args: ToolArguments): ToolResult => {
+    const result = beginCampaign(ctx.chatKey, args, { store, rules, scenarios, journal });
+    if (result.isError) return result;
+    // 开局也报一次"这一局压着哪些规则"。⚠️ **补在 `beginCampaign` 之外是有意的**：`.trpg new`
+    // 把那份回执**原样印进群**，而这一段里的机制名可能带暗线旗标（见 `describeSceneMechanics`）。
+    // 代价是这一条路多一次落盘（`beginCampaign` 刚写过），换来的是"人那条路一个字都不多说"。
+    const campaign = store.read(ctx.chatKey);
+    if (!campaign) return result;
+    const beforeSeq = campaign.seq;
+    const notes = sceneNotes(campaign);
+    // `sceneNotes` 只在真有机制命中时才写日志 —— 所以"要不要落盘"就是"seq 动了没有"。
+    if (campaign.seq !== beforeSeq) {
+      store.write(campaign);
+      mirrorLog(campaign, beforeSeq, journal ?? null);
+    }
+    return notes ? ok(`${String(result.content)}${notes}`) : result;
+  };
 
   const setScene = (ctx: ToolContext, args: ToolArguments): Promise<ToolResult> => {
     const scene = text(args?.scene, 400);
@@ -46,7 +87,9 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
       if (blocked) return ok(blocked);
       campaign.scene = scene;
       appendLog(campaign, 'scene', `场景：${scene}`);
-      return ok(`场景已更新：${scene}`);
+      // 换场景是**机制最可能变的那一刻**，所以顺手把"现在压着哪些"报一遍 —— 不给的话 DM
+      // 得自己从一大段设定里推出"进了灯塔所以要 -20"，而那正是它最容易推错的地方。
+      return ok(`场景已更新：${scene}${sceneNotes(campaign)}`);
     });
   };
 
@@ -223,9 +266,9 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
 
       // sub=start：按规则表声明的属性排先攻。**规则表坏了就拒绝**，不换一套顶上去
       // （与 `roll.ts` 那条逐字同源：静默换一套会让"同一个骰面在两局里判出不同的档"没人能解释）。
-      const lookup = rules.read(campaign.rule);
-      if (!lookup.ok) return err(lookup.message);
-      const key = lookup.rule.initiative;
+      const found = ruleSetFor(campaign, rules);
+      if (!found.ok) return err(found.message);
+      const key = found.base.initiative;
       const restarted = Boolean(campaign.combat);
       const rolled = startCombat(campaign, { key, rng });
       if (!rolled) {

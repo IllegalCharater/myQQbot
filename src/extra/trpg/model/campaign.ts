@@ -8,8 +8,8 @@
 import { MAX_SCENARIO_CHARS } from '../types.js';
 import {
   MAX_CHARACTERS, MAX_FLAGS, MAX_FLAG_VALUE_CHARS, MAX_LOG_CHARS, MAX_LOG_STORED, MAX_NAME_CHARS,
-  MAX_PLAYERS, MAX_RULE_CHARS, MAX_SCENARIO_ID_CHARS, MAX_SCENE_CHARS, MAX_SYSTEM_CHARS, MAX_TITLE_CHARS,
-  clampInt, text
+  MAX_PLAYERS, MAX_RULE_CHARS, MAX_SCENARIO_ID_CHARS, MAX_SCENE_CHARS, MAX_STRUCT_BYTES,
+  MAX_SYSTEM_CHARS, MAX_TITLE_CHARS, clampInt, text
 } from './limits.js';
 import { normalizeCharacter } from './character.js';
 import { normalizeCombat } from './combat.js';
@@ -144,10 +144,38 @@ function normalizePlayers(raw: unknown): string[] {
  * 所以这里的截断只对"手改过的存档"生效 —— 读路径永远要比写路径宽，否则一个被改坏的字段
  * 会让整局读不出来。
  */
+/**
+ * 伴生结构 / 规则扩展的**读路径**（P7-a）。
+ *
+ * 三条：
+ *   • **只收普通对象**：数组与标量一律丢掉 —— 它们的解释权在 `parseStruct` / `compileRuleSet`，
+ *     而"形状根本不对"这一档那两个函数都会拒绝，留着只会让每一处消费点都多一句"先判一下"。
+ *   • **按序列化字节夹**：它是随存档进提示词的东西，一份手改过的大对象能让每一轮多背几十 KB
+ *     （同 `MAX_STRUCT_BYTES` 那条理由）。夹不住（成环、`BigInt` 之类序列化会抛）也丢掉 ——
+ *     读路径不许抛。
+ *   • **丢掉不报错**：读路径比写路径宽，一个被改坏的伴生字段不该让**整局**读不出来。
+ */
+function extrasField(raw: unknown): Record<string, unknown> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  try {
+    if (JSON.stringify(raw).length > MAX_STRUCT_BYTES) return null;
+  } catch {
+    return null;
+  }
+  return raw as Record<string, unknown>;
+}
+
 function normalizeScenario(raw: unknown): TrpgScenarioRef {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { id: '', body: '' };
   const source = raw as Record<string, unknown>;
-  return { id: text(source.id, MAX_SCENARIO_ID_CHARS), body: text(source.body, MAX_SCENARIO_CHARS) };
+  const struct = extrasField(source.struct);
+  const ruleExt = extrasField(source.ruleExt);
+  return {
+    id: text(source.id, MAX_SCENARIO_ID_CHARS),
+    body: text(source.body, MAX_SCENARIO_CHARS),
+    ...(struct ? { struct } : {}),
+    ...(ruleExt ? { ruleExt } : {})
+  };
 }
 
 /** 开一场新团。不落盘 —— 由调用方决定什么时候写。 */

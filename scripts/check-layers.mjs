@@ -176,6 +176,28 @@ if (fs.existsSync(modelDir)) {
   }
 }
 
+// 跑团的**抽取管线**（`extra/trpg/scenario/extract/`）：与 `model/` 逐字同形的一条闸门。
+//
+// 判据也一样是"这一层能不能脱离磁盘被测"：管线的四级（切片 / 逐片抽取 / 归并 / 校验）都是
+// 纯变换 + 一次模型调用，**落盘是 `store/` 的事**（`scenario-store.ts` 的 `writeExtras`）。
+// 它嵌套在 `scenario/` 里，而上面那条根目录白名单**只管 `scenario/` 这一层**（嵌套是自由的），
+// 所以不单开这一条的话，"顺手 import 一个 node:fs 把切片写出去"不会有任何报错 ——
+// 而破坏是静默的：套件开始需要建真目录，`t-trpg-extract.mjs` 那批纯函数断言会慢慢退化成
+// 集成测试。`pipeline.ts` 的文件头就写着这条纪律，注释守不住的东西要有闸门。
+const extractDir = path.join(trpgRoot, 'scenario', 'extract');
+if (fs.existsSync(extractDir)) {
+  for (const source of filesUnder(extractDir)) {
+    const sourceRel = slash(path.relative(SRC, source));
+    const text = fs.readFileSync(source, 'utf8');
+    for (const match of text.matchAll(SPECIFIER)) {
+      const specifier = match[1] || match[2] || match[3];
+      if (specifier === 'node:fs' || specifier === 'node:path') {
+        errors.push(`${sourceRel} -> ${specifier}: 剧本抽取管线不做 I/O，落盘交给 store/ 的 writeExtras`);
+      }
+    }
+  }
+}
+
 for (const source of files) {
   const sourceRel = slash(path.relative(SRC, source));
   const sourceDomain = sourceRel.split('/')[0];

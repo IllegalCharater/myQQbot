@@ -59,6 +59,7 @@ const ASSERT = [
   't-tool-protocol.mjs',   // 工具后普通文本 → 一次协议纠正；仍可选择沉默
   't-document.mjs',        // 读文档（pdf/docx/txt/md 的抽取管线与 read_document 工具）
   't-trpg-rules.mjs',      // 跑团规则引擎（骰子表达式与检定，纯函数、可复现）
+  't-trpg-extract.mjs',    // 跑团剧本抽取管线（L1 切片 / L2 逐片 / L3 归并 / L4 校验 + 伴生文件）
   't-trpg.mjs'             // 跑团扩展（状态层 / 工具 / 命令 / 提示词 + 真起 app 的接管端到端）
 ];
 

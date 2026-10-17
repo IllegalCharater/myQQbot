@@ -19,12 +19,15 @@ import { errorMessage } from '../../../agent/tools/shared.js';
 import { EXTRA_PROMPT_JOBS } from '../../prompts.js';
 import { appendLog, mirrorLog } from '../model/campaign.js';
 import { MAX_NAME_CHARS, MAX_STATS_PER_CHARACTER, MAX_STAT, MIN_STAT, clampInt } from '../model/limits.js';
+import { mechanicContextOf, ruleSetFor } from '../model/rule-set.js';
 import { playerOf } from '../model/session.js';
-import { formatCheck } from '../render/format.js';
+import { describeCheckModifiers, formatCheck } from '../render/format.js';
 import { DiceError } from '../rules/dice.js';
 import { resolveCheck } from '../rules/check.js';
+import { applyCheckModifiers } from '../rules/rule-set.js';
 import { restOf, argsOf } from './shared.js';
 import type { CommandHandler } from './shared.js';
+import type { CheckResult } from '../rules/check.js';
 import type { ExtraUsage } from '../../types.js';
 import type { JournalPort } from '../model/campaign.js';
 import type { DiceRng } from '../rules/dice.js';
@@ -71,16 +74,28 @@ function skillList(card: TrpgCharacter): string {
 }
 
 /**
- * 读一次规则表并**检查它接受这个形状**。
+ * 读一次规则集并**检查它接受这个形状**，顺带算上这一局的机制。
  *
  * 拒绝的两种成因分开报（同 `roll` 工具）：表坏了要人去修，形状不匹配要换骰子或换表。
  * 都交给 `resolveCheck` → `check()` 抛的那句中文，不在这里重写。
+ *
+ * ⚠️ **`.ra` 与 `.rh` 共用这一个**（它是这两条路唯一的检定入口），所以机制钩子接在这里
+ * 就等于两条都接上了 —— 分开写两份的话，"`.ra` 吃了机制而 `.rh` 没吃"不会有任何报错，
+ * 表现只是同一个人同一张卡公开掷与暗掷出不同的目标值。
+ *
+ * `note` 是"规则改了目标值"那一行（P7-d）：调用方按它是不是空串决定要不要多印一行。
  */
-function judge(deps: CheckCommandDeps, campaign: TrpgCampaign, card: TrpgCharacter, skill: string, target: number) {
-  const lookup = deps.rules.read(campaign.rule);
-  // 规则表坏了就**拒绝**，不换一套顶上去（同 `roll` 工具那条）。
-  if (!lookup.ok) throw new DiceError('RULE', lookup.message);
-  return resolveCheck(lookup.rule.dice, target, { rng: deps.rng, rule: lookup.rule });
+function judge(
+  deps: CheckCommandDeps, campaign: TrpgCampaign, card: TrpgCharacter, skill: string, target: number
+): { result: CheckResult; note: string } {
+  const found = ruleSetFor(campaign, deps.rules);
+  // 基础表坏了、或这一局的规则扩展编译不过，就**拒绝**，不换一套顶上去（同 `roll` 工具那条）。
+  if (!found.ok) throw new DiceError('RULE', found.message);
+  const mods = applyCheckModifiers(found.set, mechanicContextOf(campaign, card.name, skill), target);
+  const result = resolveCheck(found.base.dice, mods.target, {
+    rng: deps.rng, judge: mods.judge, rule: found.base
+  });
+  return { result, note: describeCheckModifiers(mods) };
 }
 
 /**
@@ -152,8 +167,8 @@ export function createCheckCommand(deps: CheckCommandDeps): CommandHandler {
     }
 
     try {
-      const result = judge(deps, campaign, card, skill, target);
-      const line = `${card.name} 的${skill}：${formatCheck(result)}`;
+      const { result, note } = judge(deps, campaign, card, skill, target);
+      const line = `${card.name} 的${skill}：${formatCheck(result)}${note ? `\n${note}` : ''}`;
       const beforeSeq = campaign.seq;
       appendLog(campaign, 'check', line);
       store.write(campaign);
@@ -185,13 +200,14 @@ export function createSecretCheckCommand(deps: CheckCommandDeps): CommandHandler
     // **先看通道再掷**：掷了却发不出去等于把这次暗骰丢了，而群友只会看到一句"发不出去"。
     if (!deps.sendPrivate) return '这个机器人没装私聊通道，暗骰发不出去 —— 用 `.ra` 公开掷吧。';
 
-    let result;
+    let judged: ReturnType<typeof judge>;
     try {
-      result = judge(deps, campaign, card, skill, target);
+      judged = judge(deps, campaign, card, skill, target);
     } catch (error) {
       // 规则表的问题**不走私聊**：那是配置问题，群里说一句更有用（而且里面没有点数）。
       return error instanceof DiceError ? error.message : `检定出错：${errorMessage(error)}`;
     }
+    const { result, note } = judged;
 
     const line = formatCheck(result);
     const narration = await generateSecretNarration({
@@ -201,6 +217,9 @@ export function createSecretCheckCommand(deps: CheckCommandDeps): CommandHandler
       await deps.sendPrivate(String(input.senderId), [
         `【暗骰】${card.name} 的${skill}（${target}）`,
         line,
+        // 机制那一行也要给他：`formatCheck` 印的是**改过之后**的目标值，不给一句话，
+        // 掷骰的人只会觉得自己卡上的数与掷出来的对不上。空串由 `filter(Boolean)` 滤掉。
+        note,
         narration ? `\n${narration}` : ''
       ].filter(Boolean).join('\n'));
     } catch (error) {

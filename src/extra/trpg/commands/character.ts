@@ -8,6 +8,7 @@
 // "卡还没定下来"这件事只有本人说了算。
 import { appendLog, findCharacter, mirrorLog } from '../model/campaign.js';
 import { MAX_CHARACTERS, MAX_NAME_CHARS } from '../model/limits.js';
+import { ruleSetFor } from '../model/rule-set.js';
 import { canJoin, isQq, join, playerOf } from '../model/session.js';
 import { rollChargen } from '../rules/chargen.js';
 import { renderCharacterForPlayers, renderForPlayer } from '../render/players.js';
@@ -149,14 +150,14 @@ export function createCharacterRollCommand(deps: CharacterCommandDeps): CommandH
       return `「${card.name}」已经确认过了 —— 想重掷得先让主持人用 \`character\` 改（或者重开一局）。`;
     }
 
-    const lookup = rules.read(campaign.rule);
-    if (!lookup.ok) return lookup.message;
-    if (!lookup.rule.chargen) {
-      return `这一局的规则表（${lookup.rule.id}）没有属性生成 —— 属性由主持人定，`
+    const found = ruleSetFor(campaign, rules);
+    if (!found.ok) return found.message;
+    if (!found.base.chargen) {
+      return `这一局的规则表（${found.base.id}）没有属性生成 —— 属性由主持人定，`
         + '你可以用 `.st <技能> <值>` 自己填。';
     }
 
-    const rolled = rollChargen(lookup.rule.chargen, rng);
+    const rolled = rollChargen(found.base.chargen, rng);
     card.stats = rolled.stats;
     // 派生值：**算出来的才覆盖**（缺属性的那几项留着原样，并由下面那句说明原因）。
     const d = rolled.derived;
@@ -181,7 +182,7 @@ export function createCharacterRollCommand(deps: CharacterCommandDeps): CommandH
       d.mov === undefined ? '' : `MOV ${card.mov}`
     ].filter(Boolean).join('、');
     return [
-      `已掷出一套属性（${lookup.rule.name}）：`,
+      `已掷出一套属性（${found.base.name}）：`,
       describe(rolled.stats),
       pools ? `派生：${pools}` : '',
       // **缺属性时明说缺谁**：那意味着规则表里的属性名与派生公式认的名字不一致（改了名），

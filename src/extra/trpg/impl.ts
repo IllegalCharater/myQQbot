@@ -18,6 +18,7 @@ import { createCommands } from './commands/index.js';
 import { usableScenarios } from './commands/shared.js';
 import { secureRng } from './entropy.js';
 import { appendLog } from './model/campaign.js';
+import { ruleSetFor } from './model/rule-set.js';
 import { renderForModel } from './render/model.js';
 import { renderBriefing } from './render/status.js';
 import { formatRoll } from './render/format.js';
@@ -172,10 +173,11 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
     },
 
     /**
-     * system prompt 的贡献：**人格 → （清单 + 剧本正文）→ 当前状态**，顺序不能反。
+     * system prompt 的贡献：**人格 → （清单 + 剧本正文 + 剧情结构 + 这一局的特殊规则）→ 当前状态**，
+     * 顺序不能反。
      *
-     * 顺序即缓存：清单只在管理员改文件时变、剧本正文整局不变，而状态每轮都变。
-     * 把两个稳定的排在状态之前，system prompt 的公共前缀才能命中到状态变化点之前；
+     * 顺序即缓存：清单只在管理员改文件时变、剧本正文/结构/规则说明整局不变，而状态每轮都变。
+     * 把三个稳定的排在状态之前，system prompt 的公共前缀才能命中到状态变化点之前；
      * 反过来的话，同一场团连着跑几轮会让**整段**系统提示每轮失效（见 `render/model.ts` 顶部那段）。
      *
      * ⚠️ 本函数必须是**全函数**：装载时 `checkRuntimeShape` 会空着 `chatKey` 调它一次
@@ -196,13 +198,20 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
       // 照旧在 —— 真要开口时它仍然知道怎么开口。
       if (modes.read(chatKey) === 'assistant') return { body: [] };
       const campaign = store.read(chatKey);
+      // 规则说明**由这里现算递进去**（同清单那条：渲染层不做 I/O、也不碰 store）。
+      // 三档的区别见 `BriefingCatalog.set` —— 没有战役给 `undefined`，有战役但那份规则扩展
+      // 读不出来给 `null`。**两档不能合并**：合并之后每一个还没开团的会话都会拿到一句
+      // "规则扩展坏了"。`prompt('')` 那条装载期调用走的就是 `undefined` 这一档（`store.read('')`
+      // 是 `null`），所以它照样是全函数。
+      const access = campaign ? ruleSetFor(campaign, rules) : null;
       return {
         body: [
           ...EXTRA_PROMPT_SECTIONS.trpg.body,
           renderBriefing(campaign, {
             scenarios: usableScenarios(scenarios).map((item) => ({ id: item.id, title: item.title })),
             rules: rules.list().filter((item) => !item.problems.length)
-              .map((item) => ({ id: item.id, name: item.name, description: item.description }))
+              .map((item) => ({ id: item.id, name: item.name, description: item.description })),
+            set: access ? (access.ok ? access.set : null) : undefined
           }),
           renderForModel(campaign)
         ]

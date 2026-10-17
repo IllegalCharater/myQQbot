@@ -11,6 +11,7 @@
 // 说出去**，且没有任何报错。模型那一侧照常带数值（它本来就看得到全量状态），所以它叙事时心里有数。
 import { appendLog, mirrorLog } from '../model/campaign.js';
 import { advanceCombat, currentActor, endCombat, immobileNames, startCombat } from '../model/combat.js';
+import { ruleSetFor } from '../model/rule-set.js';
 import { formatInitiative, formatOrder } from '../render/format.js';
 import type { CommandHandler } from './shared.js';
 import type { JournalPort } from '../model/campaign.js';
@@ -85,11 +86,11 @@ export function createCombatCommand(deps: CombatCommandDeps): CommandHandler {
       return `轮到「${currentActor(campaign.combat)}」。\n${orderLine(campaign)}`;
     }
 
-    // sub=start：规则表坏了就**拒绝**，不换一套顶上去（同 `roll` 工具那条判据：静默换一套会让
-    // "同一个骰面在两局里判出不同的档"没人能解释）。
-    const lookup = rules.read(campaign.rule);
-    if (!lookup.ok) return `规则表读不出来，排不了先攻：${lookup.message}`;
-    const key = lookup.rule.initiative;
+    // sub=start：规则表坏了（或这一局的规则扩展编译不过）就**拒绝**，不换一套顶上去（同
+    // `roll` 工具那条判据：静默换一套会让"同一个骰面在两局里判出不同的档"没人能解释）。
+    const found = ruleSetFor(campaign, rules);
+    if (!found.ok) return `规则表读不出来，排不了先攻：${found.message}`;
+    const key = found.base.initiative;
     const restarted = Boolean(campaign.combat);
     const rolled = startCombat(campaign, { key, rng });
     if (!rolled) {

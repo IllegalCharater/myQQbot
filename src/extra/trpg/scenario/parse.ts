@@ -49,7 +49,35 @@ export interface ScenarioSkeleton {
   characters: TrpgCharacter[];
 }
 
-export interface TrpgScenario extends ScenarioSkeleton {
+/**
+ * 一份剧本的**伴生文件**（P7-a）。
+ *
+ * 抽取管线的产物与 `.md` 分开存：正文只留"世界观 + 主线"的压缩版（`MAX_SCENARIO_CHARS`
+ * 那条上限是成本不是洁癖），细节进 `struct`、原文进 `raw/`（保底，人可读）。
+ *
+ * ⚠️ 两个 `unknown` 字段的类型定义**不在这里**，也不在 `types.ts` 里（那个文件不许 import
+ * 本模块的任何东西）。它们的**唯一解释处**是 `scenario/extract/schema.ts` 的 `parseStruct`
+ * 与 `rules/rule-set.ts` 的 `compileRuleSet`（都是"收 `unknown` 出类型"）。
+ * 在这里写一份形状必然与那两处漂移，而漂移的表现是"写的时候按 A 写、读的时候按 B 读"。
+ */
+export interface ScenarioExtras {
+  /** `<id>.struct.json` 的内容（`JSON.parse` 的产物，原样）。 */
+  struct?: unknown;
+  /** `<id>.rule.json` 的内容（原样）。P7-c 起才产出。 */
+  ruleExt?: unknown;
+  /** `<id>.raw/` 下有几片原文切片。 */
+  rawParts?: number;
+  /**
+   * 伴生文件读不动时的说明（空数组 = 都好）。
+   *
+   * ⚠️ **与 `problems` 分开**：`problems` 说的是"这份剧本本身不能用"（`usableScenarios` 按它
+   * 过滤），而一个坏掉的 `struct.json` 不该让一份好好的 `.md` 变得不能开局 —— 那等于因为
+   * 一个旁路文件丢了整局。它的去向是回执与 `.trpg check`，**不是**过滤。
+   */
+  extrasProblems?: string[];
+}
+
+export interface TrpgScenario extends ScenarioSkeleton, ScenarioExtras {
   id: string;
   body: string;
 }
@@ -62,6 +90,10 @@ export interface ScenarioSummary {
   savedAt: number;
   /** 这份剧本的问题（空数组 = 好）。**坏文件照样列出来**，否则管理员只看到"少了一个"。 */
   problems: string[];
+  /** 有没有抽取产物（`<id>.struct.json` 在不在且解得开）。`.trpg check` 与回执按它分流。 */
+  hasStruct: boolean;
+  /** `<id>.raw/` 下有几片原文切片。 */
+  rawParts: number;
 }
 
 export type ScenarioLookup =

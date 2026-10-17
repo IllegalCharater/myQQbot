@@ -24,6 +24,7 @@
 import { err, ok } from '../../../agent/tools/shared.js';
 import { MAX_PLAYERS, MAX_RULE_CHARS, MAX_SCENARIO_ID_CHARS, text } from './limits.js';
 import { appendLog, emptyCampaign, mirrorLog } from './campaign.js';
+import { ruleSetOf } from './rule-set.js';
 import type { JournalPort } from './campaign.js';
 import type { ToolArguments, ToolResult } from '../../../agent/shared/types.js';
 import type { TrpgCampaign, TrpgCharacter, TrpgStatus } from '../types.js';
@@ -220,13 +221,35 @@ export function beginCampaign(
     return err('要给这场团起个名字（title）—— 或者指定一份带标题的剧本（scenario）');
   }
 
-  // 规则：显式给的 > 剧本推荐的 > generic。取表这一步分两种失败，处理不同：
+  // 规则：显式给的 > 剧本推荐的 > generic。取规则这一步分三种失败，处理不同：
   //   • 引用的表**不存在** → 回落 generic，并把那句 note 原样写进回执（静默回落是本仓库
   //     最忌讳的那类故障："填了、看着生效、实际用的是别的"）；
-  //   • 表**本身有问题** → 拒绝开局，把问题报上去让人去修（不是"随便换一套继续跑"）。
-  const ruleLookup = deps.rules.read(text(args?.rule, MAX_RULE_CHARS) || scenario?.rule || '');
-  if (!ruleLookup.ok) return err(ruleLookup.message);
-  const rule = ruleLookup.rule;
+  //   • 表**本身有问题** → 拒绝开局，把问题报上去让人去修（不是"随便换一套继续跑"）；
+  //   • 剧本自带的**规则扩展**编译不过 → 同样拒绝，而且此刻**什么都还没写盘**（P7-d）。
+  //
+  // ⚠️ 这一条走的是**统一取用口**（`ruleSetOf`），不是 `deps.rules.read`：六处消费点读的是
+  // 同一个函数，所以"开局时放行、运行期全部报错"这种两边不一致的状态在结构上就不可能出现。
+  // 递进去的 `scenario?.ruleExt` 是**还没快照进战役**的那一份（战役对象此刻还没建出来）。
+  const found = ruleSetOf(
+    text(args?.rule, MAX_RULE_CHARS) || scenario?.rule || '', scenario?.ruleExt, deps.rules
+  );
+  if (!found.ok) {
+    // 两条坏路，回执**分开**（P7-f）——判据是"此刻那个人能去改哪一份文件"：
+    //   • 基础表坏了：原样照印 `rule-store.ts` 那句话（`规则表「X」有问题：…`）。
+    //     **不许在这里改写**：六个消费点报的也是它，改一处就变成"开局时说的"与
+    //     "跑起来报的"不是同一句话 —— 而那句正是排查时唯一能对上号的线索。
+    //   • 规则扩展坏了：**逐条**说 + 指出去改哪份文件。这一条是给管理员看的，而
+    //     "这一局的规则扩展有问题：A；B；C"那一整句在群里既读不下去、也没说改哪儿。
+    if (found.source === 'base') return err(found.message);
+    return err([
+      '这份剧本的规则扩展有问题，开局停了：',
+      ...found.problems.map((problem) => `· ${problem}`),
+      scenario
+        ? `改完 data/trpg/scenarios/${scenario.id}.rule.json 再开一次。`
+        : '改完那份 .rule.json 再开一次。'
+    ].join('\n'));
+  }
+  const rule = found.base;
 
   const campaign = emptyCampaign(chatKey, {
     title, system: text(args?.system, 60), rule: rule.id
@@ -236,7 +259,14 @@ export function beginCampaign(
   campaign.scene = text(args?.scene, 400) || scenario?.scene || '';
 
   if (scenario) {
-    campaign.scenario = { id: scenario.id, body: scenario.body };
+    // 抽取产物（`struct` / `ruleExt`）**一起快照**，同 `body` 那条理由：改剧本文件不该影响
+    // 正在跑的这一局。两个字段是可选的 —— 手写的 `.md` 一个都没有，那是正常状态。
+    campaign.scenario = {
+      id: scenario.id,
+      body: scenario.body,
+      ...(scenario.struct === undefined ? {} : { struct: scenario.struct }),
+      ...(scenario.ruleExt === undefined ? {} : { ruleExt: scenario.ruleExt })
+    };
     // 骨架落进状态。**预置的在前、同名不覆盖**：将来若支持"往已经跑着的团里补一份剧本"，
     // 场上的事实该赢过纸上的设定。
     campaign.flags = { ...scenario.flags, ...campaign.flags };
@@ -260,11 +290,22 @@ export function beginCampaign(
   const next = campaign.status === 'preparing'
     ? '接下来让要玩的人敲 `.trpg join` 报名、`.pc new <角色名>` 建卡，都确认之后敲 `.trpg start` 开跑。'
     : '接下来用 character 的 action=create 补上玩家角色，然后开始叙事（发言记得用 say）。';
+  // 抽取产物的两句话**只在真有东西要说时**才出现（手写的 `.md` 两个字段都没有）：
+  //   • 有结构 → 说一句"它跟着进上下文"，否则管理员不知道那份 `.struct.json` 有没有生效；
+  //   • 伴生坏了 → **明说，但开局照常**（`.md` 是好的，旁路文件不该掀翻一整局 —— 见
+  //     `scenario-store.ts` 文件头那条）。两者都不是既有回执的形状，所以既有断言逐字不变。
+  const extrasNote = (scenario?.struct === undefined
+    ? ''
+    : '这份剧本还带了一份抽取出来的剧情结构，会随状态一起进 DM 的上下文。')
+    + (scenario?.extrasProblems?.length
+      ? `\n注意：${scenario.extrasProblems.join('；')}。开局照常，但那份产物用不了 —— 重传一次剧本能刷新。`
+      : '');
   return ok(`《${campaign.title}》已经开局，检定规则表是 ${rule.id}（${rule.name}）。`
     + (scenario
       ? `剧本「${scenario.id}」已注入：` + (scenario.body ? `正文 ${scenario.body.length} 字，` : '没有正文，')
         + `预置 ${Object.keys(scenario.flags).length} 条旗标、${campaign.characters.length} 张人物卡。`
       : '')
-    + (ruleLookup.note ? `注意：${ruleLookup.note}。` : '')
+    + (found.note ? `注意：${found.note}。` : '')
+    + extrasNote
     + next);
 }

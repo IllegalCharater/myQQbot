@@ -196,6 +196,38 @@ export const EXTRA_PROMPT_SECTIONS = {
  * ⚠️ 动态部分（原文、上限、局面摘要）**由调用方传进来**，不在这里拼 —— 本文件零 import，
  * 拿不到 `MAX_SCENARIO_CHARS` / `MAX_FLAGS` 那些常量。把它们写成字面量就会漂移。
  */
+/**
+ * 剧本文件的输出格式说明（frontmatter 的形状 + 那几条硬规则）。
+ *
+ * ⚠️ **它被两个 job 共用**（`formatScenario` 与 `mergeExtract`），这是刻意的：两份产物的
+ * 后置条件是**同一条**（必须过 `parseScenario`），格式说明抄两遍必然漂移，而漂移的表现是
+ * "一条路产出的文件能落库、另一条落不进去" —— 那种不一致没人会去核对。上限仍是**参数**：
+ * 本文件零 import，拿不到那些常量。
+ */
+function scenarioFileSpec(
+  { maxChars, maxFlags, maxCharacters }: { maxChars: number; maxFlags: number; maxCharacters: number }
+): string[] {
+  return [
+    '【输出格式】（frontmatter 由两行 `---` 包住，每个字段一行；后面跟正文）',
+    '---',
+    'title: 这场团的名字（30 字以内）',
+    'rule: （可省）推荐的规则表 id，例如 coc7 / generic',
+    'scene: （可省）开局时玩家所处的场景，一句话',
+    'flags: {"旗标名":"值","另一条":{"value":"值","visible":false}}',
+    'characters: [{"name":"角色名","hpMax":12,"sanMax":50,"stats":{"力量":14},"visible":false}]',
+    '---',
+    '正文',
+    '',
+    '【规则】',
+    '- `flags` 与 `characters` 的值是**单行 JSON**，不能换行；`title` / `rule` / `scene` 是普通文本。',
+    '- `visible: false` 表示**对玩家隐藏**（暗线、幕后角色）；不写就是公开的。',
+    `- 正文只放**世界观与主线**，最多 ${maxChars} 字（超了整份会被拒）。细节尽量变成 flags 或 characters。`,
+    `- 最多 ${maxFlags} 条旗标、${maxCharacters} 张人物卡。`,
+    '- **只提取原文里有的东西**：原文没提到旗标或人物，就只写 title 与正文。',
+    '- 直接输出文件内容：不要代码块、不要解释、不要写"以下是整理结果"。'
+  ];
+}
+
 export const EXTRA_PROMPT_JOBS = {
   trpg: {
     /**
@@ -214,29 +246,116 @@ export const EXTRA_PROMPT_JOBS = {
       }) => [
         '把下面这份文字整理成一份剧本文件。',
         '',
-        '【输出格式】（frontmatter 由两行 `---` 包住，每个字段一行；后面跟正文）',
-        '---',
-        'title: 这场团的名字（30 字以内）',
-        'rule: （可省）推荐的规则表 id，例如 coc7 / generic',
-        'scene: （可省）开局时玩家所处的场景，一句话',
-        'flags: {"旗标名":"值","另一条":{"value":"值","visible":false}}',
-        'characters: [{"name":"角色名","hpMax":12,"sanMax":50,"stats":{"力量":14},"visible":false}]',
-        '---',
-        '正文',
-        '',
-        '【规则】',
-        '- `flags` 与 `characters` 的值是**单行 JSON**，不能换行；`title` / `rule` / `scene` 是普通文本。',
-        '- `visible: false` 表示**对玩家隐藏**（暗线、幕后角色）；不写就是公开的。',
-        `- 正文只放**世界观与主线**，最多 ${maxChars} 字（超了整份会被拒）。细节尽量变成 flags 或 characters。`,
-        `- 最多 ${maxFlags} 条旗标、${maxCharacters} 张人物卡。`,
-        '- **只提取原文里有的东西**：原文没提到旗标或人物，就只写 title 与正文。',
-        '- 直接输出文件内容：不要代码块、不要解释、不要写"以下是整理结果"。',
+        ...scenarioFileSpec({ maxChars, maxFlags, maxCharacters }),
         '',
         `【剧本名】${name}`,
         `【原文来源】${source}，共 ${chars} 字`,
         '',
         '【原文】',
         text
+      ].join('\n')
+    },
+
+    /**
+     * **L2：从一片模组原文里抽结构化信息**（`scenario/extract/pipeline.ts`）。
+     *
+     * 一次调用只处理一片（上限 `MAX_CHUNK_CHARS` 字），所以它不必"通读整份" —— 那正是切片
+     * 存在的理由：一份 30 页模组的原文**塞不进一次调用**。
+     *
+     * ⚠️ `sourceQuote` 那一条是本 job 最要紧的约束：它是整条管线里**唯一能被人核对的东西**
+     * （L4 会查它在原文里逐字找不找得到）。所以提示词里必须说清"照抄、不改写、不补全"，
+     * 而 L4 也**不丢弃**对不上的那些 —— 只标成待核项（丢弃会让抽取静默变少）。
+     */
+    extractChunk: {
+      system: '你是跑团模组的资料整理助手：从一段模组原文里抽出结构化的剧情信息。'
+        + '你只做提取，**绝不发明原文里没有的事实** —— 原文没写的场景、人物、线索、道具一律不写。'
+        + '你只输出一个 JSON 对象，不写解释、不写前言、不用代码块包起来。',
+      user: ({ name, index, total, heading, text, maxItems, maxTextChars, maxQuoteChars,
+        mechanicTypes, triggerOps, effectHandlers }: {
+        name: string; index: number; total: number; heading: string; text: string;
+        maxItems: number; maxTextChars: number; maxQuoteChars: number;
+        mechanicTypes: readonly string[]; triggerOps: readonly string[]; effectHandlers: readonly string[];
+      }) => [
+        `这是模组「${name}」的第 ${index}/${total} 片原文${heading ? `（起于小节「${heading}」）` : ''}。`,
+        '抽出这一段里**确实出现过**的剧情信息，输出一个 JSON 对象。',
+        '',
+        '【字段】',
+        '- "summary"：这一片讲了什么，两三句话。',
+        '- "scenes"：[{"name":"场景名","summary":"这里是什么地方、会发生什么","npcs":["人物名"],"clues":["线索概述"]}]',
+        '- "npcs"：[{"name":"人物名","summary":"这个人是谁","attitude":"对玩家的态度","location":"在哪","discovered":true}]',
+        '- "clues"：[{"text":"玩家能查到的那条线索","visible":true,"location":"在哪查得到"}]',
+        '- "items"：[{"name":"道具名","summary":"这是什么、有什么用","location":"在哪"}]',
+        '- "mechanics"：[{"type":"类型","trigger":{"op":"…"},"effect":{"handler":"…","params":{}},'
+          + '"triggerText":"什么条件下触发","effectText":"会怎样","note":"一句话说明",'
+          + '"sourceQuote":"原文里逐字照抄的那一两句"}]',
+        '',
+        '【规则】',
+        `- 每一类最多 ${maxItems} 条；每个文本字段不超过 ${maxTextChars} 字。`,
+        `- mechanics 的 sourceQuote 必须**从上面那段原文里逐字照抄**（不要改写、不要补全、不要翻译），`
+          + `不超过 ${maxQuoteChars} 字。找不到出处的机制会被标成待核项。`,
+        `- mechanics 的 type 只能取这几个之一：${mechanicTypes.join(' / ')}。拿不准就写 narrative_hook。`,
+        // ── 机制要写成**受控语法**（P7-c）──
+        //
+        // 这三条是本 job 里第二要紧的约束（第一是 sourceQuote）。判据只有 `compileRuleSet` 一份，
+        // 而它认的清单就是这里念的三张 —— 由调用方从 `rules/rule-set.ts` 递进来，**不在这里抄一遍**：
+        // 抄一遍的话，加了新 handler 而提示词没跟上，表现是"模型写了一个其实支持、却没人告诉它
+        // 可以写的值"，抽出来的机制静默变少，两边都不报错。
+        `- mechanics 的 trigger 只能写成这几种 op：${triggerOps.join(' / ')}。`
+          + 'scene / actor / skill 写 {"op":"scene","value":"灯塔"}；'
+          + 'flag 要同时写 key 与 value（{"op":"flag","key":"灯灭了","value":"是"}）；'
+          + 'all_of / any_of / none_of 写 {"op":"all_of","items":[…]}，items 里还是这几种 op，可以套。',
+        `- mechanics 的 effect.handler 只能取：${effectHandlers.join(' / ')}。`
+          + 'bonus_to_check / penalty_to_check 写 {"handler":"penalty_to_check","params":{"value":20}}'
+          + '（两个都写正数，方向由 handler 决定）；'
+          + 'force_outcome 写 {"handler":"force_outcome","params":{"outcome":"success"}}（或 "failure"）；'
+          + 'immune_to_damage 与 narrate 不写 params。',
+        // ⚠️ 这句说的是**真实的后果**，不是吓唬：判据不明的机制会被降级成纯叙事（信息仍留在
+        // note / triggerText / effectText 里），而**同一个触发条件下两条方向相反的机制**会让
+        // 整份剧本开不了局 —— 那正是最该在提示词里说清的一条（模型不知道有这道闸门）。
+        '- 判据写不出来时别硬编：type 写 narrative_hook、不写 trigger、effect 写 '
+          + '{"handler":"narrate","params":{}}，内容留在 note 与 triggerText / effectText 里。'
+          + '同一个 trigger 下不要写两条方向相反的机制（一条加值一条减值、或两条都要定成败）—— '
+          + '那会让整份剧本开不了局；两条同向的加值可以，它们会相加。',
+        '- "visible" / "discovered" 写 false 表示**对玩家隐藏**（暗线、幕后角色）；不写就是公开的。',
+        '- 抽不到任何东西时输出 {} —— **不要**为了凑数编内容。',
+        '- 只输出 JSON 对象：不要代码块、不要解释、不要写"以下是抽取结果"。',
+        '',
+        '【原文】',
+        text
+      ].join('\n')
+    },
+
+    /**
+     * **L3：把分段抽取结果合成一份剧本文件**（`scenario/extract/pipeline.ts`）。
+     *
+     * 它拿到的**不是原文**，而是已经归并好的结构化结果（JSON）—— 因为原文可能大得塞不进一次
+     * 调用，那正是切片的原因。所以它做的是**压缩与串联**：把结构里的世界观与主线写成正文。
+     *
+     * ⚠️ 正文**不要罗列**场景/人物清单：那些另有结构化记录（`<id>.struct.json`），而它们
+     * 每轮都随 `renderBriefing` 进 system prompt —— 写进正文就是同一份东西付两次钱。
+     */
+    mergeExtract: {
+      system: '你是跑团剧本的整理助手：把一份模组的分段抽取结果合成一份剧本文件。'
+        + '你只做归并与压缩，**绝不发明抽取结果里没有的事实**。'
+        + '你直接输出那份文件的内容，不写解释、不写前言、不用代码块包起来。',
+      user: ({ name, source, chars, maxChars, maxFlags, maxCharacters, extracted }: {
+        name: string; source: string; chars: number;
+        maxChars: number; maxFlags: number; maxCharacters: number; extracted: string;
+      }) => [
+        '把下面这份**分段抽取结果**合成一份剧本文件。',
+        '',
+        ...scenarioFileSpec({ maxChars, maxFlags, maxCharacters }),
+        '',
+        '【正文怎么写】',
+        '- 正文是**世界观与主线**：这是个什么地方、玩家在查什么、会撞上谁、最后会怎样。',
+        '- **不要**在正文里罗列场景清单或人物清单 —— 那些已经另有结构化记录，写一遍就是重复。',
+        `- 正文不超过 ${maxChars} 字（超了整份会被拒）。`,
+        '',
+        `【剧本名】${name}`,
+        `【抽取来源】${source}，原文共 ${chars} 字`,
+        '',
+        '【分段抽取结果】',
+        extracted
       ].join('\n')
     },
 

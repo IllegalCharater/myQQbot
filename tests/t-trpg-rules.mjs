@@ -848,4 +848,495 @@ const anyRng = () => 0.5;
   }
 }
 
+// ── 16. 规则扩展：编译、互斥与两个钩子（P7-c）────────────────────────────────
+//
+// `rules/rule-set.ts` 是**语法与互斥的权威** —— 抽取管线（`scenario/extract/mechanics.ts`）、
+// 人手改过的 `<id>.rule.json`、以及开局那一步（P7-d）走的都是它。所以这一段全部是定值断言：
+// 逐条核对"这份数据编译出来是什么"。
+//
+// ⚠️ **互斥表本身是私有的**（`EFFECT_EXCLUSIONS` 不导出），所以下面那些断言一律**从行为上探**
+// —— 用 `compileRuleSet` 喂一对机制进去，看它拒不拒。探行为比探常量强：常量改名、表被换掉
+// 都不影响这些断言，而"两条相反的机制真的被拦住了"才是这张表存在的全部理由。
+{
+  const {
+    MECHANIC_TYPES, EFFECT_HANDLERS, TRIGGER_OPS, TRIGGER_ATOMS, TRIGGER_COMBINATORS,
+    EMPTY_RULE_SET, isMechanicType, compileRuleSet, triggerKey, describeTrigger, describeMechanic,
+    activeMechanics, applyCheckModifiers, damageBlockers
+  } = await load('extra/trpg/rules/rule-set.js');
+
+  /** 一条**一定编译得过**的机制。`over` 覆盖任意字段。 */
+  const mech = (over = {}) => ({
+    type: 'npc_trait',
+    note: '守夜人不吃普通伤害',
+    trigger: { op: 'actor', value: '守夜人' },
+    effect: { handler: 'narrate', params: {} },
+    sourceQuote: '守夜人刀枪不入',
+    ...over
+  });
+  /** 只编译一条，返回 `RuleSetLookup`。 */
+  const one = (over = {}) => compileRuleSet({ version: 1, mechanics: [mech(over)] });
+  /** 只编译一条、且要求它成功 —— 拿它读编译结果里那条机制。 */
+  const built = (over = {}) => {
+    const r = one(over);
+    if (!r.ok) throw new Error(`本该编译得过，却被拒了：${JSON.stringify(r.problems)}`);
+    return r.set.mechanics[0];
+  };
+  /** 一条只带 `scene: 灯塔` 的机制 —— 用来拼互斥对。 */
+  const scene = (handler, params = {}) => mech({
+    trigger: { op: 'scene', value: '灯塔' }, effect: { handler, params }
+  });
+  const ctx = (over = {}) => ({ scene: '', flags: {}, actor: '', skill: '', ...over });
+
+  // ── 16a. 两张清单 ──
+  ok('机制类型恰好八种，且与判据同源（多一个少一个都会让抽取层与编译层对不上）',
+    MECHANIC_TYPES.length === 8 && MECHANIC_TYPES.every((t) => isMechanicType(t)),
+    MECHANIC_TYPES.join('/'));
+  ok('`narrative_hook` 在清单里（它是认不出的 type 的**降级目标档**，缺了降级无处可去）',
+    isMechanicType('narrative_hook'));
+  ok('认不出的 type 与空值都不是合法类型（`isMechanicType` 不能退化成真值判断）',
+    !isMechanicType('reduce_damage') && !isMechanicType('') && !isMechanicType(null)
+    && !isMechanicType(undefined));
+  ok('handler 恰好五个 —— **收窄是有意的**，一个都不自动改状态（没有 set_flag / damage / san_loss）',
+    EFFECT_HANDLERS.length === 5
+    && JSON.stringify([...EFFECT_HANDLERS])
+      === JSON.stringify(['bonus_to_check', 'penalty_to_check', 'force_outcome', 'immune_to_damage', 'narrate']),
+    EFFECT_HANDLERS.join('/'));
+  ok('trigger 的 op 是四个原子 + 三个组合子（原子在前，提示词照这个顺序念）',
+    JSON.stringify([...TRIGGER_OPS]) === JSON.stringify([...TRIGGER_ATOMS, ...TRIGGER_COMBINATORS])
+    && TRIGGER_ATOMS.length === 4 && TRIGGER_COMBINATORS.length === 3);
+  ok('⚠️ **没有 `item` 这个 op**：战役状态里根本没有物品栏，加一个永远为假的 op 只会让机制静默失效',
+    !TRIGGER_OPS.includes('item'));
+
+  // ── 16b. 空与形状 ──
+  ok('`null` / `undefined` → 空集，而且**就是那个同一个对象**（`EMPTY_RULE_SET` 是共享常量）',
+    compileRuleSet(null).set === EMPTY_RULE_SET && compileRuleSet(undefined).set === EMPTY_RULE_SET);
+  ok('空集**不是**"没有规则"的同义词：基础表照旧生效，这里只说明"这一局没有特殊规则"',
+    EMPTY_RULE_SET.mechanics.length === 0 && EMPTY_RULE_SET.warnings.length === 0);
+  ok('不是对象（数组 / 字符串 / 数）→ 拒绝，且给的是可读的一句',
+    !compileRuleSet([]).ok && !compileRuleSet('x').ok && !compileRuleSet(3).ok
+    && compileRuleSet([]).problems[0] === '规则扩展的形状不对（应该是一个对象）');
+  ok('版本不是 1 → 拒绝（把 `2` 当成 `1` 读会让新格式的字段静默失效）',
+    !compileRuleSet({ version: 2 }).ok
+    && compileRuleSet({ version: 2 }).problems[0] === '规则扩展的版本是 2，这份代码只认 1');
+  ok('`mechanics` 不是数组 → 拒绝（当空数组处理的话表现是"一条机制都没有"，而文件里明明写着）',
+    !compileRuleSet({ mechanics: {} }).ok
+    && compileRuleSet({ mechanics: {} }).problems[0] === '规则扩展的 mechanics 要写成一个数组');
+  ok('没有 `mechanics` 这一栏 → **编译得过**，但记一笔（手写的剧本本来就没有规则扩展）',
+    compileRuleSet({}).ok && compileRuleSet({}).set.warnings.length === 1
+    && compileRuleSet({}).set.warnings[0].includes('没有 mechanics 这一栏'));
+  ok('`mechanics: []` → 编译得过且**一笔都不记**（空数组是"我明确写了没有"，与"漏了那一栏"不同）',
+    compileRuleSet({ mechanics: [] }).ok && compileRuleSet({ mechanics: [] }).set.warnings.length === 0);
+  ok('数组里混进一个不是对象的东西 → 拒绝并点明是第几条',
+    !compileRuleSet({ mechanics: [mech(), 7] }).ok
+    && compileRuleSet({ mechanics: [mech(), 7] }).problems[0] === '第 2 条机制不是一个对象');
+
+  // ── 16c. type：认不出就降级，不拒绝 ──
+  ok('认不出的 type → **降级成 `narrative_hook`**（它只是分类标签，丢了不影响判定）',
+    built({ type: 'reduce_damage' }).type === 'narrative_hook');
+  ok('降级那句话点名了原类型，而且说明"不影响判定"（不说的话管理员会以为那条机制没了）',
+    one({ type: 'reduce_damage' }).set.warnings[0]
+      === '第 1 条机制的 type「reduce_damage」我不认识，已按纯叙事处理（不影响判定）');
+  ok('type 为空也走同一条路（不写成"第 1 条的 type 我不认识"这种读不出写的是什么的话）',
+    one({ type: '' }).set.warnings[0].includes('type「（空）」'));
+
+  // ── 16d. trigger ──
+  ok('**`flag` 要同时写 key 与 value**：只写 value 是"哪个旗标等于是"当场丢掉，那条机制此后永不触发',
+    !one({ trigger: { op: 'flag', value: '是' } }).ok
+    && one({ trigger: { op: 'flag', value: '是' } }).problems[0].includes('就得写 key'));
+  ok('`flag` 只写 key 也拒（"旗标存在"与"旗标为真"是两件事，读的人推不出来）',
+    !one({ trigger: { op: 'flag', key: '灯灭了' } }).ok
+    && one({ trigger: { op: 'flag', key: '灯灭了' } }).problems[0].includes('要同时写 key 与 value'));
+  ok('`flag` 写全了就过（值原样带出来）',
+    JSON.stringify(built({ trigger: { op: 'flag', key: '灯灭了', value: '是' } }).trigger)
+      === JSON.stringify({ op: 'flag', key: '灯灭了', value: '是' }));
+  ok('原子谓词少了 `value` → 拒绝，且**念出是哪个 op**（"就得写 value"那句要能自己定位）',
+    !one({ trigger: { op: 'scene' } }).ok
+    && one({ trigger: { op: 'scene' } }).problems[0].includes('op 是「scene」'));
+  ok('组合子少了 `items`（或给空数组）→ 拒绝（空 `all_of` 恒为真，那是"无条件生效"的伪装）',
+    !one({ trigger: { op: 'all_of', items: [] } }).ok
+    && one({ trigger: { op: 'all_of', items: [] } }).problems[0].includes('非空的 items 数组'));
+  ok('认不出的 op → 拒绝，并把**全部可选值念出来**（模型/人手改时照着改得动）',
+    !one({ trigger: { op: 'item', value: '钥匙' } }).ok
+    && one({ trigger: { op: 'item', value: '钥匙' } }).problems[0]
+      === `第 1 条机制：trigger 的 op 写的是「item」，我不认识（只有 ${TRIGGER_OPS.join(' / ')}）`);
+  ok('trigger 不是对象（写成字符串 / 数组）→ 拒绝',
+    !one({ trigger: '灯塔' }).ok && !one({ trigger: [] }).ok
+    && one({ trigger: '灯塔' }).problems[0].includes('trigger 要写成一个对象'));
+  {
+    const wrap = (n, leaf) => { let node = leaf; for (let i = 0; i < n; i += 1) node = { op: 'all_of', items: [node] }; return node; };
+    ok('嵌套三层组合子照常过（"这一场且灯灭了且不是守夜人"就在这一档）',
+      one({ trigger: wrap(3, { op: 'scene', value: '灯塔' }) }).ok);
+    ok('嵌套超过上限 → 拒绝并说明上限（深度是**成本**，也是"读得懂"的上限）',
+      !one({ trigger: wrap(4, { op: 'scene', value: '灯塔' }) }).ok
+      && one({ trigger: wrap(4, { op: 'scene', value: '灯塔' }) }).problems[0].includes('嵌套太深了'));
+  }
+
+  // ── 16e. effect：认不出的 handler 拒绝（与 type 相反）──
+  ok('⚠️ **认不出的 handler 是拒绝而不是降级**：它是"这条机制要做什么"，不认识就没法诚实地应用它',
+    !one({ effect: { handler: 'reduce_damage' } }).ok
+    && one({ effect: { handler: 'reduce_damage' } }).problems[0]
+      === `第 1 条机制：effect.handler 写的是「reduce_damage」，我不认识它（只有 ${EFFECT_HANDLERS.join(' / ')}）`);
+  ok('handler 是空值也拒，且那句话印的是「（空）」而不是 `undefined`',
+    one({ effect: {} }).problems[0].includes('写的是「（空）」'));
+  ok('effect 不是对象 → 拒绝',
+    !one({ effect: 'narrate' }).ok && one({ effect: 'narrate' }).problems[0].includes('effect 要写成一个对象'));
+  ok('`bonus_to_check` 缺 `value` → 拒绝，并把允许区间写出来（+200 那种笔误该当场拦）',
+    !one({ effect: { handler: 'bonus_to_check' } }).ok
+    && one({ effect: { handler: 'bonus_to_check' } }).problems[0].includes('1–100 的整数'));
+  ok('`value` 写成字符串 `"20"` → **收下并转成数**（模型偶尔这么写，为此拒一条机制不划算）',
+    built({ effect: { handler: 'bonus_to_check', params: { value: '20' } } }).effect.params.value === 20);
+  ok('但别的类型一律不收：`true` / `"abc"` / 越界 / 小数都拒（它们说明这一栏写的不是数）',
+    !one({ effect: { handler: 'bonus_to_check', params: { value: true } } }).ok
+    && !one({ effect: { handler: 'bonus_to_check', params: { value: 'abc' } } }).ok
+    && !one({ effect: { handler: 'bonus_to_check', params: { value: 0 } } }).ok
+    && !one({ effect: { handler: 'bonus_to_check', params: { value: 101 } } }).ok
+    && !one({ effect: { handler: 'penalty_to_check', params: { value: 20.5 } } }).ok);
+  ok('两个加减 handler 都**写正数**，方向由 handler 决定（允许负数的话"penalty + (-20)"要读代码才知道）',
+    one({ effect: { handler: 'penalty_to_check', params: { value: -20 } } }).problems[0].includes('都写正数'));
+  ok('`force_outcome` 的 `outcome` 只认 success / failure（写别的没法判，也没法回执）',
+    !one({ effect: { handler: 'force_outcome', params: {} } }).ok
+    && !one({ effect: { handler: 'force_outcome', params: { outcome: 'maybe' } } }).ok);
+  ok('`force_outcome` 不写 grade / label 时给一套默认（回执不能出现空白档位）',
+    JSON.stringify(built({ effect: { handler: 'force_outcome', params: { outcome: 'success' } } }).effect.params)
+      === JSON.stringify({ outcome: 'success', grade: 'forced', label: '机制强制成功' }));
+  ok('写了就原样留着（失败那一档的默认文案与成功不同）',
+    built({ effect: { handler: 'force_outcome', params: { outcome: 'failure', grade: '必败', label: '这一枪打不中' } } })
+      .effect.params.label === '这一枪打不中'
+    && built({ effect: { handler: 'force_outcome', params: { outcome: 'failure' } } })
+      .effect.params.label === '机制强制失败');
+  ok('`immune_to_damage` / `narrate` 多写的一律忽略（为"顺手多写一栏"整条拒绝不划算）',
+    JSON.stringify(built({ effect: { handler: 'immune_to_damage', params: { value: 5 } } }).effect.params)
+      === JSON.stringify({})
+    && JSON.stringify(built({ effect: { handler: 'narrate', params: { 胡说: 1 } } }).effect.params)
+      === JSON.stringify({}));
+
+  // ── 16f. narrative_hook 的语义：强制 narrate ──
+  ok('`narrative_hook` 写了别的 handler → 记一笔并**按纯叙事处理**（分类与判定对不上该说出来）',
+    one({ type: 'narrative_hook', effect: { handler: 'bonus_to_check', params: { value: 20 } } })
+      .set.warnings[0].includes('是 narrative_hook，却写了 bonus_to_check')
+    && built({ type: 'narrative_hook', effect: { handler: 'bonus_to_check', params: { value: 20 } } })
+      .effect.handler === 'narrate');
+  ok('`narrative_hook` 的 effect 看不懂时也只记一笔（它本来就不参与判定）',
+    one({ type: 'narrative_hook', effect: 'oops' }).set.warnings[0].includes('effect 看不懂')
+    && built({ type: 'narrative_hook', effect: 'oops' }).effect.handler === 'narrate');
+  ok('`narrative_hook` **可以不写 trigger**（trigger 为 `null` = 无条件，对纯叙事提示是正当的）',
+    built({ type: 'narrative_hook', trigger: undefined }).trigger === null);
+  ok('⚠️ 别的 type 不写 trigger → **拒绝**（无条件生效的判定会让每一次检定都受影响）',
+    !one({ trigger: undefined }).ok
+    && one({ trigger: undefined }).problems[0]
+      === '第 1 条机制（npc_trait）没写 trigger —— 无条件生效的判定会让每一次检定都受影响');
+  ok('`trigger: null` 与"没写"同义（都走上面那条路，不另开一个分岔）',
+    !one({ trigger: null }).ok && one({ trigger: null }).problems[0].includes('没写 trigger'));
+
+  // ── 16g. 互斥表（决定 4）──
+  const pair = (a, b) => compileRuleSet({ version: 1, mechanics: [a, b] });
+  ok('同一个触发条件下 **加值 vs 减值 → 拒绝**，那句话同时点出两条的序号与各自的 handler',
+    !pair(scene('bonus_to_check', { value: 20 }), scene('penalty_to_check', { value: 20 })).ok
+    && pair(scene('bonus_to_check', { value: 20 }), scene('penalty_to_check', { value: 20 })).problems[0]
+      === '第 1 条与第 2 条的触发条件相同（场景：灯塔），但一条是 bonus_to_check、一条是 penalty_to_check'
+        + ' —— 两条不能同时生效，只能留一条');
+  ok('反着写（减值在前）照样拒 —— 表是**对称**的，读的人不必自己推',
+    !pair(scene('penalty_to_check', { value: 20 }), scene('bonus_to_check', { value: 20 })).ok);
+  ok('`force_outcome` 与自己互斥（同一个条件下"必中"和"必败"不能共存，两条"必中"更是重复）',
+    !pair(scene('force_outcome', { outcome: 'success' }), scene('force_outcome', { outcome: 'failure' })).ok);
+  ok('`force_outcome` 与加减也互斥（同时算的话"必中"这句话就没有意义了）',
+    !pair(scene('bonus_to_check', { value: 20 }), scene('force_outcome', { outcome: 'success' })).ok
+    && !pair(scene('penalty_to_check', { value: 20 }), scene('force_outcome', { outcome: 'success' })).ok);
+  ok('⚠️ **上面那条两个方向都要成立** —— 只看先出现的那一条那一行会让闸门变成顺序相关，'
+    + '而 `rule.json` 里谁写在前面是抽取时模型给的顺序（曾经的写法就是单向的，'
+    + '于是"先写加值、后写必中"那份文件编译得过、两条机制一起开了局）',
+    !pair(scene('force_outcome', { outcome: 'success' }), scene('bonus_to_check', { value: 20 })).ok
+    && !pair(scene('force_outcome', { outcome: 'success' }), scene('penalty_to_check', { value: 20 })).ok
+    && !pair(scene('force_outcome', { outcome: 'success' }), scene('force_outcome', { outcome: 'failure' })).ok);
+  ok('（正对照）同一个触发条件下**两条加值不互斥** —— 它们相加，那是规则书里常见的东西',
+    pair(scene('bonus_to_check', { value: 20 }), scene('bonus_to_check', { value: 5 })).ok);
+  ok('（正对照）`immune_to_damage` / `narrate` 不与任何东西冲突：免疫是同向的，叙事提示与判定并行不悖',
+    pair(scene('immune_to_damage'), scene('bonus_to_check', { value: 20 })).ok
+    && pair(scene('narrate'), scene('penalty_to_check', { value: 20 })).ok
+    && pair(scene('narrate'), scene('narrate')).ok);
+  ok('**触发条件不同就不互斥**（"灯塔里 -20"与"守夜人 +20"是两条各管一摊的规则）',
+    pair(scene('bonus_to_check', { value: 20 }), mech({ effect: { handler: 'penalty_to_check', params: { value: 20 } } })).ok);
+  ok('⚠️ 组合子的子节点**换顺序**后仍算同一个条件（不排序的话换个顺序就能绕过这张表）',
+    !pair(
+      mech({ trigger: { op: 'all_of', items: [{ op: 'scene', value: '灯塔' }, { op: 'flag', key: '灯灭了', value: '是' }] }, effect: { handler: 'bonus_to_check', params: { value: 20 } } }),
+      mech({ trigger: { op: 'all_of', items: [{ op: 'flag', key: '灯灭了', value: '是' }, { op: 'scene', value: '灯塔' }] }, effect: { handler: 'penalty_to_check', params: { value: 20 } } })
+    ).ok);
+  ok('互斥是**编译期**的：被拒时 `ok` 为假，而 `mechanics` 一条都不交出去（不是"交一半再报错"）',
+    !pair(scene('bonus_to_check', { value: 20 }), scene('penalty_to_check', { value: 20 })).set);
+  ok('超条数上限时**截断并记一笔**（它每条都进 system prompt，是成本不是洁癖）', (() => {
+    const many = Array.from({ length: 41 }, (_, i) => mech({ trigger: { op: 'scene', value: `场${i}` } }));
+    const r = compileRuleSet({ version: 1, mechanics: many });
+    return r.ok && r.set.mechanics.length === 40
+      && r.set.warnings.some((w) => w.includes('超过 40 条上限') && w.includes('第 41 条起没进来'));
+  })());
+
+  // ── 16h. 指纹与人话 ──
+  ok('`triggerKey(null)` 是 `*`（无条件那一档也要有个键，否则两条"无条件"永远不互斥）',
+    triggerKey(null) === '*');
+  ok('指纹把组合子的子节点排序后拼（与上面那条换顺序的断言同源，两处都要成立）',
+    triggerKey({ op: 'any_of', items: [{ op: 'scene', value: '灯塔' }, { op: 'actor', value: '守夜人' }] })
+      === triggerKey({ op: 'any_of', items: [{ op: 'actor', value: '守夜人' }, { op: 'scene', value: '灯塔' }] }));
+  ok('指纹区分 op：`scene:灯塔` 与 `actor:灯塔` 不是同一个条件',
+    triggerKey({ op: 'scene', value: '灯塔' }) !== triggerKey({ op: 'actor', value: '灯塔' }));
+  ok('`describeTrigger` 给的是中文人话（回执与提示词共用它）',
+    describeTrigger({ op: 'flag', key: '灯灭了', value: '是' }) === '旗标：灯灭了 = 是'
+    && describeTrigger({ op: 'all_of', items: [{ op: 'scene', value: '灯塔' }, { op: 'skill', value: '侦查' }] })
+      === '（场景：灯塔 且 技能：侦查）'
+    && describeTrigger({ op: 'none_of', items: [{ op: 'actor', value: '守夜人' }] }) === '（非 角色：守夜人）'
+    && describeTrigger(null) === '无条件');
+  ok('`describeMechanic` 一行给全：note（模型写的）+ type + 触发条件 —— 提示词与回执**共用这一个拼法**',
+    describeMechanic(built()) === '守夜人不吃普通伤害（npc_trait / 角色：守夜人）');
+  ok('没写 note 时退化成触发条件（不印出一个空括号）',
+    describeMechanic(built({ note: '' })) === '角色：守夜人（npc_trait / 角色：守夜人）');
+
+  // ── 16i. 求值：判定是**去空白后的全等**，不做子串匹配 ──
+  {
+    const set = compileRuleSet({
+      version: 1,
+      mechanics: [
+        mech({ trigger: { op: 'scene', value: '灯塔' } }),
+        mech({ trigger: { op: 'flag', key: '灯灭了', value: '是' } }),
+        mech({ trigger: { op: 'skill', value: '侦查' } }),
+        mech({ type: 'narrative_hook', trigger: undefined })
+      ]
+    }).set;
+    const names = (c) => activeMechanics(set, ctx(c)).length;
+    ok('场景**全等**才算命中（中文没有分词：`includes` 会让「灯塔的雾」误报）',
+      names({ scene: '灯塔' }) === 2 && names({ scene: '灯塔的雾' }) === 1);
+    ok('比对前两侧都去空白（`" 灯塔 "` 与 `"灯塔"` 是同一个场景）',
+      names({ scene: ' 灯塔 ' }) === 2);
+    ok('旗标要**键与值都对上**（键对值不对 = 没命中）',
+      names({ flags: { 灯灭了: '是' } }) === 2 && names({ flags: { 灯灭了: '否' } }) === 1
+      && names({ flags: {} }) === 1);
+    ok('技能名同样全等（`侦查` 命中，`侦查（视觉）` 不命中）',
+      names({ skill: '侦查' }) === 2 && names({ skill: '侦查（视觉）' }) === 1);
+    ok('**无条件的机制（trigger 为 null）总是命中** —— 那正是纯叙事提示该有的行为',
+      names({}) === 1);
+  }
+  {
+    const wrap = (op, items) => compileRuleSet({
+      version: 1, mechanics: [mech({ trigger: { op, items } })]
+    }).set;
+    const c = { scene: '灯塔', actor: '守夜人' };
+    const hit = (op, items) => activeMechanics(wrap(op, items), ctx(c)).length === 1;
+    const A = { op: 'scene', value: '灯塔' };
+    const B = { op: 'actor', value: '守夜人' };
+    const C = { op: 'actor', value: '线人' };
+    ok('`all_of` 全中才命中', hit('all_of', [A, B]) && !hit('all_of', [A, C]));
+    ok('`any_of` 中一个就命中', hit('any_of', [A, C]) && hit('any_of', [C, B]) && !hit('any_of', [C]));
+    ok('`none_of` 是"一个都不中"（不是"不全中"）', hit('none_of', [C]) && !hit('none_of', [A, C]));
+  }
+
+  // ── 16j. 检定钩子 ──
+  {
+    const set = (list) => compileRuleSet({ version: 1, mechanics: list }).set;
+    const C = ctx({ scene: '灯塔', actor: '守夜人', skill: '侦查' });
+    const bonus = (v) => mech({ trigger: { op: 'scene', value: '灯塔' }, effect: { handler: 'bonus_to_check', params: { value: v } } });
+    const penalty = (v) => mech({ trigger: { op: 'skill', value: '侦查' }, effect: { handler: 'penalty_to_check', params: { value: v } } });
+    const forced = (outcome) => mech({ trigger: { op: 'actor', value: '守夜人' }, effect: { handler: 'force_outcome', params: { outcome } } });
+
+    const none = applyCheckModifiers(set([mech({ trigger: { op: 'scene', value: '别处' } })]), C, 60);
+    ok('没有机制命中时**原样返回**目标值（不夹紧、不加 0）',
+      none.target === 60 && none.applied.length === 0 && none.overridden.length === 0 && !none.judge);
+
+    const plus = applyCheckModifiers(set([bonus(20)]), C, 60);
+    ok('加值真的加在目标值上，并且把生效的那条报出来（回执要说清"为什么是 80"）',
+      plus.target === 80 && plus.applied.length === 1 && plus.applied[0].type === 'npc_trait');
+
+    const mixed = applyCheckModifiers(set([bonus(20), penalty(5)]), C, 60);
+    ok('多条同时命中时**都算**（20 加、5 减 → 75）', mixed.target === 75 && mixed.applied.length === 2);
+
+    const floor = applyCheckModifiers(set([penalty(20)]), C, 10);
+    ok('⚠️ **不夹紧结果**：`-20` 打在 10 的检定上得到 `-10`（那是"这一枪不可能成"，是机制的正当表达）',
+      floor.target === -10);
+
+    const force = applyCheckModifiers(set([bonus(20), forced('success')]), C, 60);
+    ok('`force_outcome` 一命中 → **加减全部作废**，而且被盖住的那几条记进 `overridden`',
+      force.target === 60 && force.applied.length === 1 && force.applied[0].effect.handler === 'force_outcome'
+      && force.overridden.length === 1 && force.overridden[0].effect.handler === 'bonus_to_check');
+    ok('给出的 `judge` 直接返回那一档（**传了 judge 就完全绕过等级表**，那是 `resolveCheck` 的现成钩子）',
+      force.judge({}).success === true && force.judge({}).grade === 'forced'
+      && force.judge({}).label === '机制强制成功');
+    const forcedFail = applyCheckModifiers(set([forced('failure')]), C, 60);
+    ok('强制失败那一档同样成立（success 为假、档位与文案来自机制自己）',
+      forcedFail.judge({}).success === false && forcedFail.judge({}).grade === 'forced'
+      && forcedFail.judge({}).label === '机制强制失败');
+
+    const blocked = damageBlockers(set([mech({ trigger: { op: 'actor', value: '守夜人' }, effect: { handler: 'immune_to_damage', params: {} } })]), C);
+    ok('`damageBlockers` 只挑"免疫伤害"那几条（它是**闸门**，不是"自动把伤害改成 0"）',
+      blocked.length === 1 && blocked[0].effect.handler === 'immune_to_damage');
+    ok('不命中时返回空数组（调用方据此照常扣血）',
+      damageBlockers(set([mech({ trigger: { op: 'actor', value: '线人' }, effect: { handler: 'immune_to_damage', params: {} } })]), C).length === 0);
+    ok('`narrate` **不算**免疫（两条都叫"不参与判定"，但一个挡伤害、一个只给提示，不能混）',
+      damageBlockers(set([mech({ trigger: { op: 'actor', value: '守夜人' } })]), C).length === 0);
+  }
+}
+
+// ── 17. 规则的**唯一取用口**（P7-d，决定 3）──────────────────────────────────
+//
+// `model/rule-set.ts` 是"这一局按什么规则判"的**唯一**答案：六处消费点全走它，谁都不再自己
+// `rules.read`。它把两件事合成一次取用 —— 基础表（`RuleStore.read` 那一路）与这一局冻结的
+// 规则扩展（`ruleExt`，`compileRuleSet` 那一路）。
+//
+// ⚠️ 这一段的每一条都对着一种**安静的坏法**（探针实测过：改掉之后行为断言一条都不红）：
+//   • 基础表那句 `note`（引用的表不存在 → 回落 generic）必须**原样透传** —— 吞掉的话
+//     "填了、看着生效、实际用的是别的"就回来了；
+//   • 规则扩展坏了必须**拒绝**（`ok: false`），**不是**回落成空集 —— 静默丢掉一局自己的机制，
+//     表现是"这些规则填了、一条都没跑"，而群里一切照常；
+//   • `sceneMechanics` 读不出来时给 `null` 而不是 `[]` —— 合并成一个会让"规则集坏了"
+//     看起来像"这一场很太平"。
+{
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { ruleSetOf, ruleSetFor, mechanicContextOf, sceneMechanics } =
+    await load('extra/trpg/model/rule-set.js');
+  const { compileRuleSet, EMPTY_RULE_SET } = await load('extra/trpg/rules/rule-set.js');
+  // 自己一个目录：§13 那份 `rules/` 被那一段改过（`generic.json` 换成了"我改过的"），
+  // 借它的目录会让这里的"回落 generic"读到别人改过的表。
+  const dir = path.join(DIR, 'rs');
+  const rules = new RuleStore(dir);
+
+  /** 一份战役对象。取用口只读 `rule` / `scenario?.ruleExt` / `scene` / `flags` 四处。 */
+  const camp = (over = {}) => ({ rule: 'coc7', scene: '', flags: {}, ...over });
+  /** 一条编译得过的机制。 */
+  const mech = (over = {}) => ({
+    type: 'npc_trait',
+    note: '守夜人不吃普通伤害',
+    trigger: { op: 'scene', value: '灯塔' },
+    effect: { handler: 'narrate', params: {} },
+    sourceQuote: '守夜人刀枪不入',
+    ...over
+  });
+  /** 一份规则扩展（`<id>.rule.json` 的形状）。 */
+  const ext = (...mechanics) => ({ version: 1, mechanics, warnings: [] });
+  /** 同 trigger 下互斥的两条 —— 编译必拒（互斥表在 `rules/rule-set.ts` 里写死）。 */
+  const CLASH = () => ext(
+    mech({ effect: { handler: 'bonus_to_check', params: { value: 20 } } }),
+    mech({ effect: { handler: 'penalty_to_check', params: { value: 5 } } })
+  );
+
+  // ── 17a. 基础表那一路：三种结果逐字透传 ──
+  const plain = ruleSetOf('coc7', undefined, rules);
+  ok('没有扩展时 `set` 就是那个空集常量（空集不是"没有规则"—— 基础表照常在 `base` 里）',
+    plain.ok === true && plain.base.id === 'coc7' && plain.set === EMPTY_RULE_SET
+    && plain.set.mechanics.length === 0 && plain.note === '',
+    plain.ok ? `${plain.base.id}/${plain.note}` : plain.message);
+  ok('`null` 与 `undefined` 一视同仁（手写的剧本一个扩展都没有，那是常态不是错误）',
+    ruleSetOf('coc7', null, rules).ok === true && ruleSetOf('coc7', null, rules).set.mechanics.length === 0);
+
+  const missing = ruleSetOf('查无此表', undefined, rules);
+  ok('引用的基础表不存在 → 仍 `ok`，回落 generic，且**那句 note 原样带出来**（取用口不许吞掉它）',
+    missing.ok === true && missing.base.id === 'generic' && /不存在/.test(missing.note),
+    missing.ok ? missing.note : missing.message);
+
+  fs.writeFileSync(path.join(dir, 'broken.json'),
+    JSON.stringify({ name: '坏', levels: [{ name: 'a', label: 'A', success: true, condition: 'total >= ' }] }), 'utf8');
+  const brokenBase = ruleSetOf('broken', undefined, rules);
+  ok('基础表本身坏了 → `ok: false`，消息与 `RuleStore.read` 那句同源（判据没有第二份）',
+    brokenBase.ok === false && /有问题/.test(brokenBase.message), JSON.stringify(brokenBase));
+
+  // ── 17b. 扩展那一路：编译不过就拒绝 ──
+  const good = ruleSetOf('coc7', ext(mech()), rules);
+  ok('扩展编译得过 → 机制进 `set`，`base` 仍是那张基础表',
+    good.ok === true && good.set.mechanics.length === 1 && good.base.id === 'coc7'
+    && good.set.mechanics[0].note === '守夜人不吃普通伤害');
+
+  const clash = ruleSetOf('coc7', CLASH(), rules);
+  ok('同 trigger 下互斥的两条 → **拒绝**（`ok: false`），不是静默丢掉其中一条',
+    clash.ok === false, JSON.stringify(clash));
+  // 判据是"逐字等于前缀 + 底层 `problems` 用 `；` 连起来"，不是"消息里碰巧有个 `；`"——
+  // 只有一条 problem 时那个分隔符根本不出现，按"含 `；`"写会红（实测踩到）。
+  const clashProblems = compileRuleSet(CLASH());
+  ok('拒绝时那句消息**自报家门**（前缀 + 逐条原样带出），调用方整句照印就够用',
+    clash.ok === false && clashProblems.ok === false
+    && clash.message === `这一局的规则扩展有问题：${clashProblems.problems.join('；')}`,
+    clash.ok ? '' : clash.message);
+  ok('扩展坏掉时**不是**回落成空集（回落的表现是"机制填了、一条都没跑"，而没有人看得出来）',
+    clash.ok === false && !('set' in clash) && !('base' in clash));
+
+  // ── 17b2. `source` / `problems`（P7-f 加）──
+  //
+  // **只有 `beginCampaign` 读这两个字段**：`source` 决定回执里指哪一份文件（基础表 →
+  // `data/trpg/rules/<id>.json`；扩展 → `data/trpg/scenarios/<剧本>.rule.json`），`problems`
+  // 决定"逐条说"时说的是哪几条。六处消费点**不读**（它们只照印 `message`，失败形状逐字不变）。
+  ok('坏在**基础表**那头 → `source: \'base\'`，且 `problems` 只有一条（分条能力住在 `rule-store.ts`，'
+    + '这一层再拆一次就是第二份判据）',
+    brokenBase.ok === false && brokenBase.source === 'base'
+    && brokenBase.problems.length === 1 && brokenBase.problems[0] === brokenBase.message,
+    JSON.stringify(brokenBase));
+  ok('坏在**规则扩展**那头 → `source: \'extension\'`，`problems` 就是 `compileRuleSet` 的原样逐条',
+    clash.ok === false && clash.source === 'extension' && clashProblems.ok === false
+    && clash.problems.length === clashProblems.problems.length
+    && clash.problems.every((one, at) => one === clashProblems.problems[at]),
+    JSON.stringify(clash));
+
+  // 两条问题的夹具：**两条**都写坏 effect（`coerceEffect` 失败在互斥检查**之前** `return`，
+  // 所以两条各留一条 problem，而不是被互斥吃掉一条）。
+  const BAD_TWO = () => ext(
+    mech({ effect: { handler: 'reduce_damage', params: {} } }),
+    mech({ effect: { handler: 'reduce_damage', params: {} } })
+  );
+  const badTwo = BAD_TWO();
+  const badTwoProblems = compileRuleSet(badTwo);
+  const badTwoAccess = ruleSetOf('coc7', badTwo, rules);
+  ok('`problems` 是**逐条**的（两条问题就是两条），不是把 `message` 再切一遍 —— '
+    + '切分要另写一份判据，而它与 `compileRuleSet` 必然漂移',
+    badTwoProblems.ok === false && badTwoProblems.problems.length === 2
+    && badTwoAccess.ok === false && badTwoAccess.problems.length === 2
+    && badTwoAccess.problems.every((one, at) => one === badTwoProblems.problems[at]),
+    JSON.stringify(badTwoAccess));
+  ok('两条问题各自带着自己的序号 —— "逐条说"不等于把同一句话印两遍',
+    badTwoAccess.ok === false && badTwoAccess.problems[0] !== badTwoAccess.problems[1]
+    && badTwoAccess.problems[0].includes('第 1 条') && badTwoAccess.problems[1].includes('第 2 条'),
+    JSON.stringify(badTwoAccess.ok ? '' : badTwoAccess.problems));
+  ok('成功那一档**没有** `source` / `problems` 两个字段（`\'source\' in good` 为假）—— '
+    + '否则调用方会以为成功时也该去看它们',
+    !('source' in good) && !('problems' in good));
+
+  // ── 17c. 两个入口、一份实现 ──
+  ok('`ruleSetFor(campaign)` 与 `ruleSetOf(campaign.rule, campaign.scenario?.ruleExt)` 逐项同源',
+    ruleSetFor(camp({ rule: 'coc7' }), rules).base.id === 'coc7'
+    && ruleSetFor(camp({ rule: '查无此表' }), rules).note === ruleSetOf('查无此表', undefined, rules).note
+    && ruleSetFor(camp({ rule: 'broken' }), rules).ok === false);
+  ok('战役里**冻结的那一份** `ruleExt` 被读出来（快照，不是剧本文件此刻那份）',
+    ruleSetFor(camp({ scenario: { id: 'x', body: '', ruleExt: ext(mech()) } }), rules).set.mechanics.length === 1);
+  ok('冻结的 `ruleExt` 坏了 → 同样拒绝（正常路径上开局已经拦过，能到这儿只有"有人手改了存档"）',
+    ruleSetFor(camp({ scenario: { id: 'x', body: '', ruleExt: CLASH() } }), rules).ok === false);
+  ok('没有 `scenario` 的战役不炸（那个 `?.` 是必需的：`.trpg new` 起的团可以没有剧本）',
+    ruleSetFor(camp({ scenario: undefined }), rules).ok === true
+    && ruleSetFor(camp({ scenario: null }), rules).ok === true);
+
+  // ── 17d. 求值上下文：旗标摊平、暗线照样进 ──
+  const ctxOf = mechanicContextOf(camp({
+    scene: '灯塔',
+    flags: { 灯塔已熄: { value: '是', visible: true }, 真凶是医生: { value: '是', visible: false } }
+  }), '阿飞', '侦查');
+  ok('旗标**摊平成 名字 → 值**（存档里那份是 `{value, visible}`，而机制匹配只问值）',
+    ctxOf.flags['灯塔已熄'] === '是' && typeof ctxOf.flags['灯塔已熄'] === 'string',
+    JSON.stringify(ctxOf.flags));
+  ok('**暗线旗标照样进上下文** —— 机制本来就该能挂在暗线上，可见性是展示层的事',
+    ctxOf.flags['真凶是医生'] === '是');
+  ok('场景与行动者/技能原样带上（它们分别决定 `{op:scene}` / `{op:actor}` / `{op:skill}` 三类命中）',
+    ctxOf.scene === '灯塔' && ctxOf.actor === '阿飞' && ctxOf.skill === '侦查');
+  ok('没传行动者/技能时是**空串**（`{op:actor}` 因此不命中 —— 裸掷骰不该被角色的机制影响）',
+    mechanicContextOf(camp(), '', '').actor === '' && mechanicContextOf(camp(), '', '').skill === '');
+  ok('没有旗标的战役给出空对象（不是 `undefined`：`matcher` 靠它做空串兜底）',
+    Object.keys(mechanicContextOf(camp(), '', '').flags).length === 0);
+
+  // ── 17e. `sceneMechanics`：空数组与 `null` 是两件事 ──
+  const withExt = (ruleExt, scene = '灯塔') => camp({ scene, scenario: { id: 'x', body: '', ruleExt } });
+  const hit = sceneMechanics(withExt(ext(mech())), rules);
+  ok('场景对得上 → 命中那条（这一份就是"换场景时该报给 DM 的东西"）',
+    Array.isArray(hit) && hit.length === 1 && hit[0].note === '守夜人不吃普通伤害');
+  ok('场景对不上 → **空数组**（"这一刻没有机制命中"，什么都不用说）',
+    Array.isArray(sceneMechanics(withExt(ext(mech()), '别处'), rules))
+    && sceneMechanics(withExt(ext(mech()), '别处'), rules).length === 0);
+  ok('**读不出来时是 `null`，不是 `[]`** —— 合并成一个会让"规则集坏了"看起来像"这一场很太平"',
+    sceneMechanics(withExt(CLASH()), rules) === null);
+  ok('基础表坏了时同样是 `null`（两种坏法走同一条出口）',
+    sceneMechanics(camp({ rule: 'broken' }), rules) === null);
+  ok('`{op:actor}` / `{op:skill}` 那一类在这一份里**不命中**（行动者要到检定的那一刻才知道，这不是漏了）',
+    sceneMechanics(withExt(ext(mech({ trigger: { op: 'actor', value: '守夜人' } }))), rules).length === 0);
+}
+
 process.exit(done() ? 0 : 1);

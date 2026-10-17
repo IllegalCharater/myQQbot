@@ -11,20 +11,25 @@ import { appendLog, findCharacter, mirrorLog } from '../model/campaign.js';
 // `normalizeHidden`（两处各写一份的话，"工具传的隐藏"与"文件里配的隐藏"能对同一组输入
 // 给出不同结果，而症状是"藏了、没藏住"，没有任何报错）。
 import { normalizeHidden } from '../model/character.js';
+import { mechanicContextOf, ruleSetFor } from '../model/rule-set.js';
+import { damageBlockers, describeMechanic } from '../rules/rule-set.js';
 import { changeNote, readStats } from './shared.js';
 import type { Handler, ToolGates } from './shared.js';
 import type { ToolArguments, ToolContext, ToolResult } from '../../../agent/shared/types.js';
 import type { TrpgCampaign, TrpgCharacter } from '../types.js';
 import type { JournalPort } from '../model/campaign.js';
+import type { RuleStore } from '../store/rule-store.js';
 import type { TrpgStore } from '../store/campaign-store.js';
 
 export interface CharacterHandlerDeps {
   store: TrpgStore;
+  /** 规则表 + 这一局的规则扩展（P7-d 的伤害闸门要它）。 */
+  rules: RuleStore;
   gates: ToolGates;
   journal?: JournalPort | null;
 }
 
-export function createCharacterHandler({ store, gates, journal }: CharacterHandlerDeps): Handler {
+export function createCharacterHandler({ store, rules, gates, journal }: CharacterHandlerDeps): Handler {
   const { gate, settle, withCampaign } = gates;
 
   const createCharacter = (ctx: ToolContext, args: ToolArguments, name: string): ToolResult => {
@@ -90,9 +95,27 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
     let leaked = !card.discovered;
     const hidden = new Set(card.hidden);
 
+    // 伤害闸门（P7-d）：带**负的** hpDelta 时先问一句"这一局的规则让不让他挨这一下"。
+    // ⚠️ **排在一切改动之前**（下面每个分支都在改 `card`）：命中免疫时整次调用都要被拒，而中途
+    // 返回会让已经改掉的那几项留在内存里 —— `withCampaign` 看到 `isError` 不落盘，于是内存那份
+    // 与盘上那份对不上（下一次读到的是盘上那份，这次的改动凭空消失，而没有任何报错）。
+    //
+    // 它是**闸门不是自动改状态**：不把伤害改成 0，而是把这件事回给模型，让它按机制叙事。
+    // 这条与"状态归代码管、模型只能请求改动"是同一条分界 —— 自动清零等于代码替 DM 做了判断。
+    const hpDelta = clampInt(args?.hpDelta, -MAX_POOL, MAX_POOL, 0);
+    if (hpDelta < 0) {
+      const found = ruleSetFor(campaign, rules);
+      if (!found.ok) return err(found.message);
+      const blockers = damageBlockers(found.set, mechanicContextOf(campaign, card.name, ''));
+      if (blockers.length) {
+        return err(`「${card.name}」这一下挨不着：${blockers.map(describeMechanic).join('、')}`
+          + ' —— 这一局的规则挡掉了这次伤害。别自己把数扣了，按机制叙事（免疫 / 无效 / 被弹开都行）；'
+          + '真要让这次伤害生效，先去改那一局的规则文件。');
+      }
+    }
+
     if (args?.hpDelta !== undefined) {
-      const delta = clampInt(args.hpDelta, -MAX_POOL, MAX_POOL, 0);
-      card.hp = clampInt(card.hp + delta, 0, card.hpMax, card.hp);
+      card.hp = clampInt(card.hp + hpDelta, 0, card.hpMax, card.hp);
     }
     if (args?.sanDelta !== undefined) {
       const delta = clampInt(args.sanDelta, -MAX_POOL, MAX_POOL, 0);

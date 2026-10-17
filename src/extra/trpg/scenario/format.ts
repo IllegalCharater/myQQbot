@@ -34,8 +34,12 @@ const FORMAT_TIMEOUT_MS = 60_000;
  *
  * 为什么要余：解析时算的是**整份正文**的长度，而模型多半还会带上一点自己的措辞，
  * 卡着上限告诉它、它就会时不时超出去一格，然后整份被拒。留一截比让它重试便宜得多。
+ *
+ * ⚠️ **导出**是因为抽取管线（`extract/pipeline.ts`）也要给模型同一个数：它的 L3 产出的
+ * 是同一份东西，两个数各写一遍必然漂移，而漂移的表现是"一条路产出的文件刚好能落库、
+ * 另一条时不时被拒"。
  */
-const BODY_BUDGET = Math.max(200, Math.floor(MAX_SCENARIO_CHARS * 0.75));
+export const BODY_BUDGET = Math.max(200, Math.floor(MAX_SCENARIO_CHARS * 0.75));
 
 /**
  * 剥掉模型套的外壳。
@@ -95,7 +99,7 @@ export async function formatScenarioText(
   } finally {
     clearTimeout(timer);
   }
-  if (usageLine) console.log(`[trpg] 剧本整理用量（不进 token 账，见 scenario-format.ts 头部）：${usageLine}`);
+  if (usageLine) console.log(`[trpg] 剧本整理用量（不进 token 账，见 format.ts 头部）：${usageLine}`);
 
   const generated = stripFence(content);
   if (!generated) return { ok: false, message: '模型没有给出任何内容，稍后再试' };
