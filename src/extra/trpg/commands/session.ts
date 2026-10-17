@@ -91,7 +91,7 @@ export function createNewCommand(deps: SessionCommandDeps): CommandHandler {
       { status: 'preparing', initiator: String(input.senderId ?? '') });
     if (result.isError) return String(result.content);
     return String(result.content)
-      + (useScenario ? '' : `\n（剧本库里没有「${title}」，这一局**没有注入剧本** —— 想用剧本就先传一份）`);
+      + (useScenario ? '' : `\n（剧本库里没有「${title}」，这一局没有注入剧本 —— 想用剧本就先传一份）`);
   };
 }
 

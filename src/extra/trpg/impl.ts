@@ -15,7 +15,7 @@ import { errorMessage } from '../../agent/tools/shared.js';
 import { getConfig } from '../../core/config.js';
 import { EXTRA_PROMPT_SECTIONS } from '../prompts.js';
 import { createCommands } from './commands/index.js';
-import { scenarioIds, usableScenarios } from './commands/shared.js';
+import { usableScenarios } from './commands/shared.js';
 import { secureRng } from './entropy.js';
 import { appendLog } from './model/campaign.js';
 import { renderForModel } from './render/model.js';
@@ -97,7 +97,7 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
 
     commandHandlers: createCommands({
       store, rules, scenarios, modes, journal, rng: secureRng,
-      sendPrivate: deps.sendPrivate, sendFile: deps.sendFile
+      sendPrivate: deps.sendPrivate, sendFile: deps.sendFile, recordUsage: deps.recordUsage
     }),
 
     /**
@@ -237,7 +237,9 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
       if (!deps.deliverNote) return;
 
       lastSuggestAt.set(session.chatKey, now);
-      const options = await generateSuggestions(campaign);
+      // 这一次调用发生在 `finish()` 之后，所以用量走 `recordUsage`（只叠增量）——
+      // 借会话那条记账路会把这一整轮的账再加一遍（见 `suggest.ts` 头部与 `chat/sessions.ts`）。
+      const options = await generateSuggestions(campaign, deps.recordUsage);
       if (!options.length) return;
       deps.deliverNote(session.chatKey, {
         kind: 'suggest',

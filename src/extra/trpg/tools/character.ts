@@ -7,7 +7,11 @@ import {
   MAX_CHARACTERS, MAX_NOTES, MAX_POOL, MAX_STATS_PER_CHARACTER, clampInt, text
 } from '../model/limits.js';
 import { appendLog, findCharacter, mirrorLog } from '../model/campaign.js';
-import { changeNote, readHidden, readStats } from './shared.js';
+// `hidden` 的解析**没有工具层的那一份** —— 与存档读回来时共用 `model/character.ts` 的
+// `normalizeHidden`（两处各写一份的话，"工具传的隐藏"与"文件里配的隐藏"能对同一组输入
+// 给出不同结果，而症状是"藏了、没藏住"，没有任何报错）。
+import { normalizeHidden } from '../model/character.js';
+import { changeNote, readStats } from './shared.js';
 import type { Handler, ToolGates } from './shared.js';
 import type { ToolArguments, ToolContext, ToolResult } from '../../../agent/shared/types.js';
 import type { TrpgCampaign, TrpgCharacter } from '../types.js';
@@ -55,7 +59,7 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
       mov: 0,
       // schema 里用正面措辞 `visible`（模型更容易填对），内部存的是它的反面。
       discovered: args?.visible !== false,
-      hidden: readHidden(args?.hidden),
+      hidden: normalizeHidden(args?.hidden),
       // **建出来是"未确认"**：`.pc confirm` 是**玩家**的动作，模型替不了。
       // （DM 那条路的开局本来就是 `active`，所以这不挡它；它只挡"人从 `.trpg new` 起的局"。）
       confirmed: false
@@ -167,7 +171,7 @@ export function createCharacterHandler({ store, gates, journal }: CharacterHandl
       leaked = true;
     }
     if (args?.hidden !== undefined) {
-      const now = readHidden(args.hidden);
+      const now = normalizeHidden(args.hidden);
       if (now.join('/') !== card.hidden.join('/')) {
         card.hidden = now;
         changes.push(now.length ? `隐藏字段：${now.join('/')}` : '隐藏字段：（无）');

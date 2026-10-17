@@ -54,8 +54,8 @@ export const trpgSpec: ExtraSpec = {
   displayDesc: PROMPTS.say.displayDesc,
   /**
    * **接管模式**：装载即让**那个会话**的模型侧整体换掉 —— 工具表只剩下面这 4 个、
-   * 命令表只剩跑团那两条（外加永远在的 `/能力`）、system prompt 换成"框架契约 + 跑团人格"。
-   * 存档、上下文窗口、记忆、后台任务照常。
+   * 命令表只剩跑团那 24 条词形（12 条声明，其中 4 条带 `subs`、2 条是裸命令；外加永远在的
+   * `/能力`）、system prompt 换成"框架契约 + 跑团人格"。存档、上下文窗口、记忆、后台任务照常。
    */
   mode: 'override',
   /**

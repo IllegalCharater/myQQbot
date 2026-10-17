@@ -39,7 +39,7 @@ export function restOf(input: ExtraCommandInput, command: string): string {
  * 剧本库里**此刻能用的**那些。
  *
  * 坏文件不进清单（它们本来也选不中），但它们仍然出现在设置页里 —— 那才是能修的地方。
- * 抽成函数是因为**命令层与 `prompt()` 都要**（向导、`.trpg scenario` 的列出、`.trpg start` 的候选、
+ * 抽成函数是因为**命令层与 `prompt()` 都要**（向导、`.trpg scenario` 的列出、`.trpg new` 的候选、
  * 注入给模型的那份简报）：各写一遍的话，加一种"不能用"的成因时必然漏掉其中一处。
  */
 export function usableScenarios(store: ScenarioStore): ScenarioSummary[] {

@@ -219,7 +219,7 @@ export function createCharacterShowCommand({ store, command }: CharacterCommandD
     if (!card.discovered && card.ownerId !== String(input.senderId)) {
       return `你还没见过「${wanted}」这个人。`;
     }
-    return `${renderCharacterForPlayers(card)}\n（这是**玩家视角**：被藏起来的字段不显示。）`;
+    return `${renderCharacterForPlayers(card)}\n（这是玩家视角：被藏起来的字段不显示。）`;
   };
 }
 

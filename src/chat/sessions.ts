@@ -290,20 +290,76 @@ export class SessionRegistry {
     return { dayKey, promptTokens, completionTokens, totalTokens, cachedTokens, runs, webSearchCount };
   }
 
-  /** 在会话结束时累加今日用量。 */
+  /** 在会话结束时累加今日用量（`runs` 加一：这一整轮**就是**一次 agent 运行）。 */
   #bumpTodayUsage(s: SessionRecord) {
-    const dayKey = localDayKey(s.startedAt);
+    this.#addTodayUsage(localDayKey(s.startedAt), {
+      promptTokens: s.usage.promptTokens,
+      completionTokens: s.usage.completionTokens,
+      totalTokens: s.usage.totalTokens,
+      cachedTokens: Number(s.usage.cachedTokens) || 0,
+      webSearchCount: Number(s.webSearchCount) || 0,
+      runs: 1
+    });
+  }
+
+  /**
+   * 记一次**不属于任何会话**的模型调用用量（跑团的兜底建议与暗骰叙事那两次独立调用）。
+   *
+   * ── 为什么不能借用 `#persist` 那条路 ──
+   *
+   * 那两次调用都发生在 `finish()` **之后**（一条挂在 `onFinish` 回调上、一条在命令回执里），
+   * 而 `#persist` 对**已结束**的会话每次都会调 `#bumpTodayUsage`，它整份累加 `s.usage` ——
+   * 于是"补记一次增量"会变成"把那一整轮的账再加一遍"。这个入口只叠增量，所以补记是安全的。
+   *
+   * ── 两条刻意的取舍 ──
+   *
+   * ① **不动 `runs`**：那个数数的是"一次 agent 运行"（面板拿它算平均每次花多少），
+   *    而这两次调用不是运行 —— 算进去会让均值失真。代价是 `totalTokens / runs` 会略偏高，
+   *    这是两个数各自都更准的那一侧。
+   * ② **参数是结构类型而不是 `extra` 的类型**：`chat`(1) 比 `extra`(4) 低，反向 import 会被
+   *    `check-layers.mjs` 拦。所以这里只描述"要收哪四个数"，调用方（组装根）把扩展递上来的
+   *    那份原样转过来即可 —— 形状与 `llm` 的 `UsageTotals` 一致，没有第二套命名。
+   *
+   * 四个数全是 0 时**直接返回**：那表示这次调用没有用量可记（提供商没报 usage），
+   * 而"为一次什么都没变的增量写盘"是白开销。
+   */
+  addExtraUsage(
+    usage: {
+      promptTokens?: number; completionTokens?: number; totalTokens?: number; cachedTokens?: number;
+    } | null | undefined,
+    at: number = Date.now()
+  ): void {
+    const delta = {
+      promptTokens: Number(usage?.promptTokens) || 0,
+      completionTokens: Number(usage?.completionTokens) || 0,
+      totalTokens: Number(usage?.totalTokens) || 0,
+      cachedTokens: Number(usage?.cachedTokens) || 0
+    };
+    if (!delta.promptTokens && !delta.completionTokens && !delta.totalTokens && !delta.cachedTokens) return;
+    this.#addTodayUsage(localDayKey(at), { ...delta, webSearchCount: 0, runs: 0 });
+  }
+
+  /**
+   * 今日汇总的**唯一写入点**：读 → 叠增量 → 原子落盘。
+   *
+   * 两条路共用它（`#bumpTodayUsage` 与 `addExtraUsage`），差别只有增量里那几个数 ——
+   * 各写一份读改写的话，"新的一天"与原子落盘这两件事就有了第二份实现。
+   */
+  #addTodayUsage(dayKey: string, delta: {
+    promptTokens: number; completionTokens: number; totalTokens: number;
+    cachedTokens: number; webSearchCount: number; runs: number;
+  }) {
     let data = { dayKey, promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, runs: 0, webSearchCount: 0 };
     try {
       const parsed = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'usage-today.json'), 'utf8'));
       if (parsed?.dayKey === dayKey) data = parsed;
     } catch { /* 新的一天 */ }
-    data.promptTokens += s.usage.promptTokens;
-    data.completionTokens += s.usage.completionTokens;
-    data.totalTokens += s.usage.totalTokens;
-    data.cachedTokens = (data.cachedTokens || 0) + (Number(s.usage.cachedTokens) || 0);
-    data.runs += 1;
-    data.webSearchCount = (data.webSearchCount || 0) + (Number(s.webSearchCount) || 0);
+    data.promptTokens += delta.promptTokens;
+    data.completionTokens += delta.completionTokens;
+    data.totalTokens += delta.totalTokens;
+    data.cachedTokens = (data.cachedTokens || 0) + delta.cachedTokens;
+    data.runs += delta.runs;
+    data.webSearchCount = (data.webSearchCount || 0) + delta.webSearchCount;
     const tmp = path.join(DATA_DIR, 'usage-today.json.tmp');
     fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
     fs.renameSync(tmp, path.join(DATA_DIR, 'usage-today.json'));

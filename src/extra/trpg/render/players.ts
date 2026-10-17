@@ -129,7 +129,7 @@ export function renderForPlayers(campaign: TrpgCampaign | null): string {
   const lines = [`${PLAYER_HEADING}《${campaign.title}》${campaign.system ? `（${campaign.system}）` : ''}`];
   // `preparing` 要显眼地说出来 —— 那是唯一一个"还开不了跑"的状态，而群友需要知道自己在等什么。
   if (campaign.status === 'preparing') {
-    lines.push(`状态：**准备中**（${campaign.players.length}/${MAX_PLAYERS} 人已加入）`
+    lines.push(`状态：准备中（${campaign.players.length}/${MAX_PLAYERS} 人已加入）`
       + '—— 都建卡并确认之后敲 `.trpg start` 开跑');
   }
   if (campaign.scene) lines.push(`场景：${campaign.scene}`);
@@ -162,7 +162,7 @@ export function renderForPlayer(campaign: TrpgCampaign, qq: unknown): string {
     lines.push(id ? '你还没有人物卡 —— 敲 `.pc new <角色名>` 建一张。' : '（拿不到你的 QQ 号，这条命令要在群里直接敲）');
   } else {
     lines.push(renderCharacterForPlayers(mine));
-    if (!mine.confirmed) lines.push('（**还没确认** —— 敲 `.pc confirm`；全员确认之后 `.trpg start` 才开得了团）');
+    if (!mine.confirmed) lines.push('（还没确认 —— 敲 `.pc confirm`；全员确认之后 `.trpg start` 才开得了团）');
   }
 
   const others = campaign.characters.filter((card) => card !== mine && card.discovered);

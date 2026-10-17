@@ -19,9 +19,13 @@ import type { RuleStore } from '../store/rule-store.js';
 import type { TrpgStore } from '../store/campaign-store.js';
 import type { TrpgCampaign } from '../types.js';
 
-/** 裸 `.combat` 的回执。**群友可见文案**，不属于提示词目录（同 `ROLL_USAGE`）。 */
+/** 裸 `.combat` 的回执。**群友可见文案**，不属于提示词目录（同 `ROLL_USAGE`）。
+ *
+ * ⚠️ 群友可见的文案里**不许出现 Markdown 的加粗记号 `**`**：QQ 不认 Markdown，那些星号会
+ * 原样显示成排版垃圾。这一族里所有回执都守这条（`tests/t-trpg.mjs` 有一条端到端断言扫它）。
+ */
 const COMBAT_USAGE = '用法：\n'
-  + '· `.combat start` —— 按先攻属性排一次顺序并公布（**再排一次 = 重排**，中途加人就用它）\n'
+  + '· `.combat start` —— 按先攻属性排一次顺序并公布（再排一次 = 重排，中途加人就用它）\n'
   + '· `.combat next` —— 轮到下一个人\n'
   + '· `.combat end` —— 这一场打完了';
 

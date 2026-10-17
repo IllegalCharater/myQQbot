@@ -8,7 +8,8 @@
 import { MAX_SCENARIO_CHARS } from '../types.js';
 import {
   MAX_CHARACTERS, MAX_FLAGS, MAX_FLAG_VALUE_CHARS, MAX_LOG_CHARS, MAX_LOG_STORED, MAX_NAME_CHARS,
-  MAX_PLAYERS, MAX_RULE_CHARS, MAX_SCENE_CHARS, MAX_SYSTEM_CHARS, MAX_TITLE_CHARS, clampInt, text
+  MAX_PLAYERS, MAX_RULE_CHARS, MAX_SCENARIO_ID_CHARS, MAX_SCENE_CHARS, MAX_SYSTEM_CHARS, MAX_TITLE_CHARS,
+  clampInt, text
 } from './limits.js';
 import { normalizeCharacter } from './character.js';
 import { normalizeCombat } from './combat.js';
@@ -146,7 +147,7 @@ function normalizePlayers(raw: unknown): string[] {
 function normalizeScenario(raw: unknown): TrpgScenarioRef {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { id: '', body: '' };
   const source = raw as Record<string, unknown>;
-  return { id: text(source.id, 40), body: text(source.body, MAX_SCENARIO_CHARS) };
+  return { id: text(source.id, MAX_SCENARIO_ID_CHARS), body: text(source.body, MAX_SCENARIO_CHARS) };
 }
 
 /** 开一场新团。不落盘 —— 由调用方决定什么时候写。 */

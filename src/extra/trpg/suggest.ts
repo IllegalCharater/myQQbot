@@ -13,16 +13,17 @@
 // 这里绝不代它发群：代发的后果实测过 —— 消息进了 `session.sent`，那一轮按"已发送"收尾成 `done`，
 // 模型以为群里已经说过了，于是不再开口。与 AGENTS.md 的「工具不得代模型发言」是同一条。
 //
-// ── 已知缺口（别以为被算进账里了）──
+// ── 用量怎么记 ──
 //
-// 这一次模型调用的用量**没有进会话的 token 账**：它发生在 `finish()` 之后，而那时会话已经
-// 持久化、今日用量也已经累加过了（`SessionRegistry.#persist` → `#bumpTodayUsage`），
-// 再跑一次那个累加会**重复计**。所以这里只把用量写进日志（`[trpg] 兜底建议`），
-// 账面上少算这几百个 token。要补齐得给 `SessionRegistry` 加一个"只累加增量"的入口，
-// 那是它自己的一处设计隐患（`#persist` 对已结束的会话会重复累加），不该由这个扩展顺手改。
-import { chatCompletion } from '../../llm/llm.js';
+// 这一次模型调用发生在 `SessionRegistry.finish()` **之后**，所以它**借不了会话那条记账路**：
+// 那条路（`#persist` → `#bumpTodayUsage`）对已结束的会话每次都会把整份 `usage` 再累加一遍 ——
+// 拿它补记一次增量等于把那一整轮的账算两遍。宿主因此另开了一个"只叠增量"的入口
+// （`SessionRegistry.addExtraUsage`），由组装根接在 `ExtraRuntimeDeps.recordUsage` 上。
+// 缺省（测试、未接线的宿主）时只是不记账，调用照常 —— 见那个口子的说明。
+import { addUsage, chatCompletion, emptyUsage } from '../../llm/llm.js';
 import { EXTRA_PROMPT_JOBS } from '../prompts.js';
 import { MAX_LOG_RENDER } from './model/limits.js';
+import type { ExtraUsage } from '../types.js';
 import type { TrpgCampaign } from './types.js';
 
 const MAX_OPTIONS = 4;
@@ -52,8 +53,12 @@ export function suggestionContext(campaign: TrpgCampaign): string {
   if (campaign.characters.length) {
     lines.push('在场的人：', ...campaign.characters.slice(0, 12).map((card) => {
       const pools: string[] = [];
+      // 三条资源条与 `render/model.ts` / `render/players.ts` **同一条判据**（`xxxMax > 0` 才印）。
+      // MP 曾经漏在这里：DM 那份局势卡与玩家那份都印它，只有这份局面摘要不印，于是模型在
+      // 兜底生成建议时看到的这个人是"满状态"的 —— 而它没有任何线索说明少了什么。
       if (card.hpMax > 0) pools.push(`HP ${card.hp}/${card.hpMax}`);
       if (card.sanMax > 0) pools.push(`SAN ${card.san}/${card.sanMax}`);
+      if (card.mpMax > 0) pools.push(`MP ${card.mp}/${card.mpMax}`);
       return `- ${card.name}（${card.ownerId ? '玩家' : 'NPC'}）${pools.join(' ')}`;
     }));
   }
@@ -65,8 +70,13 @@ export function suggestionContext(campaign: TrpgCampaign): string {
 /**
  * 生成 2-4 个行动选项。**任何失败都返回空数组**（调用方据此不发条目）——
  * 它是旁路，不该有能力影响主流程；而"发一条空的建议条目"比不发更糟（会白白唤醒一次模型）。
+ *
+ * `recordUsage` 只用来记账（见文件头），**缺省时调用照常** —— 记账失败不该让群里等不到建议。
  */
-export async function generateSuggestions(campaign: TrpgCampaign): Promise<string[]> {
+export async function generateSuggestions(
+  campaign: TrpgCampaign,
+  recordUsage?: ((usage: ExtraUsage) => void) | null
+): Promise<string[]> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -91,7 +101,10 @@ export async function generateSuggestions(campaign: TrpgCampaign): Promise<strin
       content = String(result.message?.content ?? '');
       const usage = result.usage;
       if (usage) {
-        console.log(`[trpg] 兜底建议用量（不进 token 账，见 suggest.ts 头部）：`
+        // 归一到与全局同一套字段（`addUsage` 是唯一那份归一化，`llm/llm.ts`）。
+        recordUsage?.(addUsage(emptyUsage(), usage));
+        // 日志仍留着：这一次调用的开销不进任何一条会话，日志是它唯一的当场痕迹。
+        console.log(`[trpg] 兜底建议用量：`
           + `prompt=${usage.prompt_tokens ?? 0} completion=${usage.completion_tokens ?? 0}`);
       }
     } finally {

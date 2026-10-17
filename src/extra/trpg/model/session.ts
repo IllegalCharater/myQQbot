@@ -22,7 +22,7 @@
 // 全靠参数传进来的端口（`store` / `rules` / `scenarios` / `journal`），自己不 import `node:fs` ——
 // 这是 `model/` 那条闸门的要求。
 import { err, ok } from '../../../agent/tools/shared.js';
-import { MAX_PLAYERS, MAX_RULE_CHARS, text } from './limits.js';
+import { MAX_PLAYERS, MAX_RULE_CHARS, MAX_SCENARIO_ID_CHARS, text } from './limits.js';
 import { appendLog, emptyCampaign, mirrorLog } from './campaign.js';
 import type { JournalPort } from './campaign.js';
 import type { ToolArguments, ToolResult } from '../../../agent/shared/types.js';
@@ -44,7 +44,16 @@ export interface BeginDeps {
 
 export type Verdict = { ok: true } | { ok: false; reason: string };
 
-/** 玩家的 QQ 号判据。**只有这一处**：`players`、`ownerId`、三条命令全走它。 */
+/**
+ * 玩家的 QQ 号判据。`players`、`ownerId`、三条命令都走它。
+ *
+ * ⚠️ **它不是唯一的落点**（这句曾经写成"只有这一处"，那是错的）：另有 4 处内联的
+ * `/^\d+$/` 字面量 —— `tools/say.ts`（`atUserId`）、`tools/character.ts` 与
+ * `model/character.ts`（`ownerId`）、`model/campaign.ts`（`players` 归一化）。
+ * 它们各自都在**读一个不可信来源的字段**（工具参数 / 存档文件），就地判一次比跨层
+ * 引一个 helper 更直白。**改判据时要五处一起改**（QQ 号是纯数字这条今天不会变，
+ * 所以这四份拷贝的风险是可接受的）。
+ */
 export function isQq(value: unknown): boolean {
   return /^\d+$/.test(String(value ?? ''));
 }
@@ -197,7 +206,7 @@ export function beginCampaign(
   }
 
   // 剧本先读：读不到就**直接拒绝**，别开出一个"标题有了、骨架没有"的半截团。
-  const wanted = text(args?.scenario, 40);
+  const wanted = text(args?.scenario, MAX_SCENARIO_ID_CHARS);
   let scenario: TrpgScenario | null = null;
   if (wanted) {
     const found = deps.scenarios.read(wanted);

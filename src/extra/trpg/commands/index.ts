@@ -32,6 +32,7 @@ import { createScenarioCommand } from './scenario.js';
 import { createDiceCommand } from './dice.js';
 import type { CommandHandler } from './shared.js';
 import type { JournalReadPort } from './log.js';
+import type { ExtraUsage } from '../../types.js';
 import type { JournalPort } from '../model/campaign.js';
 import type { DiceRng } from '../rules/dice.js';
 import type { RuleStore } from '../store/rule-store.js';
@@ -55,6 +56,11 @@ export interface CommandDeps {
   sendPrivate?: ((targetUserId: string, text: string) => Promise<void>) | null;
   /** 群文件投递（`.log export`）。缺省 = 没装通道，导出会如实说一句。 */
   sendFile?: ((chatKey: string, fileName: string, content: string) => Promise<void>) | null;
+  /**
+   * 记一次**独立模型调用**的用量（只有 `.rh` 的私密叙事有）。
+   * 缺省 = 不记账（测试与未接线的宿主），调用照常进行 —— 见 `ExtraRuntimeDeps.recordUsage`。
+   */
+  recordUsage?: ((usage: ExtraUsage) => void) | null;
 }
 
 export function createCommands(deps: CommandDeps): Record<string, CommandHandler> {
@@ -87,9 +93,13 @@ export function createCommands(deps: CommandDeps): Record<string, CommandHandler
     ['.log export', (command) => createLogCommand({ ...base, sendFile: deps.sendFile, command })],
     ['.log', () => createLogUsageCommand()],
     // 检定与属性：都要读卡，所以都在 `commands/check.ts`。
-    ['.ra', (command) => createCheckCommand({ ...base, sendPrivate: deps.sendPrivate, command })],
-    ['.rh', (command) => createSecretCheckCommand({ ...base, sendPrivate: deps.sendPrivate, command })],
-    ['.st', (command) => createStatCommand({ ...base, sendPrivate: deps.sendPrivate, command })],
+    // `.ra` **不传 `sendPrivate`、也不传 `recordUsage`**（只有 `.rh` 会发起模型调用）；
+    // `.st` 只收它真用的那三样（见 `StatCommandDeps`）。
+    ['.ra', (command) => createCheckCommand({ ...base, command })],
+    ['.rh', (command) => createSecretCheckCommand({
+      ...base, sendPrivate: deps.sendPrivate, recordUsage: deps.recordUsage, command
+    })],
+    ['.st', (command) => createStatCommand({ store: deps.store, journal: deps.journal, command })],
     ['.r', (command) => createDiceCommand({ ...base, command })]
   ];
   return Object.fromEntries(rows.map(([word, make]) => [word, make(word)]));

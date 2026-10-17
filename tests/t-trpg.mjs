@@ -871,8 +871,11 @@ const status = (key) => store.read(key);
         model.requests.length === 0 && /已存剧本「现成的」/.test(fast) && !/模型整理/.test(fast), fast);
       // 回执末尾那句"下一步敲什么"是**用户可见**的，而且它跟着命令一起改过名 ——
       // 漏改的表现是**机器人教群友敲一条不存在的命令**，不会有任何报错。
-      ok('回执末尾给的是**当前面**的开局命令（`.trpg start <名字>`，不是作废的 `/跑团 开局`）',
-        /开局：\.trpg start 现成的/.test(fast) && !/跑团 开局|\/开局/.test(fast), fast);
+      // ⚠️ 正确词形是 `.trpg new <名字>`：`.trpg start` **不带参数**（它只把 `preparing`
+      // 推到 `active`），照抄 `start` 的话群友敲下去只会拿到一句用法提示。
+      ok('回执末尾给的是**当前面**的开局命令（`.trpg new <名字>`，不是作废的 `/跑团 开局`，也不是 `.trpg start`）',
+        /开局：\.trpg new 现成的/.test(fast) && !/开局：\.trpg start/.test(fast)
+        && !/跑团 开局|\/开局/.test(fast), fast);
 
       model.requests = [];
       model.script = [{ content: '```markdown\n' + FORM + '\n```' }];
@@ -1326,8 +1329,13 @@ const status = (key) => store.read(key);
     const K = 'group:p3-check';
     const A = '31001';
     const sent = [];
+    /** 独立模型调用的用量交给宿主的那个口子（生产里接 `SessionRegistry.addExtraUsage`）。 */
+    const usage = [];
     // **私聊端口是递进去的**（生产里 `web/app.ts` 接 `SendQueue`）—— 扩展只说"给谁、说什么"。
-    const runtime = createRuntime({ sendPrivate: async (qq, text) => { sent.push({ qq, text }); } });
+    const runtime = createRuntime({
+      sendPrivate: async (qq, text) => { sent.push({ qq, text }); },
+      recordUsage: (recorded) => usage.push(recorded)
+    });
     const commands = runtime.commandHandlers;
     // ⚠️ 按**前两个词**路由（`.pc confirm` 的键是两截，见 `ExtraCommandSpec.subs`）——
     // 只取第一个词会落到裸 `.pc` 上，而那是个用法提示，测试会以"看起来没生效"假红。
@@ -1376,6 +1384,9 @@ const status = (key) => store.read(key);
     ok('**没有战役**时 `.ra` 被引导去 `.trpg new`', /\.trpg new/.test(String(await commands['.ra']({
       chatKey: 'group:p3-none', senderId: A, text: '.ra 侦查', media: [], replyToMessageId: null
     }))));
+    // 对照：`.ra` 纯代码掷骰，一次模型调用都不发 —— 所以此刻一个用量都不该记。
+    // 少了它，"下面那条用量断言"在"`.ra` 顺手也发了一次调用"时照样是绿的。
+    ok('`.ra` 不发起模型调用，因此用量一个都没记（对照）', usage.length === 0, JSON.stringify(usage));
 
     // ── `.rh` 暗骰 ──
     model.requests = [];
@@ -1392,6 +1403,12 @@ const status = (key) => store.read(key);
       !store.read(K)?.log.some((entry) => entry.text.includes('暗骰'))
       && !journal.read(K).some((line) => line.text.includes('暗骰')),
       JSON.stringify(store.read(K)?.log.at(-1)));
+    // 那一次叙事调用的用量**记进账**（2026-10-17 补的缺口）：它发生在 `finish()` 之后，
+    // 借不了会话那条记账路，所以走 `recordUsage` → `SessionRegistry.addExtraUsage`。
+    // 假端点恒定回 `{prompt:10, completion:5, total:15}`，所以这里能逐字段钉死。
+    ok('`.rh` 那次独立模型调用的用量**交宿主的 `recordUsage`**（不是只打一行日志）',
+      usage.length === 1 && usage[0].promptTokens === 10 && usage[0].completionTokens === 5
+      && usage[0].totalTokens === 15 && usage[0].cachedTokens === 0, JSON.stringify(usage));
 
     // 模型抽风时只发点数：暗骰不该因为叙事失败而失败。
     sent.length = 0;
@@ -1399,6 +1416,10 @@ const status = (key) => store.read(key);
     const degraded = String(await as('.rh 侦查'));
     ok('叙事生成失败时**照发点数**（旁路失败不该让这次暗骰丢掉）',
       degraded === secretReceipt && sent.length === 1 && /1d100 →/.test(sent[0].text), degraded);
+    // 判据是"**发过一次调用**"，不是"拿到了一段叙事"：那一次真的花了钱，
+    // 把 `recordUsage` 挪进 `if (narration)` 里就会让它悄悄漏账。
+    ok('叙事为空的那一次**也照记用量**（记账认的是调用，不是结果）',
+      usage.length === 2, JSON.stringify(usage));
 
     // 没装私聊端口时**先说不掷** —— 掷了却发不出去等于把这次暗骰丢了。
     const bare = createRuntime();
@@ -1931,6 +1952,114 @@ const status = (key) => store.read(key);
     filtered.includes(`${journal.read(K).filter((entry) => entry.visible !== false).length} 条`), filtered);
 }
 
+// ── 5q. 群友可见的文案里没有 Markdown 的 `**`（A5）──────────────────────────
+//
+// QQ 不认 Markdown：`**粗体**` 到了群里就是**两个星号**。文案里混进它，观感是"写得像文档、
+// 发出去是乱码"，而它**不影响任何逻辑** —— 启动、聊天、掷骰全都照常，所以只有断言拦得住。
+//
+// 两层，缺一层都不够：
+//   • **行为层**：把每一条命令都真敲一遍，逐个回执找 `**`。判据是"真的跑了一遍"，而不是
+//     "我看了一眼源码" —— 文案可能来自拼接（`formatCheck` 那种），只扫字面量会漏。
+//   • **源码层**：剥注释后扫 `commands/` 与 `render/`（用户可见文案的两个落点），配一条
+//     **正对照**（同一个扫描在 `rules/dice.ts` 上必须找得到 `**` —— 那是乘方运算符），
+//     否则扫描本身失灵时上面那条是空转的。
+{
+  const K = 'group:p2-md';
+  const files = [];
+  const runtime = createRuntime({
+    // 两条投递口子都装上，好让 `.rh` 与 `.log export` 走**成功**那条路（回执形状不同）。
+    sendPrivate: async () => {},
+    sendFile: async (_key, fileName, content) => { files.push({ fileName, content }); }
+  });
+  const commands = runtime.commandHandlers;
+  const route = routeIn(commands);
+  const receipts = [];
+  const say = async (text, qq = '20031') => {
+    const key = route(text);
+    if (typeof commands[key] !== 'function') { receipts.push(`${text} → （没有这条命令：${key}）`); return; }
+    const reply = await commands[key]({ chatKey: K, senderId: qq, text, media: [], replyToMessageId: null });
+    receipts.push(`${text} → ${String(reply)}`);
+  };
+
+  // 库里先有一份剧本，好让"列出剧本"这条路有内容可印（空列表与有列表是两段不同的文案）。
+  saveScenarioText('灯塔', { format: 'md', text: 'title: 灯塔\n\n一层门厅。', chars: 16, truncated: false },
+    new ScenarioStore());
+
+  // 第一遍：**还没有局**。每一条走的都是各自的"做不了"话术 —— 那些同样进群。
+  for (const text of [
+    '.trpg', '.trpg status', '.trpg join', '.trpg start', '.trpg end', '.trpg mode', '.trpg scenario',
+    '.trpg 乱写', '.trpg start 现成的', '.trpg scenario 灯塔',
+    '.pc', '.pc new 阿飞', '.pc roll', '.pc confirm', '.pc show', '.pc save',
+    '.combat', '.combat start', '.combat next', '.combat end',
+    '.log', '.log export',
+    '.ra 侦查', '.rh 侦查', '.st 侦查 45', '.r 3d6'
+  ]) await say(text);
+
+  // 第二遍：**真的开一局**，把成功路也走一遍（局势卡、人物卡、先攻序都是群友可见的）。
+  //
+  // ⚠️ `.st` 要排在 `.pc roll` **之后**：掷一套属性是**整份替换** `stats` 的（COC 那 8 项），
+  // 先设的 `侦查` 会被它冲掉 —— 那样 `.ra` / `.rh` 走的是"卡上没有这一项"那条路，
+  // 而下面那条"`.rh` 真的发出去了"的对照会红（第一版就是这么红的）。
+  for (const text of ['.trpg new 文案检查 coc7', '.trpg join', '.pc new 阿飞', '.st 侦查 45',
+    '.pc roll', '.st 侦查 45', '.pc confirm', '.pc show', '.pc show 教授', '.trpg status']) await say(text);
+  // 第二个人：让"还差谁没确认"与先攻序里**多个人**这两条文案都有内容。
+  await say('.trpg join', '20032');
+  await say('.pc new 教授', '20032');
+  await say('.trpg start');                    // 教授还没确认 → 逐人报缺那段
+  await say('.pc confirm', '20032');
+  for (const text of ['.trpg start', '.pc show', '.pc show 教授', '.trpg status', '.combat start',
+    '.combat next', '.combat end', '.log export', '.ra 侦查', '.rh 侦查',
+    '.trpg mode 助手', '.trpg status', '.trpg mode DM', '.trpg end']) await say(text);
+
+  const bad = receipts.filter((line) => line.includes('**'));
+  ok('每一条命令的回执都不含 Markdown 的 `**`（成功与失败两条路都跑到了；QQ 不认它，群里看到的是两个星号）',
+    bad.length === 0, bad.join('\n') || `${receipts.length} 条回执逐条扫过`);
+  // 对照：这一遍**真的跑到了命令**。全是"没有这条命令"的话，上一条就是空转的。
+  ok('对照：那些回执是命令真跑出来的（不是清一色的"没有这条命令"）',
+    receipts.length >= 40 && receipts.every((line) => !line.includes('（没有这条命令：')),
+    `${receipts.length} 条`);
+  // 对照：两条投递路真的走到了（否则 `.rh` / `.log export` 只验了"没装通道"那一半）。
+  ok('对照：`.rh` 与 `.log export` 走的是**成功**那条路（私聊发了、文件发了一份）',
+    files.length >= 1 && receipts.some((line) => line.includes('.rh 侦查') && line.includes('已私聊发送')),
+    `${files.length} 份文件`);
+
+  // ── 源码层 ──
+  //
+  // 扫的是**群友可见文案的全部落点**：跑团自己的 `commands/` 与 `render/`，外加主流程那一条
+  // —— `/能力` 的回执住在 `web/onebot/commands.ts`（同样是发进群的话）。那一处**实测漏过一次**：
+  // `只接管**本群**` 就那么原样发进群里，而本段当时只扫 `extra/trpg/`，所以什么都没报。
+  //
+  // `rules/` 不扫 —— 那里的 `**` 是乘方运算符（下面那条正对照用的就是它）。
+  // `scenario/parse.ts` 也不在范围内，理由与它无关：`stripComments()` 在那个文件上会**失步**
+  // （`plain` 那行的正则字面量同时含 `"` 与 `'`，把它的状态机切进字符串模式），于是那一段
+  // 文档注释剥不掉 —— 那是助手的已知边界，不是文案的问题。所以本段只覆盖这几个落点。
+  const readTs = (rel) => fs.readFileSync(path.join(ROOT, 'src', rel), 'utf8');
+  const hits = [];
+  const scan = (rel) => {
+    const raw = readTs(rel);
+    // **成员集合取自剥注释的文本，行号取自原文**（同 `t-ports.mjs` 第 2 段那条判据）。
+    // 不这么做的话报出来的行号是错的：`stripComments()` 的块注释分支**把注释里的换行一起丢掉**
+    // （`/* … */` 那一段只是往前跳字符，不补换行），而 `web/onebot/commands.ts` 通篇是 JSDoc
+    // —— 实测那一行真身在 376，按剥完的文本数出来是 **269**，差了 100 多行。
+    const rawLines = raw.split('\n');
+    for (const [index, line] of stripComments(raw).split('\n').entries()) {
+      if (!line.includes('**')) continue;
+      const found = rawLines.findIndex((item) => item.trim() === line.trim());
+      hits.push(`${rel}:${(found >= 0 ? found : index) + 1}: ${line.trim()}`);
+    }
+  };
+  for (const dir of ['commands', 'render']) {
+    for (const name of fs.readdirSync(path.join(ROOT, 'src', 'extra', 'trpg', dir))) {
+      if (name.endsWith('.ts')) scan(`extra/trpg/${dir}/${name}`);
+    }
+  }
+  scan('web/onebot/commands.ts');
+  ok('源码层：剥注释后，群友可见文案的每个落点都没有 `**`（跑团的 `commands/` + `render/`，以及主流程的 `web/onebot/commands.ts`）',
+    hits.length === 0, hits.join('\n'));
+  ok('正对照：同一个扫描在 `rules/dice.ts` 上找得到 `**`（乘方运算符）—— 它真的看得见',
+    stripComments(readTs('extra/trpg/rules/dice.ts')).includes('**'));
+}
+
 // ── 6. 注册表接点与 `onRunEnd` ──────────────────────────────────────────────
 {
   const entry = EXTRA_REGISTRY.find((item) => item.id === 'trpg');
@@ -1995,7 +2124,12 @@ const status = (key) => store.read(key);
   const person = { id: 1, mid: 1, ts: 1, senderId: '10001', senderName: '张三', text: '我在。', self: false, read: true, reply: null, media: [] };
   const machine = { ...person, senderId: '', senderName: '转写', kind: 'transcript' };
   const sessions = [];
-  const withSink = createRuntime({ deliverNote: (chatKey, note) => sessions.push({ chatKey, ...note }) });
+  /** 兜底那次独立调用的用量（生产里由 `web/app.ts` 接到 `SessionRegistry.addExtraUsage`）。 */
+  const suggestedUsage = [];
+  const withSink = createRuntime({
+    deliverNote: (chatKey, note) => sessions.push({ chatKey, ...note }),
+    recordUsage: (recorded) => suggestedUsage.push(recorded)
+  });
   /** 兜底生成器的假回应（三个像模像样的行动选项）。 */
   const suggestReply = '- 沿着血迹往仓库深处走\n- 先检查地上的箱子\n- 退回路口问酒保';
   /**
@@ -2016,6 +2150,11 @@ const status = (key) => store.read(key);
     JSON.stringify(sessions));
   ok('条目正文**明说是给 DM 的素材**（不许它照抄、不许它说是系统给的）',
     /别照抄/.test(sessions[0].text) && /系统/.test(sessions[0].text), sessions[0].text);
+  // 这一次调用发生在 `finish()` 之后，用量走的是"只叠增量"的口子（2026-10-17 补的缺口）。
+  ok('兜底那一次独立调用的用量**交宿主的 `recordUsage`**（不是只打一行日志）',
+    suggestedUsage.length === 1 && suggestedUsage[0].promptTokens === 10
+    && suggestedUsage[0].completionTokens === 5 && suggestedUsage[0].totalTokens === 15,
+    JSON.stringify(suggestedUsage));
 
   // ② 冷却：同一个会话紧接着再来一次不再触发（防连着烧调用）。
   arm();
@@ -2068,6 +2207,10 @@ const status = (key) => store.read(key);
     sessions.length === 2 && /撬开木箱/.test(sessions[1].text)
     && !/以下是几个选项/.test(sessions[1].text) && !/很长的解释/.test(sessions[1].text),
     sessions[1]?.text);
+  // 记账认的是"这一次调用真的发生了"：⑦ 那次端点不可达（抛错、根本没有 usage）不记，
+  // ① 与 ⑧ 两次成功各记一笔 —— 一共两笔。
+  ok('用量只在调用真的发生时记一笔（端点不可达的那一次不记）',
+    suggestedUsage.length === 2, JSON.stringify(suggestedUsage));
 
   // ⑨ **助手模式**：上面每一条都成立，但它整轮不说话是常态、而"给几个行动方向"在骰子助手的
   // 语境里毫无意义 —— 所以模式这一条要能**单独**把兜底挡掉（不然它会白烧一次调用，
@@ -2112,6 +2255,86 @@ const status = (key) => store.read(key);
     recall(dedupe, '阿飞', 'roll', { expr: '1d20' }) === '结果');
   ok('参数不同就不是同一次调用', recall(dedupe, '阿飞', 'roll', { expr: '1d20', reason: '别的' }) === null);
   ok('行动者不同也不是同一次调用', recall(dedupe, '酒保', 'roll', { expr: '1d20' }) === null);
+}
+
+// ── 7b. 用量记账：**不在任何会话里**的那两次调用（E）────────────────────────
+//
+// 跑团有两次独立的 `chatCompletion`（兜底建议、暗骰叙事），它们发生在
+// `SessionRegistry.finish()` **之后**，所以借不了会话那条记账路 —— 那条路
+// （`#persist` → `#bumpTodayUsage`）对**已结束**的会话每次都会把整份 `usage` 再累加一遍，
+// 拿它补记一次增量等于把那一整轮的账算两遍。宿主因此另开了一个"只叠增量"的入口
+// （`SessionRegistry.addExtraUsage`），由组装根接在 `ExtraRuntimeDeps.recordUsage` 上。
+//
+// 上面 5i / 6 两段验的是**扩展那一半**（`recordUsage` 收到确切的那三个数），
+// 这一节补的是**另一半**：它落进 `usage-today.json` 之后账对得上，以及组装根真的接上了。
+{
+  const { SessionRegistry } = await load('chat/sessions.js');
+  const usageFile = path.join(DIR, 'usage-today.json');
+  const readUsage = () => {
+    try { return JSON.parse(fs.readFileSync(usageFile, 'utf8')); } catch { return null; }
+  };
+  const registry = new SessionRegistry(0);
+
+  // 起点：先把这一刻的账读出来，后面一律按**增量**断言 —— 临时数据目录是整段共用的，
+  // 拿绝对值断言会被"前面某段也记过账"干扰（这类"全局状态里恰好只有我一个"的前提
+  // 在本仓库被踩过，见 AGENTS.md 的测试约定）。
+  const start = readUsage();
+  const base = start ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, runs: 0 };
+
+  registry.addExtraUsage({ promptTokens: 11, completionTokens: 7, totalTokens: 18, cachedTokens: 3 });
+  const first = readUsage();
+  ok('独立调用的用量落进 `usage-today.json`（四个数一起叠）',
+    first.promptTokens === base.promptTokens + 11 && first.completionTokens === base.completionTokens + 7
+    && first.totalTokens === base.totalTokens + 18 && first.cachedTokens === base.cachedTokens + 3,
+    JSON.stringify({ first, base }));
+  ok('⚠️ 它**不动 `runs`** —— 那两次调用不是一次 agent 运行，算进去会让"每次花多少"失真',
+    first.runs === (base.runs ?? 0), JSON.stringify({ runs: first.runs, base: base.runs }));
+
+  // 读模型（面板与 `/api/usage` 走的就是它）与文件同源 —— 这个实例没有运行中的会话，
+  // 所以两者必须逐字相等。
+  const seen = registry.todayUsage(first.dayKey);
+  ok('`todayUsage()` 看得到这笔账（读模型与写入点认的是同一个文件）',
+    seen.promptTokens === first.promptTokens && seen.totalTokens === first.totalTokens
+    && seen.runs === first.runs, JSON.stringify(seen));
+
+  registry.addExtraUsage({ promptTokens: 1, completionTokens: 1, totalTokens: 2, cachedTokens: 0 });
+  const second = readUsage();
+  ok('第二次调用是**叠**上去的（不是覆盖，也不是把第一笔再写一遍）',
+    second.totalTokens === first.totalTokens + 2 && second.runs === first.runs,
+    JSON.stringify(second));
+
+  // 四个数全是 0 = 这次调用没有用量可记（提供商没报 usage）。
+  // ⚠️ 判据只能是"**盘上没多出东西**"：比内容看不出差别（写一次零增量内容一模一样），
+  // 所以先把文件挪开、跑完再放回来 —— 文件不存在时"没写"与"写了"才是可分的。
+  const saved = fs.existsSync(usageFile) ? fs.readFileSync(usageFile, 'utf8') : null;
+  fs.unlinkSync(usageFile);
+  registry.addExtraUsage({ promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0 });
+  registry.addExtraUsage(null);
+  ok('四个数全是 0（或压根没给）时**一次盘都不写**（零增量不该产生一条记录）',
+    !fs.existsSync(usageFile));
+  if (saved !== null) fs.writeFileSync(usageFile, saved, 'utf8');
+
+  // 对照：**一次真实会话结束**照旧整份记账、`runs` 加一 —— 两条路共用的那个写入点
+  // （`#addTodayUsage`）没有被这次重构改坏。少了这条，"共用一个写入点"就只剩注释在说。
+  const session = registry.create({ chatKey: 'group:1', trigger: [] });
+  session.usage = { promptTokens: 100, completionTokens: 50, totalTokens: 150, cachedTokens: 0, calls: 1 };
+  registry.finish(session.id, 'done');
+  const after = readUsage();
+  ok('对照：会话结束照旧加 1 次 `runs` 并整份记账',
+    after.runs === second.runs + 1 && after.totalTokens === second.totalTokens + 150,
+    JSON.stringify(after));
+
+  // ── 接线的源级断言 ──
+  //
+  // 上面那几条验的是入口本身，**验不到"组装根真的把它接上了"**：`web/app.ts` import 不了
+  // （它要起整个 app，那正是第 9 段做的事，而第 9 段不碰用量）。所以这里扫源码文本，
+  // 与「带副作用的入口文件只能靠文本断言守」是同一条（见 AGENTS.md 的测试约定）。
+  const app = stripComments(fs.readFileSync(path.join(ROOT, 'src', 'web', 'app.ts'), 'utf8'));
+  ok('组装根把扩展的 `recordUsage` 接到 `SessionRegistry.addExtraUsage`（只叠增量的那个入口）',
+    /recordUsage:\s*\(usage\)\s*=>\s*sessions\.addExtraUsage\(usage\)/.test(app));
+  ok('`recordUsage` 是**宿主的口子**（`extra/types.ts` 上的可选成员），扩展只说"记多少"',
+    /recordUsage\?\(usage: ExtraUsage\)/.test(
+      stripComments(fs.readFileSync(path.join(ROOT, 'src', 'extra', 'types.ts'), 'utf8'))));
 }
 
 // ── 8. 源级断言：掷骰的熵源只能是那一个 ──────────────────────────────────────

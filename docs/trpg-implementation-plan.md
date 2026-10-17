@@ -13,6 +13,7 @@
 | **P4** 属性生成（COC7） | ✅ | `rules/chargen.ts` + `.pc roll` + 卡的 `mp/mpMax/db/build/mov` | `t-trpg` 332 → **351**；`t-trpg-rules` 144 → **166** |
 | **P5** 战斗 | ✅ | `rules/combat.ts` + `model/combat.ts` + `.combat start/next/end` + `campaign action=combat` | `t-trpg` 351 → **392**；`t-trpg-rules` 166 → **185** |
 | **P6** 战报（导出） | ✅ | `render/journal.ts` + `.log export` + 面板列出/删除 + `SendQueue.sendFile` | `t-trpg` 392 → **419** |
+| **收尾** 审查发现的 A / B / C / E 四类 | ✅ | 见下面「待修复」那几张表 —— 每行末尾补了**实际怎么修的** | `t-trpg` 419 → **437** |
 
 **全量**：`npm run check` 39 个套件全绿、`npm run test:all` 49 个套件全绿（每阶段收尾都做过一次 `rm -rf dist && npm run build` 干净重建再复跑）。
 
@@ -80,64 +81,77 @@
 
 ### 待修复（P0–P4 重构后的审查发现，**逐条对照过当前代码**）
 
-> 记录于 2026-10-16，P5/P6 动工之前。**除 D 类已随手修掉外，其余尚未修**（P5/P6 只动了新增代码，
-> 没有回头改 A/B/C/E 这些）。
-> 按"会不会真的把人带错"排序。每条都给了判据 —— 修完能拿它验。
+> 记录于 2026-10-16，P5/P6 动工之前。按"会不会真的把人带错"排序。每条都给了判据 —— 修完能拿它验。
 > **2026-10-17 重锚**：P5/P6 新增了 `rules/combat.ts` / `model/combat.ts` / `commands/combat.ts` /
 > `commands/log.ts` / `render/journal.ts`，下面那些**行号已按当时的代码重取过一遍**（只改行号与计数，
 > 没有一条发现被修掉）。修的时候按"位置"那一列的描述去定位，行号本身随时会再漂。
-> **2026-10-17 同批**：D2–D5 那四条是**文档漂移**，随 P5/P6 的文档更新一起修掉了（见 D 类表里的 ✅ 行）；
-> A / B / C / E 四类**一条都没动**。
+> **2026-10-17 同批**：D2–D5 那四条是**文档漂移**，随 P5/P6 的文档更新一起修掉了（见 D 类表里的 ✅ 行）。
+
+✅ **2026-10-17 收尾：A / B / C / D / E(a) 已全部修完**（P5/P6 之后的一次专项）。下面几张表**保留原样**
+—— 那是"当时看到了什么"的记录；每行末尾补了一句**实际怎么修的**。判据那一列仍然有效，改回去就该变红。
+`t-trpg.mjs` 419 → **424**（A5 的 5q 段）→ **437**（E(a)：5i/6 两段 5 条 + 7b 段 8 条）。
+**收尾那一轮没有再加断言条数**（D1 是文档、A5 的补漏只是把 5q 的扫描范围扩到 `web/onebot/commands.ts`）。
 
 #### A 类：用户可见的错误输出（照做会失败 / 群里看到的字是错的）
 
-| # | 位置 | 是什么 | 判据 |
-| --- | --- | --- | --- |
-| A1 | `src/extra/trpg/commands/scenario.ts:117` | 存剧本的**回执末尾**写 `开局：.trpg start ${saved.scenario.id}` —— 而 `createStartCommand`（`commands/session.ts:124`）**带参数就拒**，剧本名是 `.trpg new` 的参数。这是**代码逐字产出**的一句错话，且紧跟在"我刚存好剧本"那一刻 | 存一份剧本，回执里那句照敲，必须真的开得了局（现在会被拒） |
-| A2 | `ui/js/views/settings/sections.js:917` | 设置页写着 `.trpg start <剧本名> [规则表 id]` | 面板文案与 `commands/session.ts` 的 `USAGE` 逐字一致 |
-| A3 | `AGENTS.md:613` | `.trpg start <剧本> [规则]` | 同上 |
-| A4 | `docs/trpg-dialogue-expectations.md:74` | 逐幕记录里 `[代码]` 那一栏写着 `开局：.trpg start 灯塔` —— 那份文档的**全部价值**就是"代码此刻逐字产出什么"，这里正好抄错了 | 重跑文末那段复核脚本，`[代码]` 字面量与实现逐字相同 |
-| A5 | `commands/mode.ts:31`、`commands/combat.ts:24`、`commands/character.ts:222`、`render/players.ts:165`、`render/status.ts:61,93,94` | **七处群友可见的回执把 Markdown 的 `**` 原样发进群**（QQ 不认 Markdown）。**不是"照做会失败"，是同属"群里看到的字是错的"** —— 2026-10-17 写逐幕文档时逐条跑命令发现的，四条（`mode` / `combat` / `status` / `scenario`）已亲眼见到。⚠️ `render/status.ts` 的 `renderScenarioList` **同时进 system prompt**（`renderBriefing`），所以不能简单删加粗 —— 要么按受众拆两份（`render.ts` 那条原则），要么统一去掉 | 跑一遍那些命令，输出里不出现 `**`；`t-trpg.mjs` 加一条扫"回执字面量里没有 `**`"的断言 |
+| # | 位置 | 是什么 | 判据 | 修法 |
+| --- | --- | --- | --- | --- |
+| A1 | `src/extra/trpg/commands/scenario.ts:117` | 存剧本的**回执末尾**写 `开局：.trpg start ${saved.scenario.id}` —— 而 `createStartCommand`（`commands/session.ts:124`）**带参数就拒**，剧本名是 `.trpg new` 的参数。这是**代码逐字产出**的一句错话，且紧跟在"我刚存好剧本"那一刻 | 存一份剧本，回执里那句照敲，必须真的开得了局（现在会被拒） | ✅ 改成 `.trpg new <剧本名>`，并在那行上写明"必须是真能开局的词形" |
+| A2 | `ui/js/views/settings/sections.js:917` | 设置页写着 `.trpg start <剧本名> [规则表 id]` | 面板文案与 `commands/session.ts` 的 `USAGE` 逐字一致 | ✅ 改成 `.trpg new <剧本名> [规则表 id]` |
+| A3 | `AGENTS.md:613` | `.trpg start <剧本> [规则]` | 同上 | ✅ 改成 `.trpg new <名字> [规则表]` |
+| A4 | `docs/trpg-dialogue-expectations.md:74` | 逐幕记录里 `[代码]` 那一栏写着 `开局：.trpg start 灯塔` —— 那份文档的**全部价值**就是"代码此刻逐字产出什么"，这里正好抄错了 | 重跑文末那段复核脚本，`[代码]` 字面量与实现逐字相同 | ✅ 改成 `开局：.trpg new 灯塔`；复核脚本覆盖了那条回执 |
+| A5 | `commands/mode.ts:31`、`commands/combat.ts:24`、`commands/character.ts:222`、`render/players.ts:165`、`render/status.ts:61,93,94` | **七处群友可见的回执把 Markdown 的 `**` 原样发进群**（QQ 不认 Markdown）。**不是"照做会失败"，是同属"群里看到的字是错的"** | 跑一遍那些命令，输出里不出现 `**`；`t-trpg.mjs` 加一条扫"回执字面量里没有 `**`"的断言 | ✅ 七处全去掉加粗。**当初给 `renderScenarioList` 写的理由（"它同时进 system prompt"）是个误判** —— 进 system prompt 的是 `renderBriefing`，那是另一个函数、不调用 `renderScenarioList`；它只被三处调用（`.trpg scenario`、`.trpg new` 不带名字那一次、向导），**三处都是群友可见**，所以"去掉加粗"本来就够，不需要拆两份。守护是 `t-trpg.mjs` 第 **5q** 段（5 条：行为层逐条跑两遍 + 源码层剥注释扫 + 一条正对照）。⚠️ **源码层当初只扫 `extra/trpg/`，因此漏掉了一处真缺陷**：`web/onebot/commands.ts` 的 `/能力` 回执里那句 `只接管**本群**` 原样发进了群，而没有任何断言看得见。现已把扫描扩到主流程那个落点，并用**证伪探针实测**过（把 `**` 加回去 → 5q 红 1 条，报出 `web/onebot/commands.ts:376`） |
 
 正确词形只有一条：**`.trpg new <名字> [规则表 id]`**（名字对上剧本库就用那份剧本，对不上就当标题）。
 
 #### B 类：同一条规则写了两遍（静默漂移）
 
-| # | 位置 | 是什么 | 判据 |
-| --- | --- | --- | --- |
-| B1 | `model/character.ts:87` 的 `normalizeHidden` vs `tools/shared.ts:161` 的 `readHidden` | **同一件事的两份实现**，且行为不同：`normalizeHidden` 收到标量（`"stats"`）直接返回 `[]`，`readHidden` 把它包成 `['stats']`。于是"工具写进存档的 hidden"与"存档读回来的 hidden"能不一致 —— 表现是**藏了、没藏住**，没有任何报错。另外 `readHidden` 用的是裸 `24` 而不是 `MAX_NAME_CHARS` | 两个函数对同一组输入（含标量、含大小写、含不认识的名字）给出相同结果；`readHidden` 里不出现裸数字 |
-| B2 | `scenario/parse.ts:166-168` | 裸 `60` / `64` / `400`，而 `model/limits.ts` 里有 `MAX_TITLE_CHARS` / `MAX_RULE_CHARS` / `MAX_SCENE_CHARS` 三个同名常量（同文件别处已经在 import `text`） | 源码里不出现这三个裸数；改上限时只有一处要改 |
-| B3 | `model/campaign.ts:149`、`model/session.ts:200`、`model/paths.ts:36`（默认参数）、`store/scenario-store.ts:55,67,85` | 剧本 id 的长度上限 `40` 在**六处**各写一遍（`safeFileName` 的默认值恰好也是 40，所以调用方还额外显式传一遍） | 只留一个具名常量；`safeFileName(id)` 不传第二参 |
-| B4 | `suggest.ts:50-63` 的 `suggestionContext` | 拼"在场的人"时印了 HP 与 SAN，**漏了 MP** —— 而 `render/model.ts:51` 与 `render/players.ts:35` 都印。这个函数的注释自己写着"只用已经渲染给 DM 的那几样，不另建一份世界快照"，但它已经漂了：DM 看到 MP，建议生成器看不到 | 三处对同一个角色给出的资源条一致 |
+| # | 位置 | 是什么 | 判据 | 修法 |
+| --- | --- | --- | --- | --- |
+| B1 | `model/character.ts:87` 的 `normalizeHidden` vs `tools/shared.ts:161` 的 `readHidden` | **同一件事的两份实现**，且行为不同：`normalizeHidden` 收到标量（`"stats"`）直接返回 `[]`，`readHidden` 把它包成 `['stats']`。于是"工具写进存档的 hidden"与"存档读回来的 hidden"能不一致 —— 表现是**藏了、没藏住**，没有任何报错。另外 `readHidden` 用的是裸 `24` 而不是 `MAX_NAME_CHARS` | 两个函数对同一组输入（含标量、含大小写、含不认识的名字）给出相同结果；`readHidden` 里不出现裸数字 | ✅ `readHidden` 整个删掉，工具层改调 `normalizeHidden`（**唯一一份**，含标量归一与大小写归一） |
+| B2 | `scenario/parse.ts:166-168` | 裸 `60` / `64` / `400`，而 `model/limits.ts` 里有 `MAX_TITLE_CHARS` / `MAX_RULE_CHARS` / `MAX_SCENE_CHARS` 三个同名常量 | 源码里不出现这三个裸数；改上限时只有一处要改 | ✅ 三处都换成具名常量（`import` 那一行加三个名字） |
+| B3 | `model/campaign.ts:149`、`model/session.ts:200`、`model/paths.ts:36`（默认参数）、`store/scenario-store.ts:55,67,85` | 剧本 id 的长度上限 `40` 在**六处**各写一遍 | 只留一个具名常量；`safeFileName(id)` 不传第二参 | ✅ 新增 `MAX_SCENARIO_ID_CHARS`（`model/limits.ts`），六处全部改用它；`safeFileName` 的**缺省值**就是它，调用方不再显式传第二参 |
+| B4 | `suggest.ts:50-63` 的 `suggestionContext` | 拼"在场的人"时印了 HP 与 SAN，**漏了 MP** —— 而 `render/model.ts:51` 与 `render/players.ts:35` 都印 | 三处对同一个角色给出的资源条一致 | ✅ 补上 `mpMax > 0` 那一档（与另两处**同一条判据**），并在注释里点明它是被这条审查抓出来的 |
 
 #### C 类：死代码、未用参数、过时注释（不影响行为，但会误导下一个人）
 
-| # | 位置 | 是什么 |
-| --- | --- | --- |
-| C1 | `impl.ts:18` | `import { scenarioIds, usableScenarios }` —— `scenarioIds` **从未被使用**（只有 `usableScenarios` 在第 202 行用了） |
-| C2 | `commands/index.ts:90` | `.ra` 传了 `sendPrivate`，而 `createCheckCommand` 根本不读它（只有 `.rh` 的 `createSecretCheckCommand` 读） |
-| C3 | `commands/index.ts:92` | `.st` 传了 `sendPrivate` **与** `base` 里的 `rules` / `rng`，而 `createStatCommand`（`commands/check.ts:197`）只解构 `{ store, command }` |
-| C4 | `spec.ts:57` | 注释"命令表只剩跑团**那两条**" —— 现在展开后有 24 条 |
-| C5 | `model/session.ts:48` 的 `isQq` 注释 | 声称"只有这一处"，实际另有 5 处内联的 `/^\d+$/` 字面量 |
-| C6 | `render/format.ts:38` 的 `GRADE_LABEL` | 当前**不可达**：三个 `resolveCheck` 调用点全部传 `rule`（于是 `label` 恒有值），没有一处传 `judge`。它是为 `judge` 那条对外契约留的兜底 —— 要么在注释里写明"今天不可达，是给自定义 judge 的"，要么删掉 |
-| C7 | `render/format.ts:40` | `GRADE_LABEL.success = '普通成功'`，而两套内置表的 `success` 标签都是 `'成功'`。更值得注意的不是这个兜底值，而是 `formatCheck` 对**最常见的那一档**印出 `成功（成功，差 20）` —— 成功/失败说了两遍 |
-| C8 | `render/format.ts` 的 `GRADE_LABEL` 与 `coc7`/`generic` 的 label 表 | 三处都在描述"档位叫什么"，而权威只有一处（规则表）。`GRADE_LABEL` 的存在本身就在邀请人去改它（改了不生效） |
+| # | 位置 | 是什么 | 修法 |
+| --- | --- | --- | --- |
+| C1 | `impl.ts:18` | `import { scenarioIds, usableScenarios }` —— `scenarioIds` **从未被使用** | ✅ 去掉那个名字（函数本身仍被 `commands/` 用着，不是死代码） |
+| C2 | `commands/index.ts:90` | `.ra` 传了 `sendPrivate`，而 `createCheckCommand` 根本不读它 | ✅ 不再传（只有 `.rh` 传） |
+| C3 | `commands/index.ts:92` | `.st` 传了 `sendPrivate` **与** `base` 里的 `rules` / `rng`，而 `createStatCommand` 只解构 `{ store, command }` | ✅ 只递 `{ store, journal, command }`，并把 `StatCommandDeps` 收窄成那三样（**故意窄**：按 `CheckCommandDeps` 收的话，下一个读代码的人会以为 `.st` 也掷骰、也发私聊） |
+| C4 | `spec.ts:57` | 注释"命令表只剩跑团**那两条**" —— 现在展开后有 24 条 | ✅ 改成"24 条词形（12 条声明，其中 4 条带 `subs`、2 条是裸命令；外加永远在的 `/能力`）" |
+| C5 | `model/session.ts:48` 的 `isQq` 注释 | 声称"只有这一处"，实际另有 5 处内联的 `/^\d+$/` | ✅ 注释改成"**不是唯一的落点**"并逐个列出那 4 处（`say` / `character`×2 / `campaign`），说明它们各自在读一个不可信字段、就地判一次更直白，改判据要五处一起改 |
+| C6 | `render/format.ts:38` 的 `GRADE_LABEL` | 当前**不可达** | ✅ 整张表删掉（与 C7/C8 同一个动作） |
+| C7 | `render/format.ts:40` | `formatCheck` 对**最常见的那一档**印出 `成功（成功，差 20）` | ✅ `formatCheck` 加一条判据：档位名与"成功/失败"是同一个词时**只印一次**（`grade === outcome` → 只印间距）。文案变成 `成功（差 20）` / `成功（极难成功，超出 3）` |
+| C8 | `render/format.ts` 的 `GRADE_LABEL` 与 `coc7`/`generic` 的 label 表 | 三处都在描述"档位叫什么"，而权威只有一处（规则表） | ✅ 只留规则表那一条路：`result.label ?? result.grade`，兜底表删掉。注释里写明"**这里刻意没有兜底表**"以及当初为什么删 |
 
 #### D 类：文档漂移（`docs/ts-migration-plan.md` 的跑团那一节最严重）
 
 | # | 位置 | 是什么 |
 | --- | --- | --- |
-| D1 | `docs/ts-migration-plan.md` §跑团 | 整段还停在 P0 之前：目录写成**根下平铺**（`state.ts` / `render.ts` / `tools.ts` / `rule-store.ts` / `scenario.ts` / `mode.ts`），命令写成 `/跑团` `/开局` `/模式` `/剧本` `/掷骰`（P1 起是 `.` 前缀且已拆成独立命令），`t-trpg-rules.mjs` 写成"109 条"（现 185）。**这一节现在教人敲不存在的命令、去不存在的文件** |
+| D1 | `docs/ts-migration-plan.md` §跑团 | 整段还停在 P0 之前：目录写成**根下平铺**（`state.ts` / `render.ts` / `tools.ts` / `rule-store.ts` / `scenario.ts` / `mode.ts`），命令写成 `/跑团` `/开局` `/模式` `/剧本` `/掷骰`（P1 起是 `.` 前缀且已拆成独立命令），`t-trpg-rules.mjs` 写成"109 条"（现 185）。**这一节现在教人敲不存在的命令、去不存在的文件**。✅ **2026-10-17 已修**：整节按**当前**代码重写（七个子目录与根白名单、`.` 词形与 `subs`、`initiative`/`dice`/`chargen` 三个规则字段、两份视野、战斗与战报、两种模式与 `intercept`、`configPatch` 的上下文下限、`ExtraRuntimeDeps` 四个口子），并指向 AGENTS.md 与逐幕文档作为权威 |
 | ~~D2~~ | `README.md` | ✅ **已修**（P6 同批）：`.trpg status` 那一行改成"按上面那**八**步"，并补了 `.combat start/next/end`、`.log export` 四行命令与「跑团」面板那一栏 |
 | ~~D3~~ | `AGENTS.md` §跑团 | ✅ **已修**（P6 同批）：handler 键 **14 → 24** 条（12 条声明 / 4 条带 `subs` / 2 条裸命令）、`t-trpg.mjs` **351 → 419**、`t-trpg-rules.mjs` **166 → 185**，命令表补上 `.combat` / `.log` 六行 |
-| ~~D4~~ | `docs/trpg-dialogue-expectations.md` | ✅ **已修**（P6 同批）：新增第十幕（战斗）与第十二幕（战报），文末复核脚本补上 `sendFile` 接线与 `.combat` / `.log` 两族 |
+| ~~D4~~ | `docs/trpg-dialogue-expectations.md` | ✅ **已修**（P6 同批）：新增第十一幕（战斗）与第十二幕（战报），文末复核脚本补上 `sendFile` 接线与 `.combat` / `.log` 两族 |
 | ~~D5~~ | `AGENTS.md` §跑团 | ✅ **已修**（P6 同批）：新增「战斗与先攻（P5）」一节（`initiative` 规则字段、排序/指针、倒下判定、行动即推进、伤害刻意不在 `rules/`），战报一节补上 `visible` 判据（镜像按条滤 + 导出边界再查一遍 + 面板第三列）与 `sendFile` 那条口子 |
 
-#### E 类：已知缺口（P5/P6 落地时会碰到，先记在这里）
+#### E 类：已知缺口
 
-- `suggest.ts` 与 `.rh` 私密叙事那两次独立 `chatCompletion` 调用**不进 token 账**（成因：它们发生在 `SessionRegistry.finish()` 之后，而 `#persist` 对已结束的会话会**重复累加** `usage-today.json`）。要补齐得给 `SessionRegistry` 加一个"只累加增量"的入口。
-- `.trpg scenario` 命令路径上"用文件名当名字"那一段**没有端到端断言**（要真下载 + 起 Python），只有 `scenarioNameFromFile` 的单元断言。
+- ✅ **（已修，2026-10-17）** `suggest.ts` 与 `.rh` 私密叙事那两次独立 `chatCompletion` 调用**不进 token 账**。
+  修法就是当初记下的那条：给 `SessionRegistry` 加一个**只叠增量**的入口 —— `addExtraUsage(usage, at)`，
+  它不碰 `runs`（那两次调用不是一次 agent 运行，算进去会让面板上"每次花多少"失真），四个数全 0 时直接返回。
+  与 `#bumpTodayUsage` **共用**唯一那个读改写函数 `#addTodayUsage`（"新的一天"与原子落盘只有一份实现）。
+  接线：`ExtraRuntimeDeps.recordUsage`（宿主口子）→ `web/app.ts` 的 `sessions.addExtraUsage`；
+  扩展那侧只在拿到口子时才上报（缺省 = 不记账，调用照常 —— 记不上是账面的小缺口，不该让一次暗骰失败）。
+  守护在 `t-trpg.mjs`：5i 段 3 条 + 6 段 2 条（**扩展那一半**：`recordUsage` 收到确切的那三个数）、
+  7b 段 8 条（**宿主那一半**：叠增量 / 不动 `runs` / 读模型同源 / 零增量不写盘 / 会话结束照旧加 `runs` /
+  组装根真的接上了）。**三条探针实测**：把 `runs: 0` 改成 `1` → 红 2 条；去掉零值早退 → 红 1 条；
+  把 `app.ts` 的接线换成 `() => {}` → 红 1 条。
+- `.trpg scenario` 命令路径上"用文件名当名字"那一段**没有端到端断言**（要真下载 + 起 Python），只有
+  `scenarioNameFromFile` 的单元断言。**结构性缺口，不修** —— 仓库的测试约定不许启动真解释器。
 - 换熵源（把 `secureRng` 换成 `Math.random`）**没有任何行为断言看得见**，只有源码文本断言。
+  **结构性缺口，不修** —— 掷骰本来就随机，行为断言无从判别。
 
 ## Context
 
@@ -325,7 +339,7 @@ commands: [
 命令不再以 `/` 开头，`slash-commands.ts` / `isSlashCommand` / `handleSlashCommand` 三个名字变成误称。本次一并改名（仓库对误称的容忍度很低，且这一步反正要动测试）：
 
 - `src/web/onebot/slash-commands.ts` → `src/web/onebot/commands.ts`
-- `isSlashCommand` → `isCommand`，`handleSlashCommand` → `handleCommand`
+- `isSlashCommand` → `isCommand`，`handleSlashCommand` → `handleCommand`（**实际落地的是 `isCommandEntry` / `handleCommandEntry`** —— 那两个名字在 `CommandDispatcher` 上，与扩展命令共用一个入口，加 `Entry` 是为了点明"认的是入站那一条"，见 `src/web/onebot/commands.ts`）
 - 连带：`src/web/onebot/ingest.ts`、`src/web/app.ts`、`tests/t-slash-commands.mjs`（可一并改名 `t-commands.mjs`）
 
 ---

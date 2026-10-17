@@ -14,7 +14,7 @@
 // 暗骰的结果与那段私密叙事**既不写 `campaign.log`、也不进战报** —— 它们唯一的持久痕迹是
 // 玩家私聊存档里那条 `我：…`。写进 `campaign.log` 就等于让"暗骰"在群存档里留下痕迹，
 // 而暗骰的全部意义就是不留痕迹（DM 那一份渲染会把日志念给模型听）。
-import { chatCompletion } from '../../../llm/llm.js';
+import { addUsage, chatCompletion, emptyUsage } from '../../../llm/llm.js';
 import { errorMessage } from '../../../agent/tools/shared.js';
 import { EXTRA_PROMPT_JOBS } from '../../prompts.js';
 import { appendLog, mirrorLog } from '../model/campaign.js';
@@ -25,6 +25,7 @@ import { DiceError } from '../rules/dice.js';
 import { resolveCheck } from '../rules/check.js';
 import { restOf, argsOf } from './shared.js';
 import type { CommandHandler } from './shared.js';
+import type { ExtraUsage } from '../../types.js';
 import type { JournalPort } from '../model/campaign.js';
 import type { DiceRng } from '../rules/dice.js';
 import type { TrpgCampaign, TrpgCharacter } from '../types.js';
@@ -40,8 +41,26 @@ export interface CheckCommandDeps {
   rng: DiceRng;
   /** 私聊投递（暗骰）。缺省 = 没装通道，`.rh` 会**如实说一句并且不掷**。 */
   sendPrivate?: ((targetUserId: string, text: string) => Promise<void>) | null;
+  /**
+   * 记一次独立模型调用的用量（暗骰那一次私密叙事）。
+   * 缺省 = 不记账，叙事照常生成 —— 见 `ExtraRuntimeDeps.recordUsage`。
+   */
+  recordUsage?: ((usage: ExtraUsage) => void) | null;
   journal?: JournalPort | null;
   /** 这条命令的词（`'.ra'` 这样）—— 由 `commands/index.ts` 递进来。 */
+  command: string;
+}
+
+/**
+ * `.st` 的依赖 —— **比上面那个窄**：它只读卡、改卡、落盘，不掷骰也不走私聊。
+ *
+ * 窄一份是有意的（同 `commands/index.ts` 那条"每个词只写一次"的纪律）：按 `CheckCommandDeps`
+ * 收的话，`index.ts` 会顺手把 `sendPrivate` / `rules` / `rng` 一起递进来，而它们在这里
+ * **一个都不读** —— 下一个读代码的人会以为 `.st` 也掷骰、也会发私聊。
+ */
+export interface StatCommandDeps {
+  store: TrpgStore;
+  journal?: JournalPort | null;
   command: string;
 }
 
@@ -71,11 +90,15 @@ function judge(deps: CheckCommandDeps, campaign: TrpgCampaign, card: TrpgCharact
  * （只有技能名、技能值与档位）。这是刻意的隔离 —— 模型看不见那个数，就不可能写偏。
  *
  * 失败一律返回空串（调用方只发点数那行）：它是旁路，不该让一次暗骰因为模型抽风而失败。
- * **用量不进 token 账** —— 与 `suggest.ts` 同一个已知缺口（那里有完整推导）。
+ *
+ * **用量走 `recordUsage`**（见 `ExtraRuntimeDeps.recordUsage`）：这一次调用发生在
+ * `SessionRegistry.finish()` **之后**，借不了会话那条记账路（那条路对已结束的会话会整份重复
+ * 累加）。缺省时只是不记账，调用照常。
  */
-async function generateSecretNarration(ask: {
-  card: string; skill: string; target: number; grade: string;
-}): Promise<string> {
+async function generateSecretNarration(
+  ask: { card: string; skill: string; target: number; grade: string },
+  recordUsage?: ((usage: ExtraUsage) => void) | null
+): Promise<string> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), NARRATION_TIMEOUT_MS);
@@ -90,7 +113,10 @@ async function generateSecretNarration(ask: {
       });
       const usage = result.usage;
       if (usage) {
-        console.log(`[trpg] 暗骰叙事用量（不进 token 账，见 commands/check.ts 头部）：`
+        // 归一到与全局同一套字段（`addUsage` 是唯一那份归一化，`llm/llm.ts`）。
+        recordUsage?.(addUsage(emptyUsage(), usage));
+        // 日志仍留着：这一次调用的开销不进任何一条会话，日志是它唯一的当场痕迹。
+        console.log(`[trpg] 暗骰叙事用量：`
           + `prompt=${usage.prompt_tokens ?? 0} completion=${usage.completion_tokens ?? 0}`);
       }
       return String(result.message?.content ?? '').trim().slice(0, 200);
@@ -170,7 +196,7 @@ export function createSecretCheckCommand(deps: CheckCommandDeps): CommandHandler
     const line = formatCheck(result);
     const narration = await generateSecretNarration({
       card: card.name, skill, target, grade: result.label ?? result.grade
-    });
+    }, deps.recordUsage);
     try {
       await deps.sendPrivate(String(input.senderId), [
         `【暗骰】${card.name} 的${skill}（${target}）`,
@@ -194,7 +220,7 @@ export function createSecretCheckCommand(deps: CheckCommandDeps): CommandHandler
  * 关键数值会让 DM 手里的局势与群里对不上（那条"状态归代码管"的分界在玩家这一侧同样成立）。
  * 钳制与 `character` 用的是同一组常量（`MIN_STAT` / `MAX_STAT` / `MAX_STATS_PER_CHARACTER`）。
  */
-export function createStatCommand(deps: CheckCommandDeps): CommandHandler {
+export function createStatCommand(deps: StatCommandDeps): CommandHandler {
   const { store, command } = deps;
   return async (input) => {
     const campaign = store.read(input.chatKey);

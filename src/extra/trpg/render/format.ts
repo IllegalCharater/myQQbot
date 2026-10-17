@@ -22,25 +22,25 @@ export function formatRoll(roll: DiceRoll): string {
   return line;
 }
 
-/** `1d100 对 50 → 30 = 30 ｜ 成功（差 20）`。档位的中文名优先取规则表给的 `label`。 */
-export function formatCheck(result: CheckResult): string {
-  const grade = result.label ?? GRADE_LABEL[result.grade] ?? result.grade;
-  const gap = result.margin === 0 ? '正好' : (result.margin > 0 ? `超出 ${result.margin}` : `差 ${-result.margin}`);
-  return `${formatRoll(result.roll)} ｜ 对 ${result.target} → ${result.success ? '成功' : '失败'}（${grade}，${gap}）`;
-}
-
 /**
- * 已知档位的中文名。
+ * `1d100 → 47 = 47 ｜ 对 45 → 成功（差 2）`、`→ 成功（极难成功，超出 3）`。
  *
- * 这只是**兜底**：规则表的 `label` 才是权威（COC 那套的"极难成功/困难成功"不在下表里）。
- * 认不出来就原样印 `grade`（同 `image-source` 的"字段在不在"那条规矩 —— 不替规则书编名字）。
+ * 档位的中文名**只从规则表来**（`result.label`）：`coc7` 的"极难成功/困难成功"与 `generic`
+ * 的"大成功/大失败"都写在规则文件里，那才是权威。自定义 `judge` 不填 `label` 时就原样印
+ * `grade` —— **这里刻意没有兜底表**：曾经有一张 `GRADE_LABEL`，它把 `success` 译成
+ * "普通成功"而规则表给的是"成功"，同一个档位于是有两个名字，而改那张表不会影响真实输出
+ * （规则表那条路永远带 `label`，兜底表根本走不到）。
+ *
+ * ⚠️ **档位名与"成功/失败"是同一个词时只印一次**：最常见的那一档（两套内置表的 `success`）
+ * 就是这种情况，旧写法会印出「成功（成功，差 20）」，把成功说了两遍。
  */
-const GRADE_LABEL: Record<string, string> = {
-  critical: '大成功',
-  success: '普通成功',
-  failure: '失败',
-  fumble: '大失败'
-};
+export function formatCheck(result: CheckResult): string {
+  const outcome = result.success ? '成功' : '失败';
+  const grade = result.label ?? result.grade;
+  const gap = result.margin === 0 ? '正好' : (result.margin > 0 ? `超出 ${result.margin}` : `差 ${-result.margin}`);
+  return `${formatRoll(result.roll)} ｜ 对 ${result.target} → ${outcome}`
+    + `（${grade === outcome ? gap : `${grade}，${gap}`}）`;
+}
 
 /**
  * 先攻序：`1. 阿飞 14\n2. 阿豪 12（倒下）`（P5）。

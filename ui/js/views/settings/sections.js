@@ -914,7 +914,7 @@ export function renderTrpgSection() {
       <code>.trpg scenario</code> 存（或直接放文件），规则表直接改文件，战报用 <code>.log export</code> 生成。
     </div>
     <div class="hint" style="margin-bottom:10px">
-      开局时用 <code>.trpg start &lt;剧本名&gt; [规则表 id]</code>（人敲，零成本），
+      开局时用 <code>.trpg new &lt;剧本名&gt; [规则表 id]</code>（人敲，零成本），
       或者让 DM 调 <code>campaign</code> 的 <code>action=start</code> 带上 <code>scenario</code> / <code>rule</code>。
       可用清单每一轮都会注入 DM 的上下文，所以它知道有哪些能选。
     </div>

@@ -1,8 +1,13 @@
 // **命令回执与清单**（从 `render.ts` 拆出，2026-10-16）。
 //
 // 这一层没有 I/O：清单由调用方（`commands/*`）现读目录后**递进来**。
-// 它只负责"同一件事只有一份拼法" —— 剧本清单被三处共用（`.trpg scenario`、`.trpg start`、向导），
+// 它只负责"同一件事只有一份拼法" —— 剧本清单被三处共用（`.trpg scenario`、`.trpg new`、向导），
 // 各写一遍的话，加一种状态（比如"有坏文件"）时必然漏掉其中一处。
+//
+// ⚠️ **这一层产出的字面量几乎全是群友可见的**（`renderBriefing` 那一段是唯一的例外，它只进
+// system prompt），所以**不许出现 Markdown 的加粗记号 `**`** —— QQ 不认 Markdown，那些星号
+// 会原样显示。`renderScenarioList` 被 `.trpg scenario`、`.trpg new` 与向导共用（三处都是群友可见），
+// 所以它也守这条。
 import { renderForPlayers } from './players.js';
 import type { TrpgCampaign } from '../types.js';
 
@@ -52,13 +57,13 @@ export function renderBriefing(campaign: TrpgCampaign | null, catalog: BriefingC
 }
 
 /**
- * 剧本清单。`.trpg scenario`、`.trpg start`（不带参数）与向导共用**这一份**拼法 ——
+ * 剧本清单。`.trpg scenario`、`.trpg new`（不带名字那一次）与向导共用**这一份**拼法 ——
  * 三处各写一遍的话，加一种状态（比如"有坏文件"）时必然漏掉其中一处。
  */
 export function renderScenarioList(scenarios: readonly string[]): string {
   if (!scenarios.length) {
     return '剧本库里还没有剧本。\n'
-      + '把一份剧本（`.md` / `.txt` / `.docx` / `.pdf` 都行）发到群里，**引用它**敲 `.trpg scenario` 就收进来了。\n'
+      + '把一份剧本（`.md` / `.txt` / `.docx` / `.pdf` 都行）发到群里，引用它敲 `.trpg scenario` 就收进来了。\n'
       + '不想要剧本也可以：直接 `.trpg new <随便是什么名字>` —— 那一局没有注入剧本，我自己发挥。';
   }
   return `剧本库里现在有：${scenarios.join('、')}\n`
@@ -79,7 +84,7 @@ export function renderWizard({ modeLabel, scenarios }: { modeLabel: string; scen
     `1. 定模式（当前：${modeLabel}）`,
     '   · `.trpg mode DM` —— 我当主持人：讲剧情、扮演 NPC、管人物卡与状态',
     '   · `.trpg mode 助手` —— 我只掷骰，别的什么都不做',
-    '2. 传剧本（**可选**）：把剧本文件发到群里，**引用它**敲 `.trpg scenario`',
+    '2. 传剧本（可选）：把剧本文件发到群里，引用它敲 `.trpg scenario`',
     '3. 起一局：`.trpg new <这一局的名字>`（或者写剧本名，就用那份剧本）',
     '4. 大家各自：`.trpg join` 报名 → `.pc new <角色名>` 建卡 → `.pc confirm` 确认',
     '5. 都确认了：`.trpg start` 开跑',
@@ -90,5 +95,5 @@ export function renderWizard({ modeLabel, scenarios }: { modeLabel: string; scen
 
 /** `.trpg scenario` 带了名字却没引用文件时的用法。 */
 export const SCENARIO_USAGE = '用法：.trpg scenario [名字]\n'
-  + '· 带名字：把**引用的那个文件**收进剧本库，用这个名字（`.md` / `.txt` / `.docx` / `.pdf` 都行）\n'
-  + '· 不带名字：引用了文件就用文件名当名字；没引用就是**列出剧本库**';
+  + '· 带名字：把引用的那个文件收进剧本库，用这个名字（`.md` / `.txt` / `.docx` / `.pdf` 都行）\n'
+  + '· 不带名字：引用了文件就用文件名当名字；没引用就是列出剧本库';

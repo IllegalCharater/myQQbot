@@ -184,7 +184,11 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     // 落临时文件、`upload_*_file`、留档都在 `SendQueue` 里。
     sendFile: async (chatKey: string, fileName: string, content: string) => {
       await sender.sendFile(chatKey, fileName, content);
-    }
+    },
+    // 记一次**不在任何会话里**的模型调用用量（跑团的兜底建议与暗骰叙事那两次独立调用）。
+    // 它们发生在 `finish()` 之后，所以走的是"只叠增量"的那个入口 —— 会话那条记账路对
+    // 已结束的会话会整份重复累加（见 `chat/sessions.ts` 的 `addExtraUsage`）。
+    recordUsage: (usage) => sessions.addExtraUsage(usage)
   });
   // 内置工具表算一次就够（它是常量，只有扩展那部分是变的）—— 上面那次调用只是为了拿名字。
   const BUILTIN_TOOLS = buildToolDefs();

@@ -365,8 +365,11 @@ function describeShape(input: JudgeInput): string {
  *
  * 保留这个形状是因为它是一份**对外契约**（`resolveCheck` 的 `judge` 选项、既有断言按它读
  * 默认判定）。规则表是更完整的形态 —— 它多带了等级的中文名与适用前提。
+ *
+ * `label` 可选：自定义判定想给这一档起个中文名就填它，展示层优先用它。**不填也没有兜底表** ——
+ * 展示层认不出就原样印 `grade`（不替规则书编名字，同 `image-source` 的"字段在不在"那条规矩）。
  */
-export type CheckJudge = (input: JudgeInput) => { success: boolean; grade: string };
+export type CheckJudge = (input: JudgeInput) => { success: boolean; grade: string; label?: string };
 
 /** 通用判定背后的那套规则。`defaultJudge` 就是它的一层薄封装（两处不会漂移）。 */
 export const GENERIC_RULE: CheckRule = compileRule(BUILTIN_RULE_FILES.generic);
@@ -379,7 +382,7 @@ export const GENERIC_RULE: CheckRule = compileRule(BUILTIN_RULE_FILES.generic);
  */
 export const defaultJudge: CheckJudge = (input) => {
   const level = check(GENERIC_RULE, input);
-  return { success: level.success, grade: level.name };
+  return { success: level.success, grade: level.name, label: level.label };
 };
 
 export interface CheckResult {
@@ -388,7 +391,11 @@ export interface CheckResult {
   target: number;
   success: boolean;
   grade: string;
-  /** 这一档的中文名（来自规则表）。自定义 `judge` 没有它，展示层按 `grade` 查表兜底。 */
+  /**
+   * 这一档的中文名。**权威是规则表**（`level.label`）；自定义 `judge` 想给就给一个，
+   * 不给的话展示层原样印 `grade` —— 这里**没有兜底表**（曾经有一个 `GRADE_LABEL`，
+   * 它编出的名字与规则表给的能不一致，见 `render/format.ts`）。
+   */
   label?: string;
   /** `total - target`。正数 = 超出多少，负数 = 差多少。给"差一点"这类叙事留素材。 */
   margin: number;
@@ -419,8 +426,8 @@ export function resolveCheck(
   const margin = roll.total - goal;
 
   if (judge) {
-    const { success, grade } = judge(input);
-    return { roll, target: goal, success, grade, margin };
+    const { success, grade, label } = judge(input);
+    return { roll, target: goal, success, grade, label, margin };
   }
   const level = check(rule ?? GENERIC_RULE, input);
   return { roll, target: goal, success: level.success, grade: level.name, label: level.label, margin };

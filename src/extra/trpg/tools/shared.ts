@@ -10,16 +10,15 @@
 // 只调它一次、把结果分给四个工具。每个工具各建一份的话，"同参数去重"与"主行动配额"就各算各的，
 // 而那正是这两道闸门要拦的东西（`test` 里那句"新 ctx 即新回合"也钉不住）。
 import { err, errorMessage } from '../../../agent/tools/shared.js';
-import { clampInt, text, MAX_STATS_PER_CHARACTER, MAX_STAT, MIN_STAT } from '../model/limits.js';
+import { clampInt, text, MAX_NAME_CHARS, MAX_STATS_PER_CHARACTER, MAX_STAT, MIN_STAT } from '../model/limits.js';
 import { mirrorLog } from '../model/campaign.js';
 import { advanceAfterActions } from '../model/combat.js';
 import { createLedger, consume, recall, remember } from '../rules/economy.js';
 import { DiceError } from '../rules/dice.js';
-import { HIDDEN_FIELDS } from '../types.js';
 import type { ActionLedger } from '../rules/economy.js';
 import type { JournalPort } from '../model/campaign.js';
 import type { TrpgStore } from '../store/campaign-store.js';
-import type { HiddenField, TrpgCampaign } from '../types.js';
+import type { TrpgCampaign } from '../types.js';
 import type { ToolArguments, ToolContext, ToolResult } from '../../../agent/shared/types.js';
 
 export type Handler = (ctx: ToolContext, args: ToolArguments) => Promise<ToolResult>;
@@ -143,7 +142,7 @@ export function readStats(value: unknown): Record<string, number> {
   const out: Record<string, number> = {};
   if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
   for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
-    const label = text(key, 24);
+    const label = text(key, MAX_NAME_CHARS);
     if (!label) continue;
     if (Object.keys(out).length >= MAX_STATS_PER_CHARACTER) break;
     out[label] = clampInt(raw, MIN_STAT, MAX_STAT, 0);
@@ -151,19 +150,6 @@ export function readStats(value: unknown): Record<string, number> {
   return out;
 }
 
-/**
- * 读字段级可见度。
- *
- * 合法的取值域是 `types.ts` 的 `HIDDEN_FIELDS` —— 认识的那几个之外一律丢弃，
- * 否则模型编一个 `hidden: ["hp"]`（它很可能这么写）会静默不生效，而表现是"藏了、没藏住"。
- * 单值也接受（模型常写 `hidden: "stats"` 而不是数组）。
- */
-export function readHidden(value: unknown): HiddenField[] {
-  const list = Array.isArray(value) ? value : (value === undefined || value === null ? [] : [value]);
-  const out: HiddenField[] = [];
-  for (const item of list) {
-    const name = text(item, 24).toLowerCase() as HiddenField;
-    if ((HIDDEN_FIELDS as readonly string[]).includes(name) && !out.includes(name)) out.push(name);
-  }
-  return out;
-}
+// 字段级可见度（`hidden`）**没有**这里的一份：它的唯一实现在 `model/character.ts` 的
+// `normalizeHidden`（工具层与存档层共用那一个，见那里的注释）。曾经这里有过一个 `readHidden`
+// 与它并存，两者对标量输入的行为不同 —— 别再把它加回来。

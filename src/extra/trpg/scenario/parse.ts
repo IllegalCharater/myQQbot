@@ -26,7 +26,7 @@
 //   • **frontmatter 可选**：没有就整份当正文（标题用文件名）。这条让"就贴一段设定"也能存。
 //
 // 未知的 key **忽略并记下来**（同 `normalizeCampaign` 的宽容取舍）：多打一个字不该让整份剧本报废。
-import { MAX_CHARACTERS, MAX_FLAGS, text } from '../model/limits.js';
+import { MAX_CHARACTERS, MAX_FLAGS, MAX_RULE_CHARS, MAX_SCENE_CHARS, MAX_TITLE_CHARS, text } from '../model/limits.js';
 import { normalizeCharacter } from '../model/character.js';
 import { normalizeFlag } from '../model/campaign.js';
 import { MAX_SCENARIO_CHARS } from '../types.js';
@@ -161,10 +161,13 @@ export function parseScenario(raw: unknown, id: string): ScenarioLookup {
     }
 
     // 标量字段：剥掉可选的外层引号（人在 frontmatter 里写 `title: "灯塔"` 很常见）。
+    // ⚠️ 上限一律取 `model/limits.ts` 的具名常量，**不写字面量**：这三个数在别处（`beginCampaign`
+    // 落进状态时、`state.ts` 归一化时）也各用一次，写死的话"剧本里的标题能有多长"与"存档里的
+    // 标题能有多长"会各按各的算，而表现只是某个字段被悄悄截短。
     const plain = value.replace(/^["'“”]+|["'“”]+$/g, '').trim();
-    if (key === 'title') skeleton.title = text(plain, 60);
-    if (key === 'rule') skeleton.rule = text(plain, 64);
-    if (key === 'scene') skeleton.scene = text(plain, 400);
+    if (key === 'title') skeleton.title = text(plain, MAX_TITLE_CHARS);
+    if (key === 'rule') skeleton.rule = text(plain, MAX_RULE_CHARS);
+    if (key === 'scene') skeleton.scene = text(plain, MAX_SCENE_CHARS);
   }
 
   const trimmed = body.trim();

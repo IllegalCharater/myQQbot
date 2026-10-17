@@ -48,6 +48,21 @@ export interface ExtraNote {
   text: string;
 }
 
+/**
+ * 一次**不属于任何会话**的模型调用的用量（跑团的兜底建议与暗骰叙事那两次独立调用）。
+ *
+ * 形状与 `llm` 的 `UsageTotals` 逐字段一致（调用方用 `addUsage(emptyUsage(), result.usage)`
+ * 直接产出它，见 `llm/llm.ts`），宿主拿到手不必再转一道。**刻意不 import `llm` 的那个类型**：
+ * 本文件只 import 下层**类型**，而这个形状只有四个数 —— 抄一份比多一条跨层依赖划算，
+ * 且 `UsageTotals` 里多出来的 `calls` 与"记一次用量"无关。
+ */
+export interface ExtraUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+}
+
 /** 组装根递给扩展的口子。扩展自己决定要不要用。 */
 export interface ExtraRuntimeDeps {
   /**
@@ -87,6 +102,20 @@ export interface ExtraRuntimeDeps {
    * 群友会一直等一个永远不来的文件。
    */
   sendFile?(chatKey: string, fileName: string, content: string): Promise<void>;
+
+  /**
+   * **记一次不在任何会话里的模型调用用量**（跑团的兜底建议与暗骰叙事）。
+   *
+   * 那两次调用都发生在 `SessionRegistry.finish()` **之后**（一条挂在收尾回调上、一条在命令回执
+   * 里），所以它们借不了"会话"这条记账路：那条路（`#persist` → `#bumpTodayUsage`）对**已结束**
+   * 的会话每次都会把整份 `usage` 再累加一遍，拿它补记一次增量等于把那一整轮的账算两遍。
+   * 宿主接的是 `SessionRegistry.addExtraUsage`（只叠增量、**不动 `runs`** —— 这两次不是一次
+   * agent 运行，算进去会让面板上的"每次花多少"失真）。
+   *
+   * ⚠️ **缺省时调用方照常干活**（与其余口子同一条）：记不上是账面的小缺口，不该让一次暗骰
+   * 或一次兜底建议失败。跑团因此只在拿到口子时才上报。
+   */
+  recordUsage?(usage: ExtraUsage): void;
 }
 
 /**

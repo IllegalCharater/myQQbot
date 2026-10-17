@@ -52,7 +52,7 @@ export class ScenarioStore {
 
   /** 读一份剧本。坏文件**拒绝**（不拿一个空壳顶上 —— 那会变成"开局了但什么都没注入"）。 */
   read(id: unknown): ScenarioLookup {
-    const wanted = safeFileName(id, 40);
+    const wanted = safeFileName(id);
     if (!wanted) return { ok: false, message: '剧本名不能是空的' };
     const stat = this.#stat(wanted);
     if (!stat) {
@@ -64,7 +64,7 @@ export class ScenarioStore {
 
   /** 写一份剧本（名字即 id）。`raw` 是文件全文（含 frontmatter）。 */
   write(id: unknown, raw: unknown): ScenarioLookup {
-    const wanted = safeFileName(id, 40);
+    const wanted = safeFileName(id);
     if (!wanted) return { ok: false, message: '剧本名不能是空的（也不能只有路径分隔符或点）' };
     const parsed = parseScenario(raw, wanted);
     if (!parsed.ok) return parsed;
@@ -82,7 +82,7 @@ export class ScenarioStore {
   }
 
   remove(id: unknown): boolean {
-    const wanted = safeFileName(id, 40);
+    const wanted = safeFileName(id);
     if (!wanted) return false;
     this.#cache.delete(wanted);
     try {

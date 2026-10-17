@@ -42,6 +42,15 @@ export const MAX_SYSTEM_CHARS = 60;
  * 从这里取，免得两个文件各写一个数然后漂移（漂移的表现是"长 id 在存档里被截短、于是指向另一个文件"）。
  */
 export const MAX_RULE_CHARS = 64;
+/**
+ * 剧本 id（= 剧本名 = 文件名）的长度上限。**它同时是文件名的上限**，所以只写在这一处：
+ * `safeFileName` 拿它当缺省（剧本名是它的主用途），`model/campaign.ts` 的剧本快照与
+ * `model/session.ts` 的开局参数也各取一次。
+ *
+ * ⚠️ 它与 `MAX_RULE_CHARS` 是**两个不同的数**，别合并：规则表 id 是管理员手写的短标识，
+ * 剧本名是群友随手起的（可能是一整句中文），两个数各由各自的用法决定。
+ */
+export const MAX_SCENARIO_ID_CHARS = 40;
 export const MAX_NAME_CHARS = 24;
 
 /**

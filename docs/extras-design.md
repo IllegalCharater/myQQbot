@@ -22,7 +22,7 @@
 | 性质 | 为什么必须这样 |
 |---|---|
 | **工具表按"已装载"、命令表按"已启用"** | 两个入口的人不同：命令的入口是**人**（判据按 spec 静态，敲得到），工具的入口是**模型**（只该看到此刻真正可用的能力）。这条**不对称是刻意的**，别统一掉 |
-| **命令的判据留在 `spec.ts`** | `isSlashCommand()` 是同步的、且在入站热路径上被调（决定 `wakeEligible`、要不要并入引用附件）。它不可能去问一个异步的装载表 —— 判据静态 + 执行时装载，矛盾就没了 |
+| **命令的判据留在 `spec.ts`** | `isCommandEntry()` 是同步的、且在入站热路径上被调（决定 `wakeEligible`、要不要并入引用附件）。它不可能去问一个异步的装载表 —— 判据静态 + 执行时装载，矛盾就没了 |
 | **别名由分发层统一处理** | 见 §3.3 |
 | **`/能力` 在任何模式下都存在** | 它是解除接管的唯一入口。把它一起换掉就是死锁（装得上、卸不掉） |
 | **接管按会话隔离**（§6） | 附加是全局的、接管只作用于它绑定的会话 —— 所以三张表都按会话算 |
@@ -32,7 +32,7 @@
 
 **代价（知情）**：tools 是请求前缀的一部分，装载/卸载各打散一次提示词缓存。但频次由人控制（TTL 默认 10 分钟），这正是这条设计换来的东西。
 
-**开放问题**：`/能力` 的权限与内置命令一致（白名单会话里可敲），所以白名单群里**任何群友**都能起一个重扩展。缓解是 `extras.maxLoadsPerHour` 那道闸门；要收紧只需在 `slash-commands.ts` 那一处加判据（仓库目前没有"管理员 QQ"的概念，管理动作的既有落点是 HTTP 控制台）。
+**开放问题**：`/能力` 的权限与内置命令一致（白名单会话里可敲），所以白名单群里**任何群友**都能起一个重扩展。缓解是 `extras.maxLoadsPerHour` 那道闸门；要收紧只需在 `commands.ts` 那一处加判据（仓库目前没有"管理员 QQ"的概念，管理动作的既有落点是 HTTP 控制台）。
 
 ## 3. 形态
 
@@ -87,7 +87,7 @@ export const EXTRA_REGISTRY: readonly ExtraEntry[] = [
 
 | 形状 | 住哪儿 | 是什么 |
 |---|---|---|
-| `SlashCommand`（内部） | `web/onebot/slash-commands.ts` | **命令骨架**：`run(input, deps): Promise<void>`，回执发送 / `error.message` 原样进群 / 发送失败不抛三条都在它的 `runCommand` 外壳里 |
+| `CommandEntry`（内部） | `web/onebot/commands.ts` | **命令骨架**：`run(input, deps): Promise<void>`，回执发送 / `error.message` 原样进群 / 发送失败不抛三条都在它的 `runCommand` 外壳里 |
 | `ExtraCommand` | `extra/types.ts`（**唯一定义处**） | **业务实现**：`run(input): Promise<string\|null>`，只返回一句回执文本，**不碰 sender** |
 
 **必须分开**：两者职责不同 —— 骨架管"怎么发出去"，实现管"发什么"。`adaptExtraCommand()` 就是把后者套进前者的那一层。
@@ -129,7 +129,7 @@ canonicalize(cmd, text)   = 命中**非首位**词形时，把开头那个词换
 
 **为什么必须规范化**：每个命令的解析器只认识自己那一个词。不换的话，加一个词形要同时改解析器 —— 内置的解析散在 `media/` 下各能力里、扩展的在 `impl.ts` 里，三处各改一次，而漏改的表现是"命令被认出来了、但参数解析不出来"（`/time` 交给只认 `^/时间` 的解析器 → 返回一句用法提示）。
 
-**⚠️ 这三样曾经是三份定义**：`name` + `aliases` + 一个 `match(text)` 正则，而正则里也写着 `/画` —— 改一处忘一处不会有任何报错。合并之后，`t-slash-commands.mjs` 有一条源级断言钉住"命令对象上不许再出现 `match`"。
+**⚠️ 这三样曾经是三份定义**：`name` + `aliases` + 一个 `match(text)` 正则，而正则里也写着 `/画` —— 改一处忘一处不会有任何报错。合并之后，`t-commands.mjs` 有一条源级断言钉住"命令对象上不许再出现 `match`"。
 
 **推论：`names[0]` 必须是真能敲的那个词。** 曾经内置命令写的是 `'transcribe'` 这类内部标签，规范化一接上就把它变成了 `transcribe …`，解析器当场认不出来 —— 这是实测踩到的一次。
 
@@ -144,7 +144,7 @@ canonicalize(cmd, text)   = 命中**非首位**词形时，把开头那个词换
 - 它会被当成普通消息**进 LLM**（`wakeEligible` 也跟着变 `true`），白多花一次模型调用，而且**不报任何错**；
 - 而它恰恰是 `/转写` 最常见的一种用法（直接丢个视频 + 打命令，不用引用）。
 
-**曾经的写法是给 `/转写` 单开一个 `/转写[视频]` 词形绕过它** —— 那是一条**特例**，而特例的问题是每多一种渲染形态就要多一条（`[图片]`／`[语音]`／`[表情1]`／`[文件x]`…）。统一成边界规则之后，那条特例被删掉了，`/画[图片]`、`/漫画[图片]` 这些同形的也一并认出来（它们会回一句用法提示，比默默进 LLM 好）。守护是 `t-slash-commands.mjs` 里的一条源级断言：**`/转写[视频]` 不许再出现在词形列表里**。
+**曾经的写法是给 `/转写` 单开一个 `/转写[视频]` 词形绕过它** —— 那是一条**特例**，而特例的问题是每多一种渲染形态就要多一条（`[图片]`／`[语音]`／`[表情1]`／`[文件x]`…）。统一成边界规则之后，那条特例被删掉了，`/画[图片]`、`/漫画[图片]` 这些同形的也一并认出来（它们会回一句用法提示，比默默进 LLM 好）。守护是 `t-commands.mjs` 里的一条源级断言：**`/转写[视频]` 不许再出现在词形列表里**。
 
 ⚠️ **只放宽到 `[`**，不是"任何非字母数字"：`@`（@ 段也紧贴）不在内 —— `/画@某人` 更像误触；再宽一点就会把 `/画xx` 那类既要拦住的也放进来。
 
@@ -273,7 +273,7 @@ export const SYSTEM_FRAMEWORK_SECTIONS = ['security', 'toolProtocol'] as const;
 
 **接管只作用于它绑定的那个会话** —— 在 A 群敲 `/能力 加载 <接管扩展>` 只接管 A 群，B 群照常。附加模式的扩展则是**全局**的（`enabled` + `/能力 加载`）。
 
-所以三张表都**按会话算**：`toolDefs(chatKey)` / `commandDefs(chatKey)` / `promptPlan(chatKey)`，`chatKey` 从 `agent-runner` 与 ingest 一路传下来（`isSlashCommand` 也多收一个会话参数）。
+所以三张表都**按会话算**：`toolDefs(chatKey)` / `commandDefs(chatKey)` / `promptPlan(chatKey)`，`chatKey` 从 `agent-runner` 与 ingest 一路传下来（`isCommandEntry` 也多收一个会话参数）。
 
 **为什么值得这份复杂度**：一个"接管"的扩展提供的是一整套替代人格与能力集，而一个 bot 常常同时挂在好几个群上 —— 全局接管意味着开了它所有群一起变，没法只在一个群里试。
 
@@ -306,7 +306,7 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 
 - `extra → {core, media, chat, qq, agent}` ✅
 - `web → extra` ✅（组装根 import 注册表与运行时）
-- **`extra → web` ❌** —— 扩展不认识 web。这也是"扩展不能用 web 的形状（`Route` / `SlashCommand`）"的原因：要产出它们就得 import web，方向立刻成环。所以扩展按自己的形状声明命令，由 web 侧的适配器接进来。
+- **`extra → web` ❌** —— 扩展不认识 web。这也是"扩展不能用 web 的形状（`Route` / `CommandEntry`）"的原因：要产出它们就得 import web，方向立刻成环。所以扩展按自己的形状声明命令，由 web 侧的适配器接进来。
 - 反方向同理：`agent → extra` ❌，所以扩展的工具表与提示词计划都由 `web/app.ts` 递进 agent 层（`toolDefs` / `extraPrompt` 两个可选回调）。
 
 **唯一例外是 `LAYER_ALLOW`**（`scripts/check-layers.mjs`）：`core/prompt-catalog.ts -> extra/prompts.js`，让扩展的提示词有一个单独的文件管，而目录继续转发它。
@@ -333,7 +333,7 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 - **工具表不再恒定**：装载/卸载各打散一次提示词缓存（频次由人控制）。
 - **`extras.enabled` 改动需重启**；`idleUnloadMs` / `maxLoadsPerHour` 热生效。
 - **白名单群里任何群友都能敲 `/能力`**（见 §2 的开放问题）。
-- **接管是唯一按会话隔离的东西**：`toolDefs` / `commandDefs` / `promptPlan` / `isSlashCommand` 都多带一个会话参数，注入链上（`agent-runner` → `WakeScheduler` → `Orchestrator` → `web/app.ts`）一路传下去。
+- **接管是唯一按会话隔离的东西**：`toolDefs` / `commandDefs` / `promptPlan` / `isCommandEntry` 都多带一个会话参数，注入链上（`agent-runner` → `WakeScheduler` → `Orchestrator` → `web/app.ts`）一路传下去。
 - **`LONG_TERM_TASKS` 里只有 `extras.runtime` 一行**，扩展自己的重资源在那张表里看不到（不是遗漏：它们由各自的 `dispose()` 释放，而 `dispose()` 由这一行统一调度）。
 - **扩展命令若声明成与内置同样的文案**（如 `/画`）：内置先匹配，那条扩展命令是死代码。结构上遮蔽不了内置，有行为断言钉着。
 
@@ -343,7 +343,7 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 |---|---|
 | `tests/t-extras.mjs`（167 条 —— 注册表多一个扩展就多一条"spec.ts 不 import 实现"的源级断言） | **模型零装载入口**、装载/卸载改变工具表、命令触发装载、**接管按会话隔离**（同一进程里 A 让位 B 照常）、**生命时间对两种模式都生效**、多会话共用一个实现、配置播种（含脏值忽略）、TTL 与在途、`stop()` 幂等与超时、注册表自检、名字对账（工具 + 命令两个方向）、提示词覆盖段名校验（含框架契约**不许覆盖** / `capabilityProtocol` **可以**覆盖）、**`overrideTools` 三条**（接管必须声明 `sendTool` / 名字必须真的在 `tools` 里 / 附加模式不许写）、提示词计划随装载状态、真实现跑一遍、`buildToolDefs()` 默认行为逐字不变、**`toolsFor` 五条**（按会话取子集 / 不影响别人 / 没声明的名字被滤掉 / 抛错回落成全部 / 空会话抛错即拒绝装载）、三张提示词表与注册表对账（TEXT/SECTIONS 两个方向逐个相等，JOBS 查子集）、**拦消息**（未装载不问 / 顺序即优先级 / `{}` = 不吭声 / 抛错被吞 / 接管会话只问接管者）、**拦消息的 ingest 端到端**（不惊动模型 + 回执由宿主发 + 落成已读 + 对照那条仍未读）、**运行期配置覆盖**（叠上 · 归一化 · **全局一个字没动** · 卸载即撤销 · 接管只认接管者的 · 别的会话不受影响）、**两个新挂点的装载期对账**（`configPatch` 返回非对象 / 抛错、`intercept` 不是函数 → 拒绝装载）、源级断言（`registry.ts` 的 load 是字面量 import 且无静态 impl import；各 `spec.ts` 不 import impl；`prompts.ts` 无 import；**`agent-runner` 用 `host.configFor` 且把它交给两个 builder；`app.ts` 把两个口子递下去；ingest 在落档之前问拦截**） |
 | `tests/t-reply.mjs`（70 条） | **system 段序 + 段分隔符 + 空计划是空操作 + 覆盖不可碰框架契约 + 接管只留框架契约 + 接管时能力段（含其中的工具名）一概不注入 + 框架段的工具名跟着接管者走（`sendTool` 换名、`finishTool: null` 不提）** + **传进来的那份 `config` 真的被用到**（住在三个不同帮手手里的配置项各一条：表情档位 / 统一字符预算 / 摘要档位） |
-| `tests/t-slash-commands.mjs` | `/能力` 的用法与失败话术、扩展命令走同一只 `runCommand` 外壳、扩展遮蔽不了内置、接管时主流程命令让位而 `/能力` 保留 |
+| `tests/t-commands.mjs` | `/能力` 的用法与失败话术、扩展命令走同一只 `runCommand` 外壳、扩展遮蔽不了内置、接管时主流程命令让位而 `/能力` 保留 |
 | `tests/t-tool-protocol.mjs` | 协议纠正；`capabilityProtocol` 里那条漫画规则；**`recordSent` 真的记账 + 真的发 `session-update`**（缺 `at` 时不写 `"undefined"`） |
 | `tests/t-lifecycle.mjs` / `t-tasks.mjs` | `extras.runtime` 的 id 对账与 entry 顺序 |
 | `tests/t-admin.mjs` | 真起 app 验 `/api/extras`（含 `mode`）与 `extras` 配置回显 |
@@ -351,7 +351,7 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 | `tests/t-trpg-rules.mjs`（109 条） | 与对话链无关的纯函数规则引擎（见 `docs/ts-migration-plan.md`）；含**两张检定等级表的穷举自检** |
 | `tests/t-extras.mjs` 第 16 段 | **运行结束钩子**（`runEnded`）：只有接管那个会话的扩展收得到、关掉扩展立即收不到、没有 `onRunEnd` 的实现静默跳过、钩子抛错不往上抛、`load(deps)` 收得到宿主的口子 |
 
-**证伪探针实测过十四条**（不是推断）：`toolDefs()` 去掉装载门 → `t-extras` 红 6 条；`join('\n\n')` 改回 `join('\n')` → `t-reply` **只在补了分隔符那条断言之后**才红（补之前 59 条全绿 —— 那正是这条断言的成因）；`extras.runtime` 从 `LIFECYCLE` 删掉 → `t-lifecycle` 红 6 条；去掉别名规范化 → `t-slash-commands` 红 2 条；**把边界从"空白/`[`/结束"收回成"空白/结束" → `t-slash-commands` 红 2 条**（含一条端到端的：`/转写[视频]` 什么都不入队）；**把 `#overrideEntry` 退回全局（不理会话键）→ `t-extras` 红 4 条**（表现就是"B 群也忽然变了个人"，谁也不报错）；**让接管绑定不起计时器 → `t-extras` 红 3 条**（表现是"接管永远不撒手"）。本轮又加了三条，都指向"接线断了一处而每处函数都对"这类：**`agent-runner` 漏传 `config` 给 `buildSystemPrompt` → 只有 `t-extras` 的源级断言红 1 条，而 `t-reply` 70 条全绿**（正好说明那两层缺一不可）；**ingest 不再拦消息 → `t-extras` 红 4 条**（含对照那条，它的计数也跟着翻）；**配置覆盖顺手写回全局 → `t-extras` 红 2 条**，报出的是 `{"maxRounds":42,"idle":999999999}` —— 外溢长什么样有了具体形状。
+**证伪探针实测过十四条**（不是推断）：`toolDefs()` 去掉装载门 → `t-extras` 红 6 条；`join('\n\n')` 改回 `join('\n')` → `t-reply` **只在补了分隔符那条断言之后**才红（补之前 59 条全绿 —— 那正是这条断言的成因）；`extras.runtime` 从 `LIFECYCLE` 删掉 → `t-lifecycle` 红 6 条；去掉别名规范化 → `t-commands` 红 2 条；**把边界从"空白/`[`/结束"收回成"空白/结束" → `t-commands` 红 2 条**（含一条端到端的：`/转写[视频]` 什么都不入队）；**把 `#overrideEntry` 退回全局（不理会话键）→ `t-extras` 红 4 条**（表现就是"B 群也忽然变了个人"，谁也不报错）；**让接管绑定不起计时器 → `t-extras` 红 3 条**（表现是"接管永远不撒手"）。本轮又加了三条，都指向"接线断了一处而每处函数都对"这类：**`agent-runner` 漏传 `config` 给 `buildSystemPrompt` → 只有 `t-extras` 的源级断言红 1 条，而 `t-reply` 70 条全绿**（正好说明那两层缺一不可）；**ingest 不再拦消息 → `t-extras` 红 4 条**（含对照那条，它的计数也跟着翻）；**配置覆盖顺手写回全局 → `t-extras` 红 2 条**，报出的是 `{"maxRounds":42,"idle":999999999}` —— 外溢长什么样有了具体形状。
 
 2026-10-15 那轮（拆 `capabilityProtocol` + 框架段工具名参数化 + `recordSent`）另实测四条：
 

@@ -114,7 +114,10 @@ export async function saveScenario(
     return `${formattedNote}已存剧本「${saved.scenario.id}」：标题「${saved.scenario.title}」`
       + `${skeleton ? `，带 ${skeleton}` : ''}，正文 ${saved.scenario.body.length} 字（来源 ${origin}）。`
       + (saved.ignored.length ? `（忽略了不认识的字段：${saved.ignored.join('、')}）` : '')
-      + `\n开局：.trpg start ${saved.scenario.id}`;
+      // 开局那一句必须是**真能开局的词形**：`.trpg new <名字> [规则表]`（`.trpg start`
+      // 不带参数，它只把 `preparing` 推到 `active`）。照抄 `start` 的话群友敲下去只会拿到
+      // 一句「用法：`.trpg start`（不带参数）」—— 回执把人带错，而且没有任何报错。
+      + `\n开局：.trpg new ${saved.scenario.id}`;
   } catch (error) {
     return `下载「${shown}」失败：${errorMessage(error)}`;
   }

@@ -81,13 +81,22 @@ export function normalizeCharacter(raw: unknown): TrpgCharacter | null {
 /**
  * 字段级可见度：只留认识的那几个字段名，去重。
  *
+ * **标量与数组都收**（`'stats'` 与 `['stats']` 等价），两个入口共用这一个函数：
+ * 存档文件（`normalizeCharacter`）与模型工具的 `hidden` 参数（`tools/character.ts`）。
+ * 模型经常漏掉那层数组（只藏一个字段时就写成字符串），而"漏写一层数组"与"这个名字不认识"
+ * 的结果长得一模一样（都是空），所以这里必须宽容。
+ *
+ * ⚠️ **这里曾经是两份实现**（`tools/shared.ts` 的 `readHidden`），而两者行为不同 ——
+ * 标量输入一个返回 `[]`、一个包成单元素数组。症状是"存档里配的隐藏生效、工具传的隐藏不生效"
+ * （或者反过来），**没有任何报错**。一份实现之后这条分歧不可能再出现。
+ *
  * 认不出来的一律丢弃而不是报错 —— 它可能来自一个更早/更晚的版本，而"某个字段名不认识"
  * 不该让整张卡报废（同 `normalizeCharacter` 其余部分的取舍）。
  */
 export function normalizeHidden(raw: unknown): HiddenField[] {
-  if (!Array.isArray(raw)) return [];
+  const list = Array.isArray(raw) ? raw : (raw === undefined || raw === null ? [] : [raw]);
   const out: HiddenField[] = [];
-  for (const item of raw) {
+  for (const item of list) {
     const name = text(item, MAX_NAME_CHARS).toLowerCase() as HiddenField;
     if ((HIDDEN_FIELDS as readonly string[]).includes(name) && !out.includes(name)) out.push(name);
   }

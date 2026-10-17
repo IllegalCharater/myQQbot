@@ -3,6 +3,7 @@
 // 两个函数的判据不同，别合并 —— 见下面各自的文件头。两者都是**纯字符串变换**，
 // 所以它们住在 `model/`（这一层不许出现 `node:fs` / `node:path`）：
 // 真正拼路径的是 `store/*` 与 `scenario/*`。
+import { MAX_SCENARIO_ID_CHARS } from './limits.js';
 
 /**
  * 会话标识 → 文件名里能用的那截。
@@ -32,8 +33,11 @@ export function safeName(chatKey: string): string {
  * 空串 = 这个名字不能当文件名，调用方要拒绝它而不是拿一个默认值顶上（顶上去就成了"用户以为
  * 存了 A、实际存的是别的东西"）。**这一条同时是路径安全的全部依据**：返回值里不可能再有
  * 分隔符或 `..`，所以 `path.join(dir, safeFileName(x))` 一定落在 dir 里。
+ *
+ * `maxChars` 的缺省是**剧本 id 的上限**（`MAX_SCENARIO_ID_CHARS`，剧本名是本函数的主用途），
+ * 规则表那条路自己传 `MAX_RULE_CHARS`。两个数都只有具名的那一份，本文件不写字面量。
  */
-export function safeFileName(name: unknown, maxChars = 40): string {
+export function safeFileName(name: unknown, maxChars = MAX_SCENARIO_ID_CHARS): string {
   const cleaned = String(name ?? '')
     // 路径分隔符与 Windows 非法字符 + 控制字符。`/` 与 `\` 在这里就没了，所以不可能穿目录。
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')

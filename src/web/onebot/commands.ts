@@ -373,7 +373,7 @@ function renderCapabilityList(rows: ExtraListRow[]): string {
     ...rows.map(line),
     '',
     '用法：/能力 加载 <id>、/能力 卸载 <id>',
-    '（接管模式的扩展：在本群敲加载 = 只接管**本群**；别的群要各自敲一次，'
+    '（接管模式的扩展：在本群敲加载 = 只接管「本群」；别的群要各自敲一次，'
       + '也可以写进设置文件让它开机就接管）'
   ].join('\n');
 }

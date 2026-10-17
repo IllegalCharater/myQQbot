@@ -28,6 +28,6 @@ export function createModeCommand({ store, modes, command }: ModeCommandDeps): C
     if (next === mode) return `已经是${MODE_LABEL[mode]}了。`;
     modes.write(input.chatKey, next);
     const kept = next === 'assistant' && store.read(input.chatKey) ? '这一局的存档留着，切回 DM 就接着跑。' : '';
-    return `已切到${MODE_LABEL[next]}，**下一轮运行生效**。${kept}`;
+    return `已切到${MODE_LABEL[next]}，下一轮运行生效。${kept}`;
   };
 }
