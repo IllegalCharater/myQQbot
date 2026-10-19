@@ -19,7 +19,10 @@
 // 本文件也因此**只静态 import 各扩展的 `spec.ts`**，`impl.ts` 永远走动态 import。
 //
 // ⚠️ 另一条不变量：**改本文件（增删扩展）要重启才生效**。工具表是请求前缀的一部分，
-// 运行期增删会打散提示词缓存；设置页那个开关（`extras.enabled`）同理。
+// 运行期增删会打散提示词缓存。
+// ⚠️ 别把这条顺手套到设置页那个开关（`extras.enabled`）上：**它保存后立即生效，不用重启**
+// （`isExtraEnabled` 在每个判据点上现读）。真正要重启的只有 `extras.override` ——
+// 那份绑定只在 `ExtrasRuntime.start()` 时播种。
 import { clockSpec } from './clock/spec.js';
 import { trpgSpec } from './trpg/spec.js';
 import type { ExtraEntry } from './types.js';

@@ -750,9 +750,21 @@ ok('保存分支真的读了这两个输入框', /#cfg-extras-idle-sec/.test(ext
 // 开关会"保存了但其实没写进去"，或者写到了别的 id 上。
 ok('扩展开关的 id 两端同形（渲染写 data-extra-id，保存按 data-extra-id 收集）',
   /data-extra-id=/.test(extrasSectionSrc) && /\[data-extra-id\]/.test(extrasSave));
-// "改动需重启"是这条设计知情的代价（工具表是请求前缀的一部分）。只写在源码注释里不够 ——
-// 用户看到的是一个点一下就生效的开关，不说清就是仓库最忌讳的"填了、看着生效、实际用的是别的"。
-ok('界面上写明了开关改动需要重启', /需要重启/.test(extrasSectionSrc));
+// 开关的语义必须写在明面上，而且**三件事都要说对**（2026-10-19 改）：
+//   ① 保存后立即生效、不用重启（原先这里写的是"需要重启"，与代码不符 —— `isExtraEnabled`
+//      每个判据点现读，实测勾选后不重启就能 `/能力 加载`）；
+//   ② **勾上不等于就能用** —— 还要在群里装一次；
+//   ③ 群里装载/卸载要 @ 机器人，未加载时敲扩展命令也不会把它拉起来。
+// 只写在源码注释里不够：用户看到的是一排开关，不说清就是仓库最忌讳的
+// "填了、看着生效、实际用的是别的"（或反过来：改了、以为没生效、白重启一次）。
+ok('界面上写明开关**保存后立即生效、不用重启**', /保存后立即生效/.test(extrasSectionSrc) && !/需要重启才生效/.test(extrasSectionSrc));
+ok('界面上写明"勾上不等于就能用"（还要在群里 /能力 加载）',
+  /不等于就能用/.test(extrasSectionSrc) && /\/能力 加载/.test(extrasSectionSrc));
+ok('界面上写明群里装载/卸载要先 @ 机器人', /先 @ 机器人/.test(extrasSectionSrc));
+ok('界面上写明未加载时敲扩展命令**不会**把它拉起来', /不会<\/strong>把它拉起来|不会.*把它拉起来/.test(extrasSectionSrc));
+// 唯一需要重启的那件事仍然要说（`extras.override` 只在 start() 时播种）——
+// 上面那句"不用重启"是**有条件**的，不说清会让人以为改 override 也不用重启。
+ok('界面上仍写明 `override` 改完要重启', /这一条改完要重启/.test(extrasSectionSrc));
 
 // 钳制口径：设置页按**秒**、后端按**毫秒**，所以不能逐字比字符串 —— 比换算后的值。
 const uiIdleSec = Number((/clampInt\(val\('#cfg-extras-idle-sec',\s*\d+\),\s*0,\s*(\d+),/.exec(extrasSave) || [])[1]);

@@ -737,7 +737,11 @@ export function renderExtrasSection(c) {
       额外且相对独立的功能。这里的开关决定<strong>这个扩展能不能被加载</strong>；
       <strong>真正装载/卸载在群里敲 <code>/能力</code> 命令</strong>（<code>/能力 加载 &lt;id&gt;</code>、
       <code>/能力 卸载 &lt;id&gt;</code>、单敲 <code>/能力</code> 看列表）。
-      <strong>模型没有任何装载入口</strong>：未装载的扩展，它的工具根本不在模型的工具表里。
+      <strong>群里装载与卸载必须先 @ 机器人</strong>（在群里 @ 我一下，再敲
+      <code>/能力 加载 &lt;id&gt;</code>；私聊没有 @ 这回事，直接敲即可）—— 这两个动作会起子进程、
+      换掉一个会话的整个模型侧，不该被一句手滑触发。
+      <strong>模型没有任何装载入口</strong>：未装载的扩展，它的工具根本不在模型的工具表里，
+      敲它自己的命令也<strong>不会</strong>把它拉起来（只会回一句"先 /能力 加载"）。
       装载之后空闲超过下面那个秒数会自动卸载（释放它自己持有的子进程、连接、大缓存），
       之后再用会重新加载 —— 这一来一回对模型是全透明的。
     </div>
@@ -746,7 +750,7 @@ export function renderExtrasSection(c) {
       模型侧整体让位：工具表、斜杠命令、系统提示词都换成它的（安全规则与工具调用协议两段保留）。
       <strong>接管按会话隔离</strong> —— 在哪个群敲 <code>/能力 加载</code> 就只接管哪个群。
       想让它开机就接管某些会话，写进 <code>data/config.json</code> 的
-      <code>"extras": { "override": { "group:123456": "扩展id" } }</code>（改完重启）。
+      <code>"extras": { "override": { "group:123456": "扩展id" } }</code>（<strong>这一条改完要重启</strong>）。
     </div>
     ${rows}
     <div class="field-row" style="margin-top:10px">
@@ -761,8 +765,10 @@ export function renderExtrasSection(c) {
       </div>
     </div>
     <div class="hint">
-      ⚠️ <strong>上面的开关改动需要重启才生效</strong>：工具表是每次请求前缀的一部分，
-      运行期增删会打散模型侧的提示词缓存。下面两个数字保存后即时生效。
+      ✅ <strong>上面的开关保存后立即生效，不用重启</strong>（下面两个数字同样即时生效）——
+      但它只决定"能不能被加载"，<strong>勾上不等于就能用了</strong>：还要在群里 @ 我一下、
+      敲一次 <code>/能力 加载 &lt;id&gt;</code>。
+      唯一需要重启的是上面那段 <code>override</code> 配置（它只在启动时读一次）。
     </div>`;
 }
 

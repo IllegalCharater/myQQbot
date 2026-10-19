@@ -61,7 +61,7 @@ export const trpgSpec: ExtraSpec = {
   /**
    * **默认关**。判据是仓库里所有"重的、会改变行为的能力"都默认关：`imageSource` / `transcription` /
    * `imageGen` 全是 `enabled: false`。跑团比它们更重 —— 它换掉的是 bot 的整个人格，
-   * 该由管理员在设置页明确打开（改完要重启，那句提示在设置页上）。
+   * 该由管理员在设置页明确打开（保存即生效、不用重启，那句提示在设置页上）。
    */
   defaultEnabled: false,
   /**

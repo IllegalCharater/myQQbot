@@ -259,6 +259,10 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
 
     let text;
     let commandText;
+    // 这条消息有没有 @ 机器人自己。**必须从原始段算**：下面 `renderText` 出来的是文本，
+    // 而开头那串 @ 已经被掐掉了 —— 命令层从 `text` 里看不出 @ 过（`/能力` 的装载/卸载
+    // 在群里要靠这个判据，见 `CommandInput.mentionedSelf`）。
+    let mentionedSelf = false;
     const repliedMedia: MediaEntry[] = [];
     // 引用在**这一层**解析，不交给 `segmentsToText`：那里拼出来的预览串没有 id，
     // 而被引用对象的 id 必须留下（见 ChatReply 的注释）。两条路径都走 `includeReply:false`，
@@ -279,7 +283,11 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
         reply = { mid: info.mid, sender: info.sender, text: info.text };
         if (info.media.length) repliedMedia.push(...info.media);
       }
-      const commandSegments = stripLeadingSelfMentions(segments, String(onebot.selfId ?? ''));
+      const selfId = String(onebot.selfId ?? '');
+      const commandSegments = stripLeadingSelfMentions(segments, selfId);
+      mentionedSelf = !!selfId && segments.some(
+        (seg) => seg?.type === 'at' && String((isRecord(seg.data) ? seg.data.qq : '') ?? '') === selfId
+      );
       const renderText = (segs: OneBotSegment[]) => segmentsToText(segs, {
         includeReply: false,
         resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : Promise.resolve(null)
@@ -380,6 +388,8 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
           chatKey,
           // 用 `commandText` 而不是 `text`：后者可能已被合并转发展开整份替换过。
           text: commandText,
+          // 从**原始段**算出来的（见上面那处赋值）：`commandText` 里开头那串 @ 已经被掐掉了。
+          mentionedSelf,
           media,
           // `/漫画` 的去重键是"请求者 + 漫画 ID"，缺了它俩人就共用一个额度。
           senderId,

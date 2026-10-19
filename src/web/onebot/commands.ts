@@ -58,6 +58,16 @@ export interface CommandInput {
    * `/画` 开头时，按后者判会把它变成一条真命令（ingest 的 `commandText` 就是为这条分的）。
    */
   text: string;
+  /**
+   * 这条消息**@ 了机器人自己**吗（`at` 段的 qq 等于 `onebot.selfId`）。
+   *
+   * ⚠️ 它与 `text` **不是一回事，别合并**：ingest 会把开头那串「@机器人自己」从命令文本里
+   * 掐掉（`stripLeadingSelfMentions`），所以 `@我 /能力 加载 x` 的 `text` 里**看不出** @ 过。
+   * 需要"群里必须 @ 我"这类判据（`/能力` 的装载与卸载）只能读这个字段。
+   *
+   * 私聊没有 @ 这回事，所以那里恒为 `false` —— 判据要连会话类型一起看，别写成"没有 @ 就拒绝"。
+   */
+  mentionedSelf: boolean;
   /** 本条消息的媒体 + 它引用那条消息的媒体（后者由 ingest 在 append 之前并进来）。 */
   media: MediaEntry[];
   replyToMessageId: string | number | null;
@@ -215,15 +225,27 @@ const jmcomicCommand: CommandEntry = {
 const capabilitiesCommand: CommandEntry = {
   // `/扩展` 只是"另一个叫法"，语义完全一样（命中它时会被规范回 `/能力` 再解析）。
   names: ['/能力', '/扩展'],
-  async run({ chatKey, text, replyToMessageId }, { extras, sender, log }) {
+  async run({ chatKey, text, mentionedSelf, replyToMessageId }, { extras, sender, log }) {
     await runCommand('/能力', { sender, log }, chatKey, replyToMessageId, async () => {
       if (!extras) return '扩展能力不可用（这一侧没有装上扩展运行时）';
+      // `inGroup` 决定两件事：@ 闸门要不要生效，以及列表里要不要写那句"先 @ 我一下"。
+      // 它**不**拼进命令里 —— 见 `renderCapabilityList` 上面那条注释。
+      const inGroup = String(chatKey).startsWith('group:');
       const match = /^\/能力(?:\s+(\S+))?(?:\s+(\S+))?/u.exec(text.trim());
       const action = match?.[1] ?? '';
       const id = match?.[2] ?? '';
-      if (!action) return renderCapabilityList(extras.list());
+      if (!action) return renderCapabilityList(extras.list(), inGroup);
       if (action !== '加载' && action !== '卸载') {
         return '用法：/能力（看列表）、/能力 加载 <id>、/能力 卸载 <id>';
+      }
+      // **群里装载/卸载必须先 @ 机器人**（2026-10-19，用户要求）：这两个动作是真实的资源动作
+      // （起子进程、换掉一个会话的整个模型侧），不该被一句手滑的 `/能力 加载 x` 触发 ——
+      // 白名单群里任何群友都敲得到它，而 @ 是唯一那个"我是故意冲着机器人说的"的信号。
+      // **只看会话类型与 `mentionedSelf`，不看 `text`**：开头那串 @ 已经被 ingest 掐掉了，
+      // 从 `text` 里根本看不出 @ 过（见 `CommandInput.mentionedSelf`）。
+      // 私聊不受限（那里没有 @ 这回事），裸 `/能力`（看列表，只读）也不受限。
+      if (inGroup && !mentionedSelf) {
+        return `群里${action}扩展要先 @ 我一下，再敲 /能力 ${action} ${id || '<扩展 id>'}`;
       }
       if (!id) return `用法：/能力 ${action} <扩展 id>（id 见 /能力 列表）`;
       // **把敲命令的这个会话传下去**：接管模式按会话隔离，所以 `/能力 加载 <接管扩展>`
@@ -358,8 +380,15 @@ export function createCommandDispatcher(
   };
 }
 
-/** `/能力` 无子命令时的列表。写得紧凑些：它是发到群里的。 */
-function renderCapabilityList(rows: ExtraListRow[]): string {
+/**
+ * `/能力` 无子命令时的列表。写得紧凑些：它是发到群里的。
+ *
+ * ⚠️ **印出来的每一条命令都必须是"照抄就能用"的**，所以群里那条 @ 的要求写成**一句说明**，
+ * 而不是把它拼进命令行：`@我 /能力 加载 x` 里的 `@我` 只是给读者看的示意，真敲的时候用户点的是
+ * QQ 的 @ 选人 —— 把 `@我` 当文本打进去的话命令词不在开头，**根本认不出来**。
+ * 教一条照抄会静默失效的命令，与"设置页教用户敲一条不存在的命令"是同一个病。
+ */
+function renderCapabilityList(rows: ExtraListRow[], inGroup: boolean): string {
   if (!rows.length) return '这个版本没有注册任何扩展。';
   const line = (row: ExtraListRow) => {
     const state = row.loaded
@@ -373,6 +402,9 @@ function renderCapabilityList(rows: ExtraListRow[]): string {
     ...rows.map(line),
     '',
     '用法：/能力 加载 <id>、/能力 卸载 <id>',
+    inGroup
+      ? '（本群装载/卸载要先 @ 我一下；未加载的扩展，敲它自己的命令不会把它拉起来）'
+      : '（未加载的扩展，敲它自己的命令不会把它拉起来）',
     '（接管模式的扩展：在本群敲加载 = 只接管「本群」；别的群要各自敲一次，'
       + '也可以写进设置文件让它开机就接管）'
   ].join('\n');

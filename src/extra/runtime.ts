@@ -2,9 +2,11 @@
 //
 // ── 谁能装载 ──
 //
-// **模型一个入口都没有。** 装载与卸载只由主流程那条 `/能力` 命令调 `load()` / `unload()`；
-// 敲扩展自己的命令也能把它拉起来（入口同样是人）。工具路径**不允许**隐式装载 ——
-// 未装载的扩展，它的工具根本不在工具表里（见 `toolDefs()`），所以模型连"有这个能力"都看不到。
+// **模型一个入口都没有。** 装载与卸载只由主流程那条 `/能力` 命令调 `load()` / `unload()`
+// （群里还要 @ 机器人，见 `web/onebot/commands.ts`），以及配置 `extras.override` 在 `start()`
+// 时播种。**敲扩展自己的命令不会把它拉起来**（2026-10-19 起）：未装载的扩展，命令照旧认得出，
+// 但回一句"先 /能力 加载"。工具路径同样不允许隐式装载 —— 未装载的扩展，它的工具根本不在
+// 工具表里（见 `toolDefs()`），所以模型连"有这个能力"都看不到。
 //
 // ── 三张表各自的筛选条件（别把它们"顺手统一"掉）──
 //
@@ -14,8 +16,10 @@
 //   • `toolDefs(chatKey)`    —— 接管中：**只有接管者**的；否则：**已装载**的附加扩展。
 //     模型的入口只该看到"此刻真正可用的能力"。
 //   • `commandDefs(chatKey)` —— 接管中：**只有接管者**的；否则：**已启用**的附加扩展
-//     （**接管模式的命令不外泄**：别的会话敲不到它）。命令的入口是人（判据按 spec 静态），
-//     执行时才把扩展拉起来。
+//     （**接管模式的命令不外泄**：别的会话敲不到它）。判据按 spec 静态（`isCommandEntry`
+//     同步、跑在入站热路径上，问不了异步的装载表），但**执行时不装载** —— 未加载就如实拒绝。
+//     这条"认得出但用不了"是有意的：命令若干脆不在表里，消息会静默地进 LLM，那比一句
+//     "先 /能力 加载"难查得多。
 //   • `promptPlan(chatKey)`  —— 接管中：它的 body；否则：已装载附加扩展的 append/override。
 //
 // ── 与仓库两条禁令的关系（写下来免得下一个人以为禁令被推翻了）──
@@ -51,7 +55,11 @@ import type {
  * `builtinToolNames` 是装载期的名字对账、`log` 只是让扩展能往宿主日志里写一行）。
  */
 export interface ExtrasDeps extends ExtraRuntimeDeps {
-  /** 每次现读（`idleUnloadMs` / `maxLoadsPerHour` 改完即时生效；`enabled` 例外，见 registry.ts）。 */
+  /**
+   * 每次现读：`enabled` / `idleUnloadMs` / `maxLoadsPerHour` **三样都是保存后立即生效**
+   * （`isExtraEnabled` 在每个判据点上现读，没有任何一处把它快照进字段）。
+   * 真正要重启的只有 `extras.override` —— 那份绑定只在 `start()` 时播种。
+   */
   getConfig(): AppConfig;
   /**
    * 内置工具名，用来查重。由 `web/app.ts` 递 `buildToolDefs()` 的名字 —— 本文件不许 import
@@ -358,7 +366,7 @@ export class ExtrasRuntime {
    * **接管绑定：会话 → 谁来接管**。这是全仓库唯一"按会话隔离"的东西。
    *
    * 两个来源：① `extras.runtime.start()` 从配置 `extras.override` 播种（静态、重启生效）；
-   * ② 群里敲 `/能力 加载 <接管扩展>` 在**当前会话**建一条（内存，不落盘）。
+   * ② 群里敲 `@我 /能力 加载 <接管扩展>` 在**当前会话**建一条（内存，不落盘；群里必须 @ 机器人）。
    * 目标是让"A 群换了副脑子、B 群照常"可以表达 —— 附加模式的扩展则是全局的。
    */
   readonly #overrides = new Map<string, OverrideBinding>();
@@ -423,10 +431,14 @@ export class ExtrasRuntime {
   }
 
   /**
-   * 这个会话敲得到的扩展命令。判据来自 spec（**启用即可敲，不必先装载**），执行时才把扩展拉起来。
+   * 这个会话敲得到的扩展命令。判据来自 spec（**启用即可敲，不必先装载**）——
+   * 但**敲了不会把扩展拉起来**：未加载时 `#runCommand` 如实回一句"先 /能力 加载"。
    *
    * **为什么这里按"已启用"而 `toolDefs()` 按"已装载"** —— 两个入口的人不同：命令的入口是**人**，
    * 工具的入口是**模型**。人有权决定要用什么，模型只该看到此刻可用的东西。别把这条不对称统一掉。
+   *
+   * ⚠️ 这条不对称**不等于**"敲命令就能用"（2026-10-19 起）：认得出是为了**不静默**（消息落成
+   * 已读、回一句可执行的下一步），而不是为了隐式装载。
    *
    * 被接管的会话只有接管者的命令（**外加永远在的 `/能力`**，那在命令层拼，不在这里）。
    */
@@ -553,8 +565,9 @@ export class ExtrasRuntime {
    * 就是把覆盖面扩大一格，而漏改一处的症状永远是"配了、看着生效、实际用的是别的"。
    *
    * ⚠️ **它不自动装载**（`readConfigPatch` 拿的是 `#loaded` 里那一份）：扩展还没被拉起来时，
-   * 这里返回的就是全局那份。装载的入口是命令、工具调用与每轮运行，所以"这个群今天第一条消息"
-   * 有可能还没叠上补丁 —— 这条既有的行为不是本函数引入的，但它决定了"补丁什么时候开始生效"。
+   * 这里返回的就是全局那份。装载的入口只有 `/能力 加载` 与 `start()` 的播种（工具调用与命令
+   * 都不再隐式装载），所以"这个群今天第一条消息"有可能还没叠上补丁 —— 这条既有的行为不是本
+   * 函数引入的，但它决定了"补丁什么时候开始生效"。
    */
   configFor(chatKey: string): AppConfig {
     let merged = this.#deps.getConfig();
@@ -582,7 +595,7 @@ export class ExtrasRuntime {
   runEnded(session: ExtraRunEnd): void {
     const override = this.#overrideEntry(session.chatKey);
     if (!override) return;
-    void this.#withExtra(override.id, session.chatKey, false, async (rt) => {
+    void this.#withExtra(override.id, async (rt) => {
       if (typeof rt.onRunEnd === 'function') await rt.onRunEnd(session);
     }).catch((error: unknown) => {
       this.#deps.log(`[extras] ${override.id} 的 onRunEnd 失败：${errorMessage(error)}`);
@@ -631,7 +644,7 @@ export class ExtrasRuntime {
     }));
   }
 
-  // ── 装载/卸载（**只有那条 `/能力` 命令与扩展自己的命令调它们**）──
+  // ── 装载/卸载（**只有那条 `/能力` 命令调它们**，外加 `start()` 按配置播种接管绑定）──
 
   /**
    * 装载一个扩展。**模型侧没有调用者** —— 这是这套设计的核心。
@@ -648,7 +661,7 @@ export class ExtrasRuntime {
     const entry = this.#entries.get(id);
     if (!entry) return { ok: false, note: `没有这个扩展：${id}` };
     if (!isExtraEnabled(entry, this.#deps.getConfig())) {
-      return { ok: false, note: `「${entry.title}」在设置里是关闭的，先把它打开（改完要重启）` };
+      return { ok: false, note: `「${entry.title}」在设置里是关闭的：先去设置页把它打开（保存即生效，不用重启）` };
     }
     if (entry.mode === 'override') return this.#bindOverride(entry, chatKey, reason);
     if (this.#loaded.has(id)) return { ok: false, note: `「${entry.title}」已经加载过了` };
@@ -841,8 +854,8 @@ export class ExtrasRuntime {
    *   • 绑定指向的实现没装载起来（比如配置播种时加载失败）；
    *   • **扩展在设置里被关掉了**。
    *
-   * ⚠️ 第三条是实打实踩出来的：`extras.enabled` 虽然在设置页写着"改完要重启"，但判据
-   * `isExtraEnabled` 是**每次现读**的 —— 于是"把这个扩展关掉、但不重启"会造出一个
+   * ⚠️ 第三条是实打实踩出来的：`extras.enabled` 的判据 `isExtraEnabled` 是**每次现读**的
+   * （开关保存后立即生效，不用重启），于是"把这个扩展关掉"会造出一个
    * **静默的坏状态**：会话仍被算作接管（`app.ts` 因此不拼内置工具），而扩展的工具被
    * `toolDefs()` 的启用闸门滤掉 ⇒ 模型手里**一个工具都没有**，却还拿着一份"接管"的
    * 系统提示。表现是**那个群彻底不说话了，日志里一条线索都没有**。
@@ -893,23 +906,19 @@ export class ExtrasRuntime {
   }
 
   /**
-   * 两条执行路径共用的机械：确保已装载 → 计入在途 → 执行 → 出账并重新起表。
+   * 两条执行路径共用的机械：**取已装载的实现** → 计入在途 → 执行 → 出账并重新起表。
    *
-   * `autoLoad` 是"这次执行能不能把扩展拉起来"：**只有命令路径为真**（入口是人），
-   * 工具路径为假（未装载的扩展工具根本不在表里；这里为假是**第二道**，
-   * 防的是"运行开始时装着、跑到一半被空闲卸载了"那种竞态）。
+   * ⚠️ **它不装载**（2026-10-19 起，参数 `autoLoad` 与 `chatKey` 一并删掉了）。装载的唯一入口是
+   * `/能力 加载 <id>` 与配置 `extras.override` 的播种 —— 用户要求"未显式加载时不许靠命令把它
+   * 拉起来"。两个调用点（工具 / 命令）都只可能在**已经装载**的前提下走到这里：工具表按已装载
+   * 算，命令的拒绝发生在下面那句 `ok:false` 上。真到了 `!slot` 那一格，说明是"运行开始时装着、
+   * 跑到一半被空闲卸载了"那种竞态，如实拒绝即可。
    */
-  async #withExtra<T>(id: string, chatKey: string, autoLoad: boolean, use: (rt: ExtraRuntime) => Promise<T>): Promise<Attempt<T>> {
+  async #withExtra<T>(id: string, use: (rt: ExtraRuntime) => Promise<T>): Promise<Attempt<T>> {
     const entry = this.#entries.get(id);
     if (!entry) return { ok: false, reason: `扩展 ${id} 未注册` };
-    let slot = this.#loaded.get(id);
-    if (!slot) {
-      if (!autoLoad) return { ok: false, reason: `「${entry.title}」当前没有加载，让群友先 /能力 加载 ${id}` };
-      const result = await this.load(id, 'command', chatKey);
-      if (!result.ok) return { ok: false, reason: result.note };
-      slot = this.#loaded.get(id);
-      if (!slot) return { ok: false, reason: `「${entry.title}」装载失败` };
-    }
+    const slot = this.#loaded.get(id);
+    if (!slot) return { ok: false, reason: `「${entry.title}」当前没有加载：先敲 /能力 加载 ${id}（群里要先 @ 我）` };
     // 有活干就先把空闲计时器撤掉：TTL 是**滑动**的空闲窗口，不是从装载时刻起算的固定租期。
     if (slot.timer) { clearTimeout(slot.timer); slot.timer = null; }
     slot.inFlight += 1;
@@ -928,7 +937,7 @@ export class ExtrasRuntime {
   }
 
   async #runTool(id: string, name: string, ctx: ToolContext, args: ToolArguments): Promise<ToolResult> {
-    const attempt = await this.#withExtra(id, '', false, async (rt) => {
+    const attempt = await this.#withExtra(id, async (rt) => {
       const handler = rt.handlers[name];
       if (typeof handler !== 'function') throw new Error(`扩展「${id}」没有工具「${name}」`);
       return handler(ctx, args);
@@ -938,11 +947,17 @@ export class ExtrasRuntime {
   }
 
   /**
-   * 命令路径。**装载在这里发生**（入口是人），失败**抛出** —— `web/onebot/commands.ts`
-   * 的外壳会把 `error.message` 原样发进群，那正是我们想要的（可执行的下一步）。
+   * 命令路径。**不装载**（2026-10-19 用户要求）：未显式加载的扩展，敲它自己的命令**不会**
+   * 把它拉起来，而是抛出 `#withExtra` 那句"先 /能力 加载"。
+   *
+   * 判据仍然是"这条命令属于哪个扩展"（命令表按**已启用**算，见 `commandDefs`），所以消息
+   * 照常被认作命令、落成已读、不惊动模型 —— 群友拿到的是一句**可执行的下一步**，而不是
+   * 静默地进 LLM（那正是这一层最要避免的表现）。
+   *
+   * 失败**抛出** —— `web/onebot/commands.ts` 的外壳会把 `error.message` 原样发进群。
    */
   async #runCommand(id: string, name: string, input: ExtraCommandInput): Promise<string | null> {
-    const attempt = await this.#withExtra(id, input.chatKey, true, async (rt) => {
+    const attempt = await this.#withExtra(id, async (rt) => {
       const handler = rt.commandHandlers?.[name];
       if (typeof handler !== 'function') throw new Error(`扩展「${id}」没有命令「${name}」`);
       return handler(input);

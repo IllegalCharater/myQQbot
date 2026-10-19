@@ -67,7 +67,11 @@ function deps({ failEnqueue = null, failSend = false } = {}) {
 }
 
 const input = (text, extra = {}) => ({
-  chatKey: 'group:10001', text, media: [], replyToMessageId: '9001', senderId: '555', ...extra
+  chatKey: 'group:10001', text, media: [], replyToMessageId: '9001', senderId: '555',
+  // 缺省当"@ 过机器人"：绝大多数用例与 @ 无关，而群里那条 `/能力 加载/卸载` 的判据
+  // 需要它 —— 要验"没 @"就显式传 `mentionedSelf: false`（见第 4 段末尾那组）。
+  mentionedSelf: true,
+  ...extra
 });
 
 {
@@ -329,6 +333,52 @@ console.log('\n── 扩展命令与接管模式 ──');
     await plain.handleCommandEntry(input('/扩展 加载'), dUsage);
     ok('用法提示里印的是主命令词 `/能力`（别名不改文案）',
       String(logUsage.sent.at(-1)?.message).includes('/能力 加载'), JSON.stringify(logUsage.sent));
+  }
+
+  // ── 群里装载/卸载必须 @ 机器人（2026-10-19，用户要求）────────────────────
+  //
+  // 判据读的是 `CommandInput.mentionedSelf`，**不是 `text`**：开头那串 @ 已经被 ingest
+  // 掐掉了（`stripLeadingSelfMentions`），从文本里根本看不出 @ 过 —— 写错这一步的表现是
+  // "群里 @ 了也照样拒绝"，而它在套件里只有这一组能拦住。
+  {
+    const plain = createCommandDispatcher(() => ({ override: false, commands: [] }), extrasPort);
+    const before = extrasPort.loads.length;
+    const { deps: dNoAt, log: logNoAt } = deps();
+    const handled = await plain.handleCommandEntry(input('/能力 加载 x', { mentionedSelf: false }), dNoAt);
+    ok('★ 群里没 @ 我：`/能力 加载` **仍然是命令**（落成已读、不静默进 LLM），但不装载',
+      handled === true && extrasPort.loads.length === before
+      && String(logNoAt.sent.at(-1)?.message).includes('先 @ 我一下'),
+      JSON.stringify({ handled, loads: extrasPort.loads, sent: logNoAt.sent }));
+
+    const { deps: dAt, log: logAt } = deps();
+    await plain.handleCommandEntry(input('/能力 加载 x', { mentionedSelf: true }), dAt);
+    ok('对照：@ 了就真的装载（回执把运行时那句话原样带回群里）',
+      extrasPort.loads.length === before + 1
+      && String(logAt.sent.at(-1)?.message).includes('已加载'), JSON.stringify(logAt.sent));
+
+    // 私聊没有 @ 这回事 —— 判据必须连会话类型一起看，写成"没有 @ 就拒绝"会把私聊堵死。
+    const beforeDm = extrasPort.loads.length;
+    const { deps: dDm, log: logDm } = deps();
+    await plain.handleCommandEntry(input('/能力 加载 x', { chatKey: 'private:777', mentionedSelf: false }), dDm);
+    ok('私聊不受 @ 限制（那里根本没有 @ 段，mentionedSelf 恒为 false）',
+      extrasPort.loads.length === beforeDm + 1
+      && String(logDm.sent.at(-1)?.message).includes('已加载'), JSON.stringify(logDm.sent));
+
+    // 裸 `/能力`（看列表，只读）不要求 @。列表里印的命令**必须照抄就能用**，所以
+    // `@我` 只出现在说明句里、不拼进命令行 —— 把它拼进去的话，用户照着打出来的是
+    // `@我 /能力 加载 x`（@ 是普通文本），命令词不在开头，**静默失效**。
+    const { deps: dList, log: logList } = deps();
+    await plain.handleCommandEntry(input('/能力', { mentionedSelf: false }), dList);
+    const listText = String(logList.sent.at(-1)?.message ?? '');
+    ok('裸 `/能力` 看列表不要求 @；命令行进的是能照抄的写法，@ 的要求单独一句说明',
+      listText.includes('假扩展') && listText.includes('　→ /能力 加载 fake')
+      && !listText.includes('@我 /能力') && listText.includes('先 @ 我一下'), listText);
+
+    const { deps: dListDm, log: logListDm } = deps();
+    await plain.handleCommandEntry(input('/能力', { chatKey: 'private:777' }), dListDm);
+    ok('对照：私聊的列表里不提 @（那里根本没有 @ 这回事）',
+      !String(logListDm.sent.at(-1)?.message).includes('@'),
+      String(logListDm.sent.at(-1)?.message));
   }
   {
     const { deps: d, log } = deps();

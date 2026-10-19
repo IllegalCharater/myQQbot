@@ -277,18 +277,34 @@ function makeFakeEntry(id, names, {
     r2.ok === false && /必须返回一个工具名数组/.test(r2.note), JSON.stringify(r2));
 }
 
-// ── 3. 命令触发装载（入口是人） ───────────────────────────────────────────────
+// ── 3. 命令**不再**触发装载（2026-10-19，用户要求）─────────────────────────────
+//
+// 判据仍然是静态的（`commandDefs` 按**已启用**算），所以未加载时命令照旧**认得出** ——
+// 这是刻意的：命令若干脆不在表里，那条消息会静默地进 LLM，群里什么提示都没有。
+// 但敲它**不会**把扩展拉起来，而是抛出一句可执行的下一步。
 {
   const { entry, counters } = makeFakeEntry('viacmd', ['t'], { commands: ['/go'] });
   const runtime = makeRuntime([entry], DEFAULT_EXTRAS);
   const command = runtime.commandDefs(G)[0];
-  ok('命令在扩展**未装载**时就敲得到', !!command && counters.load === 0);
+  ok('命令在扩展**未装载**时就敲得到（判据是静态的，不然消息会静默进 LLM）',
+    !!command && counters.load === 0);
 
+  let refusal = '';
+  try {
+    await command.run({ chatKey: 'group:1', senderId: '5', text: '/go', media: [], replyToMessageId: null });
+  } catch (error) { refusal = String(error?.message ?? error); }
+  ok('★ 敲命令**不再**把扩展拉起来，而是抛一句"先 /能力 加载"（由命令外壳原样发进群）',
+    counters.load === 0 && counters.command === 0 && refusal.includes('/能力 加载 viacmd'),
+    `${refusal} / load=${counters.load} command=${counters.command}`);
+  ok('未装载时工具表里仍然没有它', runtime.toolDefs(G).length === 0);
+
+  // 对照：显式装载之后，同一条命令照常跑得通 —— 没有这一条，上面那两条可能只是"命令彻底坏了"。
+  await runtime.load('viacmd');
   const receipt = await command.run({ chatKey: 'group:1', senderId: '5', text: '/go', media: [], replyToMessageId: null });
-  ok('敲命令把扩展拉起来了（装载入口是人，不是模型）',
-    receipt === 'viacmd 的命令回执' && counters.load === 1 && counters.command === 1,
-    `${receipt} / load=${counters.load}`);
-  ok('命令跑完之后工具表里也有它了', runtime.toolDefs(G).length === 1);
+  ok('对照：显式 `/能力 加载` 之后同一条命令照常跑通（回执就是实现给的那句）',
+    receipt === 'viacmd 的命令回执' && counters.command === 1, `${receipt} / command=${counters.command}`);
+  ok('对照：装载之后工具表里也有它了', runtime.toolDefs(G).length === 1);
+  await runtime.stop();
 }
 
 // ── 4. TTL：空闲到点真的 dispose；在途不卸载 ─────────────────────────────────
@@ -794,11 +810,18 @@ await withFakeTimers(async (timers) => {
   const runtime = makeRuntime(EXTRA_REGISTRY, { ...DEFAULT_EXTRAS, enabled: { clock: true } });
   ok('未装载时工具表是空的', runtime.toolDefs(G).length === 0);
 
-  // 命令路径：装起来 + 真的算一次。
+  // 命令路径：**先显式装载**（命令不再隐式装载，见第 3 段），再真的算一次。
+  const refused = await runtime.commandDefs(G)[0].run({
+    chatKey: 'group:1', senderId: '5', text: '/时间 UTC', media: [], replyToMessageId: null
+  }).then(() => '').catch((error) => String(error?.message ?? error));
+  ok('真扩展：未装载时敲 `/时间` 只得到"先 /能力 加载"（不再把它拉起来）',
+    refused.includes('/能力 加载 clock'), refused);
+
+  await runtime.load('clock');
   const receipt = await runtime.commandDefs(G)[0].run({
     chatKey: 'group:1', senderId: '5', text: '/时间 UTC', media: [], replyToMessageId: null
   });
-  ok('真扩展：敲 `/时间 UTC` 把它装载起来并真的算了', String(receipt).includes('UTC'), String(receipt));
+  ok('真扩展：显式装载之后敲 `/时间 UTC` 真的算了', String(receipt).includes('UTC'), String(receipt));
   ok('装载后工具进表', runtime.toolDefs(G).map((d) => d.name).join() === 'get_current_time');
   ok('词形列表随 spec 一路交到命令表（分发层靠它认 `/time`）',
     (runtime.commandDefs(G)[0].names ?? []).includes('/time'),
@@ -1207,7 +1230,13 @@ const inbound = (text = '3d6') => ({
     transcription: { enqueue: () => { throw new Error('不该入队'); } },
     imageGen: { enqueue: () => { throw new Error('不该入队'); } },
     jmcomic: { enqueue: () => { throw new Error('不该入队'); } },
-    commands: createCommandDispatcher(),
+    // 带上 `/能力` 的口子：下面要验群里 @ 闸门的**接线**，而没有口子时那一支会先返回
+    // "扩展能力不可用"，两种情形长得一样（等于没验）。
+    commands: createCommandDispatcher(() => ({ override: false, commands: [] }), {
+      list: () => [],
+      load: async (id) => ({ ok: true, note: `已加载「${id}」` }),
+      unload: async (id) => ({ ok: true, note: `已卸载「${id}」` })
+    }),
     // 只接 `3d6` 这一条；其余一律不管。
     extras: { intercept: (_chatKey, input) => (input.text.trim() === '3d6' ? { reply: '🎲 12' } : null) },
     emit: () => {},
@@ -1248,6 +1277,25 @@ const inbound = (text = '3d6') => ({
   ok('★ `@机器人 3d6` 照样走到扩展拦截（拦截读的是掐掉 @ 的那份文本）',
     sent.length === sentBefore + 1 && String(sent.at(-1)[1]) === '🎲 12' && forwarded.length === 1,
     JSON.stringify({ sent: sent.length, forwarded: forwarded.length }));
+
+  // `mentionedSelf` 的接线：群里 `/能力 加载` 的 @ 判据读的是它，而**文本里看不出 @ 过**
+  // （开头那串 @ 已经被掐掉了）。这两条一起证明 ingest 真的从**原始段**算出来并递下去了 ——
+  // 只钉其中一条都会漏掉"恒为 false"（那样群里 @ 了也照样被拒）或"恒为 true"（等于没做）。
+  await ingest.handle({
+    post_type: 'message', message_type: 'group', group_id: groupId, user_id: 5,
+    message_id: 1004, sender: { user_id: 5, nickname: '甲' },
+    message: [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: ' /能力 加载 x' } }]
+  });
+  ok('★ 群里 `@机器人 /能力 加载 x` 过了 @ 闸门（真的调到了装载口子）',
+    String(sent.at(-1)[1]).includes('已加载'), String(sent.at(-1)[1]));
+
+  await ingest.handle({
+    post_type: 'message', message_type: 'group', group_id: groupId, user_id: 5,
+    message_id: 1005, sender: { user_id: 5, nickname: '甲' },
+    message: [{ type: 'text', data: { text: '/能力 加载 x' } }]
+  });
+  ok('对照：同一句话没 @ 就被拒（判据真的读到了 `mentionedSelf`）',
+    String(sent.at(-1)[1]).includes('先 @ 我一下'), String(sent.at(-1)[1]));
 }
 
 // ── 19. 源级断言：两个新挂点在运行链路上真的接上了 ───────────────────────────
