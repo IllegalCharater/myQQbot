@@ -693,6 +693,53 @@ const chunkOf = (body) => ({ ok: true, content: JSON.stringify(body), usage: '' 
   ok('而且分到 `timeout` 那一档 —— 回执据此说"重发多半还是不够"，而不是"建议重试"',
     outOfTime.outcome.kind === 'timeout', JSON.stringify(outOfTime.outcome));
 
+  // ── 注入的预算：两条死线必须**从它**倒推，不是从常量 ──
+  //
+  // 两个时间预算是配置项（`resolveExtractBudget` → `.trpg scenario` → 这里）。判据是"用户拧了
+  // 旋钮之后 L2 的子预算跟着走"：钟拨到**注入预算**的 `total - call` 处，第二片必须被跳过、
+  // L3 必须照常拿到一整次调用。读常量的话这个钟（30 秒）离默认的 240 秒还远得很，第二片照抽
+  // —— 而症状只是"设置页填了不生效"，没有报错。
+  const injected = await (async () => {
+    const budget = { totalMs: 40_000, callMs: 10_000 };
+    let clock = 0;
+    const { port, seen } = fakeAsk([
+      () => { clock = budget.totalMs - budget.callMs; return chunkOf({}); },
+      { ok: true, content: FORM }
+    ]);
+    const outcome = await extractScenario(THREE, { name: 'x', source: 'text' },
+      { ask: port, now: () => clock, budget });
+    return { outcome, seen };
+  })();
+  ok('注入的预算真的被用上：L2 在 `total - call` 处收手（跳过 2 片、L3 照做）',
+    injected.outcome.ok === true && injected.outcome.result.calls === 2
+    && injected.seen.filter((r) => r.job === 'chunk').length === 1
+    && injected.seen[1].job === 'merge',
+    JSON.stringify(injected.seen.map((r) => r.job)));
+  ok('注入的预算下，"最后 N 片没抽"那句照常说（降级路径不因预算变小而消失）',
+    injected.outcome.ok === true
+    && injected.outcome.result.struct.warnings.includes('时间预算用完，最后 2 片没抽（原文已另存）'),
+    JSON.stringify(injected.outcome.ok ? injected.outcome.result.struct.warnings : injected.outcome));
+
+  // ⚠️ **对照必须有**：同一口钟、不传 `budget` 时两片照抽。少了它，上面那条只能证明"钟到了
+  // 某个位置会跳过"，证明不了那个位置来自**注入的那份预算**。
+  const injectedContrast = await (async () => {
+    let clock = 0;
+    const { port, seen } = fakeAsk([
+      () => { clock = 30_000; return chunkOf({}); },
+      chunkOf({ summary: '第二片' }),
+      chunkOf({ summary: '第三片' }),
+      { ok: true, content: FORM }
+    ]);
+    const outcome = await extractScenario(THREE, { name: 'x', source: 'text' },
+      { ask: port, now: () => clock });
+    return { outcome, seen };
+  })();
+  ok('（对照）同一口钟、不传 `budget` 时三片照抽 —— 死线确实来自注入的那份，不是钟本身',
+    injectedContrast.outcome.ok === true
+    && injectedContrast.seen.filter((r) => r.job === 'chunk').length === 3
+    && !injectedContrast.outcome.result.struct.warnings.some((w) => w.startsWith('时间预算用完')),
+    JSON.stringify(injectedContrast.seen.map((r) => r.job)));
+
   // ── "一片都没抽成"的两种成因必须分开 ──
   //
   // 钟在**第一片那道闸门之前**跳到 L2 子预算之后、整条死线之前：于是每一片都被

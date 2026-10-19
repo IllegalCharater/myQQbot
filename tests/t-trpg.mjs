@@ -4197,6 +4197,140 @@ const status = (key) => store.read(key);
     takeNarrationBudget(undefined, 'group:first-ever') === true);
 }
 
+// ── 7a2. 抽取的两个时间预算是**配置项**（2026-10-19 加）────────────────────────
+//
+// 这一段钉三件事，缺任何一件，"设置页填了 5 分钟"都可能只生效一半：
+//
+//   ① 解析本身（`resolveExtractBudget`）：两个数各自的钳制区间，以及那条**不变量** ——
+//      `totalMs - callMs >= EXTRACT_MIN_CALL_MS`（= L2 至少还发得出一发、L3 分得到一整次调用）。
+//   ② 默认值与 `DEFAULT_CONFIG.trpg` **逐字相同**。`core → extra` 是反向依赖（闸门会拦），
+//      所以那份默认值只能是**字面量副本** —— 副本就会漂移，而漂移的表现是"没配过的人拿到的
+//      预算与常量对不上"，没有人会去比两处源码。
+//   ③ 接线：宿主那个 getter 是**每次敲命令现读**（不是构造时读一次），且值真的透到管线的
+//      `deps.budget` 上 —— 少任何一半都是"填了、看着生效、实际按旧值走"。
+//
+// ⚠️ **钳制只有两份**（`resolveExtractBudget` 与设置页 `save.js`），`normalizeConfigShape` 里
+// **刻意没有**第三份分支 —— 那会是同一组边界的第三次抄写。这一段的断言就是那份取舍的凭据。
+{
+  const {
+    resolveExtractBudget, DEFAULT_EXTRACT_BUDGET,
+    EXTRACT_TOTAL_BUDGET_MS, EXTRACT_CALL_TIMEOUT_MS, EXTRACT_MIN_CALL_MS,
+    EXTRACT_TOTAL_MIN_MS, EXTRACT_TOTAL_MAX_MS, EXTRACT_CALL_MAX_MS
+  } = await load('extra/trpg/model/limits.js');
+  const { DEFAULT_CONFIG } = await load('core/config.js');
+  const { SlidingWindowBudget } = await load('media/call-budget.js');
+  const { createScenarioCommand, finishScenario } = await load('extra/trpg/commands/scenario.js');
+
+  // ── ① 解析 ──
+  ok('没配过任何东西时给的就是那两个默认常量（`undefined` 与 `{}` 两档都算）',
+    JSON.stringify(resolveExtractBudget(undefined)) === JSON.stringify(DEFAULT_EXTRACT_BUDGET)
+    && resolveExtractBudget({}).totalMs === EXTRACT_TOTAL_BUDGET_MS
+    && resolveExtractBudget({}).callMs === EXTRACT_CALL_TIMEOUT_MS,
+    JSON.stringify(resolveExtractBudget({})));
+
+  ok('整轮预算夹进 [60 秒, 30 分钟]（下界是"短到 L3 一定死"，上界是"多半是笔误"）',
+    resolveExtractBudget({ extractTotalBudgetMs: 1 }).totalMs === EXTRACT_TOTAL_MIN_MS
+    && resolveExtractBudget({ extractTotalBudgetMs: 9_999_999 }).totalMs === EXTRACT_TOTAL_MAX_MS,
+    JSON.stringify([resolveExtractBudget({ extractTotalBudgetMs: 1 }),
+      resolveExtractBudget({ extractTotalBudgetMs: 9_999_999 })]));
+
+  ok('单次上限夹进 [5 秒, 120 秒]',
+    resolveExtractBudget({ extractCallTimeoutMs: 1 }).callMs === EXTRACT_MIN_CALL_MS
+    && resolveExtractBudget({ extractCallTimeoutMs: 9_999_999 }).callMs === EXTRACT_CALL_MAX_MS,
+    JSON.stringify([resolveExtractBudget({ extractCallTimeoutMs: 1 }),
+      resolveExtractBudget({ extractCallTimeoutMs: 9_999_999 })]));
+
+  ok('⚠️ 单次上限的**上界跟着整轮预算走**：整轮填 1 分钟时单次最多 55 秒（`min(120, 整轮 - 5)`）',
+    resolveExtractBudget({ extractTotalBudgetMs: 60_000, extractCallTimeoutMs: 120_000 }).callMs === 55_000,
+    JSON.stringify(resolveExtractBudget({ extractTotalBudgetMs: 60_000, extractCallTimeoutMs: 120_000 })));
+
+  // ⚠️ 这一条单独拎出来：`clampInt` 在原始值不是有限数时**原样返回 fallback、不再夹**，
+  // 所以"用户只填了整轮预算"那一档必须由调用方先把 fallback 夹好。少了这一步，上面那条
+  // 不变量只对"两个键都填了"成立 —— 而设置页上留空第二个框是最常见的用法。
+  ok('（边界）整轮填 1 分钟、单次**没填**时回落值 60 秒也要被夹到 55 秒',
+    resolveExtractBudget({ extractTotalBudgetMs: 60_000 }).callMs === 55_000,
+    JSON.stringify(resolveExtractBudget({ extractTotalBudgetMs: 60_000 })));
+
+  const pairs = [];
+  for (const total of [1, 60_000, 90_000, 300_000, 600_000, 9_999_999]) {
+    for (const call of [undefined, 1, 5_000, 60_000, 120_000, 9_999_999]) {
+      pairs.push({
+        total,
+        call,
+        got: resolveExtractBudget({
+          extractTotalBudgetMs: total, ...(call === undefined ? {} : { extractCallTimeoutMs: call })
+        })
+      });
+    }
+  }
+  ok('（不变量）任何一组输入下，L2 的子预算都还剩至少 `EXTRACT_MIN_CALL_MS`',
+    pairs.every(({ got }) => got.totalMs - got.callMs >= EXTRACT_MIN_CALL_MS),
+    JSON.stringify(pairs.filter(({ got }) => got.totalMs - got.callMs < EXTRACT_MIN_CALL_MS)));
+
+  // ── ② 默认值与配置默认值逐字相同 ──
+  ok('`DEFAULT_CONFIG.trpg` 的两个默认值与常量逐字相同（反向依赖逼出来的副本，只能靠这条钉住）',
+    DEFAULT_CONFIG.trpg.extractTotalBudgetMs === EXTRACT_TOTAL_BUDGET_MS
+    && DEFAULT_CONFIG.trpg.extractCallTimeoutMs === EXTRACT_CALL_TIMEOUT_MS,
+    JSON.stringify(DEFAULT_CONFIG.trpg));
+
+  // ── ③ 接线：现读 ──
+  //
+  // `deps` 是在 `openScenario` **之前**组装的，所以"没有下载地址"那条早退也能证明 getter 被读过 ——
+  // 这条夹具因此不碰网络、也不碰磁盘。
+  let reads = 0;
+  const cmd = createScenarioCommand({
+    scenarios: new ScenarioStore(),
+    budget: new SlidingWindowBudget({ getLimits: () => ({ perChatPerHour: 5, perDay: 100 }) }),
+    extractBudget: () => {
+      reads += 1;
+      return { totalMs: 1000 * reads, callMs: 500 };
+    },
+    command: '.trpg scenario'
+  });
+  const file = [{ kind: 'file', name: '灯塔.md' }];
+  const send = (chatKey) => cmd({
+    chatKey, senderId: '10001', text: '.trpg scenario 灯塔', media: file, replyToMessageId: null
+  });
+  const firstRead = String(await send('group:budget-now'));
+  await send('group:budget-now');
+  ok('夹具：这一路走到"没有下载地址"那句早退（它排在 `deps` 组装之后，所以上面那两次读真的发生过）',
+    /协议端没给下载地址/.test(firstRead), firstRead);
+  ok('宿主那份预算是**每次敲命令现读**的（构造时读一次的话，设置页改完要重启才生效）',
+    reads === 2, String(reads));
+
+  // ── ③b 接线：透到管线 ──
+  //
+  // `finishScenario` 收下 `extractBudget` 之后必须原样递给 `extractScenario` 的第三个参数。
+  // ⚠️ 假管线**必须返回失败**：成功分支会走到 `saveScenarioText`（真写盘），而这一段只想验传参。
+  const captured = [];
+  const fakeDoc = { format: 'text', text: '这不是剧本格式', chars: 7, truncated: false };
+  const run = (deps) => finishScenario(fakeDoc, '灯塔.md', '灯塔', new ScenarioStore(), {
+    analyze: async (_text, _meta, options) => {
+      captured.push(options.budget);
+      return { ok: false, message: '（假管线）', kind: 'format' };
+    },
+    format: async () => ({ ok: false, message: '（假整理）' }),
+    ...deps
+  });
+  await run({ extractBudget: { totalMs: 123_456, callMs: 7_890 } });
+  await run({});
+  ok('配置里那份预算真的透到了管线的 `deps.budget`（透不到的话，用户拧的两个旋钮一个都不生效）',
+    captured[0]?.totalMs === 123_456 && captured[0]?.callMs === 7_890, JSON.stringify(captured[0]));
+  ok('（对照）没配时**不传**，而不是传一份自造的默认值 —— 两处各写一份默认值必然漂移',
+    captured[1] === undefined, JSON.stringify(captured[1]));
+
+  // ── ③c 源级接线 ──
+  const implSrc = fs.readFileSync(path.join(ROOT, 'src/extra/trpg/impl.ts'), 'utf8');
+  ok('宿主把配置读成预算、并以 getter 的形式递下去（`getConfig().trpg` → `resolveExtractBudget`）',
+    /extractBudget:\s*\(\)\s*=>\s*resolveExtractBudget\(getConfig\(\)\.trpg\)/.test(implSrc));
+  const cmdIndexSrc = fs.readFileSync(path.join(ROOT, 'src/extra/trpg/commands/index.ts'), 'utf8');
+  ok('装配清单把那个 getter 传给 `.trpg scenario`（漏了它，命令层拿到的永远是 `undefined`）',
+    /extractBudget:\s*deps\.extractBudget/.test(cmdIndexSrc));
+  const scenarioSrc = fs.readFileSync(path.join(ROOT, 'src/extra/trpg/commands/scenario.ts'), 'utf8');
+  ok('命令层**调一次** getter 再传值（把 getter 原样递给管线的话，管线拿到的是个函数）',
+    /extractBudget\s*\?\s*\{\s*extractBudget:\s*extractBudget\(\)\s*\}\s*:\s*\{\}/.test(scenarioSrc));
+}
+
 // ── 7c. 战报的**跨局分界**与模式的 mtime 缓存（2026-10-19 加）──────────────────
 //
 // 两件都是"运维层"的毛病，各自的成因不同：
@@ -4380,8 +4514,10 @@ const status = (key) => store.read(key);
   ok('`.trpg scenario` 把宿主的 `recordUsage` 透下去（否则抽取最多 6 次调用的成本没人记账）',
     // ⚠️ `[\s\S]` 而不是 `[^\n]`：那一行 2026-10-19 换成了多行写法（多了 `sendText`），
     // 用 `[^\n]` 的话它会以"找不到"的形式假红 —— 而它想守的接线其实完好。
+    // ⚠️ 那个对象后来又多了两行（`extractBudget` / `save`），所以判据从"`recordUsage }` 收尾"
+    // 改成"它是对象里的一个键" —— 盯着收尾的花括号，下一次插一行就会再假红一次。
     /'\.trpg scenario'[\s\S]{0,200}?recordUsage: deps\.recordUsage/.test(body('src/extra/trpg/commands/index.ts'))
-    && /recordUsage \}/.test(scenarioSrc)
+    && /^\s*recordUsage,?\s*$/m.test(scenarioSrc)
     && /openScenario\(input, deps\)/.test(scenarioSrc)
     && /finishScenario\(doc, shown, name, scenarios, deps\)/.test(scenarioSrc));
   // 抽取最多 5 分钟，而命令是被 `ingest.ts` 的按会话串行链 await 的 —— 没有这个口子就只能

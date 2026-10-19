@@ -317,6 +317,23 @@ export async function saveConfig({ quiet = false } = {}) {
     };
   }
 
+  if (sec === 'trpg') {
+    // 界面上是**秒**，配置里是**毫秒**（同 `imageGen.timeoutMs` 与上面 `extras.idleUnloadMs`）。
+    //
+    // ⚠️ **这一段的钳制与后端 `resolveExtractBudget()` 逐条同形**（`extra/trpg/model/limits.ts`）：
+    // 上界跟着整轮预算走（`min(120, 整轮 - 5)`），回落值也一起夹。后端那一段有详细推导，
+    // 这里只重复它的形状 —— 漂移的表现是"我填了 300 秒却按别的数走"，没人会去比两边源码。
+    // 那条不变量是"**L2 至少发得出一发、L3 一定分得到完整的一次**"：写死 120 的话，
+    // 用户把整轮填成 1 分钟就能配出 `callMs > totalMs`，而症状是抽取偶发失败 ——
+    // 与"模型今天有点慢"长得一模一样。
+    const totalSec = clampInt(val('#cfg-trpg-total-sec', 300), 60, 1800, 300);
+    const maxCallSec = Math.min(120, totalSec - 5);
+    patch.trpg = {
+      extractTotalBudgetMs: totalSec * 1000,
+      extractCallTimeoutMs: clampInt(val('#cfg-trpg-call-sec', 60), 5, maxCallSec, Math.min(maxCallSec, 60)) * 1000
+    };
+  }
+
   if (sec === 'transcription') {
     const t = c.transcription || {};
     const appId = val('#cfg-transcription-appid', t.appId || '').trim();

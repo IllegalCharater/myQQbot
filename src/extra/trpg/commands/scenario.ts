@@ -48,6 +48,7 @@ import type { DocumentText } from '../../../media/document/index.js';
 import type { ScenarioStore } from '../store/scenario-store.js';
 import type { ExtraUsage } from '../../types.js';
 import type { AskPort } from '../scenario/extract/prompt.js';
+import type { ExtractBudget } from '../model/limits.js';
 import type { ExtractFailureKind, ExtractResult, ExtractSalvage } from '../scenario/extract/pipeline.js';
 
 /** 下载超时。这是**命令路径**（群友在等回执），不该被一个慢下载挂住。 */
@@ -130,6 +131,18 @@ export interface ScenarioCommandDeps {
    */
   budget?: SlidingWindowBudget;
   /**
+   * 抽取的两个时间预算（`{totalMs, callMs}`）。**缺省 = 不传**，管线落回
+   * `DEFAULT_EXTRACT_BUDGET`（两个默认常量）—— 于是既有调用点与全部套件逐字不变。
+   *
+   * ⚠️ **它与上面那个 `budget` 是两回事**（名字撞了，但语义毫不相干）：那个是**调用闸门**
+   * （一本滑动窗口的账），这个是**时间预算**。所以这一个叫 `extractBudget`。
+   *
+   * ⚠️ **是 getter 不是值**：改完设置页该在下一次敲命令时就生效（同
+   * `webSearch.fetchTextMaxChars` 那条"每次调用现读配置"）。传一个快照进来的话，改完要重启
+   * 才生效，而症状是"填了、看着生效、实际按旧值走"。
+   */
+  extractBudget?: () => ExtractBudget;
+  /**
    * 往会话里补一句话（宿主的口子，见 `ExtraRuntimeDeps.sendText`）。
    *
    * **接了它 = 需要模型的那一半改到后台跑**（先回一句"正在抽"，抽完再发回执）；
@@ -151,8 +164,9 @@ export interface ScenarioCommandDeps {
  *
  * ── 为什么要分成"前半就地、后半交出去"（2026-10-19）──
  *
- * 前半（下载 + 解字节）是几秒的事；后半在**需要模型**时最多 5 分钟（`EXTRACT_TOTAL_BUDGET_MS`）。
- * 而命令是被 `ingest.ts` 的 `enqueueIngest` **按会话串行** await 的 —— 也就是说那几分钟里
+ * 前半（下载 + 解字节）是几秒的事；后半在**需要模型**时最多跑 `trpg.extractTotalBudgetMs`
+ * （默认 5 分钟）。而命令是被 `ingest.ts` 的 `enqueueIngest` **按会话串行** await 的 ——
+ * 也就是说那几分钟里
  * 这个群的所有消息都排在后面：不落档、不唤醒、面板不动。群里看到的是"传完剧本之后机器人
  * 死了"。同一条链上，`/转写` 与 `/画` 早就把几十秒的活交给各自的单并发后台队列了，
  * `.trpg scenario` 是这三件里最重的一件，偏偏是唯一没交出去的。
@@ -161,7 +175,7 @@ export interface ScenarioCommandDeps {
  * 所以常见的"传一份写好的 `.md`"仍然是一条回执，只有真的要抽剧情时才多一句。
  */
 export function createScenarioCommand({
-  scenarios, recordUsage, budget, sendText, save, command
+  scenarios, recordUsage, budget, extractBudget, sendText, save, command
 }: ScenarioCommandDeps): CommandHandler {
   const ledger = budget ?? scenarioBudget;
   return async (input) => {
@@ -180,8 +194,13 @@ export function createScenarioCommand({
       return '传剧本太频繁了 —— 一小时最多 5 份（一份最多 7 次模型调用；格式本来就对的那份一次都不发）。'
         + '过一会儿再传，或者让管理员直接把文件放进 `data/trpg/scenarios/`。';
     }
-    // ⚠️ `recordUsage` **放在 `...save` 之后**：它是宿主的口子，不该被测试的注入点顶掉。
-    const deps: SaveScenarioDeps = { ...(save ?? {}), recordUsage };
+    // ⚠️ 三者的优先级（后写的赢）：宿主那份预算 → 测试注入的 `save` → `recordUsage`。
+    // 宿主那份**在这里现读一次**（不是构造时读一次）：设置页改完，下一次敲命令就生效。
+    const deps: SaveScenarioDeps = {
+      ...(extractBudget ? { extractBudget: extractBudget() } : {}),
+      ...(save ?? {}),
+      recordUsage
+    };
     // 前半就地跑（几秒）。它自己会把"没有文件 / 没有下载地址 / 读不出来"那三种早退回出去。
     const opened = await openScenario(input, deps);
     if (!opened.ok) return opened.message;
@@ -224,6 +243,13 @@ export interface SaveScenarioDeps {
   /** 管线的模型调用端口。缺省 `createAskPort(recordUsage)`（真走 `chatCompletion`）。 */
   ask?: AskPort;
   /**
+   * 管线那两个时间预算，透给 `extractScenario` 的 `deps.budget`。
+   *
+   * 缺省 = 不传，管线落回 `DEFAULT_EXTRACT_BUDGET`（= `limits.ts` 的两个默认常量），
+   * **既有套件因此逐字不变** —— 只有生产路径（`impl.ts` 从 `getConfig().trpg` 读）会传它。
+   */
+  extractBudget?: ExtractBudget;
+  /**
    * 用量上报（2026-10-19 补）。这条路最多发 **6 次**模型调用（`MAX_CHUNKS` 片 + 一次归并），
    * 或者后备那次整理 1 次 —— 它们是"传一份剧本"的全部成本，不记账就没人知道它花了多少。
    *
@@ -259,7 +285,7 @@ export type OpenScenarioOutcome = { ok: true; opened: OpenedScenario } | { ok: f
  * 这条命令的**前半**：从引用里认出文件 → 下载 → 字节转文本。**一次模型调用都不发。**
  *
  * ⚠️ 拆成两半是为了让"要不要让模型干活"这个决定落在**命令层**（见 `createScenarioCommand`）：
- * 需要模型的那一半最多跑 5 分钟（`EXTRACT_TOTAL_BUDGET_MS`），而它不该把整个群的入站处理链
+ * 需要模型的那一半最多跑 `trpg.extractTotalBudgetMs`（默认 5 分钟），而它不该把整个群的入站处理链
  * 堵住 —— 那条链是**按会话串行**的（`ingest.ts` 的 `enqueueIngest`），堵住它的表现是
  * "传完剧本之后的几分钟里，这个群说什么都没反应、面板也不动"。
  *
@@ -333,7 +359,10 @@ export async function finishScenario(
     // 是这条路唯一走得通的做法（见 `extract/pipeline.ts` 文件头）。
     const outcome = await (deps.analyze ?? extractScenario)(doc.text, { name, source: sourceLabel }, {
       ask: deps.ask ?? createAskPort(deps.recordUsage),
-      ...(deps.now ? { now: deps.now } : {})
+      ...(deps.now ? { now: deps.now } : {}),
+      // ⚠️ **缺省不传**（不是传一个"默认值"）：管线的 `deps.budget` 自己缺省成
+      // `DEFAULT_EXTRACT_BUDGET`，两处各写一份默认值必然漂移。
+      ...(deps.extractBudget ? { budget: deps.extractBudget } : {})
     });
     if (outcome.ok) {
       analysis = outcome.result;
@@ -463,7 +492,8 @@ export async function finishScenario(
 /**
  * 下载 → 抽文本 → 格式匹配（必要时让模型整理）→ 落库。**前半 + 后半，一次性跑完。**
  *
- * 这条路**会占住调用方**（最长约 5 分钟）。生产路径上 `.trpg scenario` 只在"宿主没接
+ * 这条路**会占住调用方**（最长约 `trpg.extractTotalBudgetMs`，默认 5 分钟）。生产路径上
+ * `.trpg scenario` 只在"宿主没接
  * `sendText`"时才走它（见 `createScenarioCommand`）；套件也一律走它 —— 它们注入
  * `extract` / `analyze` / `format`，从不真的发调用。
  */

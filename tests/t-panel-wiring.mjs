@@ -853,6 +853,53 @@ ok("旧的 'status' 事件名订阅端已不再出现", !subscribed.includes('st
     /\/api\/trpg\/workshop/.test(settingsJs) ? '兜底缺 journals' : '没接端点');
   ok('战报那一栏把"只追加"与"删掉就没了"写在明面上（那是它区别于另外两类的地方）',
     /只追加/.test(sectionsSrc2) && /删掉就没了/.test(sectionsSrc2));
+
+  // ── 剧本抽取的两个时间预算：输入框 / 保存钳制 / 后端权威值，三处必须对得上 ──
+  //
+  // 这是"改配置要同时检查四处"那条规矩的一个实例，而它比别的配置更容易漂：**界面按秒、
+  // 配置按毫秒**，逐字比字符串永远比不出问题（两边压根不一样），只能比**换算后的值**。
+  // 后端那侧**刻意没有 `normalizeConfigShape` 分支**（`core → extra` 是反向依赖，副本越多越
+  // 容易漂），所以权威值直接取自 `limits.ts` 的常量 —— 这一段就是"只有两份钳制"那句话的凭据。
+  const trpgSave = seg("if (sec === 'trpg')", "if (sec === 'transcription')");
+  ok('设置页有两个输入框：整轮预算 / 单次调用上限（默认 300 秒 / 60 秒，单位秒）',
+    /id="cfg-trpg-total-sec"[^>]*\$\{esc\(Math\.round\(Number\(t\.extractTotalBudgetMs \?\? 300000\) \/ 1000\)\)\}/.test(sectionsSrc2)
+    && /id="cfg-trpg-call-sec"[^>]*\$\{esc\(Math\.round\(Number\(t\.extractCallTimeoutMs \?\? 60000\) \/ 1000\)\)\}/.test(sectionsSrc2),
+    /id="cfg-trpg-total-sec"/.test(sectionsSrc2) ? '缺单次上限那一栏' : '缺整轮预算那一栏');
+
+  // ⚠️ 逐条拆开比，不比整行字符串：整行比的话，改一个空格就假红，而真正要防的是**数值漂移**。
+  const uiTotal = (/clampInt\(val\('#cfg-trpg-total-sec',\s*(\d+)\),\s*(\d+),\s*(\d+),\s*(\d+)\)/
+    .exec(trpgSave) || []).slice(1).map(Number);
+  const uiCall = (/clampInt\(val\('#cfg-trpg-call-sec',\s*(\d+)\),\s*(\d+),\s*maxCallSec,\s*Math\.min\(maxCallSec,\s*(\d+)\)\)/
+    .exec(trpgSave) || []).slice(1).map(Number);
+  ok('保存分支把两个数按**秒 → 毫秒**写回（`* 1000` 少一处就是"填了 300 秒却按 300 毫秒跑"）',
+    /extractTotalBudgetMs:\s*totalSec \* 1000/.test(trpgSave)
+    // ⚠️ `[\s\S]{0,200}?` 而不是 `[^)]*`：`clampInt` 的第三个实参里还有一层 `Math.min(...)`，
+    // 用"非右括号"那一类写法会卡在嵌套括号上，以"找不到"的形式假红。
+    && /extractCallTimeoutMs:[\s\S]{0,200}?\* 1000/.test(trpgSave), trpgSave.slice(0, 200));
+  ok('单次上限的上界**跟着整轮预算走**（`min(120, 整轮 - 5)`；写死 120 就能配出 `call > total`）',
+    /const maxCallSec = Math\.min\(120, totalSec - 5\)/.test(trpgSave) && uiCall.length === 3,
+    `/const maxCallSec = Math\\.min\\(120, totalSec - 5\\)/.test(trpgSave) ? \`clamp 解析失败：\${uiCall.length} 段\` : '缺 maxCallSec 那一行'`);
+
+  const limitsTs = fs.readFileSync(path.join(process.cwd(), 'src/extra/trpg/model/limits.ts'), 'utf8');
+  const beNum = (name) => Number((new RegExp(`\\b${name}\\s*=\\s*([\\d_]+)`).exec(limitsTs) || [])[1]?.replace(/_/g, ''));
+  const totalMinSec = beNum('EXTRACT_TOTAL_MIN_MS') / 1000;
+  const totalMaxSec = beNum('EXTRACT_TOTAL_MAX_MS') / 1000;
+  const callMinSec = beNum('EXTRACT_MIN_CALL_MS') / 1000;
+  const callMaxSec = beNum('EXTRACT_CALL_MAX_MS') / 1000;
+  const totalDefaultSec = beNum('EXTRACT_TOTAL_BUDGET_MS') / 1000;
+  const callDefaultSec = beNum('EXTRACT_CALL_TIMEOUT_MS') / 1000;
+  ok('三处边界对得上：设置页的 [60, 1800] / [5, 120] 秒 = `limits.ts` 的常量（两侧各写一份，只能靠这条钉）',
+    uiTotal[1] === totalMinSec && uiTotal[2] === totalMaxSec
+    && uiCall[1] === callMinSec && callMaxSec === 120,
+    `设置页 total [${uiTotal[1]}, ${uiTotal[2]}] / call ${uiCall[1]}..120，后端 [${totalMinSec}, ${totalMaxSec}] / ${callMinSec}..${callMaxSec}`);
+  ok('回落值也逐字相同：设置页 300 / 60 秒 = `DEFAULT_CONFIG.trpg` 引用的那两个常量',
+    uiTotal[0] === totalDefaultSec && uiTotal[3] === totalDefaultSec
+    && uiCall[0] === callDefaultSec && uiCall[2] === callDefaultSec,
+    `设置页 total ${uiTotal[0]}/${uiTotal[3]}、call ${uiCall[0]}/${uiCall[2]}，常量 ${totalDefaultSec} / ${callDefaultSec}`);
+  // ⚠️ 这条是那份**取舍**的凭据：钳制只有两份（`resolveExtractBudget` 与这里），
+  // `core/config.ts` 里不该出现第三份 —— 有它的话，三处边界迟早各自漂一点。
+  ok('钳制**只有两份**：`core/config.ts` 里没有针对这两个字段的第三份 clamp',
+    !/clamp\([^)]*extract(?:TotalBudget|CallTimeout)Ms/.test(readSrc('core/config.js')));
 }
 
 console.log(`\n════ 通过 ${pass} / 失败 ${fail} ════`);

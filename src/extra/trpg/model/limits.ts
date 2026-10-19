@@ -75,9 +75,13 @@ export const MAX_POOL = 9999;
 
 // ── 剧本抽取（P7-a）───────────────────────────────────────────────────────────
 //
-// 这四个数全是**成本**，不是洁癖：一份模组按"每片一次模型调用"计费，而抽取发生在
+// 下面这三个数是**成本**，不是洁癖：一份模组按"每片一次模型调用"计费，而抽取发生在
 // `.trpg scenario` 那条命令里 —— 群友正对着群等回执。改它们等于改行为（同
 // `FALLBACK_RESERVE_MS` 那条纪律），所以写死在这里、集中一处。
+//
+// ⚠️ **紧跟其后的那两个预算数是这条规矩的例外**（2026-10-19 起）：它们进了设置页，因为
+// "这台机器上的模型有多快"是用户比我清楚的事。切片的形状（几个数）则仍然是我们的判据 ——
+// 见下面那一段。
 
 /**
  * 一份模组最多切几片（= 最多几次 L2 抽取调用，另加 L3 那一次合并）。
@@ -96,9 +100,11 @@ export const MAX_CHUNK_CHARS = 6000;
  */
 export const MIN_CHUNK_CHARS = 400;
 /**
- * 整条抽取管线的时间预算（毫秒）。**每一片都从同一条死线倒推**（同
- * `image-source` 那条"给兜底留位置"的纪律）：剩下的时间不够一次最小调用时，
- * 后面的片**不发**，只把已抽到的部分交出去并如实说明。
+ * 整条抽取管线的时间预算（毫秒）—— **默认值**，可被配置 `trpg.extractTotalBudgetMs` 覆盖。
+ *
+ * 它是**整条管线**的死线（不是单次调用）：每一片都从它倒推（同 `image-source` 那条
+ * "给兜底留位置"的纪律），剩下的时间不够一次最小调用时，后面的片**不发**，
+ * 只把已抽到的部分交出去并如实说明。
  *
  * ⚠️ **90 秒这个数曾把整条管线送进必败**（2026-10-19 真机实测）：一份 7345 字的模组切成
  * 2 片，每片实测约 44 秒，两片吃掉约 88 秒 —— 于是 L3（合成剧本文件，**唯一的交付物**）
@@ -106,24 +112,99 @@ export const MIN_CHUNK_CHARS = 400;
  * "既有 `formatScenarioText` 那 60 秒的 1.5 倍"，即**按一次调用**估的 ——
  * 可它要装的是 1 次归并 + 最多 `MAX_CHUNKS` 次分片抽取，也就是 7 次调用。
  * 现在的数是按**实测单次耗时**倒推的：每次上限 60 秒，L2 那几片最多用掉
- * `EXTRACT_TOTAL_BUDGET_MS - EXTRACT_CALL_TIMEOUT_MS`，剩下的整整 60 秒留给 L3。
+ * `总预算 - 单次上限`，剩下的整整 60 秒留给 L3。
+ *
+ * ── 为什么这两个数 2026-10-19 起进了设置页（推翻了"写死常量"那一版）──
+ *
+ * 合适的值取决于**这台机器上的模型有多快**：实测单次 44 秒的那台，5 分钟刚好够两片加一次
+ * 合成；换一个更慢的端点、或一份更长的模组，同一个数就不够了。而这正是
+ * `webSearch.fetchTextMaxChars` 当初变成配置项的同一条理由（"合适的值取决于用户怎么用"）。
+ *
+ * ⚠️ **只有这两个是旋钮**。`EXTRACT_L2_BUDGET_MS` 是派生量（见下），`EXTRACT_MIN_CALL_MS`
+ * 是"再发也是白等"的判据 —— 两者都不该让用户调，调了只会造出"L3 分不到一整次调用"这种
+ * 从表面上看不出来的坏配置（症状是抽取偶发失败，与"模型今天有点慢"长得一模一样）。
  */
 export const EXTRACT_TOTAL_BUDGET_MS = 300_000;
-/** 单次调用的上限。真正生效的是 `min(它, 剩余预算)`。 */
+/** 单次调用的上限（默认值，可被配置 `trpg.extractCallTimeoutMs` 覆盖）。真正生效的是 `min(它, 剩余预算)`。 */
 export const EXTRACT_CALL_TIMEOUT_MS = 60_000;
 /**
  * L2（逐片抽取）那一段的子预算 —— **派生量，不是第二个旋钮**。
  *
  * 它存在的唯一理由是"**L3 永远分得到一整次调用**"：分片是可选的（少抽一片只是少一点细节，
  * 而且会如实说出来），而 L3 是**唯一的交付物** —— 它失败就等于整轮白跑。所以 L2 在
- * `EXTRACT_TOTAL_BUDGET_MS - EXTRACT_CALL_TIMEOUT_MS` 处就收手，把最后那 60 秒原样留给 L3。
+ * `总预算 - 单次上限` 处就收手，把最后那一整次调用原样留给 L3。
  *
- * 别把它写成另一个可独立调的数：它一旦不等于 `总预算 - 单次上限`，这句话就不成立了
+ * ⚠️ **运行期算的是 `budget.totalMs - budget.callMs`，不是这个常量**（见 `pipeline.ts`）：
+ * 用户拧了那两个旋钮之后，只有这条减法跟着走，L3 才照样分得到一整次调用。这个常量只是
+ * **默认预算下**的那一份 —— 留着是因为套件拿它拨假钟（`t-trpg-extract.mjs`）。
+ *
+ * 别把它写成另一个可独立调的数：它一旦不等于 `总预算 - 单次上限`，上面那句话就不成立了
  * （L2 用满时 L3 会分到不足一整次调用，而那正是这一版要修的病）。
  */
 export const EXTRACT_L2_BUDGET_MS = EXTRACT_TOTAL_BUDGET_MS - EXTRACT_CALL_TIMEOUT_MS;
 /** 剩余预算低于这个数就不再发下一片 —— 发了也多半是超时。 */
 export const EXTRACT_MIN_CALL_MS = 5_000;
+/**
+ * 两个旋钮的钳制区间。
+ *
+ * **设置页侧另有一份同口径的钳制**（`ui/js/views/settings/save.js` 的 `sec === 'trpg'`
+ * 那一段），两处必须一起改 —— 漂移的表现是"我填了 300 秒却按别的数走"，没人会去比两边源码
+ * （同 `media/image-gen/config.ts` 那条"钳制只在这一处 + 设置页侧一份"的取舍）。
+ */
+export const EXTRACT_TOTAL_MIN_MS = 60_000;
+export const EXTRACT_TOTAL_MAX_MS = 1_800_000;
+export const EXTRACT_CALL_MAX_MS = 120_000;
+/**
+ * 一次抽取要用的两个数（毫秒）。
+ *
+ * ⚠️ **`callMs` 不是"L2 的子预算"**：子预算永远是 `totalMs - callMs`（见
+ * `EXTRACT_L2_BUDGET_MS`）。三个数都当旋钮，就等于允许"L2 用满时 L3 分不到一整次调用"
+ * 这种坏配置 —— 而它的症状（抽取偶发失败）与"模型今天有点慢"长得一模一样。
+ */
+export interface ExtractBudget {
+  totalMs: number;
+  callMs: number;
+}
+
+/** 没配任何东西时用的那一份（= 上面两个默认常量）。 */
+export const DEFAULT_EXTRACT_BUDGET: ExtractBudget = {
+  totalMs: EXTRACT_TOTAL_BUDGET_MS,
+  callMs: EXTRACT_CALL_TIMEOUT_MS
+};
+
+/**
+ * 从配置里读出这一份预算。**纯函数**，不读全局（调用方把 `getConfig().trpg` 递进来）。
+ *
+ * 判据两条，**顺序不能反**：
+ *   ① `totalMs` 先夹进 `[EXTRACT_TOTAL_MIN_MS, EXTRACT_TOTAL_MAX_MS]`；
+ *   ② `callMs` 再夹进 `[EXTRACT_MIN_CALL_MS, min(EXTRACT_CALL_MAX_MS, totalMs - EXTRACT_MIN_CALL_MS)]`
+ *      —— 上界跟着 `totalMs` 走，于是 `totalMs - callMs >= EXTRACT_MIN_CALL_MS` 恒成立，
+ *      也就是"L2 至少发得出一发"。
+ *
+ * ⚠️ **回落值也要一起夹**（`Math.min(callMax, EXTRACT_CALL_TIMEOUT_MS)`）：没写这个键时
+ * `clampInt` 原样返回回落值，而回落值 60 秒在 `totalMs` 被填成 1 分钟时会**大于**上界 55 秒
+ * —— 那正是 ② 要保证的东西，漏掉它这条不变量就只对"用户两个键都填了"的情况成立。
+ *
+ * ⚠️ **入参是结构化类型，不是 `AppConfig`**：`model/` 这一层不认识 `core/`，连类型都不认识
+ * （反向依赖闸门会拦）。所以它的形状是"给我两个 `unknown`，还你两个合法的数"。
+ *
+ * ⚠️ 手改配置留下的非数（`null` / `''`）会被 `clampInt` 夹到**下限**而不是回落默认值 ——
+ * 这是本文件既有的语义（"手改过 config 一样的东西也不会绕过上限"），别在这里另开一套。
+ */
+export function resolveExtractBudget(
+  raw: { extractTotalBudgetMs?: unknown; extractCallTimeoutMs?: unknown } | undefined
+): ExtractBudget {
+  const totalMs = clampInt(
+    raw?.extractTotalBudgetMs, EXTRACT_TOTAL_MIN_MS, EXTRACT_TOTAL_MAX_MS, EXTRACT_TOTAL_BUDGET_MS
+  );
+  // ② 的上界：`totalMs` 那一档的下限 60 秒远大于 `2 × EXTRACT_MIN_CALL_MS`，所以它不会
+  // 小于自己的下界（`totalMs - 5 秒 >= 55 秒 > 5 秒`）。两个数一起改时留意这一条。
+  const callMax = Math.min(EXTRACT_CALL_MAX_MS, totalMs - EXTRACT_MIN_CALL_MS);
+  const callMs = clampInt(
+    raw?.extractCallTimeoutMs, EXTRACT_MIN_CALL_MS, callMax, Math.min(callMax, EXTRACT_CALL_TIMEOUT_MS)
+  );
+  return { totalMs, callMs };
+}
 
 /** 剧情结构里每一类（场景 / 人物 / 线索 / 道具 / 机制）最多几条。 */
 export const MAX_STRUCT_ITEMS = 24;
@@ -171,8 +252,11 @@ export const MAX_ENDING_KEEPER_CHARS = 400;
 // ── 推进度（P8-b）────────────────────────────────────────────────────────────
 //
 // 三个阈值是**默认值**：规则扩展里的 `advancement_threshold` mechanic 可以按模组覆盖
-// （见 `rules/rule-set.ts`）。写成常量而不是配置项的理由同 `EXTRACT_TOTAL_BUDGET_MS` ——
-// 合适的值取决于"这一本模组的节奏"，而那本来就是模组自己的事。
+// （见 `rules/rule-set.ts`）。写成常量而不是配置项的理由是"合适的值取决于**这一本模组的
+// 节奏**"，而那本来就是模组自己的事 —— 它已经有一条**自己的**覆盖路径（就是上面那个
+// mechanic，按模组写、跟着剧本走），不必再开一个全局旋钮：全局旋钮只能同时对所有模组生效，
+// 而节奏恰好是逐模组不同的东西。（与 `EXTRACT_TOTAL_BUDGET_MS` 那条不同 —— 那一个是
+// "这台机器有多快"，全局只可能有一个答案，所以它进了设置页。）
 
 /** 距上次变化超过这么多**轮**才提示。 */
 export const ADVANCE_THRESHOLDS = { scene: 8, flag: 12, act: 20 } as const;
@@ -198,9 +282,11 @@ export const MAX_STRUCT_BYTES = 60_000;
 //
 // ── 为什么是写死的常量、不是设置页上的旋钮 ──
 //
-// 与 `EXTRACT_TOTAL_BUDGET_MS` 同一取舍：这两个数的用途是**压住滥用**，不是"按用量调优"，
-// 而配置项要多付三处钳制（`core/config.ts` / `save.js` / 面板表单）与一整套守护。它们的
-// 推导也全在本文件里（`MAX_CHUNKS` 与"一次暗骰一次调用"），放在一起才看得出为什么是这个数。
+// 这两个数的用途是**压住滥用**，不是"按用量调优"：它们的判据是"一个群友连敲十次会怎样"，
+// 而不是"这台机器能跑多快"。与抽取预算那两个旋钮的区别正在这里 —— 那两个的合适值取决于
+// 用户的机器与模型（他比我清楚），这两个的合适值取决于"白名单群里任何人"这个事实（判据
+// 在我们这边）。它们的推导也全在本文件里（`MAX_CHUNKS` 与"一次暗骰一次调用"），放在一起
+// 才看得出为什么是这个数。
 //
 // ⚠️ **`.trpg scenario` 那一档按"命令调用次数"记账，不按"实际发了几次模型调用"** ——
 // 与 image-source 那条"命中缓存的重复查询也占额度"是同一个方向（偏保守）。代价是传一份

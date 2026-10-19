@@ -20,22 +20,30 @@
 //
 // ── 预算：每一发都从同一条死线倒推 ──
 //
-// 同 `image-source` 那条"给兜底留位置"的纪律：`EXTRACT_TOTAL_BUDGET_MS` 是**整条管线**的
-// 死线，每一发的超时是 `min(EXTRACT_CALL_TIMEOUT_MS, 剩余)`；剩余低于 `EXTRACT_MIN_CALL_MS`
-// 就**不发**那一发，并把"少抽了几片"如实说出来（原文还在 `raw/` 里，没有丢）。
+// 同 `image-source` 那条"给兜底留位置"的纪律：`budget.totalMs` 是**整条管线**的死线，
+// 每一发的超时是 `min(budget.callMs, 剩余)`；剩余低于 `EXTRACT_MIN_CALL_MS` 就**不发**
+// 那一发，并把"少抽了几片"如实说出来（原文还在 `raw/` 里，没有丢）。
 //
-// ⚠️ **L2 与 L3 用的是两条死线，差一个 `EXTRACT_CALL_TIMEOUT_MS`**（2026-10-19 加）：
+// ⚠️ **L2 与 L3 用的是两条死线，差一整次调用**（2026-10-19 加）：
 // 分片是可选的，L3 是**唯一的交付物** —— 它失败就等于整轮白跑。所以 L2 只准用到
-// `EXTRACT_L2_BUDGET_MS`，把最后那 60 秒原样留给 L3。合成一条死线的后果实测过：
-// 两片各 44 秒吃光 90 秒，L3 分到 2 秒、当场超时，而群里看到的是"抽取没成"。
+// `budget.totalMs - budget.callMs`，把最后那整整一次调用原样留给 L3。合成一条死线的后果
+// 实测过：两片各 44 秒吃光 90 秒，L3 分到 2 秒、当场超时，而群里看到的是"抽取没成"。
+//
+// ⚠️ **这两个数 2026-10-19 起是配置项**（`trpg.extractTotalBudgetMs` / `trpg.extractCallTimeoutMs`，
+// 经 `deps.budget` 递进来，缺省是 `DEFAULT_EXTRACT_BUDGET`）—— 所以上面那两句话里的数
+// **一律从 `budget` 读，不许再写回常量**。常量只是缺省值：写回常量的话，设置页改了不生效，
+// 而症状是"填了 300 秒却按 60 秒走"，没人会去比源码。
+//
+// ⚠️ **L2 的子预算永远是 `budget.totalMs - budget.callMs`，不是第三个配置项**：
+// 它一旦不等于这条减法，"L3 永远分得到一整次调用"就不成立了（见 `model/limits.ts`）。
 //
 // ⚠️ **本目录（`scenario/extract/`）不许出现 `node:fs` / `node:path`**（`check-layers.mjs`
 // 有一条闸门，与 `model/` 同形）：落盘是 `store/` 的事，这一层要能脱离磁盘被测。
 import {
-  EXTRACT_CALL_TIMEOUT_MS, EXTRACT_L2_BUDGET_MS, EXTRACT_MIN_CALL_MS, EXTRACT_TOTAL_BUDGET_MS,
-  MAX_ACT_GOAL_CHARS, MAX_ACT_KEEPER_CHARS, MAX_ACT_SCENES, MAX_ACTS, MAX_CHARACTERS,
-  MAX_ENDING_KEEPER_CHARS, MAX_ENDING_READ_ALOUD_CHARS, MAX_ENDING_REWARDS_CHARS, MAX_ENDINGS, MAX_FLAGS,
-  MAX_STRUCT_ITEMS, MAX_STRUCT_TEXT_CHARS, MAX_STRUCT_QUOTE_CHARS
+  DEFAULT_EXTRACT_BUDGET, EXTRACT_MIN_CALL_MS, MAX_ACT_GOAL_CHARS, MAX_ACT_KEEPER_CHARS,
+  MAX_ACT_SCENES, MAX_ACTS, MAX_CHARACTERS, MAX_ENDING_KEEPER_CHARS, MAX_ENDING_READ_ALOUD_CHARS,
+  MAX_ENDING_REWARDS_CHARS, MAX_ENDINGS, MAX_FLAGS, MAX_STRUCT_ITEMS, MAX_STRUCT_TEXT_CHARS,
+  MAX_STRUCT_QUOTE_CHARS, type ExtractBudget
 } from '../../model/limits.js';
 import { isFormattedScenario } from '../parse.js';
 import { BODY_BUDGET, stripFence } from '../format.js';
@@ -50,6 +58,15 @@ export interface ExtractDeps {
   ask: AskPort;
   /** 现在几点（毫秒）。测试可以给一个自己控制的钟。 */
   now?: () => number;
+  /**
+   * 这一次抽取的两个时间预算。**缺省是 `DEFAULT_EXTRACT_BUDGET`**，于是既有的调用点与
+   * 全部套件逐字不变 —— 只有生产路径（经 `commands/scenario.ts` 从配置读）会传它。
+   *
+   * ⚠️ 它是**整份**（`{totalMs, callMs}`）而不是两个可选数：拆成两个的话，"只传了其中一个"
+   * 就得在这里现编另一半，而那个编出来的值与配置里那份会不一致 —— 症状是"改了一个旋钮、
+   * 另一个跟着变"，比不生效难查得多。
+   */
+  budget?: ExtractBudget;
 }
 
 export interface ExtractResult {
@@ -489,11 +506,16 @@ export async function extractScenario(
   text: string, { name, source }: { name: string; source: string }, deps: ExtractDeps
 ): Promise<ExtractOutcome> {
   const now = deps.now ?? Date.now;
+  // ⚠️ **两个预算一律从 `budget` 读，不许写回常量**（2026-10-19 起它们是配置项）：
+  // 写回常量的话设置页改了不生效，而症状是"填了 300 秒却按 60 秒走"。
+  const budget = deps.budget ?? DEFAULT_EXTRACT_BUDGET;
   const started = now();
-  // 两条死线，差一个 `EXTRACT_CALL_TIMEOUT_MS`：L2 只准用到 `l2Deadline`，好让 L3（唯一的
-  // 交付物）无论如何都分得到一整次调用。见文件头「L2 与 L3 用的是两条死线」那段。
-  const deadline = started + EXTRACT_TOTAL_BUDGET_MS;
-  const l2Deadline = started + EXTRACT_L2_BUDGET_MS;
+  // 两条死线，差一整次调用：L2 只准用到 `l2Deadline`，好让 L3（唯一的交付物）无论如何都
+  // 分得到一整次调用。见文件头「L2 与 L3 用的是两条死线」那段。
+  // ⚠️ 子预算**在这里现算**（`totalMs - callMs`），不读 `EXTRACT_L2_BUDGET_MS` —— 那个常量
+  // 是"默认预算下"的那一份，用户拧了旋钮之后它就不对了。
+  const deadline = started + budget.totalMs;
+  const l2Deadline = deadline - budget.callMs;
 
   const outline = outlineDocument(text);
   // `empty` 这一档与别的三档不同：它不是"这次不巧"，而是"这份文件里没有可抽的东西"。
@@ -547,7 +569,7 @@ export async function extractScenario(
       effectHandlers: EFFECT_HANDLERS
     };
     calls += 1;
-    const answered = await askWithTimeout(deps.ask, { job: 'chunk', payload }, Math.min(EXTRACT_CALL_TIMEOUT_MS, remaining));
+    const answered = await askWithTimeout(deps.ask, { job: 'chunk', payload }, Math.min(budget.callMs, remaining));
     if (!answered.ok) {
       // 一片抽不出来**不中断整条管线**：别的片、以及原文切片都还在。
       // 但也不装作没发生 —— 记下来，回执里会说"少抽了几片"。
@@ -599,7 +621,7 @@ export async function extractScenario(
   // **一次也到不了回执** —— 那不是一条降级路径，是死代码。剩下多少时间就给它多少。
   //
   // ⚠️ 而且它读的是**整条管线的死线**（`deadline`），不是 L2 那条子死线 —— L2 已经在
-  // `EXTRACT_L2_BUDGET_MS` 处收手了，所以这里算出来的剩余**至少是 `EXTRACT_CALL_TIMEOUT_MS`**
+  // `deadline - budget.callMs` 处收手了，所以这里算出来的剩余**至少是 `budget.callMs`**
   // （一整次调用）。那个 `remaining <= 0` 分支因此只在注入的钟被拨到终点时才走得到，留着是
   // 兜底而不是主路径。改 L2 的死线时**两处要一起看**：把它们并回一条，L3 就又会被挤空。
   const remaining = deadline - now();
@@ -617,7 +639,7 @@ export async function extractScenario(
       maxChars: BODY_BUDGET, maxFlags: MAX_FLAGS, maxCharacters: MAX_CHARACTERS,
       extracted: forPrompt(struct)
     }
-  }, Math.min(EXTRACT_CALL_TIMEOUT_MS, remaining));
+  }, Math.min(budget.callMs, remaining));
   // ⚠️ 这一发是**唯一的交付物**，所以它超时与它"请求失败"要分开：前者说明预算给少了
   // （重发无用，得拆小），后者才是网络/接口的偶发问题。合并成一档的话，最需要那句
   // "别再重发了"的场景恰好拿到"建议重发"。
