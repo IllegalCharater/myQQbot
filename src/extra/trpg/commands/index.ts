@@ -34,6 +34,7 @@ import { createDiceCommand } from './dice.js';
 import type { CommandHandler } from './shared.js';
 import type { JournalReadPort } from './log.js';
 import type { ExtraUsage } from '../../types.js';
+import type { ExtractBudget } from '../model/limits.js';
 import type { JournalPort } from '../model/campaign.js';
 import type { DiceRng } from '../rules/dice.js';
 import type { RuleStore } from '../store/rule-store.js';
@@ -67,6 +68,14 @@ export interface CommandDeps {
    * 缺省 = 不记账（测试与未接线的宿主），调用照常进行 —— 见 `ExtraRuntimeDeps.recordUsage`。
    */
   recordUsage?: ((usage: ExtraUsage) => void) | null;
+  /**
+   * `.trpg scenario` 那两个**时间预算**（`{totalMs, callMs}`，见 `model/limits.ts`）。
+   * 缺省 = 管线落回 `DEFAULT_EXTRACT_BUDGET`（两个默认常量）。
+   *
+   * ⚠️ **是 getter 不是值**：由 `impl.ts` 现读 `getConfig().trpg`，于是改完设置页下一次敲
+   * 命令就生效（同 `webSearch.fetchTextMaxChars` 那条"每次调用现读配置"）。
+   */
+  extractBudget?: () => ExtractBudget;
 }
 
 export function createCommands(deps: CommandDeps): Record<string, CommandHandler> {
@@ -83,7 +92,8 @@ export function createCommands(deps: CommandDeps): Record<string, CommandHandler
     ['.trpg end', (command) => createEndCommand({ ...base, command })],
     ['.trpg mode', (command) => createModeCommand({ ...base, command })],
     ['.trpg scenario', (command) => createScenarioCommand({
-      ...base, recordUsage: deps.recordUsage, sendText: deps.sendText, command
+      ...base, recordUsage: deps.recordUsage, sendText: deps.sendText,
+      extractBudget: deps.extractBudget, command
     })],
     // 核对抽取结果（P7-b）：零模型调用、零写入。**排在自己的子命令之后、裸 `.trpg` 之前**
     // （顺序即行为，见文件头那条）。

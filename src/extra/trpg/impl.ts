@@ -19,6 +19,7 @@ import { usableScenarios } from './commands/shared.js';
 import { secureRng } from './entropy.js';
 import { appendLog } from './model/campaign.js';
 import { mechanicContextOf, ruleSetFor } from './model/rule-set.js';
+import { resolveExtractBudget } from './model/limits.js';
 import { triggerMatches } from './rules/rule-set.js';
 import { renderForModel } from './render/model.js';
 import { renderBriefing } from './render/status.js';
@@ -165,7 +166,11 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
     commandHandlers: createCommands({
       store, rules, scenarios, modes, journal, rng: secureRng,
       sendPrivate: deps.sendPrivate, sendFile: deps.sendFile, sendText: deps.sendText,
-      recordUsage: deps.recordUsage
+      recordUsage: deps.recordUsage,
+      // ⚠️ **现读，不是快照**：改完设置页该在下一次敲 `.trpg scenario` 时就生效
+      // （同 `webSearch.fetchTextMaxChars` 那条"每次调用现读配置"）。传一个值进来的话，
+      // 改完要重启才生效，而症状是"填了、看着生效、实际按旧值走"。
+      extractBudget: () => resolveExtractBudget(getConfig().trpg)
     }),
 
     /**

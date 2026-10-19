@@ -78,7 +78,12 @@ function effectiveApi() {
 export function isRetryableError(error: unknown) {
   const msg = String(error instanceof Error ? error.message : error ?? '');
 
-  // 主动中止（用户/系统取消）：重试没有意义
+  // 主动中止（用户/系统取消、**调用方设的死线**）：重试没有意义。
+  //
+  // ⚠️ 这一条**必须排在下面那条 `/超时/` 前面**：调用方中止时带的理由是它自己那句话，
+  // 而那句话里常常就写着"超时"（抽取管线的 `抽取调用超时（60 秒）`）。反过来排的话，
+  // 一次"预算已经用光"的中止会被判成"网络层超时、再试一次可能就好" —— 见 `chatCompletion`
+  // 里那段"调用方中止与请求自己失败要分开"。
   if (/aborted|中止|已取消|cancel/i.test(msg)) return false;
 
   // 明确的客户端错误：重试也不会变好，只会白烧额度
@@ -168,6 +173,21 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     });
   } catch (error: unknown) {
     clearTimeout(timer);
+    // ⚠️ **调用方中止与"请求自己失败"必须分开**（2026-10-19 加）。
+    //
+    // 外部 `signal` 上的 abort 是**调用方设的死线**（抽取管线那条"这一发最多给 60 秒"），
+    // 不是网络故障。而它原先落进下面那句 `模型请求失败：…` —— 那个前缀的约定含义是
+    // "fetch 抛的、网络层失败、可以重试"（见 `isRetryableError`），于是调用方被告知
+    // "再试一次可能就好"，可它的预算**恰恰已经用光了**。群里看到的是一句"偶发超时，
+    // 建议重试"，而重发一次只会以同样的方式再撞一堵同样的墙。
+    //
+    // 判据取的是**外部那个 signal**（不是 controller 自己那条 5 秒以上的死线，那是真超时、
+    // 该重试）。外部 signal 一旦中止，这一发的结果对调用方已经无意义，所以不必再分辨底层
+    // 抛的到底是哪一个错 —— 直接如实说"是被调用方中止的"。
+    if (signal?.aborted) {
+      const reason = signal.reason instanceof Error ? signal.reason.message : '';
+      throw new Error(`模型请求已被调用方中止${reason ? `：${reason}` : ''}`);
+    }
     if (error instanceof Error && error.name === 'AbortError') throw new Error(`模型请求超时（${timeoutMs}ms）`);
     const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined;
     throw new Error(`模型请求失败：${cause ?? (error instanceof Error ? error.message : error)}`);

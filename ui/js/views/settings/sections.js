@@ -861,7 +861,8 @@ export function renderPersonaSaveBar() {
  * 数据来自 `GET /api/trpg/workshop`（`ui/` 够不着 `src/`，只能经端点拿，同 `/api/extras`）。
  * 坏文件也列出来并把问题摆在明面上 —— 跳过它只会让管理员看到"少了一个"而不知道出了什么事。
  */
-export function renderTrpgSection() {
+export function renderTrpgSection(c) {
+  const t = c.trpg || {};
   const data = state.trpg || { scenarios: [], rules: [], journals: [] };
   const scenarios = Array.isArray(data.scenarios) ? data.scenarios : [];
   const rules = Array.isArray(data.rules) ? data.rules : [];
@@ -939,6 +940,32 @@ export function renderTrpgSection() {
       ② 开跑之后<strong>只有这一局的人</strong>（报过名的、或 DM 直接建过卡的）的消息会惊动 DM，
       旁观者的话照常存档、也留在 DM 的【过去状态】里，但不会把 DM 叫起来。
       两条都只作用于被接管的会话。
+    </div>
+
+    <h4>剧本抽取</h4>
+    <div class="hint" style="margin-bottom:6px">
+      只有<strong>不是剧本格式</strong>的文件（PDF 模组、一段裸设定）才会走抽取：先切成几片分别抽、
+      再合成一份压缩正文，最多 7 次模型调用。<strong>格式本来就对的 <code>.md</code> 一次调用都不发</strong>，
+      下面两个数对它没有任何影响。
+    </div>
+    <div class="field-row">
+      <div class="field"><label>整轮抽取预算（秒）</label>
+        <input type="number" id="cfg-trpg-total-sec" value="${esc(Math.round(Number(t.extractTotalBudgetMs ?? 300000) / 1000))}" />
+        <div class="hint">
+          <strong>整条管线</strong>的死线（60–1800 秒）。每一片都从它倒推，剩下的时间不够一次调用时
+          后面的片就<strong>不发</strong>了（原文仍在 <code>data/trpg/scenarios/&lt;id&gt;.raw/</code>，没丢）。
+          <strong>合适的值取决于你这台机器上的模型有多快</strong> —— 实测一份 7345 字的模组单次调用约 44 秒，
+          5 分钟刚好够两片加一次合成；换个更慢的端点、或更长的模组，就该调大。
+        </div>
+      </div>
+      <div class="field"><label>单次调用上限（秒）</label>
+        <input type="number" id="cfg-trpg-call-sec" value="${esc(Math.round(Number(t.extractCallTimeoutMs ?? 60000) / 1000))}" />
+        <div class="hint">
+          一次模型调用最多等多久（5–120 秒，且<strong>不会超过「整轮预算 − 5 秒」</strong>，保存时自动收紧）。
+          最后那次「合成剧本文件」的调用<strong>一定</strong>分得到完整的一次 —— 它是唯一的交付物，
+          所以逐片抽取最多只用掉「整轮预算 − 这一次」，那一段<strong>不是</strong>第三个旋钮。
+        </div>
+      </div>
     </div>
 
     <h4>剧本</h4>

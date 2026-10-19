@@ -197,6 +197,36 @@ export const DEFAULT_CONFIG = {
     // **没声明**时兜底 —— 见 `src/extra/types.ts` 的 `lifetimeMs`。
     override: {} as Record<string, string>
   },
+  // 「跑团」扩展自己的两个时间旋钮（2026-10-19 加）。
+  //
+  // ── 为什么只有两个 ──
+  //
+  // 一次抽取要用的数其实有三个，但**只有这两个是旋钮**：`extractTotalBudgetMs` 是整条管线的
+  // 死线，`extractCallTimeoutMs` 是单次调用的上限，而 L2（逐片抽取）那一段的子预算永远是
+  // `总预算 - 单次上限` —— 它必须**派生**，否则就能配出"L2 用满时 L3 分不到一整次调用"这种
+  // 坏配置，而 L3 是**唯一的交付物**（它失败等于整轮白跑）。见
+  // `src/extra/trpg/model/limits.ts` 的 `EXTRACT_L2_BUDGET_MS`。
+  //
+  // ── 为什么这两个进了配置（原先写死）──
+  //
+  // 合适的值取决于**这台机器上的模型有多快**：真机实测那份 7345 字的模组，单次调用约 44 秒，
+  // 5 分钟刚好够两片加一次合成；换一个更慢的端点、或一份更长的模组，同一个数就不够了。
+  // 这与 `webSearch.fetchTextMaxChars` 当初变成配置项是同一条理由（"合适的值取决于用户怎么用"）。
+  //
+  // ⚠️ **钳制与归一化在 `extra/trpg/model/limits.ts` 的 `resolveExtractBudget()` 一处**
+  // （同 `imageGen` 那条：这里只放默认值）。**刻意不在 `normalizeConfigShape` 里再写一遍** ——
+  // 那会逼出**第三份**上下限字面量（`core` 不能 import `extra` 的常量，那是反向依赖），
+  // 而三份必然漂移。设置页侧另有一份同口径的钳制，改一处要同时改那边。
+  //
+  // ⚠️ **默认值必须与 `EXTRACT_TOTAL_BUDGET_MS` / `EXTRACT_CALL_TIMEOUT_MS` 逐字相同**：
+  // 一边改了另一边没改，表现是"设置页显示 300 秒、实际按别的数走"。`t-trpg.mjs` 有一条
+  // 断言把两处钉在一起。
+  trpg: {
+    /** 整条抽取管线的死线（毫秒）。60 秒 – 30 分钟。 */
+    extractTotalBudgetMs: 300000,
+    /** 单次模型调用的上限（毫秒）。5 秒 – min(120 秒, 整轮预算 - 5 秒)。 */
+    extractCallTimeoutMs: 60000
+  },
   imageSource: {
     enabled: false,
     traceMoe: { enabled: true, timeoutMs: 15000, minSimilarity: 0.87, maxResults: 3 },
