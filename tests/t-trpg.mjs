@@ -1187,6 +1187,17 @@ const status = (key) => store.read(key);
         model.requests.length === 1 && saves.read('整理过的').scenario.title === '灯塔', viaModel);
       ok('回执里点明"让模型整理过"（它同时解释了两件事：回执为什么慢、内容为什么被重排过）',
         /已让模型整理/.test(viaModel) && /原文 20 字/.test(viaModel), viaModel);
+      // ⚠️ 只印「文本」两个字时，同一批上传里对不上是哪一份（`文本` 既可能是这份 `.md`、
+      // 也可能是随手贴的一段设定），而回执是管理员唯一的凭据 —— 所以来源那一栏要带**文件名**。
+      ok('来源那一栏带上**文件名**（光印格式名的话，管理员对不上自己刚发的是哪一份）',
+        /（来源 文本「f\.md」）/.test(viaModel), viaModel);
+      // 对照：没有名字时**不硬凑** —— 否则回执上会印出「（没有名字的文件）」这种把兜底话术
+      // 当文件名的东西，而那是 `openScenario` 给"下载失败"那句话用的词。
+      model.requests = [];
+      const unnamed = await saveScenario(
+        { media: [{ kind: 'file', name: '', file: '', url }] }, '无名的', saves, { extract: extract(FORM) });
+      ok('（对照）文件没有名字时不硬凑 —— 来源那一栏退回裸的格式名',
+        /（来源 文本）/.test(unnamed) && !/没有名字的文件/.test(unnamed), unnamed);
       ok('退回整理时**明说抽取没成**（只说"整理过"，管理员会以为那份剧本有剧情结构）',
         /剧情抽取没成/.test(viaModel) && /没有剧情结构/.test(viaModel), viaModel);
       // 降级**不产生 `.rule.json`**，所以这一局一条机制都没有 —— 只说"没有剧情结构"

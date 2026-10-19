@@ -54,6 +54,15 @@ import type { ExtractResult } from '../scenario/extract/pipeline.js';
 const SAVE_TIMEOUT_MS = 15000;
 
 /**
+ * 引用里那个文件**没有名字**时的占位。
+ *
+ * 两处认它，所以必须只有一个字面量：`openScenario` 拿它兜底（协议端没给 `name` 也没给 `file`），
+ * `finishScenario` 拿它判断"来源那一栏要不要带上文件名" —— 写成两份的话，回执上会出现
+ * `文本「（没有名字的文件）」` 这种把兜底话术当文件名的东西，而没有任何报错。
+ */
+const NO_FILE_NAME = '（没有名字的文件）';
+
+/**
  * 这条命令的调用闸门（每会话每小时 / 全局每天，见 `SCENARIO_BUDGET`）。
  *
  * ⚠️ **模块级单例是有意的**：滑动窗口的状态必须**跨调用累积**，放进 `execute` 里每次新建
@@ -222,7 +231,7 @@ export async function openScenario(
   if (!file) {
     return { ok: false, message: `引用的那条消息里没有文件。\n${SCENARIO_USAGE}` };
   }
-  const shown = String(file.name ?? '').trim() || String(file.file ?? '').trim() || '（没有名字的文件）';
+  const shown = String(file.name ?? '').trim() || String(file.file ?? '').trim() || NO_FILE_NAME;
   const url = typeof file.url === 'string' ? file.url : '';
   if (!url) {
     return {
@@ -324,7 +333,13 @@ export async function finishScenario(
   ].filter(Boolean).join('、');
   // 来源格式要说出来。**整理过的那一次也要说**：它是"回执为什么慢了"与"内容为什么被重排过"
   // 的唯一线索，不说的话群友只会看到一份与自己手里不一样的剧本，而不知道为什么。
-  const origin = [sourceLabel, ...(doc.pages === undefined ? [] : [`${doc.pages} 页`]),
+  //
+  // ⚠️ **光印「文本」两个字没有信息量**（2026-10-19 补）：同一批上传里常常有好几份文本，
+  // 而回执里只有格式名时，管理员对不上自己刚发的是哪一份（`文本` 既可能是那份 `.md`、
+  // 也可能是随手贴的一段设定）。所以带上**文件名** —— 它与 `openScenario` 的兜底同源
+  // （`NO_FILE_NAME`），没有名字时不硬凑，退回裸的格式名。
+  const originLabel = shown === NO_FILE_NAME ? sourceLabel : `${sourceLabel}「${shown}」`;
+  const origin = [originLabel, ...(doc.pages === undefined ? [] : [`${doc.pages} 页`]),
     ...(doc.encoding && doc.encoding !== 'utf-8' ? [`按 ${doc.encoding} 解码`] : [])].join('，');
   // ⚠️ 判据是 `!analysis` 而不是 `usedModel`：两档都要花调用，但**只有后备那一档是"整理"**。
   // 抽取那一档已经把同一件事说得更准了（`extractedNote` 会报切了几片、用了几次），再补一句
