@@ -151,9 +151,17 @@ export function campaignSummary(campaign: TrpgCampaign, now: number = Date.now()
     const card = playerOf(campaign, qq);
     return card ? `${card.name}（${qq}）` : `${qq}（没建卡）`;
   });
-  const scenes = campaign.log.filter((entry) => entry.kind === 'scene')
-    .map((entry) => entry.text.replace(/^场景：/, '').trim())
-    .filter((line) => line && !line.startsWith('开团：'));
+  // ⚠️ **只收 `场景：` 开头的那一类**（2026-10-19 修）：这一族日志（`kind === 'scene'`）
+  // 里混着三种东西 —— `场景：X`、`开团：《X》`，以及 `旗标：真凶是医生 = 是（暗线）`
+  // （`tools/campaign.ts` 的 `setFlags` 也记成 `scene`）。原先靠"排除 `开团：`"来筛，
+  // 于是**暗线旗标的名字会被当成一处场景印进收团摘要**发进群。改成白名单前缀之后，
+  // 将来再加一类 `scene` 日志也不会意外漏进来。
+  const scenes = campaign.log
+    .filter((entry) => entry.kind === 'scene')
+    .map((entry) => entry.text.trim())
+    .filter((line) => line.startsWith('场景：'))
+    .map((line) => line.replace(/^场景：/, '').trim())
+    .filter(Boolean);
   const secrets = Object.entries(campaign.flags)
     .filter(([, flag]) => !flag.visible).map(([key]) => key);
 
@@ -181,7 +189,13 @@ export function endCampaign(chatKey: string, store: TrpgStore): string {
   if (!campaign) return '这个会话当前没有在进行中的团。';
   const summary = campaignSummary(campaign);
   store.remove(chatKey);
-  return `${summary}\n（这一局的存档已经清掉；战报留着。要再开一局就敲 \`.trpg new <名字>\`）`;
+  // ⚠️ **说清"什么没了、什么还在"**（2026-10-19 补）：删的只是这一局的存档
+  // （`data/trpg/<会话>.json`）；剧本库与它的抽取产物（`.struct.json` / `.rule.json` /
+  // `raw/`）住在 `data/trpg/scenarios/`、**以剧本为键**，`.trpg end` 碰不到它们 ——
+  // 下次用同一份剧本开局**不用重抽**（那本来就是 7 次模型调用）。不说的话，"存档已经清掉"
+  // 会被读成"连剧本也没了"。
+  return `${summary}\n（这一局的存档已经清掉；战报留着，剧本库与它抽出来的结构也留着 —— `
+    + '下次用同一份剧本开局不用重抽。要再开一局就敲 `.trpg new <名字>`）';
 }
 
 // ── 开局（**两个入口共用一个实现**）─────────────────────────────────────────

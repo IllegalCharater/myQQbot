@@ -121,7 +121,10 @@ export function createScenarioCommand({
     try {
       ledger.take(input.chatKey);
     } catch {
-      return '传剧本太频繁了 —— 一小时最多 5 次（每次最多 7 次模型调用，这份额度是一起算的）。'
+      // ⚠️ 单位是**份**（= 敲了几次），不是"几次模型调用"（2026-10-19 澄清）：
+      // 一次触发的成本在 0（格式本来就对）/ 1（后备整理）/ 7（管线）之间浮动，
+      // 而闸门排在下载之前、只知道"敲了一次"。别把这句话改回"5 次调用"。
+      return '传剧本太频繁了 —— 一小时最多 5 份（一份最多 7 次模型调用；格式本来就对的那份一次都不发）。'
         + '过一会儿再传，或者让管理员直接把文件放进 `data/trpg/scenarios/`。';
     }
     // ⚠️ `recordUsage` **放在 `...save` 之后**：它是宿主的口子，不该被测试的注入点顶掉。
@@ -290,8 +293,13 @@ export async function finishScenario(
         return `${shown}：${outcome.message}（退一步只做格式整理也没成：${formatted.message}）`;
       }
       finalText = formatted.text;
+      // ⚠️ **必须说"特殊规则不生效"**（2026-10-19 补）：降级这条路**不产生 `.rule.json`**，
+      // 所以这一局确实一条机制都没有。原先只说"没有剧情结构、DM 只能从正文里自己读"——
+      // 读者会把那当成"叙事少点细节"，而真相是"整本模组的规矩都不算数"。
+      // ⚠️ 群友可见，不许有 Markdown 的 `**`（5q 段会扫这个目录）。
       extractionNote = `剧情抽取没成（${outcome.message}），只做了格式整理 —— `
-        + '这份剧本没有剧情结构，DM 只能从正文里自己读。';
+        + '这份剧本没有剧情结构，DM 只能从正文里自己读。'
+        + '这一局不会应用剧本里的特殊规则；要重试就把原文件重新发一次、引用它敲 `.trpg scenario`。';
     }
   }
   const saved = saveScenarioText(name, { ...doc, text: finalText }, scenarios);

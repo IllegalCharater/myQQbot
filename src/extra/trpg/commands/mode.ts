@@ -28,6 +28,17 @@ export function createModeCommand({ store, modes, command }: ModeCommandDeps): C
     if (next === mode) return `已经是${MODE_LABEL[mode]}了。`;
     modes.write(input.chatKey, next);
     const kept = next === 'assistant' && store.read(input.chatKey) ? '这一局的存档留着，切回 DM 就接着跑。' : '';
-    return `已切到${MODE_LABEL[next]}，下一轮运行生效。${kept}`;
+    // ── 切到助手模式时**明说 @ 也不会回**（2026-10-19 加）──
+    //
+    // 那个形态下 `intercept` 把每一条认不出骰子的消息都静默拦下（`{}`），包括 @ 与点名 ——
+    // 这是"仅能执行 onedice 指令"的字面意思，但对刚切过去的群友**完全是反直觉的**：
+    // 他们会以为机器人掉线了。零成本的一句说明比让人猜好。
+    //
+    // ⚠️ 群友可见，不许有 Markdown 的 `**`（QQ 不认）。
+    const assistantNote = next === 'assistant'
+      ? '\n这个模式下我只认骰子表达式（3d6、d20、2d6+3、4d6kh3…）—— @ 我、跟我说话我都不会回。'
+        + '\n要聊天请切回 `.trpg mode DM`。'
+      : '';
+    return `已切到${MODE_LABEL[next]}，下一轮运行生效。${kept}${assistantNote}`;
   };
 }

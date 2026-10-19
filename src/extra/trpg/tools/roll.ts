@@ -99,7 +99,24 @@ export function createRollHandler({ store, rules, rng, gates }: RollHandlerDeps)
         return diceError(error);
       }
       const head = `${line}${reason ? `（${reason}）` : ''}`;
-      const body = `${head}${note ? `\n${note}` : ''}`;
+      // ── `skill` 漏填要说出来（2026-10-19 第三轮）──
+      //
+      // 填不填 `skill` 决定这一局的 `{op:'skill'}` 机制生不生效，而**玩家敲 `.ra <技能>`
+      // 一定带着它**。漏填时回执不能与正常检定长得一模一样：那会让模型以为自己掷了一次完整
+      // 的技能检定，而两条路判出的档可能不同（实测过：一边成功、一边失败），且它没有任何
+      // 线索可以自纠。
+      //
+      // ⚠️ **这一句只进"给模型的那一份"**：写进 `campaign.log` 会在 `.trpg status` 的
+      // "最近的检定"里冒出一句玩家看不懂的元信息，而它对玩家没有任何用处。
+      //
+      // 判据是**一句固定的话**（`没填 skill` 这个前缀），不是某个调试字段：`ToolResult.content`
+      // 是字符串，加一个 `skillUsed: false` 之类的 token 只是给模型多一层噪音 —— 而断言需要
+      // 的是一个稳定的字面量，这句话就是那个字面量。
+      const hint = structured && !skill
+        ? '\n⚠ 这次检定没填 skill —— 技能相关的特殊规则没有生效（玩家敲 `.ra <技能>` 会生效，'
+          + '两边可能判得不一样）。下一次请填上，例如 skill: "侦查"。'
+        : '';
+      const body = `${head}${note ? `\n${note}` : ''}${hint}`;
       const logged = `${head}${loggedNote ? `\n${loggedNote}` : ''}`;
       appendLog(campaign, structured ? 'check' : 'roll', logged);
       return settle(ctx, 'roll', actor || '判定', args,

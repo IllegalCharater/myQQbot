@@ -11,7 +11,7 @@
 // 而那正是这两道闸门要拦的东西（`test` 里那句"新 ctx 即新回合"也钉不住）。
 import { err, errorMessage } from '../../../agent/tools/shared.js';
 import { clampInt, text, MAX_NAME_CHARS, MAX_STATS_PER_CHARACTER, MAX_STAT, MIN_STAT } from '../model/limits.js';
-import { mirrorLog } from '../model/campaign.js';
+import { appendLog, mirrorLog } from '../model/campaign.js';
 import { advanceAfterActions } from '../model/combat.js';
 import { createLedger, consume, recall, refund, remember, PRIMARY_SOURCE } from '../rules/economy.js';
 import { DiceError } from '../rules/dice.js';
@@ -128,6 +128,18 @@ export function createGates(store: TrpgStore, journal: JournalPort | null = null
     const used = spent.get(ctx);
     spent.delete(ctx);
     if (!result.isError) {
+      // ── 额外行动留痕（2026-10-19 第三轮）──
+      //
+      // `actionSource` 是**自由文本、声明即接受**：代码只做两件事 —— 非空就跳过去重、
+      // 计入"额外行动"桶（上限 `MAX_EXTRA_ACTIONS`）。"这个来源是不是规则书允许的"代码判不了
+      // （规则表里没有那一栏），所以至少让它**在日志里留一条**：事后有人问"他为什么这一回合
+      // 动了两次"，翻得到那一行。
+      //
+      // ⚠️ **必须 `visible: false`**：`state` 类日志会镜像进战报，而战报是发进群的文件。
+      // "额外行动"是 DM 的记账，不是玩家该看到的东西（同 `tools/campaign.ts` 的 `sceneNotes`）。
+      if (used && used.source !== PRIMARY_SOURCE) {
+        appendLog(campaign, 'state', `额外行动：${used.source}（${used.actor}）`, false);
+      }
       // 战斗指针在**落盘之前**推进：它和这一轮的动作是同一件事的两半，分两次写就会留下
       // 一个"日志里记了他打了人、指针还停在他身上"的中间态（那次写入崩了的话）。
       advanceAfterActions(campaign, actors);

@@ -22,7 +22,7 @@ const { ok, done } = checker();
 // 上层一律走**桶文件**（`web/` 路由也是这么用的）；只有纯函数层 `rules/` 直接取内部实现 ——
 // 那是它存在的意义（能脱离平台独立测试），也是这个套件大半断言的对象。
 const {
-  TrpgStore, appendLog, campaignFile, clampInt, emptyCampaign, findCharacter, normalizeCampaign, text,
+  TrpgStore, appendLog, campaignFile, campaignSummary, clampInt, emptyCampaign, findCharacter, normalizeCampaign, text,
   formatCheck, formatRoll, renderForModel, renderForPlayers, renderStatusCard, describeStruct,
   renderBriefing, renderRuleNotes,
   createHandlers, createRuntime, saveScenario, scenarioNameFromFile,
@@ -376,6 +376,20 @@ const status = (key) => store.read(key);
     !/已经做过这件事/.test(body(await call('roll', rollCtx, { expr: '1d20', reason: '搜索' }))));
   ok('声明了 actionSource 才放行同参数重复（规则允许的额外行动）',
     !/已经做过这件事/.test(body(await call('roll', rollCtx, { expr: '1d20', reason: '察觉', actionSource: 'extra_attack' }))));
+  // ⚠️ `actionSource` 是**自由文本、声明即接受** —— 代码判不了"规则书允不允许这个来源"
+  // （规则表里没有那一栏）。所以至少要**留痕**（2026-10-19）：事后有人问"他为什么这一回合
+  // 动了两次"，翻得到那一行。留痕本身是 `visible:false`（战报要发进群）。
+  //
+  // ⚠️ 必须**带 `actor`**：不带 actor 的 `roll` 不占配额（`quota: Boolean(actor)`），
+  // 也就不走"额外行动"那条账 —— 拿它去验留痕只会验到一个空转。
+  await call('roll', fakeCtx(key), { expr: '1d20', actor: '阿飞', actionSource: 'multiattack' });
+  const extraLogged = (status(key)?.log ?? []).find((entry) => entry.text.startsWith('额外行动：'));
+  ok('声明了 `actionSource` 会在日志里留一条（含来源与行动者）',
+    extraLogged?.text === '额外行动：multiattack（阿飞）' && extraLogged?.visible === false,
+    JSON.stringify(extraLogged));
+  ok('那条留痕**不进战报**（战报是发进群的文件，额外行动是 DM 的记账）',
+    !new JournalStore().read(key).some((entry) => entry.text.startsWith('额外行动：')),
+    JSON.stringify(new JournalStore().read(key).map((entry) => entry.text)));
   ok('去重按回合算：新的 ctx 就是新的一回合',
     !/已经做过这件事/.test(body(await call('roll', fakeCtx(key), { expr: '1d20', reason: '察觉' }))));
 
@@ -1175,6 +1189,10 @@ const status = (key) => store.read(key);
         /已让模型整理/.test(viaModel) && /原文 20 字/.test(viaModel), viaModel);
       ok('退回整理时**明说抽取没成**（只说"整理过"，管理员会以为那份剧本有剧情结构）',
         /剧情抽取没成/.test(viaModel) && /没有剧情结构/.test(viaModel), viaModel);
+      // 降级**不产生 `.rule.json`**，所以这一局一条机制都没有 —— 只说"没有剧情结构"
+      // 会被读成"叙事少点细节"，而真相是"整本模组的规矩都不算数"。
+      ok('而且**明说特殊规则不生效**，并给出重试的路',
+        /不会应用剧本里的特殊规则/.test(viaModel) && /重新发一次/.test(viaModel), viaModel);
 
       model.requests = [];
       model.script = [{ content: '我做不到' }];
@@ -1409,14 +1427,20 @@ const status = (key) => store.read(key);
 
   ok('`/模式` 不带参数 → 报当前模式与两条可用命令',
     /当前：/.test(String(await tell('.trpg mode'))) && /助手/.test(String(await tell('.trpg mode'))));
+  const switched = String(await tell('.trpg mode 助手'));
   ok('`/模式 助手` → 记住，并回一句"下一轮生效"',
-    /已切到/.test(String(await tell('.trpg mode 助手'))) && modes.read('group:mode-c') === 'assistant');
+    /已切到/.test(switched) && modes.read('group:mode-c') === 'assistant');
+  // 那个形态下认不出骰子的消息（含 @ 与点名）**全部静默拦下** —— 对刚切过去的人是反直觉的，
+  // 所以回执必须自己说出来（零成本，不消耗模型调用）。
+  ok('切到助手模式时**明说 @ 也不会回**',
+    /@ 我、跟我说话我都不会回/.test(switched), switched);
   ok('助手模式下不带参数敲 `/跑团` → 给的是**这个模式怎么用**，不是一张"还没开团"的空状态卡',
     /发一个骰子表达式/.test(String(await tell('.trpg status'))) && !/还没有开团/.test(String(await tell('.trpg status'))));
   ok('助手模式下那条回复指向的是 `.trpg mode DM`（写成旧词形的话群友照抄就切不回来）',
     /`\.trpg mode DM`/.test(String(await tell('.trpg status'))));
-  ok('`/模式 DM` → 切回来', /已切到/.test(String(await tell('.trpg mode DM')))
-    && modes.read('group:mode-c') === 'dm');
+  const backToDm = String(await tell('.trpg mode DM'));
+  ok('`/模式 DM` → 切回来', /已切到/.test(backToDm) && modes.read('group:mode-c') === 'dm');
+  ok('对照：切回 DM 不附那句（它不是所有模式的通用提示）', !/@ 我/.test(backToDm), backToDm);
   ok('重复切到同一个模式时说清"已经是了"，不假装做了什么',
     /已经是/.test(String(await tell('.trpg mode DM'))) && String(await tell('.trpg mode DM')).includes(MODE_LABEL.dm));
   ok('不认识的模式 → 列出可用的两个（不默默当成某一个）',
@@ -1894,6 +1918,9 @@ const status = (key) => store.read(key);
   const started = String(await as(A, '.trpg start'));
   ok('全员确认之后 `.trpg start` 真的把这一局推成 **`active`**',
     now()?.status === 'active' && /开跑/.test(started), started);
+  // 开跑之后群里会安静（`.trpg start` 不唤醒模型），所以回执要**告诉新手该干什么**。
+  ok('`.trpg start` 的回执给出第一个动作的例子（"直接说话就行"对没跑过团的人等于没说）',
+    /比如描述你的第一个行动/.test(started), started);
   ok('已经在跑时再 `.trpg start` 说一句"已经在跑了"', /已经在跑/.test(String(await as(A, '.trpg start'))));
   // 这次状态迁移对模型是**不可见**的（`.trpg start` 落成已读历史、不唤醒模型，而
   // `renderForModel` 只在 `preparing` 时多一行）—— 日志是它下一轮唯一的线索。
@@ -1940,6 +1967,10 @@ const status = (key) => store.read(key);
     && /灯塔一层·门厅/.test(ended) && /真凶是守塔人/.test(ended), ended);
   ok('收团**清掉了这一局的存档**（下一局才起得来 —— 否则只能靠 restart 清）',
     now() === null && /存档已经清掉/.test(ended));
+  // 删的只是**存档**：剧本库与抽取产物以剧本为键，`.trpg end` 碰不到它们 ——
+  // 不说的话"存档已经清掉"会被读成"连剧本也没了、下次还得重抽"。
+  ok('回执说清"什么还在"：战报、剧本库与抽出来的结构都留着（下次用同一份剧本不用重抽）',
+    /剧本库与它抽出来的结构也留着/.test(ended), ended);
   ok('没有局时再 `.trpg end` 说一句"没有在进行中的团"',
     /没有在进行中的团/.test(String(await as(A, '.trpg end'))));
 
@@ -1986,6 +2017,31 @@ const status = (key) => store.read(key);
   ok('append-only：再读一次，前面的行**逐字不变**',
     JSON.stringify(again.slice(0, lines.length)) === JSON.stringify(lines));
   ok('**收团不清战报**（清掉的只是 `campaign.log` 那份环形缓冲）', journal.read(chain).length === lines.length);
+}
+
+// ── 5h2. 收团摘要的"走过的场景"只收 `场景：`（2026-10-19 修）────────────────────
+//
+// `kind:'scene'` 那一族里混着三种东西：`场景：X`、`开团：《X》`、以及
+// `旗标：真凶是医生 = 是（暗线）`（`tools/campaign.ts` 的 `setFlags` 也记成 `scene`）。
+// 原先靠"排除 `开团：`"来筛，于是**暗线旗标的名字被当成一处场景印进收团摘要**发进群 ——
+// 一条真实的隐藏泄漏（勘察确认）。改成白名单前缀之后，将来再加一类 `scene` 日志也不会漏。
+{
+  const c = emptyCampaign('group:summary', { title: '摘要团', system: '', rule: 'generic' });
+  appendLog(c, 'scene', '开团：《摘要团》 ｜ 检定规则：通用（掷高为佳）');
+  appendLog(c, 'scene', '场景：码头');
+  appendLog(c, 'scene', '旗标：真凶是医生 = 是（暗线）');
+  appendLog(c, 'scene', '旗标-：旧线索');
+  c.flags['真凶是医生'] = { value: '是', visible: false };
+  const text = campaignSummary(c);
+  // 判据要**只看"走过的场景"那一行**：暗线名字在本段的另一处（"没解开的事"）是**该印**的，
+  // 拿整段去搜会让这条断言自相矛盾（第一版就是这么假红的）。
+  const sceneLine = text.split('\n').find((line) => line.startsWith('走过的场景')) ?? '';
+  ok('"走过的场景"**只收 `场景：` 开头**（暗线旗标名不许混进来）',
+    /走过的场景：码头/.test(sceneLine) && !sceneLine.includes('真凶是医生') && !sceneLine.includes('旧线索'),
+    text);
+  ok('对照：`开团：` 也不进"走过的场景"（它本来就不是一处场景）', !text.includes('开团'), text);
+  ok('"没解开的事"仍按设计列出暗线**名字**（收团时的仪式感，不是泄漏 —— 见文档的已知取舍）',
+    /没解开的事（原本的暗线）：真凶是医生/.test(text), text);
 }
 
 // ── 5i. 检定与暗骰（P3）：.ra 公开 / .rh 暗骰 / .st 改属性 ─────────────────────
@@ -2511,6 +2567,24 @@ const status = (key) => store.read(key);
     && !masked.includes('甲'), masked);
   ok('对照组：模型那一份**照样**看得到他（藏的是玩家，不是 DM）',
     runtime.prompt(K).body[2].includes('轮到「甲」'));
+
+  // ── 命令这条路：开打之后被藏起来的人**也不许**印名字（2026-10-19 修）──
+  //
+  // `startCombat` 建序时按 `discovered` 滤过一遍，但 DM 完全可以在开打之后把某人改成
+  // `visible:false`。那时玩家视角（`.trpg status` → `combatLines`）会滤掉他，而这一族命令
+  // 原先**照印** —— 同一份状态、两个地方两个答案，且没有任何报错。
+  const afterHide = String(await as('.combat next'));
+  ok('`.combat next` 与玩家视角同源：被藏起来的人不出现在"轮到"与顺序里',
+    !afterHide.includes('甲') && /轮到「/.test(afterHide), afterHide);
+
+  // 再把**剩下的人都藏起来**：这时"轮到「X」"与顺序都要**整句不出现**
+  // （只滤名单、照印那一句，等于用一个名字把刚藏起来的人说出来）。
+  const hideMore = new TrpgStore().read(K);
+  for (const card of hideMore.characters) card.discovered = false;
+  new TrpgStore().write(hideMore);
+  const allHidden = String(await as('.combat next'));
+  ok('所有参战者都被藏起来时，回执里一个名字都不出现（也不是印出一个空壳）',
+    !allHidden.includes('轮到') && !/甲|乙|丙/.test(allHidden), allHidden);
 }
 
 // ── 5o. 战报的可见性（P6）：藏起来的东西不进战报 ─────────────────────────────
@@ -2934,13 +3008,22 @@ const status = (key) => store.read(key);
   const withSkill = await callRt('roll', fakeCtx('group:981'),
     { expr: '1d100', target: 45, actor: '阿飞', skill: '侦查' });
   const noSkill = await callRt('roll', fakeCtx('group:981'),
-    { expr: '1d100', target: 45, actor: '阿飞', reason: '同一件事，只是没填 skill' });
+    { expr: '1d100', target: 45, actor: '阿飞', reason: '同一件事，只是没给技能' });
   const raSkill = await tell('.ra 侦查', 'group:981');
   ok('`roll` 填了 skill → 技能上的机制生效（45 − 20 = 25）',
     body(withSkill).includes('｜ 对 25 →') && body(withSkill).includes('技能：侦查'), body(withSkill));
   ok('负对照：同一个调用**不填** skill → 目标值一点没动（证明是**这个参数**在起作用）',
     body(noSkill).includes('｜ 对 45 →') && !body(noSkill).includes('这一局的规则改了目标值'),
     body(noSkill));
+  // ⚠️ 漏填要说出来（2026-10-19）：不说的话回执与一次完整的技能检定**逐字同形**，
+  // 模型没有任何线索可以自纠，而两条路判出的档可能不同。
+  ok('漏填 skill 时**明说**（这是模型自纠的唯一线索）',
+    body(noSkill).includes('没填 skill'), body(noSkill));
+  ok('对照：填了 skill 就不提这句（否则它就成了每轮噪音）',
+    !body(withSkill).includes('没填 skill'), body(withSkill));
+  ok('那句提醒**不进日志** —— `.trpg status` 会把 roll / check 日志印给全群，元信息在那儿只是噪音',
+    (status('group:981')?.log ?? []).every((entry) => !entry.text.includes('没填 skill')),
+    JSON.stringify((status('group:981')?.log ?? []).map((entry) => entry.text)));
   ok('**两条路给出同一个目标值**（这才是要修的那件事）：`.ra 侦查` 与带 skill 的 roll 都是「对 25」',
     raSkill.includes('｜ 对 25 →') && body(withSkill).includes('｜ 对 25 →'),
     `${raSkill} ｜ ${body(withSkill)}`);
@@ -3308,6 +3391,10 @@ const status = (key) => store.read(key);
   const blocked = String(await send('group:budget', '.trpg scenario 灯塔'));
   ok('`.trpg scenario` 的闸门：额度用完时**整条命令不做**，并说清过一会儿再来',
     /传剧本太频繁/.test(blocked) && /data\/trpg\/scenarios/.test(blocked), blocked);
+  // 单位是**份**（敲了几次），不是"几次模型调用" —— 一次触发的成本在 0 / 1 / 7 之间浮动，
+  // 而闸门排在下载之前、只知道"敲了一次"。这句话改回"5 次调用"就是回到了那个歧义。
+  ok('限流说的是**份**（触发次数），不是"几次模型调用"',
+    /最多 5 份/.test(blocked) && !/最多 5 次/.test(blocked), blocked);
   ok('闸门**按会话**算（另一个群照常放行）',
     /协议端没给下载地址/.test(String(await send('group:budget-2', '.trpg scenario 灯塔'))));
   ok('不带名字、也没引用文件时（列剧本库）根本不记账 —— 那一步一次模型调用都不发',

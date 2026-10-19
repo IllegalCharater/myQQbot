@@ -41,11 +41,28 @@ export interface CombatCommandDeps {
   command: string;
 }
 
-/** 顺序的紧凑写法（**群友可见**：标出倒下的，不印数值）。 */
+/**
+ * 玩家**看得见的**参战者。
+ *
+ * ⚠️ **与 `render/players.ts` 的 `combatLines` 同一条判据**：先攻顺序是公开的，但"这个人
+ * 存在"仍然可以是秘密。`startCombat` 建序时已经按 `discovered` 滤过一遍，可 DM **完全可以在
+ * 开打之后**用 `character` 把某人改成 `visible: false` —— 那时这一族命令若不滤，就会把
+ * 那个人名原样印进群，而玩家视角那份（`.trpg status`）会滤掉。**同一份状态，两个地方两个答案**，
+ * 而它不会有任何报错（2026-10-19 勘察确认的真泄漏）。
+ */
+function visibleOrder(campaign: TrpgCampaign): string[] {
+  const seen = new Set(
+    campaign.characters.filter((card) => card.discovered).map((card) => card.name)
+  );
+  return (campaign.combat?.order ?? []).filter((name) => seen.has(name));
+}
+
+/** 顺序的紧凑写法（**群友可见**：标出倒下的，不印数值）。顺序为空时返回空串。 */
 function orderLine(campaign: TrpgCampaign): string {
   const combat = campaign.combat;
   if (!combat) return '';
-  return `顺序：${formatOrder(combat.order, immobileNames(campaign, combat))}`;
+  const order = visibleOrder(campaign);
+  return order.length ? `顺序：${formatOrder(order, immobileNames(campaign, combat))}` : '';
 }
 
 export function createCombatCommand(deps: CombatCommandDeps): CommandHandler {
@@ -83,7 +100,17 @@ export function createCombatCommand(deps: CombatCommandDeps): CommandHandler {
       if (!campaign.combat) return '现在没有在进行中的战斗 —— 先敲 `.combat start` 排一次先攻。';
       advanceCombat(campaign);
       flush();
-      return `轮到「${currentActor(campaign.combat)}」。\n${orderLine(campaign)}`;
+      // ⚠️ 当前行动者**没被玩家见过**时，"轮到「X」"整句不出现 —— 只滤名单、照印那一句，
+      // 等于用一个名字把刚藏起来的人说出来（同 `render/players.ts` 的 `combatLines`）。
+      const order = visibleOrder(campaign);
+      const current = currentActor(campaign.combat);
+      const lines: string[] = [];
+      if (order.includes(current)) lines.push(`轮到「${current}」。`);
+      const compact = orderLine(campaign);
+      if (compact) lines.push(compact);
+      return lines.length
+        ? lines.join('\n')
+        : '（这一场里还没有大家见过的人 —— 顺序只在玩家见过的人之间公布）';
     }
 
     // sub=start：规则表坏了（或这一局的规则扩展编译不过）就**拒绝**，不换一套顶上去（同

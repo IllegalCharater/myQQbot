@@ -135,7 +135,8 @@ export function createStartCommand({ store, journal, command }: SessionCommandDe
     store.write(campaign);
     mirrorLog(campaign, beforeSeq, journal ?? null);
     return `《${campaign.title}》开跑！${campaign.players.length} 位玩家，`
-      + `${campaign.characters.length} 张人物卡。\n接下来直接说话就行 —— 我会接着往下讲。`;
+      + `${campaign.characters.length} 张人物卡。\n接下来直接说话就行 —— 比如描述你的第一个行动，`
+      + '或者问问大家想做什么。';
   };
 }
 
