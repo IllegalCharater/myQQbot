@@ -338,7 +338,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     // 判定、解析、入队与即时回执**全在 `web/onebot/commands.ts` 一处**（那张表是唯一事实源），
     // 这里只用同一个判据决定两件事：要不要并入引用附件、要不要落成已读历史。
     // 判据若在这里另写一份，漂移的表现是"命令没被认出来、消息进了 LLM"，不报任何错。
-    const slashCommand = commands.isCommandEntry(commandText, chatKey);
+    const slashCommand = commands.isCommandEntry(commandText, chatKey, mentionedSelf);
     if (slashCommand && repliedMedia.length) {
       // 引用的那条消息里的附件要并进来：`/转写` 靠它取引用视频，`/画` 靠它取参考图（图生图）。
       media.push(...repliedMedia);

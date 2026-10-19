@@ -148,6 +148,9 @@ await ingest.handle({
   post_type: 'message', message_type: 'group', group_id: 123, user_id: 456,
   message_id: 789, sender: { user_id: 456, nickname: '测试者' },
   message: [
+    // 群里敲主流程命令要**先 @ 机器人**（2026-10-19 起），所以夹具里这一条必须有 at 段 ——
+    // 少了它这条消息根本不是命令，会静默地走普通消息那条路（下面那些断言会一起红）。
+    { type: 'at', data: { qq: '999999' } },
     { type: 'text', data: { text: '/转写' } },
     { type: 'video', data: { url: 'https://example.com/from-media.mp4', file: 'fixture.mp4' } }
   ]
@@ -223,6 +226,20 @@ ok('窗口从存档重播后仍排除 /转写',
     && forwardedToAgent.length === before3.forwarded + 1,
     JSON.stringify({ before3, after: count() }));
 
+  // 边界：`@全体成员` 也**不算**"@ 了机器人"（判据是 `at` 段的 qq 逐字等于 `selfId`，
+  // 而它是字符串 `'all'`）。于是这类消息同样进 LLM —— 这是"只掐指向自己的 @"那条边界的
+  // 直接推论，写在这里免得下一个人以为漏了一种渲染形态。
+  const before4 = count();
+  await send(794, [
+    { type: 'at', data: { qq: 'all' } },
+    { type: 'text', data: { text: ' /转写' } },
+    video('at-all')
+  ]);
+  ok('边界：`@全体成员 /转写` 不算命令（`qq:all` 不等于 selfId），照常交给模型',
+    enqueuedCommands.length === before4.enqueued
+    && forwardedToAgent.length === before4.forwarded + 1,
+    JSON.stringify({ before4, after: count() }));
+
   // 对照：selfId 还没握手拿到（空串）时退回改动前的行为，而不是"猜着掐"。
   const noSelfForwarded = [];
   const noSelfIngest = createIngest({
@@ -285,7 +302,11 @@ const cardIngest = createIngest({
 await cardIngest.handle({
   post_type: 'message', message_type: 'group', group_id: 123, user_id: 456,
   message_id: 790, sender: { user_id: 456, nickname: '测试者' },
-  message: [{ type: 'reply', data: { id: '789' } }, { type: 'text', data: { text: '/转写' } }]
+  message: [
+    { type: 'reply', data: { id: '789' } },
+    { type: 'at', data: { qq: '999999' } },
+    { type: 'text', data: { text: '/转写' } }
+  ]
 });
 ok('回复 B 站视频卡片发送 /转写，会从被引用卡片提取链接并立即入队',
   cardCommands.length === 1 && cardCommands[0].url === bilibiliCardUrl
@@ -378,7 +399,11 @@ async function cardIngestFor(groupId, rawSegments) {
   await ingest.handle({
     post_type: 'message', message_type: 'group', group_id: groupId, user_id: 456,
     message_id: 791, sender: { user_id: 456, nickname: '测试者' },
-    message: [{ type: 'reply', data: { id: '789' } }, { type: 'text', data: { text: '/转写' } }]
+    message: [
+      { type: 'reply', data: { id: '789' } },
+      { type: 'at', data: { qq: '999999' } },
+      { type: 'text', data: { text: '/转写' } }
+    ]
   });
   return { commands: enqueued, replies };
 }

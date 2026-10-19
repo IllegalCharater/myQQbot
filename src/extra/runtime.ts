@@ -463,6 +463,10 @@ export class ExtrasRuntime {
           // 每个解析器只需要认识主词（见 `canonicalize`）。
           out.push({
             names: spec.names,
+            // ⚠️ **必须带上**：`commandDefs` 是**重新构造**命令对象的（不是把 spec 原样递出去），
+            // 漏了它，扩展声明的 `requiresMention: false` 会被静默丢掉 —— 表现是"跑团那族
+            // 群里不 @ 就敲不动"，而声明看起来完全正确。探针实测抓到过一次。
+            requiresMention: spec.requiresMention !== false,
             run: (input) => this.#runCommand(entry.id, spec.names[0], input)
           });
           continue;
@@ -475,6 +479,9 @@ export class ExtrasRuntime {
           for (const sub of subs) {
             out.push({
               names: [`${name} ${sub}`],
+              // 同上面那条：展开出来的子命令也要带上声明，否则 `.trpg new` 与 `.trpg` 的
+              // @ 要求会不一样（一个免 @、一个要 @）—— 那种不一致没人查得出来。
+              requiresMention: spec.requiresMention !== false,
               run: (input) => this.#runCommand(entry.id, `${canonical} ${sub}`, input)
             });
           }

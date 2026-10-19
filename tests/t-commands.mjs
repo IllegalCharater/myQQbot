@@ -268,10 +268,10 @@ console.log('\n── 扩展命令与接管模式 ──');
     // 两张不同的表 —— 漏了这一步的表现是"接管变成了全局的"，谁也不报错。
     const perChat = createCommandDispatcher((chatKey) => ({ override: chatKey === 'group:100', commands: [] }), extrasPort);
     ok('接管按会话隔离：A 群让位、B 群照常（`/能力` 两边都在）',
-      perChat.isCommandEntry('/画 一只猫', 'group:100') === false
-      && perChat.isCommandEntry('/画 一只猫', 'group:200') === true
-      && perChat.isCommandEntry('/能力', 'group:100') === true
-      && perChat.isCommandEntry('/能力', 'group:200') === true);
+      perChat.isCommandEntry('/画 一只猫', 'group:100', true) === false
+      && perChat.isCommandEntry('/画 一只猫', 'group:200', true) === true
+      && perChat.isCommandEntry('/能力', 'group:100', true) === true
+      && perChat.isCommandEntry('/能力', 'group:200', true) === true);
   }
   {
     // `/能力 加载` 必须把**敲命令的那个会话**传下去 —— 接管按会话隔离，少了它就装不上。
@@ -335,24 +335,27 @@ console.log('\n── 扩展命令与接管模式 ──');
       String(logUsage.sent.at(-1)?.message).includes('/能力 加载'), JSON.stringify(logUsage.sent));
   }
 
-  // ── 群里装载/卸载必须 @ 机器人（2026-10-19，用户要求）────────────────────
+  // ── 群里的 @ 闸门（2026-10-19，用户要求）──────────────────────────────────
   //
-  // 判据读的是 `CommandInput.mentionedSelf`，**不是 `text`**：开头那串 @ 已经被 ingest
-  // 掐掉了（`stripLeadingSelfMentions`），从文本里根本看不出 @ 过 —— 写错这一步的表现是
-  // "群里 @ 了也照样拒绝"，而它在套件里只有这一组能拦住。
+  // 规则：**主流程斜杠命令在群里一律要先 @ 机器人**（`/能力` `/转写` `/画` `/漫画`），
+  // **扩展自己的命令由 `spec.requiresMention` 决定**（缺省要 @）；私聊一律不受限。
+  // **没 @ 时返回 `false` —— 不是"认出但拒绝"，是压根不是命令**（用户选的"完全不管"）：
+  // 消息照常落档、照常参与响应判定，只是不进命令层、不回执。
   {
     const plain = createCommandDispatcher(() => ({ override: false, commands: [] }), extrasPort);
+
     const before = extrasPort.loads.length;
     const { deps: dNoAt, log: logNoAt } = deps();
+    const recognized = plain.isCommandEntry('/能力 加载 x', 'group:10001', false);
     const handled = await plain.handleCommandEntry(input('/能力 加载 x', { mentionedSelf: false }), dNoAt);
-    ok('★ 群里没 @ 我：`/能力 加载` **仍然是命令**（落成已读、不静默进 LLM），但不装载',
-      handled === true && extrasPort.loads.length === before
-      && String(logNoAt.sent.at(-1)?.message).includes('先 @ 我一下'),
-      JSON.stringify({ handled, loads: extrasPort.loads, sent: logNoAt.sent }));
+    ok('★ 群里没 @ 我：`/能力 加载` **压根不是命令**（判据与处理都返回 false，不回执、不装载）',
+      recognized === false && handled === false && extrasPort.loads.length === before
+      && logNoAt.sent.length === 0,
+      JSON.stringify({ recognized, handled, sent: logNoAt.sent }));
 
     const { deps: dAt, log: logAt } = deps();
     await plain.handleCommandEntry(input('/能力 加载 x', { mentionedSelf: true }), dAt);
-    ok('对照：@ 了就真的装载（回执把运行时那句话原样带回群里）',
+    ok('对照：@ 了就照常装载（回执把运行时那句话原样带回群里）',
       extrasPort.loads.length === before + 1
       && String(logAt.sent.at(-1)?.message).includes('已加载'), JSON.stringify(logAt.sent));
 
@@ -364,21 +367,54 @@ console.log('\n── 扩展命令与接管模式 ──');
       extrasPort.loads.length === beforeDm + 1
       && String(logDm.sent.at(-1)?.message).includes('已加载'), JSON.stringify(logDm.sent));
 
-    // 裸 `/能力`（看列表，只读）不要求 @。列表里印的命令**必须照抄就能用**，所以
-    // `@我` 只出现在说明句里、不拼进命令行 —— 把它拼进去的话，用户照着打出来的是
-    // `@我 /能力 加载 x`（@ 是普通文本），命令词不在开头，**静默失效**。
+    // 别名走的是同一条命令对象（`canonicalize` 先把 `/扩展` 换回 `/能力` 再交给 run），
+    // 所以闸门对它同样成立 —— 漏了这条就等于"换个叫法就能绕过"。
+    const beforeAlias = extrasPort.unloads.length;
+    const { deps: dAliasNoAt, log: logAliasNoAt } = deps();
+    const aliasHandled = await plain.handleCommandEntry(input('/扩展 卸载 x', { mentionedSelf: false }), dAliasNoAt);
+    ok('别名 `/扩展` 同样受 @ 闸门管（换个叫法绕不过去）',
+      aliasHandled === false && extrasPort.unloads.length === beforeAlias && logAliasNoAt.sent.length === 0,
+      JSON.stringify(logAliasNoAt.sent));
+
+    // 裸 `/能力`（看列表）**也要 @** —— 它是同一条命令，拆一半只会让人困惑。
+    const { deps: dListNoAt, log: logListNoAt } = deps();
+    await plain.handleCommandEntry(input('/能力', { mentionedSelf: false }), dListNoAt);
+    ok('裸 `/能力`（看列表）在群里同样要 @（同一条命令，不拆一半）',
+      logListNoAt.sent.length === 0, JSON.stringify(logListNoAt.sent));
+
     const { deps: dList, log: logList } = deps();
-    await plain.handleCommandEntry(input('/能力', { mentionedSelf: false }), dList);
+    await plain.handleCommandEntry(input('/能力', { mentionedSelf: true }), dList);
     const listText = String(logList.sent.at(-1)?.message ?? '');
-    ok('裸 `/能力` 看列表不要求 @；命令行进的是能照抄的写法，@ 的要求单独一句说明',
+    ok('@ 了之后列表照常出来，且命令行进的是**能照抄**的写法（`@我` 只出现在说明句里）',
       listText.includes('假扩展') && listText.includes('　→ /能力 加载 fake')
-      && !listText.includes('@我 /能力') && listText.includes('先 @ 我一下'), listText);
+      && !listText.includes('@我 /能力') && listText.includes('先 @ 我'), listText);
 
     const { deps: dListDm, log: logListDm } = deps();
     await plain.handleCommandEntry(input('/能力', { chatKey: 'private:777' }), dListDm);
     ok('对照：私聊的列表里不提 @（那里根本没有 @ 这回事）',
-      !String(logListDm.sent.at(-1)?.message).includes('@'),
-      String(logListDm.sent.at(-1)?.message));
+      !String(logListDm.sent.at(-1)?.message).includes('@'), String(logListDm.sent.at(-1)?.message));
+  }
+
+  // 扩展自己的命令：**要不要 @ 由扩展声明**（`ExtraCommandSpec.requiresMention`，缺省要 @）。
+  // 两侧都要有 —— 只钉一边的话，"缺省值反了"或"声明被忽略"都看不出来。
+  {
+    const must = { names: ['/必须'], run: async () => '必须的回执' };            // 不声明 = 缺省要 @
+    const free = { names: ['/免 @'], requiresMention: false, run: async () => '免 @ 的回执' };
+    const cmds = createCommandDispatcher(() => ({ override: false, commands: [must, free] }), extrasPort);
+
+    ok('扩展命令：不声明 `requiresMention` 时缺省**要 @**（群里没 @ 就不是命令）',
+      cmds.isCommandEntry('/必须', 'group:10001', false) === false
+      && cmds.isCommandEntry('/必须', 'group:10001', true) === true);
+    ok('扩展命令：声明 `requiresMention: false` 后群里不 @ 也认（跑团那族靠它）',
+      cmds.isCommandEntry('/免 @', 'group:10001', false) === true);
+    ok('对照：私聊两条都不受影响',
+      cmds.isCommandEntry('/必须', 'private:7', false) === true
+      && cmds.isCommandEntry('/免 @', 'private:7', false) === true);
+
+    const { deps: dFree, log: logFree } = deps();
+    await cmds.handleCommandEntry(input('/免 @', { mentionedSelf: false }), dFree);
+    ok('处理路径与判据同源：`requiresMention: false` 的命令在群里照常跑',
+      String(logFree.sent.at(-1)?.message) === '免 @ 的回执', JSON.stringify(logFree.sent));
   }
   {
     const { deps: d, log } = deps();
@@ -419,7 +455,7 @@ console.log('\n── 扩展命令与接管模式 ──');
     !/\bmatch\s*:/.test(commandsSrc), '`match` 回来了 —— 判据又变成两份了');
   ok('ingest.ts 只用同一个判据决定 wakeEligible（命令 → 已读历史，不进窗口）',
     /wakeEligible: !slashCommand/.test(ingestSrc)
-    && /const slashCommand = commands\.isCommandEntry\(commandText, chatKey\)/.test(ingestSrc));
+    && /const slashCommand = commands\.isCommandEntry\(commandText, chatKey, mentionedSelf\)/.test(ingestSrc));
   ok('命令表存的是**函数引用**，没有按键分发（与装配清单同一形态）',
     !/COMMANDS\[/.test(commandsSrc) && !/COMMANDS\.get\(/.test(commandsSrc));
 }

@@ -307,6 +307,40 @@ function makeFakeEntry(id, names, {
   await runtime.stop();
 }
 
+// ── 3b. `commandDefs()` 必须把 `requiresMention` 原样交出去 ─────────────────────
+//
+// 它**重新构造**命令对象（不是把 spec 原样递出去），所以少写一行就会被静默丢掉 ——
+// 表现是"扩展声明了免 @，群里却怎么敲都不是命令"，而声明看起来完全正确。
+// 探针实测抓到过一次：把那一行删掉，**其余全部套件照绿**（t-commands 是手写 spec 直接
+// 交给适配器的，根本走不到 `commandDefs`），所以这条断言不能省。
+{
+  const entry = {
+    id: 'mention', title: 'mention', displayDesc: 'x', mode: 'attach', defaultEnabled: true,
+    tools: [],
+    commands: [
+      { names: ['/免'], requiresMention: false },
+      { names: ['/带子命令'], subs: ['go'], requiresMention: false },
+      { names: ['/默认'] }
+    ],
+    async load() {
+      const keys = ['/免', '/带子命令 go', '/默认'];
+      return { handlers: {}, commandHandlers: Object.fromEntries(keys.map((k) => [k, async () => k])) };
+    }
+  };
+  const runtime = makeRuntime([entry], DEFAULT_EXTRAS);
+  const defs = runtime.commandDefs(G);
+  const of = (name) => defs.find((c) => c.names[0] === name);
+  ok('声明的 `requiresMention: false` 一路交到命令表（普通命令）',
+    of('/免')?.requiresMention === false, JSON.stringify(defs.map((c) => [c.names[0], c.requiresMention])));
+  ok('子命令展开出来的那几条同样带上声明（否则 `.trpg new` 与 `.trpg` 的 @ 要求会不一样）',
+    of('/带子命令 go')?.requiresMention === false,
+    JSON.stringify(defs.map((c) => [c.names[0], c.requiresMention])));
+  ok('没声明的保持缺省（`true` = 群里要 @）',
+    of('/默认')?.requiresMention === true,
+    JSON.stringify(defs.map((c) => [c.names[0], c.requiresMention])));
+  await runtime.stop();
+}
+
 // ── 4. TTL：空闲到点真的 dispose；在途不卸载 ─────────────────────────────────
 await withFakeTimers(async (timers) => {
   const { entry, counters } = makeFakeEntry('ttl', ['ttl_tool']);
@@ -1289,13 +1323,16 @@ const inbound = (text = '3d6') => ({
   ok('★ 群里 `@机器人 /能力 加载 x` 过了 @ 闸门（真的调到了装载口子）',
     String(sent.at(-1)[1]).includes('已加载'), String(sent.at(-1)[1]));
 
+  const beforeNoAt = { sent: sent.length, forwarded: forwarded.length };
   await ingest.handle({
     post_type: 'message', message_type: 'group', group_id: groupId, user_id: 5,
     message_id: 1005, sender: { user_id: 5, nickname: '甲' },
     message: [{ type: 'text', data: { text: '/能力 加载 x' } }]
   });
-  ok('对照：同一句话没 @ 就被拒（判据真的读到了 `mentionedSelf`）',
-    String(sent.at(-1)[1]).includes('先 @ 我一下'), String(sent.at(-1)[1]));
+  // 没 @ = **压根不是命令**（用户要的"完全不管"）：不回执，照普通消息交给编排器。
+  ok('对照：同一句话没 @ 就**不是命令**（无回执，照常交给编排器）',
+    sent.length === beforeNoAt.sent && forwarded.length === beforeNoAt.forwarded + 1,
+    JSON.stringify({ sent: sent.length, forwarded: forwarded.length }));
 }
 
 // ── 19. 源级断言：两个新挂点在运行链路上真的接上了 ───────────────────────────

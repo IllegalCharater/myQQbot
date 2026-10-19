@@ -40,7 +40,11 @@ export const clockSpec: ExtraSpec = {
   // 分发层命中它之后会把开头那个词**换成 `/时间`** 再交给实现，所以 `impl.ts` 里只认一个词。
   commands: [
     {
-      names: ['/时间', '/time']
+      names: ['/时间', '/time'],
+      // **群里要先 @ 机器人**（缺省值就是它，这里写出来是因为 `spec.ts` 是别人照抄的样板）：
+      // `/时间` 是个通用小工具，谁都能随手敲一句 —— 那正是群里最吵的一类消息。
+      // 对照见 `trpg/spec.ts`：跑团那族是 `false`（那个群此刻就在跑团，掷骰还要先 @ 没法玩）。
+      requiresMention: true
     }
   ]
 };

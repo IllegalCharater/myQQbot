@@ -737,9 +737,11 @@ export function renderExtrasSection(c) {
       额外且相对独立的功能。这里的开关决定<strong>这个扩展能不能被加载</strong>；
       <strong>真正装载/卸载在群里敲 <code>/能力</code> 命令</strong>（<code>/能力 加载 &lt;id&gt;</code>、
       <code>/能力 卸载 &lt;id&gt;</code>、单敲 <code>/能力</code> 看列表）。
-      <strong>群里装载与卸载必须先 @ 机器人</strong>（在群里 @ 我一下，再敲
-      <code>/能力 加载 &lt;id&gt;</code>；私聊没有 @ 这回事，直接敲即可）—— 这两个动作会起子进程、
-      换掉一个会话的整个模型侧，不该被一句手滑触发。
+      <strong>群里敲命令要先 @ 机器人</strong> —— 主流程那几条都这样（<code>/能力</code>
+      <code>/转写</code> <code>/画</code> <code>/漫画</code>；私聊没有 @ 这回事，直接敲即可）。
+      没 @ 的消息不会被当成命令，会当普通聊天处理。
+      扩展<strong>自己的</strong>命令要不要 @ 由扩展决定：<strong>「当前时间」要 @</strong>，
+      <strong>「跑团」那族不要</strong>（那个群此刻就在跑团，掷个骰子还要先 @ 一下没法玩）。
       <strong>模型没有任何装载入口</strong>：未装载的扩展，它的工具根本不在模型的工具表里，
       敲它自己的命令也<strong>不会</strong>把它拉起来（只会回一句"先 /能力 加载"）。
       装载之后空闲超过下面那个秒数会自动卸载（释放它自己持有的子进程、连接、大缓存），

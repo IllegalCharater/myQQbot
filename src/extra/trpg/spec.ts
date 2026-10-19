@@ -204,32 +204,36 @@ export const trpgSpec: ExtraSpec = {
    * 而且查的是**展开后**的串（两个扩展各写一个 `.trpg start` 正是最该被拦住的那种撞名）。
    */
   commands: [
+    // 跑团那族**不要 @ 机器人**（`ExtraCommandSpec.requiresMention`，缺省是 `true`）：
+    // 这些命令只存在于**已经被跑团接管的那个会话**里，而那个群此刻就在跑团 ——
+    // 掷个骰子、看张卡还要先 @ 一下没法玩。与 clock 的 `/时间`（通用小工具，要 @）正相反，
+    // 所以这个开关是**每个扩展自己决定**的。
     // 会话这一族：起局 → 报名 → 确认 → 开跑 → 收团，加上形态、剧本与核对。
     // ⚠️ `check` **追加在末尾**，与 `commands/index.ts` 那张表的行序对应（那份表也把
     // `.trpg check` 排在 `.trpg scenario` 之后、裸 `.trpg` 之前）。顺序只对同前缀的词有意义，
     // 这里两个都是两词命令、互不遮蔽，但**读起来一致**省得下一个人以为漏了一条。
-    { names: ['.trpg'], subs: ['new', 'join', 'status', 'start', 'end', 'mode', 'scenario', 'check'] },
+    { requiresMention: false, names: ['.trpg'], subs: ['new', 'join', 'status', 'start', 'end', 'mode', 'scenario', 'check'] },
     // **裸命令兜底**：排在所有子命令之后 —— 只在"一个子命令都没匹配上"时命中，回用法清单。
-    { names: ['.trpg'] },
+    { requiresMention: false, names: ['.trpg'] },
     // 人物卡那一族。同样先子命令、后裸命令（顺序即行为）。
-    { names: ['.pc'], subs: ['new', 'roll', 'confirm', 'show', 'save'] },
-    { names: ['.pc'] },
+    { requiresMention: false, names: ['.pc'], subs: ['new', 'roll', 'confirm', 'show', 'save'] },
+    { requiresMention: false, names: ['.pc'] },
     // 战斗那一族（P5）。三条子命令做的是 `campaign action=combat` 那三件事，
     // 共用 `model/combat.ts` —— 两条路（人敲的 / 模型调的）判据只有一份。
     // 同样先子命令、后裸命令。
-    { names: ['.combat'], subs: ['start', 'next', 'end'] },
-    { names: ['.combat'] },
+    { requiresMention: false, names: ['.combat'], subs: ['start', 'next', 'end'] },
+    { requiresMention: false, names: ['.combat'] },
     // 战报那一族（P6）。同样先子命令、后裸命令。
     // ⚠️ 这一族**不看战役存档**：`.trpg end` 收团时删的是 `data/trpg/<会话>.json`，战报
     // （`data/trpg/journal/<会话>.jsonl`）留着 —— "刚打完那一局想留个纪念"正是它的主要用法。
-    { names: ['.log'], subs: ['export'] },
-    { names: ['.log'] },
+    { requiresMention: false, names: ['.log'], subs: ['export'] },
+    { requiresMention: false, names: ['.log'] },
     // 检定与属性：参数是**技能名**，所以是普通命令（没有子命令那一族）。它们都要读卡，
     // 所以都在 `commands/check.ts` 里（`.ra` 公开、`.rh` 暗骰、`.st` 改属性）。
-    { names: ['.ra'] },
-    { names: ['.rh'] },
-    { names: ['.st'] },
+    { requiresMention: false, names: ['.ra'] },
+    { requiresMention: false, names: ['.rh'] },
+    { requiresMention: false, names: ['.st'] },
     // 掷骰：参数是**一整条表达式**，所以它自己剥前缀、不按词切（见 `commands/shared.ts`）。
-    { names: ['.r'] }
+    { requiresMention: false, names: ['.r'] }
   ]
 };

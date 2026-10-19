@@ -122,6 +122,13 @@ interface CommandEntry {
    * （比如 `/转写` 那个由文本化产生的 `/转写[视频]`）也是往这个数组里加一条。
    */
   names: readonly string[];
+  /**
+   * **群里敲这条命令要不要先 @ 机器人**（2026-10-19 加）。私聊恒不生效（那里没有 @ 这回事）。
+   *
+   * 主流程四条**一律 `true`**（用户要求：`/能力` `/转写` `/画` `/漫画` 在群里都要 @ 才触发）；
+   * 扩展那几条由各自的 `spec.ts` 声明（`ExtraCommandSpec.requiresMention`，缺省 `true`）。
+   */
+  requiresMention: boolean;
   run(input: CommandInput, deps: CommandDeps): Promise<void>;
 }
 
@@ -147,6 +154,7 @@ const NO_EXTRAS: CommandExtraSource = { override: false, commands: [] };
 // ── 主流程命令 ──
 
 const transcribeCommand: CommandEntry = {
+  requiresMention: true,
   // "发一个视频 + 打一句 `/转写`"送来的文本是 `'/转写[视频]'`（占位符紧贴着，没有空格）。
   // 这里**不需要**为它单开一个词形：`[` 算边界（见 `startsWithWord`），所以 `/转写` 本身就认得出，
   // 而 `parseTranscriptionCommand` 拿到原样的 `'/转写[视频]'` 会从 media 里取到那个视频。
@@ -162,6 +170,7 @@ const transcribeCommand: CommandEntry = {
 };
 
 const drawCommand: CommandEntry = {
+  requiresMention: true,
   names: ['/画'],
   async run({ chatKey, text, media, replyToMessageId }, { imageGen, sender, log }) {
     await runCommand('/画', { sender, log }, chatKey, replyToMessageId, async () => {
@@ -187,6 +196,7 @@ const drawCommand: CommandEntry = {
 };
 
 const jmcomicCommand: CommandEntry = {
+  requiresMention: true,
   names: ['/漫画'],
   // `/漫画 12345`：只做"下载"这一件事 —— **搜索仍只由模型用 search_jmcomic 做**
   // （那是刻意的两条路：搜索廉价可反复，下载要拉全本、导出 PDF、传群文件且不可撤销）。
@@ -225,7 +235,9 @@ const jmcomicCommand: CommandEntry = {
 const capabilitiesCommand: CommandEntry = {
   // `/扩展` 只是"另一个叫法"，语义完全一样（命中它时会被规范回 `/能力` 再解析）。
   names: ['/能力', '/扩展'],
-  async run({ chatKey, text, mentionedSelf, replyToMessageId }, { extras, sender, log }) {
+  // 用户要求"主流程命令群里都要 @" —— 看列表也一并要（它是同一条命令，拆一半只会让人困惑）。
+  requiresMention: true,
+  async run({ chatKey, text, replyToMessageId }, { extras, sender, log }) {
     await runCommand('/能力', { sender, log }, chatKey, replyToMessageId, async () => {
       if (!extras) return '扩展能力不可用（这一侧没有装上扩展运行时）';
       // `inGroup` 决定两件事：@ 闸门要不要生效，以及列表里要不要写那句"先 @ 我一下"。
@@ -238,15 +250,9 @@ const capabilitiesCommand: CommandEntry = {
       if (action !== '加载' && action !== '卸载') {
         return '用法：/能力（看列表）、/能力 加载 <id>、/能力 卸载 <id>';
       }
-      // **群里装载/卸载必须先 @ 机器人**（2026-10-19，用户要求）：这两个动作是真实的资源动作
-      // （起子进程、换掉一个会话的整个模型侧），不该被一句手滑的 `/能力 加载 x` 触发 ——
-      // 白名单群里任何群友都敲得到它，而 @ 是唯一那个"我是故意冲着机器人说的"的信号。
-      // **只看会话类型与 `mentionedSelf`，不看 `text`**：开头那串 @ 已经被 ingest 掐掉了，
-      // 从 `text` 里根本看不出 @ 过（见 `CommandInput.mentionedSelf`）。
-      // 私聊不受限（那里没有 @ 这回事），裸 `/能力`（看列表，只读）也不受限。
-      if (inGroup && !mentionedSelf) {
-        return `群里${action}扩展要先 @ 我一下，再敲 /能力 ${action} ${id || '<扩展 id>'}`;
-      }
+      // ⚠️ 这里**不再有**"群里要 @ 我"那段分支：那条判据在 `matchesCommand` 里，没 @ 时
+      // `/能力` 根本不是一个命令（用户选的是"完全不管"，不是"认出但拒绝"）。写在这里的话
+      // 就是一段到不了的死代码。
       if (!id) return `用法：/能力 ${action} <扩展 id>（id 见 /能力 列表）`;
       // **把敲命令的这个会话传下去**：接管模式按会话隔离，所以 `/能力 加载 <接管扩展>`
       // 只接管当前会话；附加模式用不到它。
@@ -272,8 +278,13 @@ export interface CommandDispatcher {
    *
    * **要传会话标识**：被接管的会话里，主流程命令让位、只剩接管者的那些命令
    * （`/能力` 例外，它永远在）。
+   *
+   * **还要传"这条消息有没有 @ 机器人自己"**：群里那句 @ 的要求（主流程命令一律要，
+   * 扩展命令由 `spec.requiresMention` 决定）就在这个函数里判 —— 判据只有这一处，
+   * `handleCommandEntry` 走的是同一个。**没 @ 时返回 `false`**（"完全不管"：消息照常
+   * 落档、照常参与响应判定，只是不是命令）。
    */
-  isCommandEntry(text: unknown, chatKey: string): boolean;
+  isCommandEntry(text: unknown, chatKey: string, mentionedSelf: boolean): boolean;
   /** 处理一条斜杠命令。**返回是否已接管**（`false` = 不是命令，调用方照常走 LLM 路径）。 */
   handleCommandEntry(input: CommandInput, deps: CommandDeps): Promise<boolean>;
 }
@@ -303,13 +314,25 @@ function startsWithWord(text: string, word: string): boolean {
 }
 
 /**
- * 一条命令认不认这句话：**名字列表里有任何一个词打头就算**。没有第二种判据。
+ * 一条命令认不认这句话：**名字列表里有任何一个词打头**，**且群里那句 @ 的要求满足**。
+ * 没有第二种判据。
  *
  * ⚠️ `isCommandEntry` 与 `handleCommandEntry` 必须都走这一个函数 —— 分成两份时的表现是
  * "命令没被认出来、消息进了 LLM"或"同一条消息被处理两次"，两种都不报错。
+ *
+ * **没 @ 时返回 `false`（"完全不管"）**：那条消息照常落档、照常参与响应判定（`wakeEligible`
+ * 跟着变 true），只是**不是命令**。这与"认出但拒绝"是两回事，用户明确选了前者 ——
+ * 机器人不该对一句没冲着它说的话回执。
  */
-function matchesCommand(command: CommandEntry, text: string): boolean {
+function matchesCommand(command: CommandEntry, text: string, ctx: CommandMatchContext): boolean {
+  if (ctx.inGroup && command.requiresMention && !ctx.mentionedSelf) return false;
   return command.names.some((word) => startsWithWord(text, word));
+}
+
+/** 判定命令时要看的**会话侧**信息：是不是群聊、有没有 @ 机器人自己。 */
+interface CommandMatchContext {
+  inGroup: boolean;
+  mentionedSelf: boolean;
 }
 
 /**
@@ -337,6 +360,8 @@ function canonicalize(command: CommandEntry, text: string): string {
 function adaptExtraCommand(command: ExtraCommand): CommandEntry {
   return {
     names: command.names,
+    // 扩展自己决定（`ExtraCommandSpec.requiresMention`，缺省要 @）—— 见那个字段的注释。
+    requiresMention: command.requiresMention !== false,
     run: (input, deps) => runCommand(
       command.names[0] ?? '', deps, input.chatKey, input.replyToMessageId, () => command.run(input)
     )
@@ -365,13 +390,20 @@ export function createCommandDispatcher(
   };
 
   return {
-    isCommandEntry(text, chatKey) {
+    isCommandEntry(text, chatKey, mentionedSelf) {
       const value = String(text ?? '').trim();
-      return tableFor(chatKey).some((command) => matchesCommand(command, value));
+      const ctx = { inGroup: String(chatKey).startsWith('group:'), mentionedSelf: mentionedSelf === true };
+      return tableFor(chatKey).some((command) => matchesCommand(command, value, ctx));
     },
     async handleCommandEntry(input, deps) {
       const text = String(input.text ?? '').trim();
-      const command = tableFor(input.chatKey).find((item) => matchesCommand(item, text));
+      // 判据与 `isCommandEntry` **同源**（同一个 `matchesCommand` + 同一份会话侧上下文）：
+      // 分两份的表现是"命令没被认出来、消息进了 LLM"或"同一条消息被处理两次"，两种都不报错。
+      const ctx = {
+        inGroup: String(input.chatKey).startsWith('group:'),
+        mentionedSelf: input.mentionedSelf === true
+      };
+      const command = tableFor(input.chatKey).find((item) => matchesCommand(item, text, ctx));
       if (!command) return false;
       // 走的是**别名**的话，把开头那个词规范回主命令词：解析器只认识一个词。
       await command.run({ ...input, text: canonicalize(command, text) }, { ...deps, extras });
@@ -403,7 +435,7 @@ function renderCapabilityList(rows: ExtraListRow[], inGroup: boolean): string {
     '',
     '用法：/能力 加载 <id>、/能力 卸载 <id>',
     inGroup
-      ? '（本群装载/卸载要先 @ 我一下；未加载的扩展，敲它自己的命令不会把它拉起来）'
+      ? '（本群的主流程命令都要先 @ 我；未加载的扩展，敲它自己的命令不会把它拉起来）'
       : '（未加载的扩展，敲它自己的命令不会把它拉起来）',
     '（接管模式的扩展：在本群敲加载 = 只接管「本群」；别的群要各自敲一次，'
       + '也可以写进设置文件让它开机就接管）'
