@@ -179,9 +179,10 @@ configPatch?(chatKey: string): ExtraConfigPatch   // 形状同 data/config.json
 - **⚠️ 必须一路传到提示词拼装里，否则只生效一半**：`buildSystemPrompt` / `buildUserPrompt` / `buildPastState` / `formatEntry` / `triggerLabels` / `digestConfigForChat` 都收一个 `config` 参数（缺省 = 全局那份，既有调用点逐字不变），**内部一律不再自己读 `getConfig()`**。分两处读的话，"预算 / 摘要档位 / 表情档位 / 成员备注"那一半就还是全局的，症状是"覆盖了、只生效一半"，没人查得出来。
 - **它管不到整条链路**（如实记下）：入站白名单、发送限频、面板显示、以及**工具定义本身**（`buildToolDefs()` 在 app 启动时算一次）读到的仍是全局那份。`resolveTranscriptionConfig(cfg)` / `resolveImageGenConfig(cfg)` 收的是 `cfg`，**在**范围内。
 - **上下文窗口容量与历史深度曾经也管不到，2026-10-16 起管得到了** —— 那是**改了两个读取点**换来的（不是它自己长出来的）：① `Orchestrator` 建 `ContextWindowRegistry` 时按 `configFor(chatKey)` 取容量（`capacity` 因此从"数字"变成 `数字 | ((chatKey) => number)`，`capacityFor(chatKey)` 是唯一入口）；② `wake-scheduler` 算历史深度时读 `this.configFor(chatKey)`。**两处缺一，症状都是"配了、看着生效、实际用的是别的"**：只改第一处，窗口宽了而【过去状态】还是老的深度；只改第二处，反过来。探针实测：把第一处退回全局读 → `t-trpg` 红 1 条 + `t-window` 红 2 条；把第二处退回 → `t-trpg` 红 1 条（**只有**历史深度那条，容量那条照样绿）。跑团用它把"够跑一局"的三个数（`maxContextMessages` / `historyCount` / `promptContextMaxChars`）抬到 `CONTEXT_FLOOR`，**语义是下限不是覆盖**，且 `0`（不限）原样留着。
+- **响应档位 2026-10-19 起也管得到了**，那是**第三个读取点**：`wake-scheduler` 的 `#resolvePendingResponse`（判"这批消息值不值得惊动模型"的那一处，`scheduleWake` 与 `wake` 共用）从 `getConfig()` 改成 `this.configFor(chatKey)`，并把那份配置交给 `responseConfigForChat(chatKey, cfg)`（那个函数因此多了一个 `source` 参数，缺省仍是全局那份，既有调用点逐字不变）。跑团用它把被接管的会话**覆盖成 4 档**（滑条 100 = 全部响应）—— ⚠️ 这一项与那三个宽度旋钮的取舍**相反**：100 已经是滑条最右端，没有"比它更宽"可言，所以它是覆盖而不是下限。探针实测：把读取点退回全局读 → `t-trpg` 红 1 条（**只有端到端那条**，`t-reply` 那条传的是显式配置、照样绿）。**往这张单子上加一项的办法永远是改那个读取点**，不是在这一侧多写一行补丁。
 - **装载期对账**：`configPatch('')` 返回非对象、或那次调用抛错 → **拒绝装载**（与 `prompt` / `toolsFor` 同一条）。装载时另记一行日志说明"这个扩展会覆盖运行期配置" —— 判断"这个群为什么和设置里不一样"时，那是唯一的线索。
 
-守护分两层，**缺一层就会漏掉一整类错误**（探针实测）：`t-reply.mjs` 逐项断言那几个帮手认传进来的那份（住在三个不同帮手里的配置项各一条），`t-extras.mjs` 用**源级断言**钉 `agent-runner` 真的把它交给了两个 builder。删掉 `buildSystemPrompt({ config })` 那一行，`t-reply` 70 条**全绿**，只有源级那条红 —— "每处函数都对，但没人传给它"。
+守护分两层，**缺一层就会漏掉一整类错误**（探针实测）：`t-reply.mjs` 逐项断言那几个帮手认传进来的那份（住在四个不同帮手里的配置项各一条：表情档位 / 统一字符预算 / 摘要档位 / 响应档位），`t-extras.mjs` 用**源级断言**钉 `agent-runner` 真的把它交给了两个 builder。删掉 `buildSystemPrompt({ config })` 那一行，`t-reply` 70 条**全绿**，只有源级那条红 —— "每处函数都对，但没人传给它"。
 
 
 
@@ -342,7 +343,7 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 | 套件 | 管什么 |
 |---|---|
 | `tests/t-extras.mjs`（167 条 —— 注册表多一个扩展就多一条"spec.ts 不 import 实现"的源级断言） | **模型零装载入口**、装载/卸载改变工具表、命令触发装载、**接管按会话隔离**（同一进程里 A 让位 B 照常）、**生命时间对两种模式都生效**、多会话共用一个实现、配置播种（含脏值忽略）、TTL 与在途、`stop()` 幂等与超时、注册表自检、名字对账（工具 + 命令两个方向）、提示词覆盖段名校验（含框架契约**不许覆盖** / `capabilityProtocol` **可以**覆盖）、**`overrideTools` 三条**（接管必须声明 `sendTool` / 名字必须真的在 `tools` 里 / 附加模式不许写）、提示词计划随装载状态、真实现跑一遍、`buildToolDefs()` 默认行为逐字不变、**`toolsFor` 五条**（按会话取子集 / 不影响别人 / 没声明的名字被滤掉 / 抛错回落成全部 / 空会话抛错即拒绝装载）、三张提示词表与注册表对账（TEXT/SECTIONS 两个方向逐个相等，JOBS 查子集）、**拦消息**（未装载不问 / 顺序即优先级 / `{}` = 不吭声 / 抛错被吞 / 接管会话只问接管者）、**拦消息的 ingest 端到端**（不惊动模型 + 回执由宿主发 + 落成已读 + 对照那条仍未读）、**运行期配置覆盖**（叠上 · 归一化 · **全局一个字没动** · 卸载即撤销 · 接管只认接管者的 · 别的会话不受影响）、**两个新挂点的装载期对账**（`configPatch` 返回非对象 / 抛错、`intercept` 不是函数 → 拒绝装载）、源级断言（`registry.ts` 的 load 是字面量 import 且无静态 impl import；各 `spec.ts` 不 import impl；`prompts.ts` 无 import；**`agent-runner` 用 `host.configFor` 且把它交给两个 builder；`app.ts` 把两个口子递下去；ingest 在落档之前问拦截**） |
-| `tests/t-reply.mjs`（70 条） | **system 段序 + 段分隔符 + 空计划是空操作 + 覆盖不可碰框架契约 + 接管只留框架契约 + 接管时能力段（含其中的工具名）一概不注入 + 框架段的工具名跟着接管者走（`sendTool` 换名、`finishTool: null` 不提）** + **传进来的那份 `config` 真的被用到**（住在三个不同帮手手里的配置项各一条：表情档位 / 统一字符预算 / 摘要档位） |
+| `tests/t-reply.mjs`（72 条） | **system 段序 + 段分隔符 + 空计划是空操作 + 覆盖不可碰框架契约 + 接管只留框架契约 + 接管时能力段（含其中的工具名）一概不注入 + 框架段的工具名跟着接管者走（`sendTool` 换名、`finishTool: null` 不提）** + **传进来的那份 `config` 真的被用到**（住在四个不同帮手手里的配置项各一条：表情档位 / 统一字符预算 / 摘要档位 / 响应档位） |
 | `tests/t-commands.mjs` | `/能力` 的用法与失败话术、扩展命令走同一只 `runCommand` 外壳、扩展遮蔽不了内置、接管时主流程命令让位而 `/能力` 保留 |
 | `tests/t-tool-protocol.mjs` | 协议纠正；`capabilityProtocol` 里那条漫画规则；**`recordSent` 真的记账 + 真的发 `session-update`**（缺 `at` 时不写 `"undefined"`） |
 | `tests/t-lifecycle.mjs` / `t-tasks.mjs` | `extras.runtime` 的 id 对账与 entry 顺序 |

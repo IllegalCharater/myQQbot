@@ -1507,6 +1507,57 @@ const status = (key) => store.read(key);
   store.remove('group:int');
 }
 
+// ── 5e2. DM 模式的准入：只有这一局的人能惊动 DM（2026-10-19 加）───────────────
+//
+// 响应档位被抬到 4 档（见 5f）之后，"谁说话都响应"就必须由这一层把**谁**界定清楚 ——
+// 否则旁观者插一句话也会叫起一整轮模型调用，而那一轮里 DM 只能对着"跟这一局无关的一句话"叙事。
+//
+// 判据落在 `intercept` 的第二档返回：`{}` = **拦下但不吭声**（消息照常存档、照常上面板，
+// 只是落成已读历史）。所以这一段的两条断言形状不同 —— `null` 是放行，`'{}'` 是拦下。
+{
+  const runtime = createRuntime();
+  const KEY = 'group:admit';
+  const feed = (chatKey, senderId) => runtime.intercept({
+    chatKey, senderId, text: '我推开门', media: [], replyToMessageId: null
+  });
+  /** 重写这一局的存档：`mutate` 拿到的是一份全新的 `active` 局。 */
+  const open = (mutate) => {
+    const campaign = emptyCampaign(KEY, { title: '准入测试团', system: '', rule: 'generic' });
+    mutate(campaign);
+    store.write(campaign);
+  };
+  const blocked = (chatKey, senderId) => JSON.stringify(feed(chatKey, senderId)) === '{}';
+
+  ok('没开局：谁说话都照常（这条路必须在 —— 否则"还没开团"的群连话都不能说）',
+    feed(KEY, '20001') === null && feed(KEY, '20002') === null);
+
+  open((campaign) => { campaign.status = 'preparing'; campaign.players = ['20001']; });
+  ok('还在建卡（preparing）：**一律放行** —— 那段时间群里讨论的正是"怎么加入、建什么卡"',
+    feed(KEY, '20001') === null && feed(KEY, '20002') === null);
+
+  open((campaign) => { campaign.players = ['20001']; });
+  ok('开跑之后：报过名的玩家放行（`null`）', feed(KEY, '20001') === null);
+  ok('**旁观者被拦下**（`{}` 而不是 null —— 拦下才进不了窗口）', blocked(KEY, '20002'));
+
+  // DM 直接建卡给某个人（`character action=create` 带 `ownerId`）**不进 `players`** ——
+  // 少了这条判据，那个人说话 DM 会当没听见，而**没有任何报错**。
+  open((campaign) => {
+    campaign.players = [];
+    campaign.characters.push({ name: '被建卡的人', ownerId: '20003' });
+  });
+  ok('**有卡的人也算"这一局的人"**（只认 `players` 会静默漏掉"DM 建的卡"那一条路）',
+    feed(KEY, '20003') === null && blocked(KEY, '20004'));
+
+  ok('拿不到发送者时放行（宁可多惊动一次，也不要把说不清来源的消息静默吞掉）',
+    feed(KEY, '') === null && feed(KEY, null) === null);
+
+  // 助手模式**不走这条判据**：它整条都拦，与"是不是玩家"无关（判据在 5e 段）。
+  new TrpgModeStore().write('group:admit-as', 'assistant');
+  ok('助手模式照旧整条拦下（它不认识"玩家"这个概念，也不该因为这里新增判据而变松）',
+    blocked('group:admit-as', '20001'));
+  store.remove(KEY);
+}
+
 // ── 5f. 配置覆盖：挂载期间把"上下文宽度"抬起来 ──────────────────────────────
 //
 // `configPatch` 只影响**这一轮那份运行配置**（`ExtrasRuntime.configFor`），不落盘、不外溢。
@@ -1540,6 +1591,23 @@ const status = (key) => store.read(key);
   ok('助手模式**不抬**（它整条消息都拦下来、压根不跑模型，抬了只是白占内存）',
     JSON.stringify(runtime.configPatch('group:cfg-as')) === '{}',
     JSON.stringify(runtime.configPatch('group:cfg-as')));
+
+  // ── 响应档位（2026-10-19 加）：这一项是**覆盖**，不是下限 ──
+  //
+  // 判据是"玩家说的每一句话 DM 都看得见"。滑条最右端（100 = 4 档）是唯一能保证这件事的位置，
+  // 而默认的 95 本来也是 4 档 —— 所以这个覆盖只在管理员**手动调低过**时起作用，而那正是最需要
+  // 它的群（低档位会让 DM 静默漏掉玩家的行动，日志里一条线索都没有）。
+  //
+  // **两个旋钮都要写**：`unifiedTier` 开着时只看 `contextSliderPos`，关掉时群聊按
+  // `groupSliderPos[群号]` 覆盖全局 —— 只写一个的话，另一种配置下覆盖会静默失效。
+  updateConfig({ store: { contextSliderPos: 0, unifiedTier: false, groupSliderPos: { 'cfg-tier': 0 } } });
+  const tier = patchOf('group:cfg-tier');
+  ok('挂载期间把**响应档位**抬到 4 档（滑条 100），且两个旋钮都写（两种 `unifiedTier` 配置下都生效）',
+    tier.contextSliderPos === 100 && tier.groupSliderPos?.['cfg-tier'] === 100, JSON.stringify(tier));
+  ok('私聊不写 `groupSliderPos`（它跟随全局 —— 写一个用不上的键只会让人以为那里也有判据）',
+    patchOf('private:cfg-tier').groupSliderPos === undefined,
+    JSON.stringify(patchOf('private:cfg-tier').groupSliderPos));
+  updateConfig({ store: { unifiedTier: true, groupSliderPos: { __replace__: {} } } });
 
   updateConfig({ store: previous });
   ok('对照：复原之后读到的还是全局那份（覆盖从来没写回配置）',
@@ -4284,6 +4352,37 @@ console.log('\n=== 端到端：真起 app（createApp + start）===');
   ok('接管群（DM）的窗口容量被抬到下限（全局配的是 20）', capOf('group:701') === 200, String(capOf('group:701')));
   ok('**没被接管的群一点没变**（覆盖不外溢到别的会话）', capOf('group:702') === 20, String(capOf('group:702')));
   ok('助手模式**不抬**（它压根不跑模型，抬了只是白占内存）', capOf('group:703') === 20, String(capOf('group:703')));
+
+  // ── 响应档位：接管群**无视**全局档位（2026-10-19 加）──
+  //
+  // 判据是"玩家说的每一句话 DM 都看得见"。这里把全局滑条调到 0（1 档 = 只响应艾特），然后把
+  // **同一句话**分别发给两个群：
+  //   • group:701（被接管）—— 照样起一轮（扩展的 `configPatch` 把档位抬到 4 档）；
+  //   • group:702（没被接管）—— 一条模型请求都不产生（对照组，证明上一条不是假绿）。
+  //
+  // ⚠️ 这一段钉的是**核心那一个读取点**：`WakeScheduler.#resolvePendingResponse` 读的必须是
+  // `configFor(chatKey)` 而不是全局那份。少了它，`configPatch` 里那一行就是纯死配置 ——
+  // 而症状只是"DM 偶尔不理人"，没有任何报错。
+  updateConfig({ store: { contextSliderPos: 0 } });
+  const runsAfter = async (key, text) => {
+    await settle();
+    const beforeCount = model.requests.length;
+    const entry = core.store.appendIncoming(key, {
+      mid: Date.now(), ts: Date.now(), senderId: '10001', senderName: '张三', text
+    });
+    core.orchestrator.onIncoming(key, entry);
+    core.orchestrator.forceWake(key);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return model.requests.length - beforeCount;
+  };
+
+  const plainRuns = await runsAfter('group:702', '我推开门');
+  ok('**没被接管的群照常受档位约束**：1 档下那句普通的话一条请求都不产生（对照组）',
+    plainRuns === 0, String(plainRuns));
+  const dmRuns = await runsAfter('group:701', '我推开门');
+  ok('**被接管的群无视全局档位**：同一句话照样起一轮（`configPatch` 把档位抬到 4 档）',
+    dmRuns > 0, String(dmRuns));
+  updateConfig({ store: { contextSliderPos: 95 } });
 
   // ── 接管会话里，模型调 say 的那一轮必须被记成 done ──
   //

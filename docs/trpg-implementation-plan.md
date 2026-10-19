@@ -1,6 +1,6 @@
 # 跑团（TRPG）：分层重构 + 功能实现计划
 
-> **最后更新：2026-10-17**。依据：`docs/trpg-dialogue-expectations.md`（现状逐幕）与《跑团功能实现度检查报告》（31 项对照，结论 ✅6 / 🟡9 / 🔴16）。
+> **最后更新：2026-10-19**。依据：`docs/trpg-dialogue-expectations.md`（现状逐幕）与《跑团功能实现度检查报告》（31 项对照，结论 ✅6 / 🟡9 / 🔴16）。
 
 ## 实施进度
 
@@ -21,6 +21,7 @@
 | **P8** 叙事阶段识别（分幕） | ✅ | `StructAct` + L2/L3/L4 全链路；`campaign.currentAct`；`scenario/acts.ts` 的确定性推进；DM 阶段块与玩家「第 N 幕 / 共 M 幕」；`.trpg check` 的幕清单 | `t-trpg` 623 → **644**；`t-trpg-extract` 82 → **95** |
 | **P8-b** 推进保证 | ✅ | `campaign.advancement` 三指标（含 `dirty` / `hinted`）；`model/advance.ts` 的阈值、5 轮冷却与提示正文；`onRunEnd` 接线（只数真人推动、与兜底建议互斥）；`campaign action=advance`（`explainUnmet`）；`advancement_threshold` / `stage_advance` 两条 mechanic；三处标签与人格段 | `t-trpg` 644 → **680**；`t-trpg-rules` 290 → **306** |
 | **P8-c** 模型判定收团（结局） | ✅ | `StructEnding` + L2/L3/L4；`campaign action=end`（endingId 校验 / 自由结局）；`campaign.ended` 标记与「收尾才删存档」；摘要的结局段与「没解开的事」排除；战报 `[结局]`；briefing 结局清单与人格段 | `t-trpg` 680 → **709**；`t-trpg-extract` 95 → **104** |
+| **第四轮** 保证响应（档位覆盖 + 准入） | ✅ | `impl.ts` 的 `configPatch` 把**响应档位覆盖成 4 档**（`contextSliderPos` + `groupSliderPos` 两个旋钮都写）；`intercept` 的 **DM 准入**（`dmAdmit`：只认 `active`、玩家 = `players` ∪ 有卡的人）；**核心第三个读取点** —— `WakeScheduler.#resolvePendingResponse` 改读 `configFor(chatKey)`、`responseConfigForChat` 多一个 `source` 参数 | `t-trpg` 709 → **719**；`t-reply` 70 → **72** |
 
 **全量**：`npm run check` **40 个套件**全绿、`npm run test:all` **50 个套件**全绿（每阶段收尾都做过一次 `rm -rf dist && npm run build` 干净重建再复跑）。
 
@@ -60,6 +61,7 @@
 - **P4 三条**：DB 表边界写成 `<` → `t-trpg-rules` 红 1（判据是**每一档的两个端点**）；**`.pc roll` 里写 `hpMax` 那一行拆掉 → 第一版断言照样全绿**，补上「派生值是按公式从刚掷出的属性算的」才红；`pools` 隐藏不再覆盖 MP → 红 1。
 - **P5 三条**：`rollInitiative` 的排序键去掉先攻值（只剩名单顺序）→ 红 **6**（顺序、给模型的那一份、工具回执、`sub=next`、以及"行动即推进"与"不是当前行动者不推"两条）；`advance` 去掉 `skip` 判断（倒下的人也占回合）→ 红 1（绕回起点那条）；`renderForPlayers` 的 `combatLines` 去掉 `seen` 过滤 → 红 1（"轮到「X」"那句把还没被玩家见过的人漏出去）。
 - **P6 五条**：`mirrorLog` 不看 `visible` → 红 **6**（含 `read()` 那条独立的"战报里没有 `visible: false`"）；`character` 建卡那条恒 `visible` → 红 2；`.log export` 去掉过滤 → 红 2；`JournalStore.read()` 丢掉 `visible` → 红 2（"原样带回来" + "手改过的文件也挡得住"）；`campaign` 删暗线那条不标 → 红 1。
+- **第四轮五条**：`#resolvePendingResponse` 退回全局读 → `t-trpg` 红 1（**只有端到端那条** —— `t-reply` 那一条传的是显式配置，照样绿）；去掉 `configPatch` 里档位那两行 → `t-trpg` 红 2（5f 那条 + 端到端那条）；`dmAdmit` 恒放行 → 红 2；恒拦下 → 红 **6**（含 5e 段既有的"DM 模式不拦"）；去掉「有卡的人也算」那一句 → 红 1。
 
 ⚠️ **P4 第二条是这份计划里最值得记的一课**：`> 0` 这类判据在"上游已经给过默认值"的前提下**证明不了任何事**。写断言时先问一句"**如果这一行删掉，这个数还会碰巧对吗**"。
 

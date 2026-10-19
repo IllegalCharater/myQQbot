@@ -279,9 +279,14 @@ export class WakeScheduler {
    * @returns 当前窗口的响应决定；不包含任何历史长度信息
    */
   #resolvePendingResponse(chatKey: string): ResponseDecision {
-    const cfg = getConfig();
+    // ⚠️ **这一轮那份配置**（`configFor(chatKey)`，不是全局 `getConfig()`）：扩展的运行期覆盖
+    // 能改档位（跑团把 DM 会话抬到 4 档），而覆盖是**按会话**的 —— 全局读会让它在"要不要惊动
+    // 模型"这最要紧的一处静默失效，症状正是"配了 100%、实际还按老档位判"。
+    //
+    // 身份（昵称/人设名/selfId）也取这一份：两者本来就该是"这一次判定看到的世界"。
+    const cfg = this.configFor(chatKey);
     const entries = this.windows.pending(chatKey);
-    const responsePolicy = responseConfigForChat(chatKey);
+    const responsePolicy = responseConfigForChat(chatKey, cfg);
     return evaluateWindowTrigger({
       entries,
       identity: {

@@ -989,9 +989,15 @@ export function mergeConfigPatch(base: AppConfig, patch: unknown): AppConfig {
  * unifiedTier 开启 → 从全局滑条位置派生档位与概率；
  * 关闭 → 群聊查 groupSliderPos，有单独设置就换算出该群的 responseTier/randomPercent。
  * 关键词表仍沿用全局值；历史深度不属于本函数。私聊永远跟随全局响应档位。
+ *
+ * ⚠️ **`source` 必须由调用方传"那一轮/那一次判定真正生效的那份配置"**，缺省才是全局那份。
+ * 扩展的 `configPatch` 能把某个会话的档位抬起来（跑团就是这么做的：DM 会话要 4 档），
+ * 而它叠出来的是 `ExtrasRuntime.configFor(chatKey)` —— **调用点读 `getConfig()` 就会让那次
+ * 覆盖在这一处静默失效**，症状是"配了、看着生效、实际用的是别的"（同 `digestConfigForChat`
+ * 与 `resolveTranscriptionConfig(cfg)` 那条纪律）。守护是 `t-reply.mjs` 那一节逐个帮手各一条断言。
  */
-export function responseConfigForChat(chatKey: string) {
-  const store = getConfig().store || {};
+export function responseConfigForChat(chatKey: string, source: AppConfig = getConfig()) {
+  const store = source.store || {};
   let pos = store.contextSliderPos;
   if (store.unifiedTier !== false) {
     const { tier, randomPercent } = sliderToTier(pos);

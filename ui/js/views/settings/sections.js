@@ -918,6 +918,13 @@ export function renderTrpgSection() {
       或者让 DM 调 <code>campaign</code> 的 <code>action=start</code> 带上 <code>scenario</code> / <code>rule</code>。
       可用清单每一轮都会注入 DM 的上下文，所以它知道有哪些能选。
     </div>
+    <div class="hint" style="margin-bottom:10px">
+      被接管的群有两件事与这一页的其余设置不同：① <strong>响应概率滑条对它不生效</strong> ——
+      那个群的档位会被抬到「全部响应」，玩家说的每一句话都会交给 DM（跑团要的正是这个）；
+      ② 开跑之后<strong>只有这一局的人</strong>（报过名的、或 DM 直接建过卡的）的消息会惊动 DM，
+      旁观者的话照常存档、也留在 DM 的【过去状态】里，但不会把 DM 叫起来。
+      两条都只作用于被接管的会话。
+    </div>
 
     <h4>剧本</h4>
     <div class="hint" style="margin-bottom:6px">目录：<code>data/trpg/scenarios/&lt;名字&gt;.md</code>。

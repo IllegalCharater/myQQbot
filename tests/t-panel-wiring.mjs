@@ -823,6 +823,12 @@ ok("旧的 'status' 事件名订阅端已不再出现", !subscribed.includes('st
   // 漏掉它的接线不会有任何报错，只是那一栏永远空着 —— 而"空着"与"还没有战报"在界面上一样。
   ok('战报那一栏真的挂上了（第三类，与剧本、规则表同形）',
     /data-trpg-row="journal"/.test(sectionsSrc2) && /data-trpg-del="journal"/.test(sectionsSrc2));
+  // 被接管的群有两条"与设置页其余部分不同"的行为（2026-10-19）：档位被抬到 4 档、只有这一局的人
+  // 能惊动 DM。**必须在设置页明说** —— 不然管理员把滑条调低、发现那个群照常句句有回应，只会以为
+  // 是 bug（本仓库最忌讳的就是"填了、看着生效、实际用的是别的"）。
+  ok('设置页把"被接管的群与别处不同"写在明面上（档位不生效 + 只有这一局的人能惊动 DM）',
+    /响应概率滑条/.test(sectionsSrc2) && /只有这一局的人/.test(sectionsSrc2),
+    /响应概率滑条/.test(sectionsSrc2) ? '缺"只有这一局的人"' : '缺"响应概率滑条"那句');
   ok('战报的取数与另外两类**同一个端点**，且失败时的兜底里也有 `journals`',
     /\/api\/trpg\/workshop/.test(settingsJs) && /journals: \[\]/.test(settingsJs),
     /\/api\/trpg\/workshop/.test(settingsJs) ? '兜底缺 journals' : '没接端点');

@@ -225,6 +225,18 @@ ok('旧表头那句（只有带图才有 id）已不复存在', !/带图的消�
   ok('digestConfigForChat 认传进来的配置',
     dgc(patch({ digest: { ...base.digest, maxChars: 0 } })).maxChars === 0
     && dgc(patch({ digest: { ...base.digest, maxChars: 1234 } })).maxChars === 1234);
+
+  // ④ 响应档位住在 responseConfigForChat 手里 —— 它是 `wake-scheduler` 判"要不要惊动模型"
+  //    时读的那一处（2026-10-19 从全局那份改成传进来的这份，跑团靠它把 DM 会话抬到 4 档）。
+  const rp = (config) => responseConfigForChat(KEY, config);
+  ok('responseConfigForChat 认传进来的配置（滑条 0 = 1 档，而全局那份是 3 档）',
+    rp(patch({ store: { ...base.store, contextSliderPos: 0 } })).responseTier === 1
+    && rp(patch({ store: { ...base.store, contextSliderPos: 95 } })).responseTier === 4
+    && rp(patch({ store: { ...base.store, contextSliderPos: 55 } })).responseTier === 3,
+    JSON.stringify([rp(patch({ store: { ...base.store, contextSliderPos: 0 } })).responseTier,
+      rp(patch({ store: { ...base.store, contextSliderPos: 95 } })).responseTier]));
+  ok('不传 config 与传全局那份逐字相同（缺省那条路没被改坏）',
+    JSON.stringify(rp()) === JSON.stringify(responseConfigForChat(KEY)));
 }
 
 // ── 3b. "是不是在叫我"：两个名字都要给，结论由模型下 ──

@@ -38,7 +38,9 @@ import {
 import { actsOf, findAct, firstAct, nextAct } from './scenario/acts.js';
 import { createHandlers } from './tools/index.js';
 import type { AdvancementMetric } from './types.js';
-import type { ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd } from '../types.js';
+import type {
+  ExtraCommandInput, ExtraInterceptResult, ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd
+} from '../types.js';
 
 /**
  * 兜底建议的冷却：同一个会话这么久之内最多触发一次。
@@ -67,6 +69,62 @@ const DM_TOOLS: readonly string[] = trpgSpec.tools.map((tool) => tool.name);
  */
 const CONTEXT_FLOOR = { maxContextMessages: 200, historyCount: 200, promptContextMaxChars: 60000 } as const;
 
+/**
+ * 挂载期间把**响应档位**抬到 4 档（全部响应）—— 滑条 `100` 就是 4 档（见 `core/tier-slider.ts`）。
+ *
+ * ⚠️ 这一项与上面那三个宽度旋钮的取舍**不同**：那三个是"下限不是覆盖"（用户配得更宽就照用户的），
+ * 而档位是**覆盖** —— 跑团要的正是"玩家说的每一句话 DM 都看得见"，`100` 已经是滑条的最右端，
+ * 没有"比它更宽"可言。默认配置（95）本来也是 4 档，所以这个覆盖只在管理员**手动调低过**时起作用
+ * —— 而那种群恰恰是最需要它的：低档位会让 DM 静默漏掉玩家的行动，而**日志里一条线索都没有**。
+ *
+ * ⚠️ 它**只在这一处生效**：`WakeScheduler` 判"要不要惊动模型"时读的是 `configFor(chatKey)`
+ * （2026-10-19 从全局那份改过来）。那一个读取点少了，这一行就是纯粹的死配置。
+ */
+const RESPONSE_FLOOR_POS = 100;
+
+/**
+ * DM 模式的**准入判据**：这一条消息能不能惊动 DM。
+ *
+ * 返回 `null` = 放行（照常落未读、走模型）；返回 `{}` = **拦下但不吭声** —— 消息照常存档、
+ * 照常上面板，只是落成**已读历史**（模型以后在【过去状态】里读得到，这一轮不惊动它）。
+ *
+ * ── 为什么要有它 ──
+ *
+ * 跑团是**一个小圈子的事**，而群是公开的：旁观者插一句话不该把 DM 叫起来（它每被叫一次就是
+ * 一整轮模型调用，而那一轮里它只能对着"跟这一局无关的一句话"叙事）。档位被抬到 4 档之后
+ * 这件事更明显 —— 4 档的含义是"谁说话都响应"，所以必须由这一层把"谁"界定清楚。
+ *
+ * ── 四条边界 ──
+ *
+ * ① **只认"已经开跑"的局**（`status === 'active'`）。没开局、还在建卡（`preparing`）时**一律放行**：
+ *    那两段时间里群里讨论的正是"怎么加入、建什么卡"，拦下等于把报名的人挡在门外。
+ * ② **玩家 = 报名过的人 ∪ 有卡的人**。前者是 `.trpg join` / `.pc new` 写下的 `players`，
+ *    后者补的是"DM 直接建卡给某人"那条路（`character action=create` 带 `ownerId` **不进 `players`**）
+ *    —— 少了后半句，那个人说话 DM 会当没听见，而没有任何报错。
+ * ③ **拿不到发送者就放行**（`senderId` 为空）。宁可多惊动一次，也不要把一条说不清来源的消息
+ *    静默吞掉：吞掉是不可见的，多跑一轮只是花点钱。
+ * ④ **命令不受影响**：`intercept` 只在**不是**斜杠命令时被问（`ingest.ts` 的顺序），所以
+ *    `.trpg join` / `.pc new` / `.r 3d6` 这些照旧敲得动 —— 非玩家想加入的那条路是通的。
+ *
+ * ⚠️ **已知代价（知情）**：非玩家**用自然语言**问"我能加入吗"不会得到回应（他的那句话只进
+ * 【过去状态】，下一次玩家说话时 DM 才看得到）。判据放宽一条（比如"@ 了就放行"）就能救回来，
+ * 但那会让旁观者随手一句 @ 就把 DM 叫起来 —— 这里选了严格的那一侧。
+ *
+ * ⚠️ **另有一条机械代价**：它每条入站消息都要**同步读一次这一局的存档**（`TrpgStore.read`
+ * 无缓存，一个几 KB 的 JSON + 一次归一化）。这是 `intercept` 契约允许的（"同步"是硬要求，
+ * "无 I/O"指的是**不许 await**），代价也可接受 —— 但它确实落在了入站热路径上，所以
+ * **别在这里再加第二次读盘**（要别的字段就从这一个 `campaign` 上取）。
+ */
+const dmAdmit = (store: TrpgStore) => (input: ExtraCommandInput): ExtraInterceptResult | null => {
+  const campaign = store.read(input.chatKey);
+  if (!campaign || campaign.status !== 'active') return null;
+  const sender = String(input.senderId ?? '');
+  if (!sender) return null;
+  if (campaign.players.includes(sender)) return null;
+  if (campaign.characters.some((card) => card.ownerId === sender)) return null;
+  return {};
+};
+
 export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
   const store = new TrpgStore();
   /** 规则表（`data/trpg/rules/`）。内置的两套由它**懒补齐**（首次用到规则时才写盘）。 */
@@ -83,9 +141,10 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
   /**
    * 每个会话的运行模式（`data/trpg/modes.json`）。缺省 = DM。
    *
-   * 它同时被 `toolsFor`（露哪些工具）、`prompt`（给哪份人格）与 `onRunEnd`（跑不跑兜底建议）
-   * 三处读，所以必须是**同一个实例** —— 各建一个会在"读的是同一份文件"上浪费，更糟的是
-   * 让人以为三处的判据可能不一致。
+   * 它同时被 `toolsFor`（露哪些工具）、`prompt`（给哪份人格）、`onRunEnd`（跑不跑兜底建议）、
+   * `intercept`（拦不拦消息、按什么判据拦）与 `configPatch`（抬不抬上下文与档位）五处读，
+   * 所以必须是**同一个实例** —— 各建一个会在"读的是同一份文件"上浪费，更糟的是
+   * 让人以为五处的判据可能不一致。
    */
   const modes = new TrpgModeStore();
   /** 每个会话上次兜底的时间。只留冷却窗口内的，所以它自然有界（见 `coolingDown`）。 */
@@ -127,11 +186,14 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
      * 这正是"仅能执行 onedice 指令"的字面意思，也是这个模式唯一的零成本保证：
      * 那个群里**一次模型调用都不会发生**（所以助手模式连人格都不注入 —— 见下面 `prompt()`）。
      *
+     * **DM 模式**走另一条判据：只放行**这一局的人**（见 `dmAdmit`）—— 旁观者的消息照常存档，
+     * 但不惊动 DM。
+     *
      * ⚠️ 三条硬约束见 `ExtraRuntime.intercept`，这里最要紧的是**同步**：它跑在**每一条**入站
      * 消息上，所以下面只有同步的小文件读写，一个 `await` 都没有。
      */
     intercept(input) {
-      if (modes.read(input.chatKey) !== 'assistant') return null;
+      if (modes.read(input.chatKey) !== 'assistant') return dmAdmit(store)(input);
       const expr = looksLikeDiceRequest(input.text);
       // 认不出 → `{}` = **拦下、不吭声**：不惊动模型，也不刷屏。
       if (!expr) return {};
@@ -155,7 +217,7 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
     },
 
     /**
-     * 挂载期间把"上下文宽度"抬到 `CONTEXT_FLOOR`（见那里）。
+     * 挂载期间把"上下文宽度"抬到 `CONTEXT_FLOOR`、把"响应档位"抬到 4 档（见 `RESPONSE_FLOOR_POS`）。
      *
      * ⚠️ **助手模式不抬**：它压根不跑模型（`intercept` 全拦），拓宽窗口只是白占内存。
      *
@@ -171,11 +233,17 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
         const value = Math.max(0, Number(current) || 0);
         return value === 0 ? 0 : Math.max(value, floor);
       };
+      // 档位那一项**两个旋钮都要写**：`unifiedTier` 开着时只看 `contextSliderPos`，
+      // 关掉时群聊按 `groupSliderPos[群号]` 覆盖全局 —— 只写一个的话，另一种配置下
+      // 覆盖会**静默失效**（而"档位没抬起来"的表现只是"DM 偶尔不理人"）。
+      const [kind, id] = String(chatKey).split(':');
       return {
         store: {
           maxContextMessages: lift(base.maxContextMessages, CONTEXT_FLOOR.maxContextMessages),
           historyCount: lift(base.historyCount, CONTEXT_FLOOR.historyCount),
-          promptContextMaxChars: lift(base.promptContextMaxChars, CONTEXT_FLOOR.promptContextMaxChars)
+          promptContextMaxChars: lift(base.promptContextMaxChars, CONTEXT_FLOOR.promptContextMaxChars),
+          contextSliderPos: RESPONSE_FLOOR_POS,
+          ...(kind === 'group' && id ? { groupSliderPos: { [id]: RESPONSE_FLOOR_POS } } : {})
         }
       };
     },

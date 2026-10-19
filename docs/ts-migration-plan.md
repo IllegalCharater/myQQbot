@@ -184,6 +184,14 @@ OneBot 入站事件
 `randomPercent` 仅在运行时由滑条位置计算，不再写入配置；加载旧配置时会一次性把
 旧字段迁移成滑条位置。全局滑条与 `groupSliderPos` 也遵循同一换算规则。
 
+**取档位的唯一入口是 `responseConfigForChat(chatKey, source)`**，`source` 缺省才是全局那份。
+调度器（`#resolvePendingResponse`，`scheduleWake` 与 `wake` 共用它）传的是
+`configFor(chatKey)` —— 那是**这一轮运行真正生效的那份配置**，扩展的运行期覆盖（`configPatch`）
+就叠在它上面。跑团靠这一点把被接管的会话**覆盖成 4 档**（滑条 100 = 全部响应），所以"玩家说的
+每一句话 DM 都看得见"；调用点读 `getConfig()` 会让那次覆盖在这一处**静默失效**（症状是"配了、
+看着生效、实际用的是别的"）。同一条纪律的另外两处是窗口容量与历史深度，见
+`docs/extras-design.md` §5。
+
 旧配置的 `atCount/keywordCount/randomCount/allCount` 会按照升级时所选响应档位迁移成一个 `historyCount`，随后删除。内部统一使用 `historyCount` / `historyLimit`。
 
 调度器在消费窗口前完成两件彼此独立的事：
@@ -233,7 +241,7 @@ UI 文案、日志、HTTP 错误和运行时参数校验错误不属于提示词
 
 斜杠命令只声明**一个词形列表** `names`（第一个是主命令词），判定、规范化与日志标签**三样都从它派生** —— 没有第二种判据（曾经是 `name` + `aliases` + 一个 `match` 正则，三份）。命中非首位词形时把开头那个词换成 `names[0]` 再交给处理函数，于是每个解析器只认识自己那一个词。判定的边界是**一条**：`词` 后面跟空白、**`[`**、或直接结束 —— `[` 也算边界，是因为协议端把媒体段渲染成紧贴着的占位符（`segmentsToText` 用 `out.join('')`），"发视频 + 打 `/转写`"送来的就是 `/转写[视频]`；统一成边界规则之后，原先为它单开的那条 `/转写[视频]` 词形被删掉了。见 `docs/extras-design.md` §3.3–§3.4。
 
-**扩展还能拦下普通消息**（`ExtraRuntime.intercept`）：入站链路在**落档之前**问一遍"这条你要不要自己接"，拦下的消息照常存档、照常上面板，但落成**已读**历史（`wakeEligible: !slashCommand && !intercepted`）—— 与斜杠命令并列的第二条确定性快路径，只是不需要群友敲斜杠。回执由**宿主**发（扩展碰不到 `sender`）。返回 `{}` 是"**全拦**"那一档（跑团助手模式正靠它：那个群里一次模型调用都不会发生）；**推论是"响应档位"在那条路上彻底不相干** —— 拦下的消息落成已读、`wakeEligible: false`，窗口判定根本走不到它，所以低档位群里助手模式照样掷骰（DM 模式一切照旧）。
+**扩展还能拦下普通消息**（`ExtraRuntime.intercept`）：入站链路在**落档之前**问一遍"这条你要不要自己接"，拦下的消息照常存档、照常上面板，但落成**已读**历史（`wakeEligible: !slashCommand && !intercepted`）—— 与斜杠命令并列的第二条确定性快路径，只是不需要群友敲斜杠。回执由**宿主**发（扩展碰不到 `sender`）。返回 `{}` 是"**全拦**"那一档（跑团助手模式正靠它：那个群里一次模型调用都不会发生）；**推论是"响应档位"在那条路上彻底不相干** —— 拦下的消息落成已读、`wakeEligible: false`，窗口判定根本走不到它，所以低档位群里助手模式照样掷骰。DM 模式 2026-10-19 起也不再受档位约束：它用的是**准入**（开跑之后只有这一局的人的消息会惊动 DM，返回 `{}` 拦下旁观者）**加上**把档位覆盖成 4 档。
 
 **扩展还能给"这一轮运行"叠一层配置补丁**（`ExtraRuntime.configPatch(chatKey)`）：`runAgent` 开头调一次 `host.configFor(chatKey)` 算出一份**叠过的配置**，那一轮读到的每一处都是它。它**不改全局、不落盘**（`core/config.ts` 的 `mergeConfigPatch`），所以接管的会话与别的会话各看各的。⚠️ 这份 `cfg` **必须一路传到提示词拼装里**（`buildSystemPrompt` / `buildUserPrompt` / `buildPastState` / `formatEntry` / `triggerLabels` / `digestConfigForChat` 都收 `config`，内部不再自己读 `getConfig()`）—— 漏一处就是"覆盖了、只生效一半"。见 `docs/extras-design.md` §3.5–§3.6。
 
