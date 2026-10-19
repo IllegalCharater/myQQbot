@@ -247,7 +247,11 @@ export function findCharacter(campaign: TrpgCampaign, name: unknown): TrpgCharac
  * ⚠️ 它是**结构性**的（只有这一个方法），所以套件可以传一个普通对象字面量进来。
  */
 export interface JournalPort {
-  append(chatKey: string, entry: TrpgLogEntry): void;
+  /**
+   * `sessionId` 是"这一条属于哪一局"（见 `TrpgLogEntry.session`）。
+   * **可选**：旧调用点与套件里的普通对象字面量不必认识它。
+   */
+  append(chatKey: string, entry: TrpgLogEntry, sessionId?: string): void;
 }
 
 /**
@@ -261,12 +265,16 @@ export interface JournalPort {
  * 序号单调递增（截断旧日志不会让它回退），所以 `seq >= fromSeq` 精确等于"这次新加的"。
  *
  * ⚠️ **`visible === false` 的那些不进战报**（见 `TrpgLogEntry.visible`）：战报会被导出成文件
- * 发进群，而藏起来的卡与暗线在 `campaign.log` 的正文里是写着名字的。判据**只在这里一处**，
- * 导出路径不再筛第二遍。
+ * 发进群，而藏起来的卡与暗线在 `campaign.log` 的正文里是写着名字的。**写入侧这一道是主判据**；
+ * 导出路径（`commands/log.ts`）在"把这份文件发出去"那一刻**按同一条判据再查一遍** —— 那不是
+ * 第二份逻辑，而是同一条判据在发布边界上的重放，挡的是"手改过的战报文件"与"将来某个绕过
+ * `mirrorLog` 的写入点"。两处对 `visible === false` 的判断必须逐字一致。
  */
 export function mirrorLog(campaign: TrpgCampaign, fromSeq: number, journal: JournalPort | null): void {
   if (!journal) return;
   for (const entry of campaign.log) {
-    if (entry.seq >= fromSeq && entry.visible !== false) journal.append(campaign.chatKey, entry);
+    if (entry.seq >= fromSeq && entry.visible !== false) {
+      journal.append(campaign.chatKey, entry, campaign.sessionId);
+    }
   }
 }

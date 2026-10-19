@@ -15,11 +15,12 @@
 // 玩家私聊存档里那条 `我：…`。写进 `campaign.log` 就等于让"暗骰"在群存档里留下痕迹，
 // 而暗骰的全部意义就是不留痕迹（DM 那一份渲染会把日志念给模型听）。
 import { addUsage, chatCompletion, emptyUsage } from '../../../llm/llm.js';
+import { SlidingWindowBudget } from '../../../media/call-budget.js';
 import { errorMessage } from '../../../agent/tools/shared.js';
 import { EXTRA_PROMPT_JOBS } from '../../prompts.js';
 import { appendLog, mirrorLog } from '../model/campaign.js';
-import { MAX_NAME_CHARS, MAX_STATS_PER_CHARACTER, MAX_STAT, MIN_STAT, clampInt } from '../model/limits.js';
-import { mechanicContextOf, ruleSetFor } from '../model/rule-set.js';
+import { MAX_NAME_CHARS, MAX_STATS_PER_CHARACTER, MAX_STAT, MIN_STAT, SECRET_ROLL_BUDGET, clampInt } from '../model/limits.js';
+import { mechanicContextOf, ruleSetFor, secretFlagNames } from '../model/rule-set.js';
 import { playerOf } from '../model/session.js';
 import { describeCheckModifiers, formatCheck } from '../render/format.js';
 import { DiceError } from '../rules/dice.js';
@@ -38,6 +39,13 @@ import type { TrpgStore } from '../store/campaign-store.js';
 /** 私密叙事的等待上限。与 `suggest.ts` 同一口径：旁路调用不该拖住别的东西。 */
 const NARRATION_TIMEOUT_MS = 12000;
 
+/**
+ * 暗骰私密叙事的调用闸门（见 `SECRET_ROLL_BUDGET`）。
+ *
+ * ⚠️ **模块级单例是有意的**：滑动窗口要跨调用累积，每次新建等于没有闸门。
+ */
+const secretRollBudget = new SlidingWindowBudget({ getLimits: () => SECRET_ROLL_BUDGET });
+
 export interface CheckCommandDeps {
   store: TrpgStore;
   rules: RuleStore;
@@ -49,6 +57,10 @@ export interface CheckCommandDeps {
    * 缺省 = 不记账，叙事照常生成 —— 见 `ExtraRuntimeDeps.recordUsage`。
    */
   recordUsage?: ((usage: ExtraUsage) => void) | null;
+  /**
+   * 暗骰叙事的调用闸门。缺省 = 模块级那本账（生产路径）；套件要验"限额到了会怎样"时注入自己的。
+   */
+  budget?: SlidingWindowBudget;
   journal?: JournalPort | null;
   /** 这条命令的词（`'.ra'` 这样）—— 由 `commands/index.ts` 递进来。 */
   command: string;
@@ -74,6 +86,17 @@ function skillList(card: TrpgCharacter): string {
 }
 
 /**
+ * 这一局里**玩家不该看到名字**的旗标（暗线）。
+ *
+ * 给 `describeCheckModifiers` 用：那条文本会**进群**（`.ra`）或**进私聊**（`.rh`），
+ * 而它在机制没有 `note` 时会退到触发条件 —— 触发条件可能是暗线旗标。不遮的话，一次 `.ra`
+ * 就会把 `旗标：真凶是医生 = 是` 印在全群面前（实测过），并跟着日志进战报。
+ *
+ * 判据收在 `model/rule-set.ts` 的 `secretFlagNames` 一处（`roll` 工具写日志那一份也要它）。
+ */
+const secretFlagsOf = secretFlagNames;
+
+/**
  * 读一次规则集并**检查它接受这个形状**，顺带算上这一局的机制。
  *
  * 拒绝的两种成因分开报（同 `roll` 工具）：表坏了要人去修，形状不匹配要换骰子或换表。
@@ -84,6 +107,7 @@ function skillList(card: TrpgCharacter): string {
  * 表现只是同一个人同一张卡公开掷与暗掷出不同的目标值。
  *
  * `note` 是"规则改了目标值"那一行（P7-d）：调用方按它是不是空串决定要不要多印一行。
+ * 它**带上了暗线旗标的遮挡**（见 `secretFlagsOf`）—— 这两条路的受众都是玩家。
  */
 function judge(
   deps: CheckCommandDeps, campaign: TrpgCampaign, card: TrpgCharacter, skill: string, target: number
@@ -95,7 +119,7 @@ function judge(
   const result = resolveCheck(found.base.dice, mods.target, {
     rng: deps.rng, judge: mods.judge, rule: found.base
   });
-  return { result, note: describeCheckModifiers(mods) };
+  return { result, note: describeCheckModifiers(mods, { secretFlags: secretFlagsOf(campaign) }) };
 }
 
 /**
@@ -141,6 +165,26 @@ async function generateSecretNarration(
   } catch (error) {
     console.warn('[trpg] 暗骰叙事生成失败（只发点数）:', error instanceof Error ? error.message : error);
     return '';
+  }
+}
+
+/**
+ * 暗骰叙事那一次调用过不过闸门。**过不了返回 `false`，只省掉叙事**（点数照掷照发）。
+ *
+ * 单独抽一个函数是为了让"限额到了会怎样"能被断言：`SlidingWindowBudget.take` 抛
+ * `RATE_LIMITED`，而这里把它收成布尔值 —— 顺带保证**抛错不会漏到命令层**（那会让整条
+ * 暗骰变成一句"出错"，而它本来只是加菜没了）。
+ *
+ * **导出只为单测**（同 `scenarioNameFromFile`）：真跑一次得有个能应答的模型端点，
+ * 而本仓库的测试约定不许联网。
+ */
+export function takeNarrationBudget(budget: SlidingWindowBudget | undefined, chatKey: string): boolean {
+  try {
+    (budget ?? secretRollBudget).take(chatKey);
+    return true;
+  } catch {
+    console.warn('[trpg] 暗骰叙事的调用额度用完了，这次只发点数');
+    return false;
   }
 }
 
@@ -210,9 +254,16 @@ export function createSecretCheckCommand(deps: CheckCommandDeps): CommandHandler
     const { result, note } = judged;
 
     const line = formatCheck(result);
-    const narration = await generateSecretNarration({
-      card: card.name, skill, target, grade: result.label ?? result.grade
-    }, deps.recordUsage);
+    // ── 那一次私密叙事**先过闸门**（2026-10-19 加）──
+    //
+    // 每次暗骰都要发一次模型调用，而这是白名单群里任何群友都能敲的命令 —— 没有闸门的话
+    // 它就成了一个不限次数的免费模型入口。限额到了**只省掉那段叙事**：点数照掷、照发，
+    // 因为它才是这条命令的正文（叙事是加菜）。所以这里不拒绝整条命令。
+    const narration = takeNarrationBudget(deps.budget, input.chatKey)
+      ? await generateSecretNarration({
+        card: card.name, skill, target, grade: result.label ?? result.grade
+      }, deps.recordUsage)
+      : '';
     try {
       await deps.sendPrivate(String(input.senderId), [
         `【暗骰】${card.name} 的${skill}（${target}）`,

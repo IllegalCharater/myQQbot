@@ -31,7 +31,7 @@ const {
   JournalStore
 } = await load('extra/trpg/index.js');
 const { DiceError, looksLikeDiceRequest, rollDice } = await load('extra/trpg/rules/dice.js');
-const { createLedger, consume, recall, remember } = await load('extra/trpg/rules/economy.js');
+const { createLedger, consume, recall, refund, remember } = await load('extra/trpg/rules/economy.js');
 const {
   compileRuleSet, describeMechanic, EMPTY_RULE_SET
 } = await load('extra/trpg/rules/rule-set.js');
@@ -271,6 +271,38 @@ const status = (key) => store.read(key);
     /这一轮已经行动过了/.test(body(await call('character', hitCtx, { action: 'update', name: '阿飞', hpDelta: -1 }))));
   ok('同一回合里改**别人**照常（账本按卡名分）',
     !(await call('character', hitCtx, { action: 'update', name: '酒保', hpDelta: -1 })).isError);
+
+  // ── 报错的那一次**不占额度**（2026-10-19 补）──
+  //
+  // `consume` 排在参数校验之前（工具得先知道"这一轮还能不能动"才去干活），所以一次纯粹
+  // 写错参数的调用会把那个角色这一回合的行动吃掉 —— 模型改正参数重来时拿到的是
+  // 「这一轮已经行动过了」，血没掉、卡没改，而群里看不出发生了什么（实测过两次）。
+  // 判据与"被闸门拒掉的那一次不占额度"是同一条：**没做成的事不该收费**。
+  await call('character', ctx, { action: 'create', name: '教授', hpMax: 12 });
+  const retryCtx = fakeCtx(key);
+  const badUpdate = await call('character', retryCtx, {
+    // 一次调用带两项，其中 `stats` 写坏了 —— 这正是人格段要求的写法（"要改好几项就一次给全"），
+    // 所以这条路径不是边角料，而是最常见的那种。
+    action: 'update', name: '教授', hpDelta: -5, stats: {}
+  });
+  ok('夹具：一次调用里带写坏的参数 → 报错',
+    badUpdate.isError === true && /stats 是空的/.test(body(badUpdate)), body(badUpdate));
+  const fixedUpdate = await call('character', retryCtx, { action: 'update', name: '教授', hpDelta: -5 });
+  ok('**改正参数重来就能成**（报错的那次没把这一回合的行动吃掉）',
+    !fixedUpdate.isError && status(key).characters.at(-1).hp === 7, body(fixedUpdate));
+  ok('负对照：**成功**的那一次照常占额度（同一个 ctx 再改一次还是被拒）',
+    /这一轮已经行动过了/.test(body(await call('character', retryCtx, { action: 'update', name: '教授', hpDelta: -1 }))));
+
+  const rerollCtx = fakeCtx(key);
+  const badRoll = await call('roll', rerollCtx, { expr: '3d6x', actor: '教授' });
+  ok('夹具：写错的骰子表达式（带 actor）也报错',
+    badRoll.isError === true && /骰子表达式/.test(body(badRoll)), body(badRoll));
+  // ⚠️ 判据不能只看 `isError`：被配额拦下时 `gate` 回的是 `ok(blocked)`（**不是** error），
+  // 所以"没报错"在"被拦住"时也成立 —— 那样写是一条假绿（第一版就是这么写的）。
+  const fixedRoll = await call('roll', rerollCtx, { expr: '1d100', target: 45, actor: '教授' });
+  ok('`roll` 同理：改正表达式重掷就掷得出来（解析失败的那一次不占额度）',
+    !fixedRoll.isError && /｜ 对 45 →/.test(body(fixedRoll)) && !/已经行动过/.test(body(fixedRoll)),
+    body(fixedRoll));
 
   const downCtx = fakeCtx(key);
   await call('character', downCtx, { action: 'update', name: '阿飞', hpDelta: -100 });
@@ -1155,6 +1187,45 @@ const status = (key) => store.read(key);
       ok('管线与后备**都**没成时，两条原因都在回执里',
         /本用例验的是后备那条路/.test(failed) && /退一步只做格式整理也没成/.test(failed), failed);
 
+      // ── 拆成"前半就地 / 后半交出去"之后的那条路（2026-10-19）──
+      //
+      // 抽取最多 90 秒，而命令是被 `ingest.ts` 的**按会话串行**链 await 的 —— 就地跑完的
+      // 代价是"传完剧本之后的一分钟里，这个群说什么都没反应"。判据因此是**命令立刻返回**
+      // 且回执由 `sendText` 事后补上，而不是"最后拿到了什么"（后者就地跑也拿得到）。
+      const { createScenarioCommand } = await load('extra/trpg/commands/scenario.js');
+      const sent = [];
+      const asyncCmd = createScenarioCommand({
+        scenarios: saves, command: '.trpg scenario',
+        sendText: async (_key, text) => { sent.push(text); },
+        // 管线"没成"→ 走后备那次整理（`FORM`）→ 一次调用、结果确定，且不依赖假端点的脚本。
+        save: { extract: extract(PLAIN), analyze: noPipeline, format: async () => ({ ok: true, text: FORM }) }
+      });
+      const immediate = String(await asyncCmd({
+        chatKey: 'group:async', senderId: '10001', text: '.trpg scenario 异步的', media, replyToMessageId: null
+      }));
+      ok('需要模型时命令**立刻**回一句"正在收"，而不是等抽取跑完（那 90 秒不再堵住这个群）',
+        /正在收「f.md」/.test(immediate) && !/已存剧本/.test(immediate), immediate);
+      ok('夹具：那一刻回执还没发出去（补发是后台那条路的事）', sent.length === 0, JSON.stringify(sent));
+      // 后台是 `void` 出去的，所以这里**轮询等它落地**（不是 `sleep(80)` 那种定值等待 ——
+      // 机器一忙就会假红，而这条链上没有任何"它必须在这一刻完成"的语义）。
+      for (let i = 0; i < 100 && sent.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      ok('后台跑完之后用 `sendText` 把回执补上（与就地跑时逐字同形）',
+        sent.length === 1 && /已存剧本「异步的」/.test(sent[0]) && /开局：\.trpg new 异步的/.test(sent[0]),
+        JSON.stringify(sent));
+      const fastSent = [];
+      const inlineCmd = createScenarioCommand({
+        scenarios: saves, command: '.trpg scenario',
+        sendText: async (_key, text) => { fastSent.push(text); },
+        save: { extract: extract(FORM) }
+      });
+      const inline = String(await inlineCmd({
+        chatKey: 'group:inline', senderId: '10001', text: '.trpg scenario 现成的二号', media, replyToMessageId: null
+      }));
+      ok('格式本来就对 → 即使接了 `sendText` 也**就地**回（常见的那条路不该变成两条消息）',
+        /已存剧本「现成的二号」/.test(inline) && fastSent.length === 0, inline);
+
       // ── 管线成了的那条路 ──
       //
       // 注入一个成功的管线（生产实现会真的发 N+1 次调用，本机不能发），验的是**接线**：
@@ -1768,6 +1839,18 @@ const status = (key) => store.read(key);
 
   ok('`preparing` 的 `.trpg status` 明说"准备中"（那是唯一一个还开不了跑的状态）',
     /准备中/.test(String(await as(B, '.trpg status'))), String(await as(B, '.trpg status')));
+  // ⚠️ **只有玩家那份说是不够的**（2026-10-19 补）：模型那份原先一个字都不提状态，于是
+  // `.trpg new` 之后群里随便说句话，DM 就可能开讲 —— 而 `preparing` 那道闸门存在的理由
+  // 正是"卡没建完、没确认时不该开始"。
+  ok('模型那一侧也看得到「准备中」（缺了它，`.trpg new` 之后 DM 会以为已经开跑了）',
+    /准备中/.test(renderForModel(now())), renderForModel(now()).slice(0, 400));
+  // `preparing` 时**不许**把 DM 引向 `restart`：那一档的局并没有在跑，而 restart 会清掉
+  // 全队刚建好的卡。正确的下一步是"让群友敲 .trpg start"。
+  const prepTool = await createRuntime().handlers.campaign(fakeCtx(chain), { action: 'start', title: '另一局' });
+  ok('`campaign action=start` 在 `preparing` 局里被拒时说的是**还没开跑**，并把人指去 `.trpg start`',
+    /还没开跑/.test(body(prepTool)) && /\.trpg start/.test(body(prepTool)), body(prepTool));
+  ok('对照：那一档的拒绝话术里**不出现 restart**（照着做会清掉全队的卡）',
+    !/restart/.test(body(prepTool)), body(prepTool));
 
   ok('第二个人 `.trpg join` 进得来', /已加入/.test(String(await as(B, '.trpg join'))));
   ok('重复 join 被拒，并说清为什么', /已经在这一局里/.test(String(await as(B, '.trpg join'))));
@@ -1781,6 +1864,8 @@ const status = (key) => store.read(key);
   ok('`.pc new` 建出**自己的**卡（`ownerId` = 敲命令的人），并停在"未确认"',
     now()?.characters.at(-1)?.ownerId === A && now()?.characters.at(-1)?.confirmed === false, made);
   ok('回执点明"定下来之后要 `.pc confirm`"', /\.pc confirm/.test(made), made);
+  ok('`preparing` 时模型那份会标出**谁还没确认**（它替不了玩家点确认，但能催一句）',
+    renderForModel(now()).includes('[还没确认]'), renderForModel(now()).slice(-500));
   // **没先 join 的人直接建卡，也要进名单** —— 不把"报名"与"建卡"分成两步（群友会漏掉
   // 前一步，而 `canActivate` 是按名单逐人查的，那张卡会落进"查不到这个人"的缝里）。
   const lazy = 'group:p2-lazy';
@@ -1810,6 +1895,16 @@ const status = (key) => store.read(key);
   ok('全员确认之后 `.trpg start` 真的把这一局推成 **`active`**',
     now()?.status === 'active' && /开跑/.test(started), started);
   ok('已经在跑时再 `.trpg start` 说一句"已经在跑了"', /已经在跑/.test(String(await as(A, '.trpg start'))));
+  // 这次状态迁移对模型是**不可见**的（`.trpg start` 落成已读历史、不唤醒模型，而
+  // `renderForModel` 只在 `preparing` 时多一行）—— 日志是它下一轮唯一的线索。
+  ok('`.trpg start` 在日志里留下一条「开跑」（否则这一次迁移对模型完全不可见）',
+    now()?.log.some((entry) => entry.kind === 'state' && entry.text.startsWith('开跑：')),
+    JSON.stringify(now()?.log.slice(-2)));
+  ok('那条「开跑」也进了战报（写盘之后镜像，与其余命令同形）',
+    journal.read(chain).some((entry) => entry.text.startsWith('开跑：')),
+    JSON.stringify(journal.read(chain).slice(-2)));
+  ok('开了跑之后模型那份**不再**说「准备中」（两个状态在提示词里必须分得开）',
+    !/准备中/.test(renderForModel(now())), renderForModel(now()).slice(0, 400));
 
   const mine = String(await as(A, '.pc show'));
   ok('`.pc show` 不带名字看的是**自己的**卡（标题与全群那份不同）',
@@ -2126,6 +2221,31 @@ const status = (key) => store.read(key);
   // ── 确认之后不能重掷 ──
   await as('.pc confirm');
   ok('确认之后不能重掷（那张卡定下来了）', /已经确认过/.test(String(await as('.pc roll'))));
+
+  // ── 重掷会**整份替换** `stats`：顶掉了旧值就要说出来（2026-10-19 加）──
+  //
+  // 重掷本身是正当的（"掷到满意为止"是这类游戏的常规玩法），坏的只是"没人知道刚才那次覆盖了
+  // 什么"：主持人手工给的技能、玩家用 `.st` 填的那几项会悄无声息地消失，而回执一字不提。
+  const K2 = 'group:p4-replace';
+  const as2 = (line, key = K2) => commands[route(line)]({
+    chatKey: key, senderId: A, text: line, media: [], replyToMessageId: null
+  });
+  await as2('.trpg new 覆盖测试 coc7');
+  await as2('.pc new 阿飞');
+  await as2('.st 侦查 45');
+  const first = String(await as2('.pc roll'));
+  ok('第一次重掷：卡上原有 1 项 → 回执**明说被顶掉了**',
+    /顶掉了卡上原有的 1 项/.test(first), first);
+  ok('第二次重掷：现在卡上是一整套（8 项）→ 数字跟着变（不是写死的一句）',
+    /顶掉了卡上原有的 8 项/.test(String(await as2('.pc roll'))));
+  // 负对照必须**真的开一局并建卡**：拿一个"还没有局"的会话去掷，回的是那句开局提示，
+  // 断言照样绿 —— 那是假绿。
+  const K3 = 'group:p4-fresh';
+  await as2('.trpg new 全新 coc7', K3);
+  await as2('.pc new 阿飞', K3);
+  const fresh = String(await as2('.pc roll', K3));
+  ok('负对照：**第一次**掷属性（卡上一个数都没有）不提这件事 —— 那时没有任何东西被顶掉',
+    /已掷出/.test(fresh) && !/顶掉了卡上原有的/.test(fresh), fresh);
 }
 
 // ── 5k. 战斗（P5）：先攻、回合指针，以及"行动即推进" ─────────────────────────
@@ -2762,6 +2882,14 @@ const status = (key) => store.read(key);
   const plan998 = rt.prompt('group:998');
   ok('端到端：**没开团的会话一个字都不印**（三档一合并，这里就会冒出一句"规则扩展坏了"）',
     !plan998.body[1].includes('这一局的特殊规则'), plan998.body[1]);
+  // 人格段说的是**收团**该敲什么。原先写的是 `/能力 卸载 trpg` —— 那是"这个群不跑团了"，
+  // 不写摘要、不清存档，敲完 `.trpg` 命令也全没了。`.trpg end` 才是收团（P2 起就有）。
+  // ⚠️ 判据取的是**那一行本身**（以「收团：」开头），不是整段里有没有出现过 `.trpg end` ——
+  // 整段里别处也提它（下一行就在说两者不同），那样写的话把这一行改回去也不会红。
+  const collectLine = plan972.body[0].split('\n').find((line) => line.startsWith('收团：')) ?? '';
+  ok('人格段里收团指的是 `.trpg end`', collectLine.includes('.trpg end'), collectLine);
+  ok('而且**不再**把卸载当成收团（两件事在提示词里必须分开说）',
+    !/让他们敲 `\/能力 卸载 trpg`/.test(plan972.body[0]), plan972.body[0].slice(-260));
 
   const started973 = await callRt('campaign', fakeCtx('group:973'), { action: 'start', scenario: '规则模组' });
   ok('`campaign action=start`（模型那一侧）**要**报一遍这一场景压着哪些规则',
@@ -2788,6 +2916,73 @@ const status = (key) => store.read(key);
   const bare973 = await callRt('roll', fakeCtx('group:973'), { expr: '1d100', reason: '随便掷' });
   ok('确定性分界：没有 target 的裸掷骰**不参与**机制（它压根不是检定）',
     !body(bare973).includes('这一局的规则改了目标值') && !body(bare973).includes('对 '), body(bare973));
+
+  // ── ②c. `roll` 的 `skill` 维度（2026-10-19 补）：两条路必须给同一个目标值 ──
+  //
+  // 这一段钉的是一个**实测过的分岔**：工具那一侧原先恒传空串 `skill`，于是挂在技能上的机制
+  // **只在 `.ra` / `.rh` 那条路上生效** —— 同一张卡、同一个场景、同一个骰面，DM 掷出「成功」
+  // 而玩家敲 `.ra` 掷出「失败」。三条断言缺一不可：正、负对照、以及**跨路相等**。
+  const wSkill = rtScenarios.write('技能模组', '---\ntitle: 技能模组\n---\n黑暗里什么都看不清。\n');
+  const wSkillExt = rtScenarios.writeExtras('技能模组', {
+    ruleExt: ext(mech({ note: '', trigger: { op: 'skill', value: '侦查' } }))
+  });
+  ok('夹具：技能模组写得进去（写不进去的话下面三条全是空转）',
+    wSkill.ok === true && wSkillExt.ok === true, JSON.stringify([wSkill.ok, wSkillExt.ok]));
+  await callRt('campaign', fakeCtx('group:981'), { action: 'start', scenario: '技能模组' });
+  await callRt('character', fakeCtx('group:981'),
+    { action: 'create', name: '阿飞', ownerId: '10001', stats: { 侦查: 45 }, hpMax: 10 });
+  const withSkill = await callRt('roll', fakeCtx('group:981'),
+    { expr: '1d100', target: 45, actor: '阿飞', skill: '侦查' });
+  const noSkill = await callRt('roll', fakeCtx('group:981'),
+    { expr: '1d100', target: 45, actor: '阿飞', reason: '同一件事，只是没填 skill' });
+  const raSkill = await tell('.ra 侦查', 'group:981');
+  ok('`roll` 填了 skill → 技能上的机制生效（45 − 20 = 25）',
+    body(withSkill).includes('｜ 对 25 →') && body(withSkill).includes('技能：侦查'), body(withSkill));
+  ok('负对照：同一个调用**不填** skill → 目标值一点没动（证明是**这个参数**在起作用）',
+    body(noSkill).includes('｜ 对 45 →') && !body(noSkill).includes('这一局的规则改了目标值'),
+    body(noSkill));
+  ok('**两条路给出同一个目标值**（这才是要修的那件事）：`.ra 侦查` 与带 skill 的 roll 都是「对 25」',
+    raSkill.includes('｜ 对 25 →') && body(withSkill).includes('｜ 对 25 →'),
+    `${raSkill} ｜ ${body(withSkill)}`);
+
+  // ── ②d. 暗线旗标的名字**不许**跟着检定回执进群（2026-10-19 补）──
+  //
+  // `describeCheckModifiers` 在机制没有 `note` 时退到触发条件，而触发条件可能是暗线旗标 ——
+  // 实测过：一次 `.ra` 会把 `旗标：真凶是医生 = 是` 印在全群面前，并跟着那条日志进战报，
+  // 再被 `.log export` 发一次。遮挡的判据必须是 `visible`，不是"凡旗标都遮"（那样 DM 与
+  // 群友都看不到公开旗标，回执会变得没法对账）。
+  const rtJournal = new JournalStore();
+  const wSecret = rtScenarios.write('暗线模组',
+    '---\ntitle: 暗线模组\nflags: {"真凶是医生":{"value":"是","visible":false},"灯塔已熄":"是"}\n---\n医生有问题。\n');
+  const wSecretExt = rtScenarios.writeExtras('暗线模组', {
+    ruleExt: ext(
+      mech({ note: '', trigger: { op: 'flag', key: '真凶是医生', value: '是' } }),
+      mech({ note: '', trigger: { op: 'flag', key: '灯塔已熄', value: '是' }, effect: { handler: 'penalty_to_check', params: { value: 5 } } })
+    )
+  });
+  ok('夹具：暗线模组写得进去（一条挂暗线、一条挂公开旗标，两条都没有 note）',
+    wSecret.ok === true && wSecretExt.ok === true, JSON.stringify([wSecret.ok, wSecretExt.ok]));
+  await callRt('campaign', fakeCtx('group:982'), { action: 'start', scenario: '暗线模组' });
+  await callRt('character', fakeCtx('group:982'),
+    { action: 'create', name: '阿飞', ownerId: '10001', stats: { 侦查: 45 }, hpMax: 10 });
+  const raSecret = await tell('.ra 侦查', 'group:982');
+  ok('`.ra` 的回执**不许出现暗线旗标的名字**（它进群，还会跟着日志进战报）',
+    !raSecret.includes('真凶是医生') && raSecret.includes('这一局的特殊规则'), raSecret);
+  ok('负对照：公开旗标照旧指名（判据是那条旗标的 `visible`，不是"凡旗标都遮"）',
+    raSecret.includes('旗标：灯塔已熄 = 是'), raSecret);
+  const rollSecret = await callRt('roll', fakeCtx('group:982'),
+    { expr: '1d100', target: 45, actor: '阿飞', skill: '侦查' });
+  ok('对照：模型那一侧（`roll` 工具）**照旧看得到是哪一条** —— DM 得靠它把数对上',
+    body(rollSecret).includes('旗标：真凶是医生 = 是'), body(rollSecret));
+  const journal977 = rtJournal.read('group:982');
+  ok('战报里也没有那个名字（`.ra` 那条日志跟着 `note` 一起写进去，两处共用同一个遮挡）',
+    journal977.length > 0 && !journal977.some((entry) => entry.text.includes('真凶是医生')),
+    JSON.stringify(journal977.map((entry) => entry.text)));
+  // 与战报同源但**另一条出口**：`.trpg status` 直接把最近三条 `roll` / `check` 日志印给全群
+  // （`PLAYER_LOG_KINDS`）。工具那条路的日志正文要是没遮，就是从这儿漏的。
+  const status982 = await tell('.trpg status', 'group:982');
+  ok('`.trpg status` 印给全群的那几行里也不许有暗线旗标名',
+    !status982.includes('真凶是医生'), status982);
 
   // 钩子 B：`character` 的伤害闸门
   await callRt('campaign', fakeCtx('group:975'), { action: 'start', scenario: '免疫模组' });
@@ -3069,6 +3264,109 @@ const status = (key) => store.read(key);
     recall(dedupe, '阿飞', 'roll', { expr: '1d20' }) === '结果');
   ok('参数不同就不是同一次调用', recall(dedupe, '阿飞', 'roll', { expr: '1d20', reason: '别的' }) === null);
   ok('行动者不同也不是同一次调用', recall(dedupe, '酒保', 'roll', { expr: '1d20' }) === null);
+
+  // ── `refund`：`consume` 的逆操作（2026-10-19 加）──
+  //
+  // 它服务的是"报错的那一次不占额度"（`tools/shared.ts` 的 `spent` 那一格）。四条判据里
+  // 后两条是**防坏账**的：多退一次不能让计数变成负数，退一个从没记过的人也不能抛。
+  const paid = createLedger();
+  consume(paid, '阿飞', '');
+  refund(paid, '阿飞', '');
+  ok('退回来的额度能再用（主行动那一格回到"没用过"）', consume(paid, '阿飞', '').ok === true);
+  const paidExtra = createLedger();
+  for (const source of ['multiattack', 'haste', 'time_stop']) consume(paidExtra, '酒保', source);
+  refund(paidExtra, '酒保', 'time_stop');
+  refund(paidExtra, '酒保', 'time_stop');   // 多退一次
+  ok('额外行动同样退得掉，而且**多退一次不会变成负数**（退不掉就什么都不做）',
+    consume(paidExtra, '酒保', 'time_stop').ok === true
+    && consume(paidExtra, '酒保', '另一个来源').ok === false);
+  ok('退一个从没记过的行动者不抛错，也不影响别人',
+    (refund(paid, '查无此人', ''), consume(paid, '查无此人', '').ok === true
+      && consume(paid, '阿飞', '').ok === false));
+}
+
+// ── 7a. 调用闸门：`.trpg scenario` 与 `.rh` 的暗骰叙事（2026-10-19 加）──────────
+//
+// 这两条命令是白名单群里**任何群友**都能敲的，而各自要发模型调用（一份模组最多 7 次、
+// 一次暗骰 1 次）。其余重能力早就各有一本 `SlidingWindowBudget`，跑团原先一个都没有。
+// 两段的判据不同：`.trpg scenario` 被拦下时**整条命令不做**，`.rh` 被拦下时**只省掉叙事**
+// （点数照掷照发）—— 后者才是这条命令的正文。
+{
+  const { SlidingWindowBudget } = await load('media/call-budget.js');
+  const { createScenarioCommand } = await load('extra/trpg/commands/scenario.js');
+  const { takeNarrationBudget } = await load('extra/trpg/commands/check.js');
+
+  const tight = new SlidingWindowBudget({ getLimits: () => ({ perChatPerHour: 1, perDay: 100 }) });
+  const cmd = createScenarioCommand({
+    scenarios: new ScenarioStore(), budget: tight, command: '.trpg scenario'
+  });
+  // 媒体里没有 `url` → `saveScenario` 会**在下载之前**早退，所以这条用例不碰网络。
+  const file = [{ kind: 'file', name: '灯塔.md' }];
+  const send = (chatKey, text, media = file) => cmd({ chatKey, senderId: '10001', text, media, replyToMessageId: null });
+  ok('夹具：没有下载地址时走到那句可读的早退（下面两条断言才有判别力）',
+    /协议端没给下载地址/.test(String(await send('group:budget', '.trpg scenario 灯塔'))));
+  const blocked = String(await send('group:budget', '.trpg scenario 灯塔'));
+  ok('`.trpg scenario` 的闸门：额度用完时**整条命令不做**，并说清过一会儿再来',
+    /传剧本太频繁/.test(blocked) && /data\/trpg\/scenarios/.test(blocked), blocked);
+  ok('闸门**按会话**算（另一个群照常放行）',
+    /协议端没给下载地址/.test(String(await send('group:budget-2', '.trpg scenario 灯塔'))));
+  ok('不带名字、也没引用文件时（列剧本库）根本不记账 —— 那一步一次模型调用都不发',
+    /剧本库/.test(String(await send('group:budget', '.trpg scenario', []))));
+
+  const tiny = new SlidingWindowBudget({ getLimits: () => ({ perChatPerHour: 1, perDay: 100 }) });
+  ok('暗骰叙事的闸门（正）：还有额度 → 放行', takeNarrationBudget(tiny, 'group:b') === true);
+  ok('暗骰叙事的闸门（负）：额度用完 → 返回 false（调用方据此**只省掉叙事**）',
+    takeNarrationBudget(tiny, 'group:b') === false);
+  ok('它同样按会话算（另一个群照常放行）', takeNarrationBudget(tiny, 'group:c') === true);
+  ok('缺省那一本账（`undefined`）照常能用，不会抛',
+    takeNarrationBudget(undefined, 'group:first-ever') === true);
+}
+
+// ── 7c. 战报的**跨局分界**与模式的 mtime 缓存（2026-10-19 加）──────────────────
+//
+// 两件都是"运维层"的毛病，各自的成因不同：
+//   • 战报按**会话** append，而 `.trpg end` 只删存档、不清战报 —— 连开两局之后导出的文件里
+//     两局混在一起，`seq` 还是每局从 1 重来的。判据是 `TrpgLogEntry.session`。
+//   • `modes.json` 原先**每条入站消息读一遍**（`intercept` 问的第一件事就是它），
+//     而"不缓存"那条理由（手改文件不生效）对 mtime 缓存不成立。
+{
+  const { mirrorLog } = await load('extra/trpg/model/campaign.js');
+  const { renderJournal } = await load('extra/trpg/render/journal.js');
+  const entry = (seq, text, session) => ({ seq, ts: 0, kind: 'roll', text, ...(session ? { session } : {}) });
+
+  ok('单局导出**逐字不变**：分界行只在真有第二局时才出现',
+    !/第 \d 局/.test(renderJournal('group:j', [entry(1, 'a', 's1'), entry(2, 'b', 's1')])));
+  const two = renderJournal('group:j', [entry(1, 'a', 's1'), entry(1, 'c', 's2')]);
+  ok('两局：在第二局那一条**之前**插一行分界（否则读的人只看到一串重复的序号）',
+    /—— 第 2 局/.test(two) && two.indexOf('第 2 局') < two.indexOf('c'), two);
+  ok('旧战报（一条 `session` 都没有）一条分界都不印 —— 与加这个功能之前逐字相同',
+    !/第 \d 局/.test(renderJournal('group:j', [entry(1, 'a'), entry(2, 'b')])));
+
+  const campaign = emptyCampaign('group:j2', { title: 't', system: '', rule: 'generic' });
+  const seen = [];
+  appendLog(campaign, 'roll', '一');
+  mirrorLog(campaign, 1, { append: (key, item, session) => seen.push({ key, session }) });
+  ok('镜像时把**这一局的 `sessionId`** 一起交给战报（缺了它，上面那条分界就没有判据）',
+    seen.length === 1 && seen[0].session === campaign.sessionId && campaign.sessionId !== '',
+    JSON.stringify(seen));
+
+  const modes = new TrpgModeStore(path.join(DIR, 'modes-cache.json'));
+  modes.write('group:x', 'assistant');
+  ok('写完之后立刻读得到（同一秒内 rename 的 mtime 分辨率不够，所以写那一侧要显式作废缓存）',
+    modes.read('group:x') === 'assistant');
+  // 外部改文件（不经这个实例写）→ 签名（mtime + size）变 → 下一次读必须看到新的一版。
+  // ⚠️ 显式把 mtime 推到未来：**只按 mtime 缓存时**这一条会间歇性红（同一 tick 内连写两次，
+  // mtime 一样），而实现已经加上了 `size` 那一维；这里推 mtime 是让这条用例与"手改文件"
+  // 这个场景本身一致（真手改不会卡在同一毫秒）。
+  fs.writeFileSync(modes.file, JSON.stringify({ 'group:x': 'dm' }), 'utf8');
+  const future = new Date(Date.now() + 5000);
+  fs.utimesSync(modes.file, future, future);
+  ok('**手改了文件也读得到新的一版**（缓存按 mtime + size 失效，不是"读一次就永远记着"）',
+    modes.read('group:x') === 'dm');
+  ok('坏 JSON 与"没有这个文件"同一条路：给缺省模式，不抛',
+    (fs.writeFileSync(modes.file, '{不是 JSON', 'utf8'),
+    fs.utimesSync(modes.file, new Date(Date.now() + 9000), new Date(Date.now() + 9000)),
+    modes.read('group:x') === 'dm'));
 }
 
 // ── 7b. 用量记账：**不在任何会话里**的那两次调用（E）────────────────────────
@@ -3198,11 +3496,26 @@ const status = (key) => store.read(key);
     /atUserId/.test(body('src/extra/trpg/tools/say.ts'))
     && /atUserId/.test(body('src/extra/trpg/spec.ts'))
     && /atUserId:/.test(body('src/extra/prompts.ts')));
-  // `.trpg scenario` 那条命令要走 `saveScenario` 的 `recordUsage` —— 而那一段（下载 + 抽文本）
+  // `.trpg scenario` 那条命令要把宿主的 `recordUsage` 一路带到抽取管线 —— 而那段（下载 + 抽文本）
   // 在套件里跑不了（要真网络 + 真 Python），所以只能从源码文本上守"接上了"这一件事。
-  ok('`.trpg scenario` 把宿主的 `recordUsage` 透给 `saveScenario`（否则抽取最多 6 次调用的成本没人记账）',
-    /'\.trpg scenario'[^\n]*recordUsage: deps\.recordUsage/.test(body('src/extra/trpg/commands/index.ts'))
-    && /saveScenario\(input, name, scenarios, \{ recordUsage \}\)/.test(body('src/extra/trpg/commands/scenario.ts')));
+  // ⚠️ 2026-10-19 拆成"前半就地 / 后半交出去"之后，判据跟着变成**同一个 `deps` 对象交给两半**：
+  // 只钉 `finishScenario(...)` 那一行的话，把 `openScenario` 那处漏掉（读字节那一步不记账）
+  // 不会有任何报错。
+  const scenarioSrc = body('src/extra/trpg/commands/scenario.ts');
+  ok('`.trpg scenario` 把宿主的 `recordUsage` 透下去（否则抽取最多 6 次调用的成本没人记账）',
+    // ⚠️ `[\s\S]` 而不是 `[^\n]`：那一行 2026-10-19 换成了多行写法（多了 `sendText`），
+    // 用 `[^\n]` 的话它会以"找不到"的形式假红 —— 而它想守的接线其实完好。
+    /'\.trpg scenario'[\s\S]{0,200}?recordUsage: deps\.recordUsage/.test(body('src/extra/trpg/commands/index.ts'))
+    && /recordUsage \}/.test(scenarioSrc)
+    && /openScenario\(input, deps\)/.test(scenarioSrc)
+    && /finishScenario\(doc, shown, name, scenarios, deps\)/.test(scenarioSrc));
+  // 抽取最多 90 秒，而命令是被 `ingest.ts` 的按会话串行链 await 的 —— 没有这个口子就只能
+  // 就地跑完，那 90 秒里整个群的消息都排在后面。三条缺一不可：接口上有、组装根接了、
+  // 命令层真的往下递了。
+  ok('`sendText` 是宿主的口子，`web/app.ts` 接上了，命令层也真的递了下去（抽取不再堵住入站链）',
+    /sendText\?\(/.test(body('src/extra/types.ts'))
+    && /sendText: async \(chatKey/.test(app)
+    && /sendText: deps\.sendText/.test(body('src/extra/trpg/commands/index.ts')));
   ok('`sendPrivate` 是**宿主的口子**（`extra/types.ts` 上的可选成员），扩展只说"给谁、说什么"',
     /sendPrivate\?\(/.test(body('src/extra/types.ts')));
 }

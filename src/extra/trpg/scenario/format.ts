@@ -15,11 +15,14 @@
 // 那会变成"开局了但什么都没注入"，而群里没人知道为什么。
 // 所以本函数的**后置条件是"返回的文本一定是规定格式"**，不满足就返回失败。
 //
-// ── 已知缺口：这一次调用的用量没进 token 账 ──
+// ── 用量记账（2026-10-19 补上）──
 //
-// 与 `suggest.ts` 同一条（那里有完整推导）：这条路径不挂在某个会话上，而
-// `SessionRegistry` 没有"只累加增量"的入口（`#persist` 对已结束的会话会重复累加），
-// 所以只把用量写进日志。
+// 这一次调用发生在 `finish()` 之外，所以走的是 `SessionRegistry.addExtraUsage`（只叠增量）——
+// 与 `suggest.ts` / `.rh` 的暗骰叙事同一条链：`ExtraRuntimeDeps.recordUsage` → `web/app.ts` →
+// `sessions.addExtraUsage`。**`recordUsage` 是第三个参数、不是全局状态**：缺省 = 不记账、
+// 调用照常（记不上是账面的小缺口，不该让一次传剧本失败）。
+//
+// 日志仍然留着（`[trpg] 剧本整理用量`）：账本只给总数，而"这一份整理花了多少"只有它答得上来。
 import { addUsage, chatCompletion, emptyUsage } from '../../../llm/llm.js';
 import { EXTRA_PROMPT_JOBS } from '../../prompts.js';
 import type { ExtraUsage } from '../../types.js';

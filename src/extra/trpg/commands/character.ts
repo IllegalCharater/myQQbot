@@ -158,6 +158,11 @@ export function createCharacterRollCommand(deps: CharacterCommandDeps): CommandH
     }
 
     const rolled = rollChargen(found.base.chargen, rng);
+    // ⚠️ **这一行是整份替换 `stats`**，所以要把"原来那些被顶掉了"说出来（2026-10-19 加）。
+    // 不说的话，主持人先前手工给的技能、玩家用 `.st` 填的那几项会**悄无声息地消失** ——
+    // 而重掷本身是正当的（"掷到满意为止"是这类游戏的常规玩法），坏的只是"没人知道刚才那次
+    // 覆盖了什么"。数字本身不用报（它们就在上一版的日志里），报"有几项"就够定位。
+    const replaced = Object.keys(card.stats).length;
     card.stats = rolled.stats;
     // 派生值：**算出来的才覆盖**（缺属性的那几项留着原样，并由下面那句说明原因）。
     const d = rolled.derived;
@@ -190,6 +195,8 @@ export function createCharacterRollCommand(deps: CharacterCommandDeps): CommandH
       rolled.missing.length
         ? `（有几项没算出来：规则表里没有 ${rolled.missing.join('、')} —— 那几项派生值要这几个名字）`
         : '',
+      // 覆盖了旧值就说一句（判据见上面 `replaced` 那处）。
+      replaced ? `（这一套顶掉了卡上原有的 ${replaced} 项属性/技能）` : '',
       '不满意就再敲一次（确认之前随便重掷）；定下来敲 `.pc confirm`。'
     ].filter(Boolean).join('\n');
   };

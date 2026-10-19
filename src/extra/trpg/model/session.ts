@@ -110,10 +110,21 @@ export function canActivate(campaign: TrpgCampaign): Verdict {
   return { ok: true };
 }
 
-/** `preparing → active`（就地改）。返回 `false` = 判据没过（调用方先用 `canActivate` 拿原因）。 */
+/**
+ * `preparing → active`（就地改）。返回 `false` = 判据没过（调用方先用 `canActivate` 拿原因）。
+ *
+ * ⚠️ **顺手落一条日志**（2026-10-19 加）。不加的话这个状态迁移对模型是**完全不可见的**：
+ * `.trpg start` 是斜杠命令（落成已读历史、不唤醒模型），而 `renderForModel` 在两者之间
+ * 只差一行"准备中"—— 消失得悄无声息。日志是模型下一轮唯一能看到的"刚才发生了什么"。
+ *
+ * `kind` 用 `state` 而不是 `scene`：`campaignSummary` 会把 `scene` 那几类拼成"走过的场景"，
+ * 而"开跑"不是一处场景。
+ */
 export function activate(campaign: TrpgCampaign): boolean {
   if (campaign.status === 'active') return false;
   campaign.status = 'active';
+  appendLog(campaign, 'state',
+    `开跑：《${campaign.title}》（${campaign.players.length} 位玩家、${campaign.characters.length} 张人物卡）`);
   return true;
 }
 
@@ -201,6 +212,18 @@ export function beginCampaign(
 ): ToolResult {
   const existing = deps.store.read(chatKey);
   if (existing && args?.restart !== true) {
+    // ── 按**状态**分岔（2026-10-19 补）──
+    //
+    // 原先只有一句"已经有《X》在跑了"，而 `preparing` 的局**并没有在跑** —— 那句话是假话，
+    // 更糟的是后面那句"真要推倒重来就把 restart 设成 true"：模型照着做会**清掉全队刚建好的卡**。
+    // 这一档正确的下一步是"让群友敲 `.trpg start`"，而且必须是**人**来敲（`canActivate` 的闸门
+    // 在那儿），模型没有那个工具 —— 所以要把这件事说明白，否则它会反复试 start。
+    if (existing.status === 'preparing') {
+      return err(`这一局还没开跑（《${existing.title}》，${existing.players.length} 人已加入、`
+        + `${existing.characters.length} 张人物卡）。等大家建卡并确认之后，让群友敲 \`.trpg start\` 开跑 ——`
+        + '那一步只能由人来敲，你不需要、也没有工具去开始或重开。'
+        + '要改设定用 action=scene / flag，要改人用 character。');
+    }
     return err(`这个会话已经有《${existing.title}》在跑了（${existing.characters.length} 张人物卡）。`
       + '改设定用 action=scene/flag、改人用 character；真要推倒重来，把 restart 设成 true'
       + '——那会清掉现有的卡与全部记录，先跟群友说一声');

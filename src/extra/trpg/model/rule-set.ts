@@ -137,6 +137,29 @@ export function mechanicContextOf(
 }
 
 /**
+ * 这一局里**玩家不该看到名字**的旗标（暗线）。
+ *
+ * ── 它为什么是一个共享助手，而不是各调用点自己筛 ──
+ *
+ * `describeCheckModifiers` 在机制没有 `note` 时退到触发条件，而触发条件可能是暗线旗标
+ * （`describeTrigger` 会印成 `旗标：真凶是医生 = 是`）。**凡是要给玩家看的地方**都要把那个
+ * 名字遮掉，而"哪些地方要给玩家看"分散在三处：`.ra` / `.rh` 的回执（`commands/check.ts`）、
+ * 以及 `roll` 工具**写进 `campaign.log` 的那一份**（`tools/roll.ts`）—— 后一处容易被漏掉，
+ * 因为工具的结果本身是给模型的；但那份日志会被 `.trpg status` 印给全群（`PLAYER_LOG_KINDS`
+ * 就收 `roll` / `check` 两类），也会镜像进战报、被 `.log export` 再发一次。
+ *
+ * 三处各筛一遍必然漂移，而漂移的表现是"这条命令遮住了、那条没有" —— 没有任何报错。
+ * 所以判据（`visible === false`）与取值都收在这里一处，调用方只管传不传。
+ */
+export function secretFlagNames(campaign: TrpgCampaign): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const [key, flag] of Object.entries(campaign.flags)) {
+    if (!flag.visible) out.add(key);
+  }
+  return out;
+}
+
+/**
  * 这一局面下**此刻**生效的机制 —— `campaign` 的两个钩子（换场景 / 开局）与 P7-e 的提示词共用它。
  *
  * `actor` / `skill` 都空着是**有意的**：那两样要到检定的那一刻才知道，而这里是"此刻这一场景

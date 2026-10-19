@@ -13,6 +13,7 @@
 // `preparing` 推成 `active`。模型那条 `campaign action=start` 仍然是"建局即开跑"（`active`）——
 // 两个入口共用 `beginCampaign`，差别只有 `status` 那一个参数（见 `model/session.ts`）。
 import { MODE_LABEL } from '../model/mode.js';
+import { mirrorLog } from '../model/campaign.js';
 import { beginCampaign, canActivate, activate, canJoin, join, endCampaign } from '../model/session.js';
 import { renderScenarioList, renderStatusCard, renderWizard } from '../render/status.js';
 import { argsOf, scenarioIds } from './shared.js';
@@ -120,15 +121,19 @@ export function createJoinCommand({ store, command }: SessionCommandDeps): Comma
  * 判据全在 `canActivate` 里（`model/session.ts`），它拒绝时会**逐人**说清谁还没好、
  * 下一步敲什么 —— 只说一句"还有人没确认"等于让群友互相猜。
  */
-export function createStartCommand({ store, command }: SessionCommandDeps): CommandHandler {
+export function createStartCommand({ store, journal, command }: SessionCommandDeps): CommandHandler {
   return async (input) => {
     const campaign = store.read(input.chatKey);
     if (!campaign) return '这个会话还没有开局 —— 先让谁来敲 `.trpg new <名字>` 起一局。';
     if (argsOf(input, command).length) return '用法：`.trpg start`（不带参数）';
     const verdict = canActivate(campaign);
     if (!verdict.ok) return verdict.reason;
+    // `activate` 顺手落一条"开跑"日志（见那边），所以这一处也要镜像战报 ——
+    // 与其余命令逐字同形：**改了状态就写盘，写盘之后镜像**。
+    const beforeSeq = campaign.seq;
     activate(campaign);
     store.write(campaign);
+    mirrorLog(campaign, beforeSeq, journal ?? null);
     return `《${campaign.title}》开跑！${campaign.players.length} 位玩家，`
       + `${campaign.characters.length} 张人物卡。\n接下来直接说话就行 —— 我会接着往下讲。`;
   };

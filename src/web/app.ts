@@ -185,6 +185,11 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     sendFile: async (chatKey: string, fileName: string, content: string) => {
       await sender.sendFile(chatKey, fileName, content);
     },
+    // 往会话里补一句话（跑团的 `.trpg scenario` 用它发"抽完了"的第二条回执）。
+    // 与 `deliverNote` 不是一回事：那个是给模型的机器条目（会唤醒一次运行），这个只是发进群。
+    sendText: async (chatKey: string, text: string) => {
+      await sender.sendTextBatch(chatKey, text);
+    },
     // 记一次**不在任何会话里**的模型调用用量（跑团的兜底建议与暗骰叙事那两次独立调用）。
     // 它们发生在 `finish()` 之后，所以走的是"只叠增量"的那个入口 —— 会话那条记账路对
     // 已结束的会话会整份重复累加（见 `chat/sessions.ts` 的 `addExtraUsage`）。

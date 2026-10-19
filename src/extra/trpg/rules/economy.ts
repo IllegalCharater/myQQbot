@@ -94,6 +94,36 @@ export function recall(ledger: ActionLedger, actor: string, tool: string, args: 
   return ledger.results.get(resultKey(actor, tool, args)) ?? null;
 }
 
+/**
+ * **把一次已经花掉的额度还回去**（`consume` 的逆操作）。
+ *
+ * ── 为什么必须有它 ──
+ *
+ * `consume` 排在工具参数校验**之前**（工具要先知道"这一轮还能不能动"才去干活），于是
+ * **一次纯粹的参数错误也会把额度吃掉**：实测过两种最常见的形态 —— `character` 一次调用
+ * 同时给 `hpDelta` 与写坏的 `stats`（人格段明确要求"要改好几项就在一次调用里全给它"，
+ * 所以这条路径很常见），以及 `roll` 里把表达式写成 `3d6x`。两者都是"改一下参数重来就行"，
+ * 可重来时拿到的是「这一轮已经行动过了」—— 血没掉、卡没改，而群里看不出发生了什么。
+ *
+ * 判据与"被闸门拒掉的那一次不占额度"（`consume` 的说明）是同一条：**没做成的事不该收费**。
+ * 差别只在于"没做成"是在 `consume` 之后才发现的。
+ *
+ * ⚠️ **只退一格，且退不掉就什么都不做**：计数归零时删掉那一档；行动者一档都不剩时删掉
+ * 那个人（`consume` 也是这么建的，两边形状必须一致）。不抛错 —— 它跑在错误路径上，
+ * 而"退不掉"只可能是记账被谁改坏了，那时让原来的错误照常回给模型更重要。
+ */
+export function refund(ledger: ActionLedger, actor: string, source: unknown): void {
+  const who = String(actor ?? '').trim() || '这个单位';
+  const name = String(source ?? '').trim() || PRIMARY_SOURCE;
+  const used = ledger.actions.get(who);
+  if (!used) return;
+  const count = used.get(name) ?? 0;
+  if (count <= 0) return;
+  if (count === 1) used.delete(name);
+  else used.set(name, count - 1);
+  if (!used.size) ledger.actions.delete(who);
+}
+
 function resultKey(actor: string, tool: string, args: unknown): string {
   return `${String(actor ?? '').trim()}|${tool}|${stableKey(args)}`;
 }

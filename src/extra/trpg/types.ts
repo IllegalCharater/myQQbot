@@ -107,6 +107,20 @@ export interface TrpgLogEntry {
   kind: string;
   text: string;
   /**
+   * 这一条属于**哪一局**（`TrpgCampaign.sessionId`）。**只有战报里会写它**，`campaign.log`
+   * 里恒为 `undefined`（那一局只有一个 `sessionId`，写进每一条是纯冗余）。
+   *
+   * ⚠️ **它是"收团不清战报"那条取舍的补丁**（2026-10-19 加）：战报按**会话** append
+   * （`data/trpg/journal/<会话>.jsonl`），而 `.trpg end` 只删存档、不清战报 —— 于是连开两局
+   * 之后，导出的那份文件里两局的条目混在一起，而 `seq` 是**每局从 1 重来**的
+   * （`emptyCampaign` 的 `seq: 1`）。没有这个字段的话，读那份战报的人看到的是一串
+   * 重复的序号，没有任何线索指出"这里换了一局"。
+   *
+   * 旧战报没有它（那时也还没有"分界"这个概念），读回来是 `undefined` ——
+   * 渲染层按"字段在不在"决定要不要印分界行（同 `visible` / `time` 那几条规矩）。
+   */
+  session?: string;
+  /**
    * 这一条能不能进**给玩家看的战报**（`data/trpg/journal/`）。缺省 `true`。
    *
    * ── 为什么是一个字段，而不是"导出时按 kind 再筛一遍" ──

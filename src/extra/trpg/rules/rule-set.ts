@@ -394,6 +394,29 @@ export function describeTrigger(node: TriggerNode | null): string {
 }
 
 /**
+ * 触发条件里提到了**哪些旗标名**（空数组 = 没提）。组合子递归进去，只收 `flag` 原子。
+ *
+ * ── 它为什么必须存在 ──
+ *
+ * `describeTrigger` 把 `{op:'flag'}` 印成 `旗标：真凶是医生 = 是`，而这句话会进
+ * **`.ra` 的群回执**（`describeCheckModifiers` 在没有 `note` 时退到触发条件）。暗线旗标
+ * （`visible: false`）的名字因此会当着全群的面印出来 —— 而 `render/players.ts` 那边为了
+ * 不泄漏，连"一条全是问号的旗标"都不印。所以判据要能回答"这条机制的触发条件里，有没有
+ * 玩家不该看到的名字"，而这个回答只能靠**走一遍触发树**（在拼好的那句人话上做字符串匹配
+ * 是第二份判据，迟早与 `describeTrigger` 漂移）。
+ *
+ * 树的形状只有 `rules/rule-set.ts` 知道，所以它住在这里、与 `describeTrigger` 并排。
+ */
+export function triggerFlagNames(node: TriggerNode | null): string[] {
+  if (!node) return [];
+  switch (node.op) {
+    case 'flag': return [node.key];
+    case 'scene': case 'actor': case 'skill': return [];
+    default: return node.items.flatMap((item) => triggerFlagNames(item));
+  }
+}
+
+/**
  * 一条机制的**一行说明**。
  *
  * 唯一拼法：提示词那一节（P7-e）与三条工具的回执都调它 —— 各拼一遍的话，"回执里说的"与

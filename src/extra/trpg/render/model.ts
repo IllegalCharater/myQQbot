@@ -42,8 +42,12 @@ const HIDDEN_MARK = '[暗线]';
  *
  * 隐藏信息**照印**，但标出来 —— 模型是 DM，它必须知道"这个人其实是谁"，
  * 也必须在开口前知道"这件事玩家还不知道"。
+ *
+ * `preparing` 时另标一句"还没确认"：那一档里"谁还没准备好"是 DM 唯一能帮上忙的信息
+ * （它不能替玩家点确认，但可以催一句）。**开了跑之后不标** —— 那时 `confirmed` 已经没有
+ * 意义，而 DM 用工具建的每一张 NPC 卡都是 `confirmed: false`，标出来只会变成噪音。
  */
-function modelCharacterLine(card: TrpgCharacter): string {
+function modelCharacterLine(card: TrpgCharacter, { preparing = false }: { preparing?: boolean } = {}): string {
   const pools: string[] = [];
   // HP / SAN 只在"这个概念真的存在"时才印：sanMax 为 0 表示这张卡没有理智值
   // （通用骰子那条路上很多系统没有 SAN），印一个 `SAN 0/0` 只会让模型困惑。
@@ -65,6 +69,7 @@ function modelCharacterLine(card: TrpgCharacter): string {
   // 隐藏字段计数（照 TRPG-AI-DM 的 `隐藏字段:N`）：一个数字，把"该谨慎说话"
   // 变成可读的量化信号，比让模型自己去读那张可见度表省事得多。
   const marks: string[] = [];
+  if (preparing && !card.confirmed) marks.push('[还没确认]');
   if (!card.discovered) marks.push('[玩家尚未见过]');
   if (card.hidden.length) marks.push(`[对玩家隐藏: ${card.hidden.join('/')}]`);
   return [
@@ -88,16 +93,32 @@ export function renderForModel(campaign: TrpgCampaign | null): string {
       + `建立这场团，然后用 character 的 action=create 把玩家和主要 NPC 的卡建起来。在那之前不要凭空宣布任何状态。`;
   }
 
+  const preparing = campaign.status === 'preparing';
   const head = [
     MODEL_HEADING,
     `战役：${campaign.title}${campaign.system ? `（规则：${campaign.system}）` : ''}`,
     `检定规则表：${campaign.rule || 'generic'}`,
     `场景：${campaign.scene || '（还没定）'}`
   ];
+  // ── `preparing` 必须说出来（2026-10-19 补）──
+  //
+  // 这一行缺了的时候，模型手里那份状态与"已经开跑"**逐字相同**（角色、场景、旗标全在），
+  // 于是 `.trpg new` 之后群里随便说句话它就可能开讲 —— 而状态机存在的理由正是"卡没建完、
+  // 没确认时不该开始"。反过来，`.trpg start` 之后它也拿不到任何"可以开跑了"的信号
+  // （那条命令落成已读历史、不唤醒模型）。判据只有一处：`campaign.status`。
+  //
+  // ⚠️ **文案里不许有 Markdown 的 `**`**：本文件在 5q 段的源码扫描范围内（`render/`），
+  // QQ 不认 Markdown，而这条虽然是给模型的、`render/` 里其余几份却是群友可见的 ——
+  // 扫描按目录走，不做逐句区分。
+  if (preparing) {
+    head.push('状态：准备中 —— 这一局还没开跑（大家在报名、建卡、确认）。都确认之后群友敲'
+      + ' `.trpg start` 才会开始。在那之前不要开始叙事、不要替他们推进剧情；'
+      + '有人问起就说还在等人。');
+  }
   const tail: string[] = [];
 
   if (campaign.characters.length) {
-    tail.push('—— 角色 ——', ...campaign.characters.map(modelCharacterLine));
+    tail.push('—— 角色 ——', ...campaign.characters.map((card) => modelCharacterLine(card, { preparing })));
   } else {
     tail.push('—— 角色 ——', '（还没有建立任何人物卡）');
   }

@@ -57,7 +57,7 @@ src/extra/
    └─ rules/         纯函数规则引擎（dice.ts / percentile.ts / condition.ts / check.ts / economy.ts），**与对话链完全无关**
 ```
 
-**宿主递给扩展的口子**（`ExtraRuntimeDeps`，§7 与 `types.ts`）：`load(deps)` 收下它，目前只有一个成员 `deliverNote(chatKey, note)` —— 把一条机器条目送进会话。**为什么是参数而不是让扩展自己 import**：那条链要碰 `ChatStore` 与 `Orchestrator`，而 `extra → agent` 是反向依赖（层级闸门会拦），组装是 `web/` 的活。扩展只说"这是一条什么、正文是什么"，**怎么落库由宿主决定**。
+**宿主递给扩展的口子**（`ExtraRuntimeDeps`，§7 与 `types.ts`）：`load(deps)` 收下它，成员**全是可选的**，缺省时那条路退回同步/降级行为。当前五个：`deliverNote(chatKey, note)`（把一条机器条目送进会话）、`sendPrivate(targetUserId, text)`、`sendFile(chatKey, fileName, content)`、`sendText(chatKey, text)`（2026-10-19 加：**往会话里补一句话** —— 命令的返回值只够回一句，而 `.trpg scenario` 要在"开始做"和"做完了"各说一句）、`recordUsage(usage)`。⚠️ **`deliverNote` 与 `sendText` 的收件人不同**：前者是给**模型**的机器条目（落存档、入窗、唤醒一次运行），后者只是发给群里的一句话（模型不因此被叫醒）。**为什么是参数而不是让扩展自己 import**：那条链要碰 `ChatStore` 与 `Orchestrator`，而 `extra → agent` 是反向依赖（层级闸门会拦），组装是 `web/` 的活。扩展只说"这是一条什么、正文是什么"，**怎么落库由宿主决定**。
 
 ```ts
 // registry.ts —— 与 web/runtime/lifecycle.ts 的装配清单同一形态：存函数引用、只 for...of、无按键分发

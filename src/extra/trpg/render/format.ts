@@ -8,7 +8,7 @@
 import type { CheckResult } from '../rules/check.js';
 import type { DiceRoll } from '../rules/dice.js';
 import type { CheckModifiers, RuntimeMechanic } from '../rules/rule-set.js';
-import { describeMechanic, describeTrigger } from '../rules/rule-set.js';
+import { describeMechanic, describeTrigger, triggerFlagNames } from '../rules/rule-set.js';
 
 /** `3d6 → 4+2+5 = 11`、`4d6kh3 → 6+3+5 = 14（掷出 1,6,3,5，丢掉 1 颗；骰子和 14）`。 */
 export function formatRoll(roll: DiceRoll): string {
@@ -55,18 +55,37 @@ export function formatCheck(result: CheckResult): string {
  * 印的是机制的 `note`（写 `rule.json` 的人给它写的一句话），没有 `note` 才退到触发条件 ——
  * 两条都在 `rules/rule-set.ts` 里，不在这里再拼一遍。
  *
- * ⚠️ **已知代价**：这条文本既进 `roll` 工具的结果（给模型），也进 `.ra` 的回执（给群里）。
- * 而**触发条件可能是暗线旗标**（`旗标：真凶是医生 = 是`）—— 那种机制在 `.ra` 上命中时，
- * 群友会看到那个旗标名。没有更好的办法：目标值本身已经改了（`对 25` 与卡上的 45 对不上），
- * 那句话已经在泄露"有东西生效了"，而说清是哪一条是唯一能让 DM 把数对上的方式。**缓解手段
- * 是 `note`**：先印 `note`、只在它为空时才印触发条件，而 `note` 是写规则的人自己写的。
+ * ── 暗线旗标：退到触发条件**必须带 `secretFlags`** ──
+ *
+ * ⚠️ 这条文本既进 `roll` 工具的结果（**只给模型**），也进 `.ra` / `.rh` 的回执（**进群**、
+ * 以及私聊）。而触发条件可能是暗线旗标 —— `describeTrigger` 会把它印成
+ * `旗标：真凶是医生 = 是`，那等于当着全群的面把藏起来的那条说出来（实测过），
+ * 而且 `.ra` 那条回执还会写进日志、镜像进战报、被 `.log export` 再发一次。
+ *
+ * 所以调用方**要按受众传 `secretFlags`**：命令那一侧（进群）传本局所有 `visible: false`
+ * 的旗标名，命中就退成一句不指名的话；模型那一侧（`roll` 工具）不传 —— DM 本来就该知道
+ * 是哪条机制在起作用，而说清是哪一条是它能对上数的唯一办法。
+ *
+ * 判据走 `triggerFlagNames`（走触发树）而不是在拼好的那句人话上做字符串匹配：后者是
+ * 第二份判据，迟早与 `describeTrigger` 漂移。
  *
  * 群友可见，所以**不许有 `**`**（`t-trpg.mjs` 5q 段扫的就是 `render/` 与 `commands/`）。
  * 没有机制命中时返回空串 —— 调用方按"有没有"决定要不要多印一行。
  */
-export function describeCheckModifiers(mods: CheckModifiers): string {
+export function describeCheckModifiers(
+  mods: CheckModifiers,
+  { secretFlags }: { secretFlags?: ReadonlySet<string> } = {}
+): string {
   if (!mods.applied.length && !mods.overridden.length) return '';
-  const name = (mechanic: RuntimeMechanic) => mechanic.note || describeTrigger(mechanic.trigger);
+  const name = (mechanic: RuntimeMechanic) => {
+    if (mechanic.note) return mechanic.note;
+    // 没有 note 才退到触发条件，而那时要问一句"这句话能不能给玩家看"。
+    if (secretFlags?.size
+      && triggerFlagNames(mechanic.trigger).some((key) => secretFlags.has(key))) {
+      return '这一局的特殊规则';
+    }
+    return describeTrigger(mechanic.trigger);
+  };
   const applied = mods.applied.map(name).join('、');
   if (mods.judge) {
     return `这一局的规则定了结果：${applied}`

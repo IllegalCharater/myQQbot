@@ -104,6 +104,22 @@ export interface ExtraRuntimeDeps {
   sendFile?(chatKey: string, fileName: string, content: string): Promise<void>;
 
   /**
+   * **往会话里发一句话**（跑团的 `.trpg scenario` 用它把"抽完了"的回执补上）。
+   *
+   * 与 `deliverNote` 的区别是**收件人**：`deliverNote` 是给**模型**的一条机器条目（会落存档、
+   * 入窗、唤醒一次运行），而这个只是**发给群里的一句话**（群友看到，模型不因此被叫醒）。
+   * 两者都会落一条 `我：…` 的存档 —— 那是"机器人说过什么"的记账，与唤醒无关。
+   *
+   * ⚠️ **它是"命令的回执可以不只一条"这条路的唯一出口**：`CommandHandler` 的返回值只够
+   * 回一句，而 `.trpg scenario` 要在**开始做**和**做完了**各说一句 —— 中间那段（抽取管线）
+   * 最长 90 秒，占住的是整个会话的入站处理链（`ingest.ts` 的 `enqueueIngest` 按会话串行）。
+   *
+   * ⚠️ **缺省时调用方必须退回同步路径**（`.trpg scenario` 就是先看它在不在）：没有它就没法
+   * 事后补一句话，异步化只会让群友永远等不到回执。
+   */
+  sendText?(chatKey: string, text: string): Promise<void>;
+
+  /**
    * **记一次不在任何会话里的模型调用用量**（跑团的兜底建议与暗骰叙事）。
    *
    * 那两次调用都发生在 `SessionRegistry.finish()` **之后**（一条挂在收尾回调上、一条在命令回执

@@ -58,6 +58,11 @@ export interface CommandDeps {
   /** 群文件投递（`.log export`）。缺省 = 没装通道，导出会如实说一句。 */
   sendFile?: ((chatKey: string, fileName: string, content: string) => Promise<void>) | null;
   /**
+   * 往会话里补一句话（`.trpg scenario` 的"抽完了"那条回执）。
+   * 缺省 = 那条命令就地跑完（会占住入站链），见 `createScenarioCommand`。
+   */
+  sendText?: ((chatKey: string, text: string) => Promise<void>) | null;
+  /**
    * 记一次**独立模型调用**的用量（只有 `.rh` 的私密叙事有）。
    * 缺省 = 不记账（测试与未接线的宿主），调用照常进行 —— 见 `ExtraRuntimeDeps.recordUsage`。
    */
@@ -77,7 +82,9 @@ export function createCommands(deps: CommandDeps): Record<string, CommandHandler
     ['.trpg start', (command) => createStartCommand({ ...base, command })],
     ['.trpg end', (command) => createEndCommand({ ...base, command })],
     ['.trpg mode', (command) => createModeCommand({ ...base, command })],
-    ['.trpg scenario', (command) => createScenarioCommand({ ...base, recordUsage: deps.recordUsage, command })],
+    ['.trpg scenario', (command) => createScenarioCommand({
+      ...base, recordUsage: deps.recordUsage, sendText: deps.sendText, command
+    })],
     // 核对抽取结果（P7-b）：零模型调用、零写入。**排在自己的子命令之后、裸 `.trpg` 之前**
     // （顺序即行为，见文件头那条）。
     ['.trpg check', (command) => createVerifyCommand({ ...base, command })],

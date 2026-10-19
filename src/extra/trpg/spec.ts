@@ -169,6 +169,10 @@ export const trpgSpec: ExtraSpec = {
           target: { type: 'number', description: PROMPTS.roll.target },
           reason: { type: 'string', description: PROMPTS.roll.reason },
           actor: { type: 'string', description: PROMPTS.roll.actor },
+          // ⚠️ **必须有它**：这一局的规则扩展按技能名匹配 `{op:'skill'}` 机制。没有这一栏时
+          // 工具那条路恒传空串，于是同一个检定「DM 用 roll 掷」与「玩家敲 .ra」目标值不同 ——
+          // 而两条路本该是同一件事（见 `tools/roll.ts` 那段说明与 `.ra` 的 `judge()`）。
+          skill: { type: 'string', description: PROMPTS.roll.skill },
           actionSource: { type: 'string', description: PROMPTS.roll.actionSource }
         },
         required: ['expr']

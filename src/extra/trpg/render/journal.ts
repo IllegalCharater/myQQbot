@@ -51,10 +51,30 @@ export function journalFileName(ts = Date.now()): string {
 }
 
 /**
+ * 一局的**分界行**。
+ *
+ * `sessionId` 是 `Date.now().toString(36)`（见 `emptyCampaign`），所以能解回开局时刻 ——
+ * 但它**也可能是人手改过的任意字符串**，所以解出来的时间要落在合理区间才印，否则只印序号。
+ */
+function sessionLine(index: number, session: string): string {
+  const at = Number.parseInt(session, 36);
+  const sane = Number.isFinite(at) && at > 1_577_836_800_000 && at < Date.now() + 86_400_000;
+  return `—— 第 ${index} 局${sane ? `（${stamp(at)} 开的）` : ''} ——`;
+}
+
+/**
  * 渲染整份战报。
  *
  * `exportedAt` 只是为了让人知道这份文件是什么时候导出的（**不参与内容**，所以它可以被测试
  * 固定住，导出结果的其余部分才是与 journal 逐字一致的判据）。
+ *
+ * ── 分界行：只在**真的有第二局**时才印（2026-10-19 加）──
+ *
+ * 战报按**会话** append，而 `.trpg end` 不清它 —— 于是连开两局之后，那份文件里两局的条目
+ * 混在一起，`seq` 还是每局从 1 重来的。`TrpgLogEntry.session` 就是那条判据。
+ *
+ * ⚠️ **单局的输出逐字未变**：只有出现第二个 `session` 时才插一行，所以"只玩过一局"的
+ * 导出与加这个功能之前完全一样（旧战报没有 `session` 字段，更是一条都不印）。
  */
 export function renderJournal(chatKey: string, entries: readonly TrpgLogEntry[], exportedAt = Date.now()): string {
   const lines: string[] = [
@@ -66,7 +86,15 @@ export function renderJournal(chatKey: string, entries: readonly TrpgLogEntry[],
     '---',
     ''
   ];
+  let current = '';
+  let index = 0;
   for (const entry of entries) {
+    if (entry.session && entry.session !== current) {
+      current = entry.session;
+      index += 1;
+      // 第一局不印（单局导出与旧版逐字相同）；从第二局起才需要"这里换了一局"这条线索。
+      if (index > 1) lines.push('', sessionLine(index, entry.session));
+    }
     const label = KIND_LABEL[entry.kind] ?? entry.kind;
     // 正文原样印（它已经过 `MAX_LOG_CHARS` 的截断，见 `appendLog`）—— 这里不做二次加工：
     // 战报的价值就在"逐字"（它是这一局唯一完整的一份记录）。

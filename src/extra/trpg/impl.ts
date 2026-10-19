@@ -98,7 +98,8 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
 
     commandHandlers: createCommands({
       store, rules, scenarios, modes, journal, rng: secureRng,
-      sendPrivate: deps.sendPrivate, sendFile: deps.sendFile, recordUsage: deps.recordUsage
+      sendPrivate: deps.sendPrivate, sendFile: deps.sendFile, sendText: deps.sendText,
+      recordUsage: deps.recordUsage
     }),
 
     /**

@@ -16,6 +16,7 @@
 | **收尾** 审查发现的 A / B / C / E 四类 | ✅ | 见下面「待修复」那几张表 —— 每行末尾补了**实际怎么修的** | `t-trpg` 419 → **437** |
 | **P7** 剧本抽取管线 + 规则扩展 | ✅ | `scenario/extract/` 四级流水线（L1 切片 → L2 逐片抽 → L3 归并 → L4 校验）、`model/rule-set.ts` + `rules/rule-set.ts`、`.trpg check`、规则表加 `initiative` 一栏 | `t-trpg` 437 → **553**；`t-trpg-rules` 185 → **289**；新增 `t-trpg-extract` **82** |
 | **收尾（二）** 抽取与整理的用量记账 | ✅ | `createAskPort` / `formatScenarioText` 收 `recordUsage`；`.trpg scenario` 透给宿主 | `t-trpg` 553 → **557** |
+| **第三轮** 落地审查发现的 9 条（详见 `AGENTS.md` 的「2026-10-19 第三轮」） | ✅ | `roll` 加 `skill`；暗线旗标遮挡（三条出圈路径）；`preparing` 对模型可见 + `activate` 落日志；拒绝话术按状态分岔；人格里收团改 `.trpg end`；`refund`（报错不占额度）；`.trpg scenario` 拆前后半 + 后台 + `sendText`；两本调用额度；`.pc roll` 覆盖提示 / 战报跨局分界 / `modes.json` mtime 缓存 | `t-trpg` 557 → **607** |
 
 **全量**：`npm run check` **40 个套件**全绿、`npm run test:all` **50 个套件**全绿（每阶段收尾都做过一次 `rm -rf dist && npm run build` 干净重建再复跑）。
 

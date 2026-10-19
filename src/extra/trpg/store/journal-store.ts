@@ -45,12 +45,16 @@ export class JournalStore {
   /**
    * 追加一条。**永不抛**：战报是旁路（主流程已经把这一局的日志写进存档了），
    * 一次写盘失败不该让群友那次操作看起来失败。
+   *
+   * `sessionId` 是"这一条属于哪一局"（见 `TrpgLogEntry.session`）。**只有非空才写这个键** ——
+   * 缺省时与旧战报逐字同形，于是"没有分界"这件事仍然由**字段的缺席**表达。
    */
-  append(chatKey: string, entry: TrpgLogEntry): void {
+  append(chatKey: string, entry: TrpgLogEntry, sessionId?: string): void {
     if (!chatKey) return;
     try {
       fs.mkdirSync(this.dir, { recursive: true });
-      fs.appendFileSync(this.file(chatKey), `${JSON.stringify(entry)}\n`, 'utf8');
+      const line = sessionId ? { ...entry, session: sessionId } : entry;
+      fs.appendFileSync(this.file(chatKey), `${JSON.stringify(line)}\n`, 'utf8');
     } catch { /* 旁路：磁盘满/权限不够都不该掀翻主流程 */ }
   }
 
@@ -89,6 +93,10 @@ export class JournalStore {
         text: body
       };
       if (source.visible === false) entry.visible = false;
+      // `session` 与 `visible` 同一条规矩：**原样带回来**。丢掉它，导出的战报里两局的条目
+      // 又会混成一片（而序号是每局从 1 重来的）。
+      const session = text(source.session, 32);
+      if (session) entry.session = session;
       out.push(entry);
     }
     return out;

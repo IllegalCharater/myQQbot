@@ -13,7 +13,7 @@ import { err, errorMessage } from '../../../agent/tools/shared.js';
 import { clampInt, text, MAX_NAME_CHARS, MAX_STATS_PER_CHARACTER, MAX_STAT, MIN_STAT } from '../model/limits.js';
 import { mirrorLog } from '../model/campaign.js';
 import { advanceAfterActions } from '../model/combat.js';
-import { createLedger, consume, recall, remember } from '../rules/economy.js';
+import { createLedger, consume, recall, refund, remember, PRIMARY_SOURCE } from '../rules/economy.js';
 import { DiceError } from '../rules/dice.js';
 import type { ActionLedger } from '../rules/economy.js';
 import type { JournalPort } from '../model/campaign.js';
@@ -70,8 +70,23 @@ export function createGates(store: TrpgStore, journal: JournalPort | null = null
    */
   const acted = new WeakMap<ToolContext, string[]>();
 
+  /**
+   * 这一轮**刚花掉的那一格额度**（每个 `ctx` 至多一条）。
+   *
+   * 由 `gate` 记、由 `withCampaign` 收口：`result.isError` 时**还回去**（见 `refund`）。
+   * 没有它的话，一次纯粹写错参数的调用会把那个角色这一回合的行动吃掉 —— 而模型改正参数
+   * 重来时拿到的是「这一轮已经行动过了」，血没掉、卡没改，群里也看不出发生了什么（实测过）。
+   *
+   * ⚠️ **必须"读到即清"**：留着的话，下一次 `withCampaign` 会拿着一格已经还过的额度去退，
+   * 于是把**别人**的额度退掉 —— 症状是"某个角色一回合能行动两次"，而它不会有任何报错。
+   */
+  const spent = new WeakMap<ToolContext, { actor: string; source: string }>();
+
   const gate: ToolGates['gate'] = (ctx, { tool, actor, args, source, quota }) => {
     const declared = text(source, 24);
+    // 上一次调用留下的那一格已经在 `withCampaign` 里收口了；这里再清一次是防"有人
+    // 绕过 `withCampaign` 直接调 gate"（今天没有这样的调用点，但清一次比留个隐患便宜）。
+    spent.delete(ctx);
     const ledger = ledgerFor(ctx);
     // 声明了额外行动来源 = 这是规则允许的另一次行动，同样的参数可以合法地再来一次。
     if (!declared) {
@@ -84,6 +99,8 @@ export function createGates(store: TrpgStore, journal: JournalPort | null = null
       // 只有**过了配额**才算这个人这一回合真的动了（被拒的那次没做事）。
       const list = acted.get(ctx);
       if (list) list.push(actor); else acted.set(ctx, [actor]);
+      // 记下这一格，**成不成功由 `withCampaign` 定**（它在 `run` 之后才知道）。
+      spent.set(ctx, { actor, source: declared || PRIMARY_SOURCE });
     }
     return '';
   };
@@ -106,6 +123,10 @@ export function createGates(store: TrpgStore, journal: JournalPort | null = null
     // 工具调用一起被消费掉 —— 于是"报错的那次"也推了指针，而群友只看到 DM 说"这不行"。
     const actors = acted.get(ctx) ?? [];
     acted.delete(ctx);
+    // 额度同理：**没做成的事不收费**。这一格只可能在 `result.isError` 时还在（成功时下面
+    // 那句 `store.write` 之前就已经用掉了），所以"读出来再判"比"看情况删"更难写错。
+    const used = spent.get(ctx);
+    spent.delete(ctx);
     if (!result.isError) {
       // 战斗指针在**落盘之前**推进：它和这一轮的动作是同一件事的两半，分两次写就会留下
       // 一个"日志里记了他打了人、指针还停在他身上"的中间态（那次写入崩了的话）。
@@ -114,6 +135,8 @@ export function createGates(store: TrpgStore, journal: JournalPort | null = null
       // 战报在**落盘之后**镜像（见 `mirrorLog`）：被 `return err(...)` 撤销的那次调用
       // 一个字都不该进战报。
       mirrorLog(campaign, beforeSeq, journal);
+    } else if (used) {
+      refund(ledgerFor(ctx), used.actor, used.source);
     }
     return result;
   };
