@@ -82,23 +82,58 @@ export interface ExtractResult {
   ms: number;
 }
 
-export type ExtractOutcome = { ok: true; result: ExtractResult } | { ok: false; message: string };
+export type ExtractOutcome =
+  | { ok: true; result: ExtractResult }
+  | { ok: false; kind: ExtractFailureKind; message: string };
+
+/**
+ * 失败**分档**（2026-10-19 加）。取值只有四种，判据是"下一步该做什么不一样"：
+ *
+ * - `timeout` —— 我们自己的死线到了（某一发超时、或者整条预算用光）。**重发一次多半还是不够**：
+ *   同一份文件、同样的片数、同样的死线。要给它一个"拆小一点"的建议。
+ * - `empty`   —— 这份文件里压根没有可抽取的正文（扫描件、整页图片）。重发结果一样。
+ * - `format`  —— 模型这次没按格式答。**这一档才是真的偶发**，重发通常就好。
+ * - `request` —— 请求本身失败（网络、接口、5xx）。与这份文件无关，也是偶发。
+ *
+ * ⚠️ **它存在的唯一理由是回执里那句"下一步"**（`commands/scenario.ts` 的
+ * `extractFailureAdvice`）：原先无论哪种失败都说"要重试就把原文件重新发一次"，于是
+ * 配置性的必然失败被说成"偶发，建议重试" —— 管理员拿着一次真实的失败去撞同一堵墙，
+ * 而回执本身没给他任何别的线索。**别把它降级成一个字符串前缀**：分档是要给分支用的。
+ */
+export type ExtractFailureKind = 'timeout' | 'request' | 'format' | 'empty';
+
+/** 一次调用的失败。`timedOut` 区分"我们自己的死线到了"与"这次请求真的失败了"。 */
+type AskFailure = { ok: false; message: string; timedOut: boolean };
 
 /** 一次调用的结果：成功给内容，失败给一句可读的原因。 */
 async function askWithTimeout(
   ask: AskPort, request: AskRequest, timeoutMs: number
-): Promise<{ ok: true; content: string } | { ok: false; message: string }> {
+): Promise<{ ok: true; content: string } | AskFailure> {
   const controller = new AbortController();
+  const seconds = Math.round(timeoutMs / 1000);
+  let timedOut = false;
   // `timer` 刻意**不 unref**：这里的超时是唯一的兜底，而"卡住不退出的假端点"不持有任何句柄，
   // unref 掉的计时器会被无视 —— 那正是 `core/python-probe.ts` 那条踩过的坑（套件会静默中止）。
-  const timer = setTimeout(() => controller.abort(new Error(`抽取调用超时（${Math.round(timeoutMs / 1000)} 秒）`)), timeoutMs);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error(`抽取调用超时（${seconds} 秒）`));
+  }, timeoutMs);
+  // 死线到了就**用我们自己这句话**，不转述端口的报错。理由有两条，都不是洁癖：
+  // ① `chatCompletion` 会把调用方中止洗成 `模型请求失败：…`，而那个前缀的含义是"网络层失败、
+  //    可以重试" —— 恰恰是这条路上最错的建议（预算已经用光）；`llm.ts` 那边也已改（外部
+  //    signal 上的中止不再走那个前缀），但这一层不该指望它：端口是**注入的**，假的实现
+  //    完全可能给一句别的话。
+  // ② 回执那句"下一步"要按档给，而档来自这里 —— 没有这个标记就只能去猜字符串。
+  const timedOutFailure = (): AskFailure => ({ ok: false, message: `抽取调用超时（${seconds} 秒）`, timedOut: true });
   try {
     const outcome = await ask(request, controller.signal);
-    return outcome.ok ? { ok: true, content: outcome.content } : { ok: false, message: outcome.message };
+    if (outcome.ok) return { ok: true, content: outcome.content };
+    return timedOut ? timedOutFailure() : { ok: false, message: outcome.message, timedOut: false };
   } catch (error) {
     // 端口自己吞了异常是它的约定（`askModel` 就是这么写的），但假的实现可能不吞 ——
     // 在这里兜一层，免得一个抛异常的端口把整条命令变成一次未捕获异常。
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    if (timedOut) return timedOutFailure();
+    return { ok: false, message: error instanceof Error ? error.message : String(error), timedOut: false };
   } finally {
     clearTimeout(timer);
   }
@@ -383,6 +418,9 @@ function forPrompt(struct: ScenarioStruct): string {
  *
  * 失败一律是**如实失败**（调用方拿这条消息去回报，或退回 `formatScenarioText`）—— 这里
  * 绝不返回一份"抽了一半但看着像成功了"的结果。
+ *
+ * 失败时**必带 `kind`**（见 `ExtractFailureKind`）：调用方靠它决定回执里那句"下一步"。
+ * 判据是"重发有没有用"，而不是那句报错长什么样 —— 别让调用方去匹配消息文本。
  */
 export async function extractScenario(
   text: string, { name, source }: { name: string; source: string }, deps: ExtractDeps
@@ -395,7 +433,9 @@ export async function extractScenario(
   const l2Deadline = started + EXTRACT_L2_BUDGET_MS;
 
   const outline = outlineDocument(text);
-  if (!outline.chunks.length) return { ok: false, message: '这份文件里没有可抽取的正文' };
+  // `empty` 这一档与别的三档不同：它不是"这次不巧"，而是"这份文件里没有可抽的东西"。
+  // 回执因此不能建议重发 —— 重发一次结果逐字相同。
+  if (!outline.chunks.length) return { ok: false, kind: 'empty', message: '这份文件里没有可抽取的正文' };
 
   const warnings: string[] = [];
   if (outline.droppedChars > 0) {
@@ -407,6 +447,9 @@ export async function extractScenario(
   let calls = 0;
   let skipped = 0;
   let firstFailure = '';
+  // 与 `firstFailure` 并行的那条线：**第一片为什么失败**。回执那句"下一步"按它分岔，
+  // 而分岔的判据是"重发有没有用"，与那句报错本身无关 —— 所以不能靠去匹配报错文本。
+  let firstFailureKind: ExtractFailureKind | null = null;
 
   for (const chunk of outline.chunks) {
     // ⚠️ 这里读的是 `l2Deadline` 而**不是** `deadline`：分片是可选的，L3 是唯一的交付物。
@@ -443,19 +486,19 @@ export async function extractScenario(
     if (!answered.ok) {
       // 一片抽不出来**不中断整条管线**：别的片、以及原文切片都还在。
       // 但也不装作没发生 —— 记下来，回执里会说"少抽了几片"。
-      if (!firstFailure) firstFailure = answered.message;
+      if (!firstFailure) { firstFailure = answered.message; firstFailureKind = answered.timedOut ? 'timeout' : 'request'; }
       warnings.push(`第 ${chunk.index + 1} 片没抽出来：${answered.message}`);
       continue;
     }
     const parsed = parseJsonObject(answered.content);
     if (!parsed.ok) {
-      if (!firstFailure) firstFailure = parsed.message;
+      if (!firstFailure) { firstFailure = parsed.message; firstFailureKind = 'format'; }
       warnings.push(`第 ${chunk.index + 1} 片没抽出来：${parsed.message}`);
       continue;
     }
     const part = coerceStruct(parsed.value, []);
     if (!part) {
-      if (!firstFailure) firstFailure = '模型给的不是一个对象';
+      if (!firstFailure) { firstFailure = '模型给的不是一个对象'; firstFailureKind = 'format'; }
       warnings.push(`第 ${chunk.index + 1} 片没抽出来：模型给的不是一个对象`);
       continue;
     }
@@ -464,7 +507,11 @@ export async function extractScenario(
 
   if (!parts.length) {
     // 一片都没成 —— 没有任何可交出去的东西。如实失败，让调用方退回后备那条路。
-    return { ok: false, message: `抽取没成：${firstFailure || '模型一片都没答上来'}` };
+    // ⚠️ "一片都没成"的成因不止一种，而回执那句建议完全不同：一片都没答上来**且**有片被
+    // 跳过（`skipped > 0`）时，真凶是预算 —— 那是**配置性的必然**，重发一次还是撞同一堵墙；
+    // 而模型答得不对是偶发的。原先两者共用一句"模型一片都没答上来"，把前者也说成了后者。
+    const nothing = skipped > 0 ? '时间不够，一片都没抽成' : '模型一片都没答上来';
+    return { ok: false, kind: firstFailureKind ?? (skipped > 0 ? 'timeout' : 'format'), message: `抽取没成：${firstFailure || nothing}` };
   }
   if (skipped > 0) warnings.push(`时间预算用完，最后 ${skipped} 片没抽（原文已另存）`);
 
@@ -485,7 +532,7 @@ export async function extractScenario(
   // 兜底而不是主路径。改 L2 的死线时**两处要一起看**：把它们并回一条，L3 就又会被挤空。
   const remaining = deadline - now();
   if (remaining <= 0) {
-    return { ok: false, message: '抽取没成：时间预算用完了，没来得及合成剧本文件' };
+    return { ok: false, kind: 'timeout', message: '抽取没成：时间预算用完了，没来得及合成剧本文件' };
   }
   calls += 1;
   const merged = await askWithTimeout(deps.ask, {
@@ -496,15 +543,18 @@ export async function extractScenario(
       extracted: forPrompt(struct)
     }
   }, Math.min(EXTRACT_CALL_TIMEOUT_MS, remaining));
-  if (!merged.ok) return { ok: false, message: `合成剧本文件时出错：${merged.message}` };
+  // ⚠️ 这一发是**唯一的交付物**，所以它超时与它"请求失败"要分开：前者说明预算给少了
+  // （重发无用，得拆小），后者才是网络/接口的偶发问题。合并成一档的话，最需要那句
+  // "别再重发了"的场景恰好拿到"建议重发"。
+  if (!merged.ok) return { ok: false, kind: merged.timedOut ? 'timeout' : 'request', message: `合成剧本文件时出错：${merged.message}` };
 
   const body = stripFence(merged.content);
-  if (!body) return { ok: false, message: '模型没有给出剧本内容，稍后再试' };
+  if (!body) return { ok: false, kind: 'format', message: '模型没有给出剧本内容，稍后再试' };
 
   // **后置条件**：合成的必须是规定格式。不满足就如实失败 —— 把一份解析不了的文件写进
   // 剧本库的表现是"开局了但什么都没注入"，而群里没人知道为什么（同 `format.ts` 那条）。
   if (!isFormattedScenario(body, name)) {
-    return { ok: false, message: '模型合成出来的东西不是剧本格式（没有骨架）—— 稍后再试一次' };
+    return { ok: false, kind: 'format', message: '模型合成出来的东西不是剧本格式（没有骨架）—— 稍后再试一次' };
   }
 
   // ── L4：校验（在正文过关之后做，于是待核项一定跟着一份可用的文件一起交出去）──

@@ -55,11 +55,14 @@ const { ScenarioStore } = await load('extra/trpg/index.js');
  */
 function fakeAsk(script) {
   const seen = [];
-  const port = async (request, _signal) => {
+  const port = async (request, signal) => {
     seen.push(request);
     const next = script.shift();
     if (!next) return { ok: false, message: '（脚本用完了）' };
-    return typeof next === 'function' ? next(request) : next;
+    // ⚠️ **signal 要递给脚本**：有一条用例验的是"端口真的听了死线"（`l3Timeout`），
+    // 不递的话它拿到的 `signal` 是 `undefined`，那条断言会以 TypeError 收场 —— 而它看起来
+    // 会像"超时那一档没分对"。绝大多数脚本忽略第二个参数，所以这个改动对它们逐字无影响。
+    return typeof next === 'function' ? next(request, signal) : next;
   };
   return { port, seen };
 }
@@ -569,6 +572,8 @@ const chunkOf = (body) => ({ ok: true, content: JSON.stringify(body), usage: '' 
   ok('没有可抽取的正文时**一次调用都不发**就失败（先切再看，切片为空就不该去打扰模型）',
     noText.outcome.ok === false && /没有可抽取的正文/.test(noText.outcome.message) && noText.seen.length === 0,
     JSON.stringify(noText.outcome));
+  ok('而且分到 `empty` 那一档 —— 这一档**重发没用**（文件里没有文字，重发一次结果逐字相同）',
+    noText.outcome.kind === 'empty', JSON.stringify(noText.outcome));
 
   const allBad = await (async () => {
     const { port } = fakeAsk([{ ok: true, content: '我做不到' }]);
@@ -577,6 +582,8 @@ const chunkOf = (body) => ({ ok: true, content: JSON.stringify(body), usage: '' 
   ok('一片都没成 → 如实失败，且把**第一片那句原因**带出来（不返回一份"抽了一半但看着像成功了"的东西）',
     allBad.ok === false && allBad.message === '抽取没成：模型给的不是一个 JSON 对象',
     JSON.stringify(allBad));
+  ok('而且分到 `format` 那一档 —— 这一档**重发有用**（模型这次没按格式答，是偶发的）',
+    allBad.kind === 'format', JSON.stringify(allBad));
 
   // 3 片 → **4 次调用**（3 片各一次 + 合成一次）。脚本必须给满这四发：少一发的话合成那一发会
   // 撞上"脚本用完了"，于是整条管线以 `ok:false` 收场 —— 而断言想钉的是"第一片炸了、别的照跑"。
@@ -614,6 +621,8 @@ const chunkOf = (body) => ({ ok: true, content: JSON.stringify(body), usage: '' 
   })();
   ok('L3 那一发失败 → 如实失败并点明是**合成**这一步（调用方据此退回后备那条路）',
     mergeBad.ok === false && mergeBad.message === '合成剧本文件时出错：模型挂了', JSON.stringify(mergeBad));
+  ok('而且分到 `request` 那一档（端口给了原因、不是超时）—— 这一档也是**重发有用**的偶发故障',
+    mergeBad.kind === 'request', JSON.stringify(mergeBad));
 
   const dropped = await (async () => {
     const { port, seen } = fakeAsk([
@@ -681,6 +690,57 @@ const chunkOf = (body) => ({ ok: true, content: JSON.stringify(body), usage: '' 
     && outOfTime.outcome.message === '抽取没成：时间预算用完了，没来得及合成剧本文件'
     && outOfTime.seen.filter((r) => r.job === 'merge').length === 0,
     JSON.stringify(outOfTime.outcome));
+  ok('而且分到 `timeout` 那一档 —— 回执据此说"重发多半还是不够"，而不是"建议重试"',
+    outOfTime.outcome.kind === 'timeout', JSON.stringify(outOfTime.outcome));
+
+  // ── "一片都没抽成"的两种成因必须分开 ──
+  //
+  // 钟在**第一片那道闸门之前**跳到 L2 子预算之后、整条死线之前：于是每一片都被
+  // `remaining < EXTRACT_MIN_CALL_MS` 跳过，而 L3 还有余量。这是实测那份《回声公寓》的镜像 ——
+  // 那时是"片抽完了、L3 分不到时间"，这里是"片压根没轮到"，但群里该看到的话是同一种：
+  // **时间不够**。原先这两种都印"模型一片都没答上来"，把配置性的必然说成了模型的问题。
+  //
+  // ⚠️ 钟要**按调用次数**跳，不能是一个定值：`started = now()` 与第一片那道闸门读的是同一个
+  // 定值，差永远是 `EXTRACT_L2_BUDGET_MS`（正好放行）。这一条与 `skipped` 那段用"端口里改钟"
+  // 是同一个手法，只是这里没有端口调用可以挂。
+  const noTime = await (async () => {
+    let reads = 0;
+    const clock = () => (reads++ === 0 ? 0 : EXTRACT_L2_BUDGET_MS + 10_000);
+    const { port, seen } = fakeAsk([{ ok: true, content: FORM }]);
+    const outcome = await extractScenario(THREE, { name: 'x', source: 'text' }, { ask: port, now: clock });
+    return { outcome, seen };
+  })();
+  ok('一片都没轮到（时间不够）→ 说"时间不够，一片都没抽成"，**不说**"模型一片都没答上来"',
+    noTime.outcome.ok === false
+    && noTime.outcome.message === '抽取没成：时间不够，一片都没抽成'
+    && noTime.seen.filter((r) => r.job === 'chunk').length === 0,
+    JSON.stringify(noTime.outcome));
+  ok('而且分到 `timeout` 那一档（不是 `format`）—— 两档的回执建议相反，认错了就会让人白重发一次',
+    noTime.outcome.kind === 'timeout', JSON.stringify(noTime.outcome));
+
+  // ── 超时那一档：**必须与"请求失败"分开**，而且要认得出来 ──
+  //
+  // 这一条走的是**真的计时器**（不是注入的钟）：L3 只剩 1 秒，端口按 `askWith` 的约定
+  // **听 signal**（abort 就 reject），于是 1 秒后计时器真的开火。判据是 `askWithTimeout`
+  // 自己那个 `timedOut` 标记，**不是**端口报错的文本 —— 真端口会把中止洗成
+  // `模型请求失败：…`，而那个前缀的含义恰恰是"可以重试"（`llm.ts` 已修，但这一层不该指望它：
+  // 端口是注入的，假的实现完全可能给一句别的话）。
+  const l3Timeout = await (async () => {
+    let clock = 0;
+    const { port } = fakeAsk([
+      () => { clock = EXTRACT_TOTAL_BUDGET_MS - 1000; return chunkOf({}); },
+      (_request, signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')));
+      })
+    ]);
+    const outcome = await extractScenario(ONE, { name: 'x', source: 'text' },
+      { ask: port, now: () => clock });
+    return outcome;
+  })();
+  ok('L3 撞上死线（端口真的听了 signal）→ 分到 `timeout`，报错用的是**我们自己的话**、不带"模型请求失败"那个可重试的前缀',
+    l3Timeout.ok === false && l3Timeout.kind === 'timeout'
+    && l3Timeout.message === '合成剧本文件时出错：抽取调用超时（1 秒）',
+    JSON.stringify(l3Timeout));
 }
 
 // ── 分幕（P8）：`coerceStruct` 收 acts / `mergeStructs` 按 id 合并 / `verifyActs` 的两类待核项 ──

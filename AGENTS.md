@@ -696,6 +696,10 @@ extra/trpg/
 
 四条边界：① **`isFormattedScenario` 仍是唯一分档判据**（真 → 0 调用；假 → 走管线），不引入第三个档；② 管线失败时**退回 `formatScenarioText` 那条老路**（只整理格式，一次调用），两条都失败就把**两条原因都说出来** —— 只说一句会丢掉一半事实；③ `writeExtras` 写失败**不回滚**（`.md` 已经是好的，旁路文件坏了不该让整份剧本白传一次），回执里如实说；④ **一条机制都没抽到时不传 `ruleExt`**（判据是"有没有"而不是"传 `null`"）—— `writeExtras` 的约定是"给了才动"，落一个写着 `null` 的 `.rule.json` 会让 `.trpg check` 报"0 条机制"，看起来像抽坏了。
 
+**失败要分档，而分档的唯一消费者是回执里那句"下一步"**（2026-10-19 加）。`ExtractOutcome` 的失败分支带 `kind`（`ExtractFailureKind` = `timeout` / `request` / `format` / `empty`），`commands/scenario.ts` 的 `EXTRACT_ADVICE`（`Record<…>`，不是 `switch` —— 新增一档时 `tsc` 要当场报错）把它翻成一句群友可见的建议。**判据只有一条：重发一次有没有用** —— `timeout`（同一份文件、同样的片数、同样的死线）与 `empty`（文件里压根没有文字）没用，`format`（模型这次没按格式答）与 `request`（网络/接口）才有用。⚠️ **这两档逐字不许出现「重新发一次」**，有断言钉着。原先四档共用一句"要重试就把原文件重新发一次"，于是**配置性的必然失败被说成"偶发、建议重试"**：管理员拿着一次真实的失败去撞同一堵墙（实测那份 7345 字的《回声公寓》就是这么被劝的）。`kind` 认不出来时（注入的假实现可能不带这个字段）给一句"先看日志"，**不是**"再试一次"。
+
+⚠️ **它需要 `llm.ts` 配合，那处是同一个病的另一半**：`askWithTimeout` 用 `controller.abort(new Error('抽取调用超时（60 秒）'))` 设死线，而 `chatCompletion` 原先把 fetch 抛的错一律套上 `模型请求失败：…` —— 那个前缀的**约定含义**是"fetch 抛的、网络层失败、可以重试"（`isRetryableError` 靠它判可重试）。于是"调用方主动中止"被洗成"网络超时"，再被 `/超时/` 那条规则判成可重试。现在 `chatCompletion` 的 catch 里**先认外部 `signal`**（`signal?.aborted` → `模型请求已被调用方中止：<理由>`），`isRetryableError` 里 `/aborted|中止|已取消|cancel/` 那条**必须排在 `/超时/` 前面**（调用方给的理由里常常就写着"超时"）。判据是取**外部那个 signal**，不是 `controller` 自己那条 5 秒以上的死线 —— 后者是真超时、该重试，两条对照断言都在 `t-trpg.mjs` 里。**跑团抽取管线是唯一往 `chatCompletion` 传调用方 signal 的地方**（主对话链不传），所以这处改动影响不到聊天。探针实测：把 `signal?.aborted` 那一段改成恒假 → `t-trpg.mjs` 红 2 条，报出的正是洗过的那句 `模型请求失败：抽取调用超时（60 秒）`。
+
 **规则层的纯度是机检的**：`scripts/check-layers.mjs` 有一条闸门 —— `extra/trpg/rules/**` 的相对 import 不许离开该目录，**非相对 import 一律禁止**（连 `node:` 都不许，所以真熵源住在 `entropy.ts` 由调用方注入）。判据是"它必须能脱离平台独立测试"，与 DiceRobot 的 `dicerobot/trpg/ruff.toml` 是同一条。**这条只靠注释守不住**：第一次"顺手 import 一个 logger"不会有任何报错。
 
 **兜底建议：一个新增的"运行结束"端口**（`ExtraRuntime.onRunEnd`，2026-10-16 加）：

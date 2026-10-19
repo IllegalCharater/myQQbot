@@ -48,7 +48,7 @@ import type { DocumentText } from '../../../media/document/index.js';
 import type { ScenarioStore } from '../store/scenario-store.js';
 import type { ExtraUsage } from '../../types.js';
 import type { AskPort } from '../scenario/extract/prompt.js';
-import type { ExtractResult } from '../scenario/extract/pipeline.js';
+import type { ExtractFailureKind, ExtractResult } from '../scenario/extract/pipeline.js';
 
 /** 下载超时。这是**命令路径**（群友在等回执），不该被一个慢下载挂住。 */
 const SAVE_TIMEOUT_MS = 15000;
@@ -61,6 +61,50 @@ const SAVE_TIMEOUT_MS = 15000;
  * `文本「（没有名字的文件）」` 这种把兜底话术当文件名的东西，而没有任何报错。
  */
 const NO_FILE_NAME = '（没有名字的文件）';
+
+/**
+ * 抽取失败之后那句"下一步"—— **按 `kind` 分档**（2026-10-19 加）。
+ *
+ * 原先无论哪种失败，回执末尾都是同一句"要重试就把原文件重新发一次"。于是**配置性的
+ * 必然失败**被说成了"偶发，建议重试"：管理员拿着一次真实的失败去撞同一堵墙，而回执
+ * 本身没给他任何别的线索（实测就是这份 7345 字的《回声公寓》：预算在 L3 处正好用光，
+ * 重发一次会以同样的方式、在同一个地方再失败一次）。
+ *
+ * 分档的判据只有一条：**重发一次有没有用**。
+ *   - `timeout` 没用 —— 同一份文件、同样的片数、同样的死线。要的是"拆小/自己写"。
+ *   - `empty`   没用 —— 文件里压根没有可抽的文字。要的是"换一份"。
+ *   - `format` / `request` 有用 —— 这两档才是真的偶发。
+ *
+ * ⚠️ **写成 `Record<ExtractFailureKind, string>` 而不是 `switch`**：新增一个 kind 时
+ * `tsc` 会当场报错，而 `switch` 会静默走 `default`。这与 `ENGINE_ROWS` / `ORDER` 那两张表
+ * 是同一条纪律（穷尽性是有用的信号，别把它丢掉）。
+ *
+ * ⚠️ 这些句子**群友可见**，不许出现 Markdown 的 `**`（5q 段会扫这个目录）。
+ */
+const EXTRACT_ADVICE: Record<ExtractFailureKind, string> = {
+  timeout: '这次是时间不够：原文太长，切成几片分别抽取时把预算用光了。重发一次多半还是不够 —— '
+    + '同一份文件、同样的片数、同样的死线。把原文件拆成几份分别传，'
+    + '或者自己按剧本格式写一份 `.md`（开头几行写 `title:` / `flags:`）再传，都比重发管用。',
+  empty: '这份文件里没有能抽的正文（扫描件、或者正文全是图片）—— 重发一次结果一样，换成带文字的版本再传。',
+  format: '模型这次没按格式答（抽取结果解不动、或者合成出来的东西没有剧本骨架）—— '
+    + '这一档是偶发的，把原文件重新发一次、引用它敲 `.trpg scenario` 通常就好了。',
+  request: '模型请求本身失败了（网络或接口的问题，与这份文件无关）—— '
+    + '过一会儿把原文件重新发一次、引用它敲 `.trpg scenario`。'
+};
+
+/** 分档没认出来时的兜底。**不是**"再试一次"，而是"先去看日志"。 */
+const UNKNOWN_ADVICE = '先看一眼日志里那条 `[trpg]` 的原始报错再决定要不要重发 —— 这次失败的类别没认出来。';
+
+/**
+ * 取某一档的"下一步"。
+ *
+ * ⚠️ **收 `undefined` 并给出兜底**：`analyze` 是**注入的**，套件里那些假管线返回的失败对象
+ * 可能压根没有 `kind`（本仓库的假端点就是普通对象字面量）。少了这层兜底，群里会出现一句
+ * `undefined` —— 而那正是本仓库反复踩过的那类"看着像能跑"的静默失败。
+ */
+export function extractFailureAdvice(kind: ExtractFailureKind | undefined): string {
+  return (kind && EXTRACT_ADVICE[kind]) || UNKNOWN_ADVICE;
+}
 
 /**
  * 这条命令的调用闸门（每会话每小时 / 全局每天，见 `SCENARIO_BUDGET`）。
@@ -299,16 +343,19 @@ export async function finishScenario(
         doc.text, { name, source: sourceLabel }, deps.recordUsage
       );
       if (!formatted.ok) {
-        return `${shown}：${outcome.message}（退一步只做格式整理也没成：${formatted.message}）`;
+        return `${shown}：${outcome.message}（退一步只做格式整理也没成：${formatted.message}）`
+          + `\n${extractFailureAdvice(outcome.kind)}`;
       }
       finalText = formatted.text;
       // ⚠️ **必须说"特殊规则不生效"**（2026-10-19 补）：降级这条路**不产生 `.rule.json`**，
       // 所以这一局确实一条机制都没有。原先只说"没有剧情结构、DM 只能从正文里自己读"——
       // 读者会把那当成"叙事少点细节"，而真相是"整本模组的规矩都不算数"。
+      // ⚠️ 那句"下一步"**按 `outcome.kind` 分档**，不再固定说"建议重试"（见 `EXTRACT_ADVICE`）。
       // ⚠️ 群友可见，不许有 Markdown 的 `**`（5q 段会扫这个目录）。
       extractionNote = `剧情抽取没成（${outcome.message}），只做了格式整理 —— `
         + '这份剧本没有剧情结构，DM 只能从正文里自己读。'
-        + '这一局不会应用剧本里的特殊规则；要重试就把原文件重新发一次、引用它敲 `.trpg scenario`。';
+        + '这一局不会应用剧本里的特殊规则。'
+        + `\n${extractFailureAdvice(outcome.kind)}`;
     }
   }
   const saved = saveScenarioText(name, { ...doc, text: finalText }, scenarios);

@@ -1164,7 +1164,11 @@ const status = (key) => store.read(key);
       // P7-a 之后 `usedModel` 那条路**先走抽取管线**，`format` 是它的后备。下面三条验的正是
       // 后备那条路，所以注入一个"必定失败"的管线 —— 于是它们逐字照旧（一次调用、同样的文案）。
       // **不注入的话它们会变成假绿**：管线会真的去调那个假端点，而它的脚本是消耗式的。
-      const noPipeline = async () => ({ ok: false, message: '（本用例验的是后备那条路）' });
+      // ⚠️ `kind` **不能省**：回执那句"下一步"是按它分岔的（`extractFailureAdvice`），
+      // 而 `request` 这一档正是"重发有用"的那一档 —— 省掉它回执会走兜底那句
+      // "类别没认出来"，下面那条 `/重新发一次/` 当场变红。真管线永远带 `kind`，
+      // 这里是**注入的假实现**，所以它得自己把契约补齐。
+      const noPipeline = async () => ({ ok: false, kind: 'request', message: '（本用例验的是后备那条路）' });
 
       model.requests = [];
       model.script = [{ content: '这条不该被用到' }];
@@ -1204,6 +1208,37 @@ const status = (key) => store.read(key);
       // 会被读成"叙事少点细节"，而真相是"整本模组的规矩都不算数"。
       ok('而且**明说特殊规则不生效**，并给出重试的路',
         /不会应用剧本里的特殊规则/.test(viaModel) && /重新发一次/.test(viaModel), viaModel);
+
+      // ── 那句"下一步"**按失败档位分岔**（2026-10-19）──
+      //
+      // 起因是一次实测：7345 字的《回声公寓》两片各吃掉 44 秒，L3 只分到 2 秒就超时，
+      // 而回执说的是"偶发超时，建议重试" —— 管理员拿着一次**配置性的必然失败**去撞同一堵墙，
+      // 而回执没给他任何别的线索。分档的判据只有一条：**重发一次有没有用**。
+      const { extractFailureAdvice } = await load('extra/trpg/commands/scenario.js');
+      // ⚠️ 判据取的是"**有没有给出那条可执行的路**"，不是"有没有出现『重发』两个字"：
+      // `timeout` 那句里就有"重发一次多半还是不够"（那正是要说的事），拿词去卡会把它判成反的。
+      ok('`timeout` 档**不劝人重发**（同一份文件、同样的片数、同样的死线，重发必然再撞一次），改为劝他拆小或自己写',
+        /时间不够/.test(extractFailureAdvice('timeout'))
+        && /多半还是不够/.test(extractFailureAdvice('timeout'))
+        && /拆成几份|自己按剧本格式写/.test(extractFailureAdvice('timeout'))
+        && !/重新发一次/.test(extractFailureAdvice('timeout')), extractFailureAdvice('timeout'));
+      ok('`empty` 档同理**不劝人重发**（文件里没有文字，重发结果逐字相同），改为劝他换一份',
+        /没有能抽的正文/.test(extractFailureAdvice('empty'))
+        && /换成带文字的版本/.test(extractFailureAdvice('empty'))
+        && !/重新发一次/.test(extractFailureAdvice('empty')), extractFailureAdvice('empty'));
+      // 对照必须存在：另外两档**仍然**要说"重发" —— 一刀切删掉那句的话，真正的偶发故障
+      // 就没有下一步了，而这一条正是"分档"与"换个说法"的分界。
+      ok('（对照）`format` 与 `request` 两档照旧给出"重新发一次"这条可执行的路',
+        /重新发一次/.test(extractFailureAdvice('format')) && /重新发一次/.test(extractFailureAdvice('request')),
+        extractFailureAdvice('request'));
+      // 注入的假管线可能压根没给 `kind`（套件里那些就是普通对象字面量），少了这层兜底
+      // 群里会出现一句 `undefined` —— 正是本仓库反复踩过的那类静默失败。
+      ok('没给 `kind` 时**不印 `undefined`**，而是给一句"先看日志"（注入的假实现可能没带这个字段）',
+        !/undefined/.test(extractFailureAdvice(undefined))
+        && /日志/.test(extractFailureAdvice(undefined)), extractFailureAdvice(undefined));
+      ok('四档的文案**互不相同**（认错档等于给错建议，而它们都是"看着像对的"那种句子）',
+        new Set(['timeout', 'request', 'format', 'empty'].map(extractFailureAdvice)).size === 4,
+        JSON.stringify(['timeout', 'request', 'format', 'empty'].map(extractFailureAdvice)));
 
       model.requests = [];
       model.script = [{ content: '我做不到' }];
@@ -1365,6 +1400,51 @@ const status = (key) => store.read(key);
       server.close();
       server.closeAllConnections?.();
     }
+  }
+
+  // ── 调用方设的死线 vs 请求自己失败：`chatCompletion` 必须分得开（2026-10-19）──
+  //
+  // 这是那"2 秒超时"的另一半。管线中止一发时带的理由是**它自己那句话**（`抽取调用超时（60 秒）`），
+  // 而 `chatCompletion` 原先把它洗成 `模型请求失败：…` —— 那个前缀的约定含义是"fetch 抛的、
+  // 网络层失败、可以重试"（`isRetryableError` 第 100 行就是靠它判的），于是**"预算已经用光"**
+  // 这件事被说成了"再试一次可能就好"。群里看到的正是那句"偶发超时，建议重试"。
+  //
+  // ⚠️ 夹具是一个**接了连接就不回话**的端点。换成"立刻返回 500"之类的话，请求会在死线之前
+  // 就结束，测到的就是"请求失败"而不是"我们中止了它" —— 断言照样能绿，但绿的是别的东西。
+  {
+    const { chatCompletion, isRetryableError } = await load('llm/llm.js');
+    const { updateConfig, getConfig } = await load('core/config.js');
+    const stall = http.createServer(() => { /* 故意不响应：让死线成为唯一的出口 */ });
+    await new Promise((resolve) => stall.listen(0, '127.0.0.1', resolve));
+    const apiBackup = getConfig().api;
+    updateConfig({ api: { baseUrl: `http://127.0.0.1:${stall.address().port}`, model: 'stall', apiKey: 'x' } });
+    let message = '';
+    try {
+      const controller = new AbortController();
+      const killer = setTimeout(() => controller.abort(new Error('抽取调用超时（60 秒）')), 50);
+      try {
+        await chatCompletion({ messages: [{ role: 'user', content: 'x' }], signal: controller.signal });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      } finally {
+        clearTimeout(killer);
+      }
+    } finally {
+      updateConfig({ api: apiBackup });
+      stall.closeAllConnections?.();
+      stall.close();
+    }
+    ok('调用方中止时**如实说"是被调用方中止的"**，不套 `模型请求失败：` 那个"可以重试"的前缀',
+      /已被调用方中止/.test(message) && !/模型请求失败/.test(message), message);
+    ok('而且把调用方给的理由**原样带出来**（回执要能说清是**哪一种**中止）',
+      /抽取调用超时（60 秒）/.test(message), message);
+    ok('这一条**被判成不可重试** —— 预算已经用光，再试一次只会以同样的方式再撞一堵同样的墙',
+      isRetryableError(new Error(message)) === false, message);
+    // 对照必须存在：少了这两条，"恒返回 false"也能让上面那条绿。
+    ok('（对照）网络层失败**仍然**可重试（`模型请求失败` 那个前缀的既有含义没被改掉）',
+      isRetryableError(new Error('模型请求失败：connect ECONNREFUSED')) === true);
+    ok('（对照）请求**自己**超时（不是调用方中止）**仍然**可重试',
+      isRetryableError(new Error('模型请求超时（180000ms）')) === true);
   }
 }
 
