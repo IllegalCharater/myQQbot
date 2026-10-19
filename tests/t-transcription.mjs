@@ -165,6 +165,90 @@ commandWindows.reload('group:123');
 ok('窗口从存档重播后仍排除 /转写',
   commandWindows.pending('group:123').map((m) => m.mid).join(',') === '788');
 
+// ── 命令可以跟在「@机器人自己」后面 ─────────────────────────────────────────
+//
+// 实测（2026-10-19 真机）：群友敲 `@bot /能力`，协议端把 @ 段渲染成紧贴的 `@名字`，
+// 于是命令词不在开头 —— 消息被当成普通消息进了 LLM，群里收到一句模型自己编的
+// 「？又发什么暗号」，白多花一次模型调用，而**不报任何错**。
+{
+  const count = () => ({
+    enqueued: enqueuedCommands.length, replies: commandReplies.length, forwarded: forwardedToAgent.length
+  });
+  const send = (id, message) => ingest.handle({
+    post_type: 'message', message_type: 'group', group_id: 123, user_id: 456,
+    message_id: id, sender: { user_id: 456, nickname: '测试者' }, message
+  });
+  const video = (name) => ({ type: 'video', data: { url: `https://example.com/${name}.mp4`, file: 'fixture.mp4' } });
+
+  const before = count();
+  await send(790, [
+    { type: 'at', data: { qq: '999999' } },
+    { type: 'text', data: { text: ' /转写' } },
+    video('at-prefixed')
+  ]);
+  const after = count();
+  ok('★ `@机器人 /转写` 照样认得出命令（@ 段不参与命令判定）',
+    after.enqueued === before.enqueued + 1
+    && enqueuedCommands.at(-1).url === 'https://example.com/at-prefixed.mp4'
+    && after.forwarded === before.forwarded && after.replies === before.replies + 1,
+    JSON.stringify({ before, after }));
+  ok('存档里**仍然带着 @**（掐掉的只是命令判定用的那一份文本）',
+    String(commandStore.findByMid('group:123', 790)?.text ?? '').startsWith('@999999 '),
+    String(commandStore.findByMid('group:123', 790)?.text ?? ''));
+
+  // 引用段在协议端报文里排在 @ 之前（`[reply, at, text]`）—— 掐的时候要连它一起跳过。
+  const before2 = count();
+  await send(791, [
+    { type: 'reply', data: { id: '788' } },
+    { type: 'at', data: { qq: '999999' } },
+    { type: 'text', data: { text: ' /转写' } },
+    video('at-reply')
+  ]);
+  ok('引用 + @机器人 + 命令（协议端就是这个顺序）同样认得出',
+    enqueuedCommands.length === before2.enqueued + 1
+    && enqueuedCommands.at(-1).url === 'https://example.com/at-reply.mp4'
+    && forwardedToAgent.length === before2.forwarded,
+    JSON.stringify({ before2, after: count() }));
+
+  // 对照：@ 的是**别人** → 不是命令。`@小明 /画 猫` 是在跟别人说话，
+  // 顺手把命令执行掉是误伤；没有这条对照，上面两条可能只是"任何 @ 都被掐掉了"。
+  const before3 = count();
+  await send(792, [
+    { type: 'at', data: { qq: '888888' } },
+    { type: 'text', data: { text: ' /转写' } },
+    video('other-at')
+  ]);
+  ok('对照：@ 别人之后跟命令**不算命令**（照常交给模型）',
+    enqueuedCommands.length === before3.enqueued
+    && forwardedToAgent.length === before3.forwarded + 1,
+    JSON.stringify({ before3, after: count() }));
+
+  // 对照：selfId 还没握手拿到（空串）时退回改动前的行为，而不是"猜着掐"。
+  const noSelfForwarded = [];
+  const noSelfIngest = createIngest({
+    commands,
+    extras: { intercept: () => null },
+    onebot: { selfId: '' },
+    store: new ChatStore(),
+    sender: { sendTextBatch: async () => ({}) },
+    orchestrator: { onIncoming: (...args) => { noSelfForwarded.push(args); } },
+    transcription: { enqueue: () => { throw new Error('不该入队'); } },
+    emit: () => {}, getConfig: () => commandConfig, log: () => {}
+  });
+  await noSelfIngest.handle({
+    post_type: 'message', message_type: 'group', group_id: 124, user_id: 456,
+    message_id: 793, sender: { user_id: 456, nickname: '测试者' },
+    message: [
+      { type: 'at', data: { qq: '999999' } },
+      { type: 'text', data: { text: ' /转写' } },
+      video('no-self')
+    ]
+  });
+  ok('对照：selfId 为空时原样不掐（认不出自己就退回改动前的行为）',
+    enqueuedCommands.length === before3.enqueued && noSelfForwarded.length === 1,
+    JSON.stringify({ enqueued: enqueuedCommands.length, forwarded: noSelfForwarded.length }));
+}
+
 const bilibiliCardUrl = 'https://b23.tv/fixture-card';
 const cardCommands = [];
 const cardReplies = [];

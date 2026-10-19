@@ -1235,6 +1235,19 @@ const inbound = (text = '3d6') => ({
   ok('对照：不被拦的消息照常交给编排器', forwarded.length === 1, String(forwarded.length));
   ok('对照：同一条消息仍然**未读**（照常参与响应判定）',
     store.recent(`group:${groupId}`, { limit: 5 }).find((m) => String(m.text) === '3d6 是什么意思')?.read === false);
+
+  // `@机器人 3d6` 同样要走到拦截里：命令判定用的那份文本掐掉了开头的 @（见 ingest 的
+  // `stripLeadingSelfMentions`），拦截读的是同一份 —— 少了这条，`@bot 3d6` 会被当成普通
+  // 消息交给模型，而扩展**永远等不到它**（与斜杠命令那条是同一个病）。
+  const sentBefore = sent.length;
+  await ingest.handle({
+    post_type: 'message', message_type: 'group', group_id: groupId, user_id: 5,
+    message_id: 1003, sender: { user_id: 5, nickname: '甲' },
+    message: [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: ' 3d6' } }]
+  });
+  ok('★ `@机器人 3d6` 照样走到扩展拦截（拦截读的是掐掉 @ 的那份文本）',
+    sent.length === sentBefore + 1 && String(sent.at(-1)[1]) === '🎲 12' && forwarded.length === 1,
+    JSON.stringify({ sent: sent.length, forwarded: forwarded.length }));
 }
 
 // ── 19. 源级断言：两个新挂点在运行链路上真的接上了 ───────────────────────────

@@ -19,7 +19,7 @@ import {
   segmentsToText, extractMediaFromSegments, expandForwardNodes, forwardIdFromData
 } from '../../qq/onebot.js';
 import type { OneBotClient } from '../../qq/onebot.js';
-import type { OneBotEvent } from '../../qq/types.js';
+import type { OneBotEvent, OneBotSegment } from '../../qq/types.js';
 import type { SendQueue } from '../../qq/sender.js';
 import type { CommandDeps, CommandDispatcher } from './commands.js';
 import type { ExtrasRuntime } from '../../extra/runtime.js';
@@ -90,6 +90,41 @@ function addCardMediaFromSegments(media: MediaEntry[], segments: unknown): void 
 export interface Ingest {
   /** `OneBotClient.onEvent` 的落点。内部已吞掉各自的分支，不需要调用方再 catch 分支错误。 */
   handle(event: OneBotEvent): Promise<void>;
+}
+
+/**
+ * 命令判定用的文本里，**掐掉开头那串「@机器人自己」的段**。
+ *
+ * 群友很自然的输入是「先 @ 机器人、再敲命令」（`@bot /转写`），而协议端把 @ 段渲染成
+ * **紧贴着**的 `@名字`（`segmentsToText` 用 `out.join('')`），于是拿到的文本是
+ * `@Zarathustra /转写` —— 命令词不在开头，`startsWithWord` 认不出来。
+ * **实测（2026-10-19 真机）**：`@bot /能力` 被当成普通消息进了 LLM，群里收到一句模型自己编的
+ * 「？又发什么暗号」，白多花一次模型调用（`wakeEligible` 也跟着变 true），而**不报任何错**。
+ *
+ * ⚠️ **只掐指向机器人自己的那一串，不是"任何开头的 @"**：`@小明 /画 猫` 是在跟别人说话，
+ * 顺手把命令执行掉是误伤（同 `startsWithWord` 那条"`@` 不算边界"的取舍，方向相反而已）。
+ * `selfId` 为空（还没握手拿到自己的号）时原样返回 —— 认不出自己就退回改动前的行为，
+ * 而不是猜。
+ *
+ * ⚠️ **引用段在协议端的报文里排在 @ 之前**（`[reply, at, text]`），所以要先跳过它 ——
+ * 少了这一步，"引用一条消息 + @机器人 + 敲命令"这条最常见的形态一个都不会被掐掉。
+ * 它本来就不出现在命令文本里（`includeReply:false`），跳过它不改变任何输出。
+ *
+ * 掐掉的只是**命令判定用的那一份**（`commandText`）：进存档的 `text` 仍带着 @，
+ * 那是群友真正说的话。与「合并转发展开只替换 `text`、不替换 `commandText`」是同一条分工。
+ */
+function stripLeadingSelfMentions(segments: OneBotSegment[], selfId: string): OneBotSegment[] {
+  if (!selfId) return segments;
+  const start = segments[0]?.type === 'reply' ? 1 : 0;
+  let i = start;
+  while (i < segments.length) {
+    const seg = segments[i];
+    const qq = isRecord(seg?.data) ? seg.data.qq : undefined;
+    if (seg?.type !== 'at' || String(qq ?? '') !== selfId) break;
+    i += 1;
+  }
+  // 一个都没掐掉时返回**原数组**：调用方按引用判断"要不要为存档那一份重算一次"。
+  return i > start ? segments.slice(i) : segments;
 }
 
 export function createIngest({ onebot, store, sender, orchestrator, transcription, imageGen, jmcomic, commands, extras, emit, getConfig, log }: {
@@ -233,6 +268,8 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     // 于是 `commandText` 是"用户真正敲的那句话"（命令判定与 `parseTranscriptionCommand` 只认它），
     // `text` 是"进了存档、给模型看的那份"。别把它们并成一个变量 —— 那会让
     // "转发了一条记录、转发内容里恰好以 /转写 开头"变成一条真命令。
+    // 另有一处**只动 `commandText`** 的规范化：开头那串「@机器人自己」的段要掐掉
+    // （`@bot /转写` 是群里最自然的输入，见 `stripLeadingSelfMentions`）—— 存档里仍带着 @。
     let reply: ChatReply | null = null;
     if (segments) {
       const replySeg = segments.find((seg) => seg?.type === 'reply');
@@ -242,11 +279,16 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
         reply = { mid: info.mid, sender: info.sender, text: info.text };
         if (info.media.length) repliedMedia.push(...info.media);
       }
-      commandText = await segmentsToText(segments, {
+      const commandSegments = stripLeadingSelfMentions(segments, String(onebot.selfId ?? ''));
+      const renderText = (segs: OneBotSegment[]) => segmentsToText(segs, {
         includeReply: false,
         resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : Promise.resolve(null)
       });
-      text = commandText;
+      commandText = await renderText(commandSegments);
+      // 存档那一份**保留 @**（那是群友真正说的话），所以只在真掐掉过东西时才重算一遍 ——
+      // 没掐掉时两者逐字相同，重算只会让 @ 名字白查一遍（查不到的名字**不进缓存**，
+      // 于是每个 `@非本群成员` 的消息都要多打一次接口）。
+      text = commandSegments === segments ? commandText : await renderText(segments);
     } else {
       text = String(event.raw_message ?? event.message ?? '').trim();
       commandText = text;
