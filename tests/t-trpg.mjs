@@ -1218,8 +1218,8 @@ const status = (key) => store.read(key);
 
       // ── 拆成"前半就地 / 后半交出去"之后的那条路（2026-10-19）──
       //
-      // 抽取最多 90 秒，而命令是被 `ingest.ts` 的**按会话串行**链 await 的 —— 就地跑完的
-      // 代价是"传完剧本之后的一分钟里，这个群说什么都没反应"。判据因此是**命令立刻返回**
+      // 抽取最多 5 分钟，而命令是被 `ingest.ts` 的**按会话串行**链 await 的 —— 就地跑完的
+      // 代价是"传完剧本之后的几分钟里，这个群说什么都没反应"。判据因此是**命令立刻返回**
       // 且回执由 `sendText` 事后补上，而不是"最后拿到了什么"（后者就地跑也拿得到）。
       const { createScenarioCommand } = await load('extra/trpg/commands/scenario.js');
       const sent = [];
@@ -1232,7 +1232,7 @@ const status = (key) => store.read(key);
       const immediate = String(await asyncCmd({
         chatKey: 'group:async', senderId: '10001', text: '.trpg scenario 异步的', media, replyToMessageId: null
       }));
-      ok('需要模型时命令**立刻**回一句"正在收"，而不是等抽取跑完（那 90 秒不再堵住这个群）',
+      ok('需要模型时命令**立刻**回一句"正在收"，而不是等抽取跑完（那几分钟不再堵住这个群）',
         /正在收「f.md」/.test(immediate) && !/已存剧本/.test(immediate), immediate);
       ok('夹具：那一刻回执还没发出去（补发是后台那条路的事）', sent.length === 0, JSON.stringify(sent));
       // 后台是 `void` 出去的，所以这里**轮询等它落地**（不是 `sleep(80)` 那种定值等待 ——
@@ -4196,8 +4196,8 @@ const status = (key) => store.read(key);
     && /recordUsage \}/.test(scenarioSrc)
     && /openScenario\(input, deps\)/.test(scenarioSrc)
     && /finishScenario\(doc, shown, name, scenarios, deps\)/.test(scenarioSrc));
-  // 抽取最多 90 秒，而命令是被 `ingest.ts` 的按会话串行链 await 的 —— 没有这个口子就只能
-  // 就地跑完，那 90 秒里整个群的消息都排在后面。三条缺一不可：接口上有、组装根接了、
+  // 抽取最多 5 分钟，而命令是被 `ingest.ts` 的按会话串行链 await 的 —— 没有这个口子就只能
+  // 就地跑完，那几分钟里整个群的消息都排在后面。三条缺一不可：接口上有、组装根接了、
   // 命令层真的往下递了。
   ok('`sendText` 是宿主的口子，`web/app.ts` 接上了，命令层也真的递了下去（抽取不再堵住入站链）',
     /sendText\?\(/.test(body('src/extra/types.ts'))

@@ -100,12 +100,28 @@ export const MIN_CHUNK_CHARS = 400;
  * `image-source` 那条"给兜底留位置"的纪律）：剩下的时间不够一次最小调用时，
  * 后面的片**不发**，只把已抽到的部分交出去并如实说明。
  *
- * 90 秒是既有 `formatScenarioText` 那 60 秒的 1.5 倍 —— 它已经是一次同步等待了，
- * 抽取只是把同一件事切成几发。异步化（队列 + 回流）是 P8 的事。
+ * ⚠️ **90 秒这个数曾把整条管线送进必败**（2026-10-19 真机实测）：一份 7345 字的模组切成
+ * 2 片，每片实测约 44 秒，两片吃掉约 88 秒 —— 于是 L3（合成剧本文件，**唯一的交付物**）
+ * 只分到 2 秒，超时、整轮报废、退回一次格式整理。而"90 秒"当初的算法是
+ * "既有 `formatScenarioText` 那 60 秒的 1.5 倍"，即**按一次调用**估的 ——
+ * 可它要装的是 1 次归并 + 最多 `MAX_CHUNKS` 次分片抽取，也就是 7 次调用。
+ * 现在的数是按**实测单次耗时**倒推的：每次上限 60 秒，L2 那几片最多用掉
+ * `EXTRACT_TOTAL_BUDGET_MS - EXTRACT_CALL_TIMEOUT_MS`，剩下的整整 60 秒留给 L3。
  */
-export const EXTRACT_TOTAL_BUDGET_MS = 90_000;
+export const EXTRACT_TOTAL_BUDGET_MS = 300_000;
 /** 单次调用的上限。真正生效的是 `min(它, 剩余预算)`。 */
-export const EXTRACT_CALL_TIMEOUT_MS = 45_000;
+export const EXTRACT_CALL_TIMEOUT_MS = 60_000;
+/**
+ * L2（逐片抽取）那一段的子预算 —— **派生量，不是第二个旋钮**。
+ *
+ * 它存在的唯一理由是"**L3 永远分得到一整次调用**"：分片是可选的（少抽一片只是少一点细节，
+ * 而且会如实说出来），而 L3 是**唯一的交付物** —— 它失败就等于整轮白跑。所以 L2 在
+ * `EXTRACT_TOTAL_BUDGET_MS - EXTRACT_CALL_TIMEOUT_MS` 处就收手，把最后那 60 秒原样留给 L3。
+ *
+ * 别把它写成另一个可独立调的数：它一旦不等于 `总预算 - 单次上限`，这句话就不成立了
+ * （L2 用满时 L3 会分到不足一整次调用，而那正是这一版要修的病）。
+ */
+export const EXTRACT_L2_BUDGET_MS = EXTRACT_TOTAL_BUDGET_MS - EXTRACT_CALL_TIMEOUT_MS;
 /** 剩余预算低于这个数就不再发下一片 —— 发了也多半是超时。 */
 export const EXTRACT_MIN_CALL_MS = 5_000;
 

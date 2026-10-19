@@ -107,8 +107,8 @@ export interface ScenarioCommandDeps {
  *
  * ── 为什么要分成"前半就地、后半交出去"（2026-10-19）──
  *
- * 前半（下载 + 解字节）是几秒的事；后半在**需要模型**时最多 90 秒（`EXTRACT_TOTAL_BUDGET_MS`）。
- * 而命令是被 `ingest.ts` 的 `enqueueIngest` **按会话串行** await 的 —— 也就是说那 90 秒里
+ * 前半（下载 + 解字节）是几秒的事；后半在**需要模型**时最多 5 分钟（`EXTRACT_TOTAL_BUDGET_MS`）。
+ * 而命令是被 `ingest.ts` 的 `enqueueIngest` **按会话串行** await 的 —— 也就是说那几分钟里
  * 这个群的所有消息都排在后面：不落档、不唤醒、面板不动。群里看到的是"传完剧本之后机器人
  * 死了"。同一条链上，`/转写` 与 `/画` 早就把几十秒的活交给各自的单并发后台队列了，
  * `.trpg scenario` 是这三件里最重的一件，偏偏是唯一没交出去的。
@@ -154,7 +154,7 @@ export function createScenarioCommand({
         // 两种都不该把异常打到入站链上 —— 那条链已经走完了。
         console.warn('[trpg] 剧本抽取的后台任务失败:', error instanceof Error ? error.message : error);
       });
-    return `正在收「${shown}」—— 这份不是剧本格式，要先抽剧情结构（最多 7 次模型调用，可能要一分钟）。`
+    return `正在收「${shown}」—— 这份不是剧本格式，要先抽剧情结构（最多 7 次模型调用，可能要几分钟）。`
       + '抽完我在这里发一条回执；这期间群里照常说话。';
   };
 }
@@ -215,9 +215,9 @@ export type OpenScenarioOutcome = { ok: true; opened: OpenedScenario } | { ok: f
  * 这条命令的**前半**：从引用里认出文件 → 下载 → 字节转文本。**一次模型调用都不发。**
  *
  * ⚠️ 拆成两半是为了让"要不要让模型干活"这个决定落在**命令层**（见 `createScenarioCommand`）：
- * 需要模型的那一半最多跑 90 秒（`EXTRACT_TOTAL_BUDGET_MS`），而它不该把整个群的入站处理链
+ * 需要模型的那一半最多跑 5 分钟（`EXTRACT_TOTAL_BUDGET_MS`），而它不该把整个群的入站处理链
  * 堵住 —— 那条链是**按会话串行**的（`ingest.ts` 的 `enqueueIngest`），堵住它的表现是
- * "传完剧本之后的一分钟里，这个群说什么都没反应、面板也不动"。
+ * "传完剧本之后的几分钟里，这个群说什么都没反应、面板也不动"。
  *
  * `saveScenario` 仍然把两半串起来：套件与"宿主没接异步口子"的那条路走的就是它。
  */
@@ -378,7 +378,7 @@ export async function finishScenario(
 /**
  * 下载 → 抽文本 → 格式匹配（必要时让模型整理）→ 落库。**前半 + 后半，一次性跑完。**
  *
- * 这条路**会占住调用方**（最长约 90 秒）。生产路径上 `.trpg scenario` 只在"宿主没接
+ * 这条路**会占住调用方**（最长约 5 分钟）。生产路径上 `.trpg scenario` 只在"宿主没接
  * `sendText`"时才走它（见 `createScenarioCommand`）；套件也一律走它 —— 它们注入
  * `extract` / `analyze` / `format`，从不真的发调用。
  */

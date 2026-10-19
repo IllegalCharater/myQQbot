@@ -37,7 +37,13 @@ const { mergeStructs, extractScenario, verifyActs, verifyEndings } = await load(
 // 本身就是"没有第二份定义"的证据（`schema.ts` 里那个 `STRUCT_MECHANIC_TYPES` 已随 P7-c 删掉）。
 const { MECHANIC_TYPES, TRIGGER_OPS, EFFECT_HANDLERS, isMechanicType } =
   await load('extra/trpg/rules/rule-set.js');
-const { MAX_CHUNKS, MAX_CHUNK_CHARS, MAX_STRUCT_ITEMS, MAX_ACTS, MAX_ACT_SCENES } = await load('extra/trpg/model/limits.js');
+const {
+  MAX_CHUNKS, MAX_CHUNK_CHARS, MAX_STRUCT_ITEMS, MAX_ACTS, MAX_ACT_SCENES,
+  // ⚠️ 预算那三条也要取**权威值**：下面「预算降级」那一段的钟是拨出来的，写死数字的话
+  // 常量一改（本轮就从 90 秒改成了 5 分钟）那两条断言会以"结果不对"的形式假红，
+  // 而它们想守的性质其实完好 —— 看上去像代码坏了，其实只是夹具过期。
+  EXTRACT_TOTAL_BUDGET_MS, EXTRACT_L2_BUDGET_MS, EXTRACT_CALL_TIMEOUT_MS
+} = await load('extra/trpg/model/limits.js');
 const { ScenarioStore } = await load('extra/trpg/index.js');
 
 /**
@@ -627,13 +633,19 @@ const chunkOf = (body) => ({ ok: true, content: JSON.stringify(body), usage: '' 
 
   // ── 预算降级：钟拨快之后，**片被跳过但合成照做** ──
   //
-  // 这两条钉的是本轮改掉的那道闸门：原先 L3 与 L2 共用 `EXTRACT_MIN_CALL_MS` 阈值，于是
-  // "有片被跳过"与"能合成"永远不可能同时成立（两处读同一个只会往前走的钟），上面那条
-  // 「最后 N 片没抽」的警告**一次也到不了回执** —— 那不是降级路径，是死代码。
+  // 这两条钉的是两道闸门，都不是"跑得快不快"：
+  //
+  //   ① L3 与 L2 不共用 `EXTRACT_MIN_CALL_MS` 阈值 —— 原先共用，于是"有片被跳过"与"能合成"
+  //      永远不可能同时成立（两处读同一个只会往前走的钟），上面那条「最后 N 片没抽」的警告
+  //      **一次也到不了回执**。那不是降级路径，是死代码。
+  //   ② L2 与 L3 用的是**两条死线**，差一个 `EXTRACT_CALL_TIMEOUT_MS` —— 分片是尽力而为，
+  //      L3 是唯一的交付物。钟拨到 `EXTRACT_L2_BUDGET_MS`（L2 的子预算**恰好用满**，最紧的
+  //      那一格）时，L3 必须照常拿到整次调用。合成一条死线的话这一格就是实测踩到的那个
+  //      必败：两片各 44 秒吃光预算，L3 分到 2 秒、当场超时、整轮报废。
   const skipped = await (async () => {
     let clock = 0;
     const { port, seen } = fakeAsk([
-      () => { clock = 86_000; return chunkOf({}); },
+      () => { clock = EXTRACT_L2_BUDGET_MS; return chunkOf({}); },
       { ok: true, content: FORM }
     ]);
     const outcome = await extractScenario(THREE, { name: 'x', source: 'text' },
@@ -645,6 +657,10 @@ const chunkOf = (body) => ({ ok: true, content: JSON.stringify(body), usage: '' 
     && skipped.seen.filter((r) => r.job === 'chunk').length === 1
     && skipped.seen[1].job === 'merge',
     JSON.stringify(skipped.seen.map((r) => r.job)));
+  ok('L2 的子预算**恰好用满**时，L3 仍拿得到一整次调用（两条死线差一个 `EXTRACT_CALL_TIMEOUT_MS`）',
+    skipped.outcome.ok === true && EXTRACT_L2_BUDGET_MS + EXTRACT_CALL_TIMEOUT_MS === EXTRACT_TOTAL_BUDGET_MS
+    && skipped.seen.some((r) => r.job === 'merge'),
+    JSON.stringify(skipped.seen.map((r) => r.job)));
   ok('被跳过的那几片要**如实说出来**（不说的话管理员以为 3 片全抽了，而结构里少了两片的内容）',
     skipped.outcome.ok === true
     && skipped.outcome.result.struct.warnings.includes('时间预算用完，最后 2 片没抽（原文已另存）'),
@@ -653,7 +669,7 @@ const chunkOf = (body) => ({ ok: true, content: JSON.stringify(body), usage: '' 
   const outOfTime = await (async () => {
     let clock = 0;
     const { port, seen } = fakeAsk([
-      () => { clock = 90_001; return chunkOf({}); },
+      () => { clock = EXTRACT_TOTAL_BUDGET_MS + 1; return chunkOf({}); },
       { ok: true, content: FORM }
     ]);
     const outcome = await extractScenario(THREE, { name: 'x', source: 'text' },

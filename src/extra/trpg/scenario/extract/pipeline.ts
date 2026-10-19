@@ -24,10 +24,15 @@
 // 死线，每一发的超时是 `min(EXTRACT_CALL_TIMEOUT_MS, 剩余)`；剩余低于 `EXTRACT_MIN_CALL_MS`
 // 就**不发**那一发，并把"少抽了几片"如实说出来（原文还在 `raw/` 里，没有丢）。
 //
+// ⚠️ **L2 与 L3 用的是两条死线，差一个 `EXTRACT_CALL_TIMEOUT_MS`**（2026-10-19 加）：
+// 分片是可选的，L3 是**唯一的交付物** —— 它失败就等于整轮白跑。所以 L2 只准用到
+// `EXTRACT_L2_BUDGET_MS`，把最后那 60 秒原样留给 L3。合成一条死线的后果实测过：
+// 两片各 44 秒吃光 90 秒，L3 分到 2 秒、当场超时，而群里看到的是"抽取没成"。
+//
 // ⚠️ **本目录（`scenario/extract/`）不许出现 `node:fs` / `node:path`**（`check-layers.mjs`
 // 有一条闸门，与 `model/` 同形）：落盘是 `store/` 的事，这一层要能脱离磁盘被测。
 import {
-  EXTRACT_CALL_TIMEOUT_MS, EXTRACT_MIN_CALL_MS, EXTRACT_TOTAL_BUDGET_MS,
+  EXTRACT_CALL_TIMEOUT_MS, EXTRACT_L2_BUDGET_MS, EXTRACT_MIN_CALL_MS, EXTRACT_TOTAL_BUDGET_MS,
   MAX_ACT_GOAL_CHARS, MAX_ACT_KEEPER_CHARS, MAX_ACT_SCENES, MAX_ACTS, MAX_CHARACTERS,
   MAX_ENDING_KEEPER_CHARS, MAX_ENDING_READ_ALOUD_CHARS, MAX_ENDING_REWARDS_CHARS, MAX_ENDINGS, MAX_FLAGS,
   MAX_STRUCT_ITEMS, MAX_STRUCT_TEXT_CHARS, MAX_STRUCT_QUOTE_CHARS
@@ -384,7 +389,10 @@ export async function extractScenario(
 ): Promise<ExtractOutcome> {
   const now = deps.now ?? Date.now;
   const started = now();
+  // 两条死线，差一个 `EXTRACT_CALL_TIMEOUT_MS`：L2 只准用到 `l2Deadline`，好让 L3（唯一的
+  // 交付物）无论如何都分得到一整次调用。见文件头「L2 与 L3 用的是两条死线」那段。
   const deadline = started + EXTRACT_TOTAL_BUDGET_MS;
+  const l2Deadline = started + EXTRACT_L2_BUDGET_MS;
 
   const outline = outlineDocument(text);
   if (!outline.chunks.length) return { ok: false, message: '这份文件里没有可抽取的正文' };
@@ -401,7 +409,9 @@ export async function extractScenario(
   let firstFailure = '';
 
   for (const chunk of outline.chunks) {
-    const remaining = deadline - now();
+    // ⚠️ 这里读的是 `l2Deadline` 而**不是** `deadline`：分片是可选的，L3 是唯一的交付物。
+    // 用整条管线的死线的话，几片慢调用就能把 L3 挤到零秒（实测过，见文件头）。
+    const remaining = l2Deadline - now();
     if (remaining < EXTRACT_MIN_CALL_MS) {
       skipped = outline.chunks.length - chunk.index;
       break;
@@ -467,8 +477,12 @@ export async function extractScenario(
   // 不同：L2 那几发是**尽力而为**（少一片还有别的片），而 L3 是**唯一的交付物** —— 前面抽到
   // 的东西全靠它才出得去。用同一个阈值卡它的话，"有片被跳过"与"能合成"就**永远不可能同时
   // 成立**（两处读的是同一个时钟，而时钟只往前走），于是上面那条「最后 N 片没抽」的警告
-  // **一次也到不了回执** —— 那不是一条降级路径，是死代码。剩下多少时间就给它多少，最坏
-  // 情况是把残余预算花在一次注定超时的调用上（几秒），换来的是"抽到多少就交多少"。
+  // **一次也到不了回执** —— 那不是一条降级路径，是死代码。剩下多少时间就给它多少。
+  //
+  // ⚠️ 而且它读的是**整条管线的死线**（`deadline`），不是 L2 那条子死线 —— L2 已经在
+  // `EXTRACT_L2_BUDGET_MS` 处收手了，所以这里算出来的剩余**至少是 `EXTRACT_CALL_TIMEOUT_MS`**
+  // （一整次调用）。那个 `remaining <= 0` 分支因此只在注入的钟被拨到终点时才走得到，留着是
+  // 兜底而不是主路径。改 L2 的死线时**两处要一起看**：把它们并回一条，L3 就又会被挤空。
   const remaining = deadline - now();
   if (remaining <= 0) {
     return { ok: false, message: '抽取没成：时间预算用完了，没来得及合成剧本文件' };
