@@ -105,10 +105,13 @@ commandDefs(chatKey)  // 接管中：只有接管者的；否则：**已启用**
 promptPlan(chatKey)   // 接管中：它的 body；否则：已装载附加扩展的 append/override
 ```
 
-**两种模式的释放时机不同**（`extras.idleUnloadMs`，`0` = 不限）：
+**两种模式的释放时机不同，而且是两个数**（2026-10-19 拆开）：
 
-- **附加**：到点**卸载实现**。
-- **接管**：到点**那个会话交还主流程**；实现由别的绑定或附加装载继续养着，**最后一个绑定走掉时才 dispose**。
+- **附加**：`extras.idleUnloadMs`（默认 600 秒，`0` = 不限）—— **滑动**窗口，每次执行重起；到点**卸载实现**。
+- **接管**：`extras.overrideTtlMs`（**默认 0 = 不限**）—— **从绑定起算的固定租期**，执行不续期；
+  到点**那个会话交还主流程**；实现由别的绑定或附加装载继续养着，**最后一个绑定走掉时才 dispose**。
+
+⚠️ 别把两者合回一个数：共用时"一局跑团玩到一半、那个群自己变回普通群友"，群里没有任何提示。
 
 ### 3.3 命令的词形列表
 
@@ -194,7 +197,7 @@ configPatch?(chatKey: string): ExtraConfigPatch   // 形状同 data/config.json
 ```text
 /能力 加载 <id>   ── 闸门 → import() → 校验名字集合 → 记入装载表 → 起空闲计时器
 敲扩展自己的命令   ── **不装载**：没装载就抛一句「先 /能力 加载」（消息照常落成已读）
-每次执行          ── inFlight++ / 清空闲计时器 → 执行 → inFlight-- / 按 idleUnloadMs 重新起表
+每次执行          ── inFlight++ / 清空闲计时器 → 执行 → inFlight-- / 按 idleUnloadMs 重新起表（仅附加）
 空闲到点          ── inFlight>0 就推迟；否则 dispose() → 从装载表删掉
 /能力 卸载 <id>   ── 在途时拒绝；否则清计时器 → dispose() → 从装载表删掉
 app.stop()        ── 清全部计时器 + dispose 全部已装载项（每个带等待上限）
@@ -335,7 +338,7 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 
 - **模块代码不会被卸载**：Node ESM 没有模块卸载，`import()` 缓存永驻。没有 `dispose()` 的扩展，空闲卸载等于什么都没做。
 - **工具表不再恒定**：装载/卸载各打散一次提示词缓存（频次由人控制）。
-- **`extras.enabled` / `idleUnloadMs` / `maxLoadsPerHour` 都是保存后立即生效**（判据每次现读）；真正要重启的只有 `extras.override`（`start()` 时播种）。设置页原先写的是"开关要重启"，那是错的（2026-10-19 实测纠正）。
+- **`extras.enabled` / `idleUnloadMs` / `overrideTtlMs` / `maxLoadsPerHour` 都是保存后立即生效**（判据每次现读）；真正要重启的只有 `extras.override`（`start()` 时播种）。设置页原先写的是"开关要重启"，那是错的（2026-10-19 实测纠正）。
 - **白名单群里任何群友都能敲 `/能力`**（@ 只挡手滑，不是权限；见 §2 的开放问题）。
 - **未加载的扩展，命令认得出但用不了**：这是一条有意的取舍 —— 命令若干脆不在表里，那条消息会静默地进 LLM。
 - **接管是唯一按会话隔离的东西**：`toolDefs` / `commandDefs` / `promptPlan` / `isCommandEntry` 都多带一个会话参数，注入链上（`agent-runner` → `WakeScheduler` → `Orchestrator` → `web/app.ts`）一路传下去。

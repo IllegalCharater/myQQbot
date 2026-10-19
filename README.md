@@ -333,7 +333,7 @@ Environment="DASHSCOPE_API_KEY=<your-api-key>"
 每个扩展也可以在 `data/config.json` 里单独覆盖要不要启用：
 
 ```json
-{ "extras": { "enabled": { "clock": false }, "idleUnloadMs": 600000, "maxLoadsPerHour": 20 } }
+{ "extras": { "enabled": { "clock": false }, "idleUnloadMs": 600000, "overrideTtlMs": 0, "maxLoadsPerHour": 20 } }
 ```
 
 `enabled` 里没写的扩展按它自己的出厂默认值走。**白名单群里的任何人都能敲 `/能力`**（它受「每小时装载

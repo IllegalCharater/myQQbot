@@ -73,7 +73,9 @@ async function flush(times = 8) {
   for (let i = 0; i < times; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
-const DEFAULT_EXTRAS = { enabled: {}, idleUnloadMs: 600000, maxLoadsPerHour: 20 };
+// 与 `DEFAULT_CONFIG.extras` 同形。**`overrideTtlMs` 缺省 0 = 接管永不自动交还**（2026-10-19 起，
+// 与附加模式的 `idleUnloadMs` 是两个数），所以这里也写 0 —— 各 TTL 用例要自己显式打开它。
+const DEFAULT_EXTRAS = { enabled: {}, idleUnloadMs: 600000, overrideTtlMs: 0, maxLoadsPerHour: 20 };
 /** 本套件用的会话标识。**接管按会话隔离**，所以三张表都要带上它。 */
 const G = 'group:1';
 
@@ -801,22 +803,60 @@ await withFakeTimers(async (timers) => {
   await runtime.stop();
 }
 
-// 生命时间：**两种模式都受它约束**（配置里同一个数）。到点后附加的卸载实现、接管的交还主流程。
+// 生命时间：**两种模式各用各的数**（2026-10-19 拆开）。
+//   附加 → `idleUnloadMs`（滑动窗口）
+//   接管 → `overrideTtlMs`（从绑定起算的固定租期，缺省 0 = 永不自动交还）
 await withFakeTimers(async (timers) => {
   const over = makeFakeEntry('ttl_ov', ['ov_tool'], {
     mode: 'override', overrideTools: { sendTool: 'ov_tool' }
   });
   const normal = makeFakeEntry('ttl_at', ['at_tool']);
-  const runtime = makeRuntime([over.entry, normal.entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 1000 });
+  const runtime = makeRuntime([over.entry, normal.entry], {
+    ...DEFAULT_EXTRAS, idleUnloadMs: 1000, overrideTtlMs: 1000
+  });
   await runtime.load('ttl_ov', 'test', G);
   await runtime.load('ttl_at');
   ok('接管绑定与附加装载各有一个计时器', timers.count() === 2, `实际 ${timers.count()} 个`);
 
   timers.advance(1000);
   await flush();
-  ok('到点：附加的**卸载实现**、接管的**交还主流程**（两种模式都受生命时间约束）',
+  ok('到点：附加的**卸载实现**、接管的**交还主流程**（两个数都设上时各自生效）',
     normal.counters.dispose === 1 && runtime.isOverridden(G) === false && over.counters.dispose === 1,
     `over=${over.counters.dispose} normal=${normal.counters.dispose}`);
+  await runtime.stop();
+});
+
+// ⚠️ **两个数不能合回去**（这条是 2026-10-19 拆开的理由，也是它唯一的行为断言）：
+// `idleUnloadMs` 到点只会卸掉附加扩展的实现，**接管一点不受影响** —— 曾经两者共用，
+// 后果是"一局跑团玩到一半、那个群自己变回普通群友"，群里没有任何提示。
+await withFakeTimers(async (timers) => {
+  const over = makeFakeEntry('split_ov', ['ov_tool'], {
+    mode: 'override', overrideTools: { sendTool: 'ov_tool' }
+  });
+  const normal = makeFakeEntry('split_at', ['at_tool']);
+  // 附加 1 秒后卸；接管**不限**（缺省 0）。
+  const runtime = makeRuntime([over.entry, normal.entry], {
+    ...DEFAULT_EXTRAS, idleUnloadMs: 1000, overrideTtlMs: 0
+  });
+  await runtime.load('split_ov', 'test', G);
+  await runtime.load('split_at');
+  ok('接管租期为 0 ⇒ 只 arm 附加那一个计时器',
+    timers.count() === 1, `实际 ${timers.count()} 个`);
+
+  timers.advance(1000);
+  await flush();
+  ok('★ 附加到点照常卸载，**接管照旧**（不再是"共用同一个数"）',
+    normal.counters.dispose === 1 && runtime.isOverridden(G) === true
+    && runtime.toolDefs(G).map((d) => d.name).join() === 'ov_tool',
+    `normal=${normal.counters.dispose} overridden=${runtime.isOverridden(G)}`);
+
+  // 再走很久也不会到期（0 = 不限），只能手动卸载。
+  timers.advance(10 * 60 * 1000);
+  await flush();
+  ok('再放 10 分钟也不会自动交还（0 = 只能手动卸载）',
+    runtime.isOverridden(G) === true);
+  const off = await runtime.unload('split_ov', G);
+  ok('对照：手动 `/能力 卸载` 才交还', off.ok === true && runtime.isOverridden(G) === false);
   await runtime.stop();
 });
 
@@ -825,7 +865,7 @@ await withFakeTimers(async (timers) => {
   const over = makeFakeEntry('shared', ['shared_tool'], {
     mode: 'override', overrideTools: { sendTool: 'shared_tool' }
   });
-  const runtime = makeRuntime([over.entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 1000 });
+  const runtime = makeRuntime([over.entry], { ...DEFAULT_EXTRAS, overrideTtlMs: 1000 });
   await runtime.load('shared', 'test', 'group:1');
   await runtime.load('shared', 'test', 'group:2');
   ok('两个会话绑同一个接管扩展：实现只 import 一次', over.counters.load === 1, `load=${over.counters.load}`);

@@ -816,13 +816,26 @@ export class ExtrasRuntime {
     return { ok: true, note: `「${entry.title}」已接管这个会话（下一轮运行生效）` };
   }
 
-  /** 生命时间：与附加模式的空闲卸载**共用同一个数**（`0` = 不自动交还）。 */
-  #lifetimeMs(): number {
+  /**
+   * **附加模式**的空闲卸载窗口：滑动窗口，每次执行都由 `#withExtra` 重起（`0` = 不卸载）。
+   */
+  #attachIdleMs(): number {
     return Math.max(0, Math.trunc(Number(this.#deps.getConfig().extras?.idleUnloadMs)) || 0);
   }
 
+  /**
+   * **接管模式**的租期：**从建立绑定那一刻起算的固定时长**，执行不续期（`0` = 不自动交还）。
+   *
+   * ⚠️ 与 `#attachIdleMs` **是两个数，别合回去**：曾经共用 `idleUnloadMs`，后果是一局跑团
+   * 玩到一半、那个群自己变回普通群友（群里没有任何提示）。两项的语义不同 ——
+   * 一个是"多久没人用就释放资源"，一个是"这个人做的接管动作什么时候失效"。
+   */
+  #overrideTtlMs(): number {
+    return Math.max(0, Math.trunc(Number(this.#deps.getConfig().extras?.overrideTtlMs)) || 0);
+  }
+
   #armBindingTimer(chatKey: string, binding: OverrideBinding): void {
-    const ms = this.#lifetimeMs();
+    const ms = this.#overrideTtlMs();
     if (ms <= 0) return;
     binding.timer = setTimeout(() => this.#onBindingExpired(chatKey, binding), ms);
     binding.timer.unref?.();
@@ -992,7 +1005,7 @@ export class ExtrasRuntime {
    */
   #armIdleTimer(id: string, slot: LoadedSlot): void {
     // 0 = 常驻不卸载（与仓库"0 = 不限"的惯例一致）。
-    const ms = this.#lifetimeMs();
+    const ms = this.#attachIdleMs();
     if (ms <= 0) return;
     slot.timer = setTimeout(() => this.#onIdle(id, slot), ms);
     // 别让一个空闲计时器把进程钉住 —— 与 price-feed / 历史压缩巡检同一条姿态。
