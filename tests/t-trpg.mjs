@@ -36,6 +36,8 @@ const {
   compileRuleSet, describeMechanic, EMPTY_RULE_SET
 } = await load('extra/trpg/rules/rule-set.js');
 const { EXTRA_REGISTRY } = await load('extra/registry.js');
+// P7 的抽取端口**不在桶里**（同 `scenario/extract/*`：内部实现，套件直接取）。
+const { createAskPort } = await load('extra/trpg/scenario/extract/prompt.js');
 
 /**
  * `text` → 该由哪个处理函数接手。
@@ -1217,6 +1219,47 @@ const status = (key) => store.read(key);
       });
       ok('管线合成的正文超长 → 落库**如实失败**（抽取不是绕过正文上限的后门），而且不落盘',
         /太长/.test(overlong) && saves.read('抽过头了').ok === false, overlong);
+
+      // ── 用量记账（2026-10-19 补）──
+      //
+      // 这条路最多发 **6 次**调用（`MAX_CHUNKS` 片 + 一次归并），或者后备那次整理 1 次 ——
+      // 它们是"传一份剧本"的**全部成本**，不记账就没人知道它花了多少。
+      // 这里直接对着**真端口**验（上面那些用例注入了假 `ask`，碰不到记账那一段）。
+      model.requests = [];
+      model.script = [{
+        content: '{"scenes":[],"npcs":[],"clues":[],"items":[],"mechanics":[],"warnings":[]}'
+      }];
+      const portUsage = [];
+      const portOutcome = await createAskPort((usage) => portUsage.push(usage))(
+        {
+          job: 'merge',
+          payload: {
+            name: '记账', source: '文本', chars: 10, maxChars: 4000, maxFlags: 9, maxCharacters: 9, extracted: '{}'
+          }
+        },
+        new AbortController().signal
+      );
+      ok('抽取端口把每次调用的用量**交 recordUsage**（与 `suggest` / `.rh` 同一条链，不是只打日志）',
+        portOutcome.ok && portUsage.length === 1 && portUsage[0].promptTokens === 10
+        && portUsage[0].completionTokens === 5 && portUsage[0].totalTokens === 15,
+        JSON.stringify(portUsage));
+
+      model.script = [{ content: FORM }];
+      const formatUsage = [];
+      const formatted2 = await formatScenarioText(
+        '随便一段设定', { name: '记账', source: '文本' }, (usage) => formatUsage.push(usage)
+      );
+      ok('后备那次格式整理**也交用量**（两条路的成本都要看得见）',
+        formatted2.ok && formatUsage.length === 1 && formatUsage[0].totalTokens === 15,
+        JSON.stringify(formatUsage));
+      // 两次调用 → 脚本要装**两条**（假端点是消耗式的，见 `suggest` 那段踩过的坑）。
+      model.script = [{ content: FORM }, { content: '{"scenes":[],"npcs":[],"clues":[],"items":[],"mechanics":[],"warnings":[]}' }];
+      ok('**不给 `recordUsage` 时调用照常**（记不上是账面的小缺口，不该让一次传剧本失败）',
+        (await formatScenarioText('随便一段设定', { name: '记账', source: '文本' })).ok === true
+        && (await createAskPort()(
+          { job: 'merge', payload: { name: 'x', source: '文本', chars: 1, maxChars: 9, maxFlags: 9, maxCharacters: 9, extracted: '{}' } },
+          new AbortController().signal
+        )).ok === true);
     } finally {
       updateConfig({ security: { allowPrivateImageHosts: before === true } });
       server.close();
@@ -3155,6 +3198,11 @@ const status = (key) => store.read(key);
     /atUserId/.test(body('src/extra/trpg/tools/say.ts'))
     && /atUserId/.test(body('src/extra/trpg/spec.ts'))
     && /atUserId:/.test(body('src/extra/prompts.ts')));
+  // `.trpg scenario` 那条命令要走 `saveScenario` 的 `recordUsage` —— 而那一段（下载 + 抽文本）
+  // 在套件里跑不了（要真网络 + 真 Python），所以只能从源码文本上守"接上了"这一件事。
+  ok('`.trpg scenario` 把宿主的 `recordUsage` 透给 `saveScenario`（否则抽取最多 6 次调用的成本没人记账）',
+    /'\.trpg scenario'[^\n]*recordUsage: deps\.recordUsage/.test(body('src/extra/trpg/commands/index.ts'))
+    && /saveScenario\(input, name, scenarios, \{ recordUsage \}\)/.test(body('src/extra/trpg/commands/scenario.ts')));
   ok('`sendPrivate` 是**宿主的口子**（`extra/types.ts` 上的可选成员），扩展只说"给谁、说什么"',
     /sendPrivate\?\(/.test(body('src/extra/types.ts')));
 }

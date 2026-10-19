@@ -19,8 +19,8 @@ export type HiddenField = (typeof HIDDEN_FIELDS)[number];
  * 它**每轮都进 system prompt**，所以这个数是成本不是洁癖。一份典型剧本的世界观 + 主线在
  * 2–4k 字；再长就该拆成旗标/人物卡（那两样本来就是给"以后还要记得的事实"用的）。
  * 超限**当场拒绝**（而不是截断）：截断是在人还能改的时候不说、等到跑起来才少半段，而那时
- * 没人知道少了什么。落在这里而不是 `scenario.ts`，是因为 `state.ts` 的归一化也要用，
- * 而 `scenario.ts` 反过来 import `state.ts` —— 放本文件（零 import）两边都拿得到。
+ * 没人知道少了什么。落在这里而不是 `scenario/parse.ts`，是因为 `model/campaign.ts` 的归一化也要用（`normalizeScenario`），
+ * 而 `scenario/parse.ts` 反过来 import `model/campaign.ts` —— 放本文件（零 import）两边都拿得到。
  */
 export const MAX_SCENARIO_CHARS = 4000;
 

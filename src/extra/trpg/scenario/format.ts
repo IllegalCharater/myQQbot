@@ -20,8 +20,9 @@
 // 与 `suggest.ts` 同一条（那里有完整推导）：这条路径不挂在某个会话上，而
 // `SessionRegistry` 没有"只累加增量"的入口（`#persist` 对已结束的会话会重复累加），
 // 所以只把用量写进日志。
-import { chatCompletion } from '../../../llm/llm.js';
+import { addUsage, chatCompletion, emptyUsage } from '../../../llm/llm.js';
 import { EXTRA_PROMPT_JOBS } from '../../prompts.js';
+import type { ExtraUsage } from '../../types.js';
 import { isFormattedScenario, parseScenario } from './parse.js';
 import { MAX_CHARACTERS, MAX_FLAGS } from '../model/limits.js';
 import { MAX_SCENARIO_CHARS } from '../types.js';
@@ -63,7 +64,13 @@ export type FormatOutcome = { ok: true; text: string; usage: string } | { ok: fa
  * `source` 是来源格式的中文名（`PDF` / `Word 文档` / `文本`），只用于让模型知道自己拿到的是什么。
  */
 export async function formatScenarioText(
-  text: string, { name, source }: { name: string; source: string }
+  text: string,
+  { name, source }: { name: string; source: string },
+  /**
+   * 用量上报（2026-10-19 补）。缺省 = 不记账、**调用照常** —— 记不上是账面的小缺口，
+   * 不该让一次整理失败（同 `suggest.ts` 那条）。
+   */
+  recordUsage?: ((usage: ExtraUsage) => void) | null
 ): Promise<FormatOutcome> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FORMAT_TIMEOUT_MS);
@@ -93,13 +100,15 @@ export async function formatScenarioText(
     content = String(result.message?.content ?? '');
     if (result.usage) {
       usageLine = `prompt=${result.usage.prompt_tokens ?? 0} completion=${result.usage.completion_tokens ?? 0}`;
+      recordUsage?.(addUsage(emptyUsage(), result.usage));
     }
   } catch (error) {
     return { ok: false, message: `让模型整理剧本时出错：${error instanceof Error ? error.message : String(error)}` };
   } finally {
     clearTimeout(timer);
   }
-  if (usageLine) console.log(`[trpg] 剧本整理用量（不进 token 账，见 format.ts 头部）：${usageLine}`);
+  // 日志留着：账本只给总数，而"这一份整理花了多少"只有它答得上来。
+  if (usageLine) console.log(`[trpg] 剧本整理用量：${usageLine}`);
 
   const generated = stripFence(content);
   if (!generated) return { ok: false, message: '模型没有给出任何内容，稍后再试' };

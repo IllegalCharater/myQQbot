@@ -14,8 +14,10 @@
 | **P5** 战斗 | ✅ | `rules/combat.ts` + `model/combat.ts` + `.combat start/next/end` + `campaign action=combat` | `t-trpg` 351 → **392**；`t-trpg-rules` 166 → **185** |
 | **P6** 战报（导出） | ✅ | `render/journal.ts` + `.log export` + 面板列出/删除 + `SendQueue.sendFile` | `t-trpg` 392 → **419** |
 | **收尾** 审查发现的 A / B / C / E 四类 | ✅ | 见下面「待修复」那几张表 —— 每行末尾补了**实际怎么修的** | `t-trpg` 419 → **437** |
+| **P7** 剧本抽取管线 + 规则扩展 | ✅ | `scenario/extract/` 四级流水线（L1 切片 → L2 逐片抽 → L3 归并 → L4 校验）、`model/rule-set.ts` + `rules/rule-set.ts`、`.trpg check`、规则表加 `initiative` 一栏 | `t-trpg` 437 → **553**；`t-trpg-rules` 185 → **289**；新增 `t-trpg-extract` **82** |
+| **收尾（二）** 抽取与整理的用量记账 | ✅ | `createAskPort` / `formatScenarioText` 收 `recordUsage`；`.trpg scenario` 透给宿主 | `t-trpg` 553 → **557** |
 
-**全量**：`npm run check` 39 个套件全绿、`npm run test:all` 49 个套件全绿（每阶段收尾都做过一次 `rm -rf dist && npm run build` 干净重建再复跑）。
+**全量**：`npm run check` **40 个套件**全绿、`npm run test:all` **50 个套件**全绿（每阶段收尾都做过一次 `rm -rf dist && npm run build` 干净重建再复跑）。
 
 ### 各阶段实际做了什么
 
@@ -26,6 +28,8 @@
 - **P4**：**掷法是数据、公式是代码**（`.pc roll` 只在规则表声明了 `chargen` 时才有）；派生值认死那几个属性名，改名会让那几项**派生不出来**并明说缺谁。
 - **P5**：**顺序是代码、数值是规则**（`rules/combat.ts` 只管排序与指针，命中/伤害仍走 `resolveCheck` 与 `character` 的 `hpDelta`）。战斗状态挂在 `TrpgCampaign.combat` 上，与人物卡同一份归一化（`normalizeCombat`）。**"行动即推进"**：`campaign action=combat` 的 `sub=next` 与玩家自己敲的 `.combat next` 是**同一个函数**（`advanceTurn`），区别只在谁有权敲 —— 而"谁有权"这件事**代码不拦**（决策 9，见偏差表 9）。
 - **P6**：战报**只在写入那一刻筛一次**（`TrpgLogEntry.visible`），`mirrorLog` 据此挡下；导出再按**同一条判据**挡一次（那是这条链上唯一的发布动作）。`.log export` 走宿主递进来的 `sendFile` 口子（扩展只说"给谁、叫什么名字、正文是什么"），宿主那侧是 `SendQueue.sendFile` → `upload_group_file`（**120 秒**，与转写的全文文件、漫画的 PDF 同一档超时）。
+- **P7**：一份"格式不对"的模组不再只做**一次**格式整理，而是走四级流水线 —— **L1 `outline.ts` 纯函数切片 → L2 逐片抽取 → L3 归并 → L4 校验回填**，编排在 `pipeline.ts`。产物是**三份伴生文件**（`.struct.json` 剧情结构 / `.rule.json` 规则扩展 / `.raw/` 原文切片），由 `store/scenario-store.ts` 的 `writeExtras` 落盘 —— **管线自己不做 I/O**，这正是 `scenario/extract/**` 那条新闸门（与 `model/**` 逐字同形）的全部理由。`<id>.md` 仍是**唯一进 system prompt 的正文**，`MAX_SCENARIO_CHARS` **不动**：30 页模组的细节进 struct（有独立预算）、原文进 `raw/`。**"只抽不扩"是这条管线的判据**（正文那个数每轮都进提示词，是成本不是洁癖）。另有两块：**规则扩展**（`RuleExtension`：把"某个场景里侦察要减 20"这类散文变成可编译的机制，`compileRuleSet` 编译、`applyCheckModifiers` 在检定/战斗上套用）与 **`.trpg check`**（零模型调用、零写入，把抽出来的东西摊开给管理员核对 —— 抽取质量本身只能人工冒烟）。
+- **收尾（二）**：抽取管线（最多 **6 次**调用）与后备那次整理（1 次）的用量，2026-10-19 起进 token 账 —— `createAskPort(recordUsage)` 与 `formatScenarioText(..., recordUsage)` 各报各的，由 `.trpg scenario` 透给宿主的 `ExtraRuntimeDeps.recordUsage`（同 `suggest` / `.rh` 那条链）。⚠️ **`recordUsage` 是端口的参数、不是 `AskPort` 的第三个参数**：管线只认 `(request, signal)`，把记账塞进端口就等于让管线认识记账。
 
 ### 与本文原始设计的偏差（合并记录，免得下一个人照旧文改已经改过的地方）
 
@@ -92,6 +96,9 @@
 `t-trpg.mjs` 419 → **424**（A5 的 5q 段）→ **437**（E(a)：5i/6 两段 5 条 + 7b 段 8 条）。
 **收尾那一轮没有再加断言条数**（D1 是文档、A5 的补漏只是把 5q 的扫描范围扩到 `web/onebot/commands.ts`）。
 
+**2026-10-19**：P7（抽取管线 / 规则扩展 / `.trpg check`）把 `t-trpg.mjs` 推到 **553**、`t-trpg-rules.mjs` 到 **289**，
+并新增 `t-trpg-extract.mjs`（**82**）；同日的「收尾（二）」补上抽取与整理的用量记账 → `t-trpg.mjs` **557**。
+
 #### A 类：用户可见的错误输出（照做会失败 / 群里看到的字是错的）
 
 | # | 位置 | 是什么 | 判据 | 修法 |
@@ -120,7 +127,7 @@
 | C1 | `impl.ts:18` | `import { scenarioIds, usableScenarios }` —— `scenarioIds` **从未被使用** | ✅ 去掉那个名字（函数本身仍被 `commands/` 用着，不是死代码） |
 | C2 | `commands/index.ts:90` | `.ra` 传了 `sendPrivate`，而 `createCheckCommand` 根本不读它 | ✅ 不再传（只有 `.rh` 传） |
 | C3 | `commands/index.ts:92` | `.st` 传了 `sendPrivate` **与** `base` 里的 `rules` / `rng`，而 `createStatCommand` 只解构 `{ store, command }` | ✅ 只递 `{ store, journal, command }`，并把 `StatCommandDeps` 收窄成那三样（**故意窄**：按 `CheckCommandDeps` 收的话，下一个读代码的人会以为 `.st` 也掷骰、也发私聊） |
-| C4 | `spec.ts:57` | 注释"命令表只剩跑团**那两条**" —— 现在展开后有 24 条 | ✅ 改成"24 条词形（12 条声明，其中 4 条带 `subs`、2 条是裸命令；外加永远在的 `/能力`）" |
+| C4 | `spec.ts:57` | 注释"命令表只剩跑团**那两条**" —— 现在展开后有 24 条 | ✅ 改成"24 条词形（12 条声明，其中 4 条带 `subs`、2 条是裸命令；外加永远在的 `/能力`）"；**P7 加 `.trpg check` 之后是 25 条词形 / 4 条裸命令**，注释已跟着改 |
 | C5 | `model/session.ts:48` 的 `isQq` 注释 | 声称"只有这一处"，实际另有 5 处内联的 `/^\d+$/` | ✅ 注释改成"**不是唯一的落点**"并逐个列出那 4 处（`say` / `character`×2 / `campaign`），说明它们各自在读一个不可信字段、就地判一次更直白，改判据要五处一起改 |
 | C6 | `render/format.ts:38` 的 `GRADE_LABEL` | 当前**不可达** | ✅ 整张表删掉（与 C7/C8 同一个动作） |
 | C7 | `render/format.ts:40` | `formatCheck` 对**最常见的那一档**印出 `成功（成功，差 20）` | ✅ `formatCheck` 加一条判据：档位名与"成功/失败"是同一个词时**只印一次**（`grade === outcome` → 只印间距）。文案变成 `成功（差 20）` / `成功（极难成功，超出 3）` |
@@ -148,15 +155,23 @@
   7b 段 8 条（**宿主那一半**：叠增量 / 不动 `runs` / 读模型同源 / 零增量不写盘 / 会话结束照旧加 `runs` /
   组装根真的接上了）。**三条探针实测**：把 `runs: 0` 改成 `1` → 红 2 条；去掉零值早退 → 红 1 条；
   把 `app.ts` 的接线换成 `() => {}` → 红 1 条。
-- ⬜ **（只记录，2026-10-17 按决定 7：不进本阶段开发计划）** 抽取管线的模型调用
-  （`scenario/extract/prompt.ts` 的 `askModel`）与单次格式整理（`scenario/format.ts` 的
+- ✅ **（已修，2026-10-19）** 抽取管线的模型调用
+  （`scenario/extract/prompt.ts` 的 `createAskPort`）与单次格式整理（`scenario/format.ts` 的
   `formatScenarioText`）**同样不进 token 账**。修法与上面那条同源（`ExtraRuntimeDeps.recordUsage`
   → `sessions.addExtraUsage`），但**量级不同**：P7 把"传一份剧本"从**一次**调用放大成**最多 6 次**
   （`MAX_CHUNKS`），所以这个缺口比 `.rh` 那一次大得多。
-  今天唯一的用量凭据是那两处各自打的日志行（`[trpg] 剧本抽取用量（…，不进 token 账…）`）——
-  它是**刻意留的**，别在补账时顺手删掉：补完之后它仍是"这一份模组花了多少"的最近一处线索。
-  接线落点：`askModel` 拿到 `result.usage` 之后上报（与 `suggest.ts` 逐字同形），
-  **不要加进 `ExtractDeps` / `AskPort`** —— 那会把"记账"塞进测试要注入的假端点接口里。
+  落地：`createAskPort(recordUsage?)` 是一个**工厂**（`AskPort` 仍然是两参数 —— 见下），
+  `formatScenarioText(text, opts, recordUsage?)` 收第三个参数；`.trpg scenario` 把宿主的
+  `recordUsage` 透给 `saveScenario`，两条路各报各的（一次调用报一次，不是只报总数）。
+  **缺省不记账、调用照常**（记不上是账面的小缺口，不该让一次传剧本失败）。
+  **日志仍然留着**（`[trpg] 剧本抽取用量（chunk）` / `[trpg] 剧本整理用量`）：账本只给总数，
+  而"这一片花了多少"只有它答得上来 —— 补账时**别顺手删掉**。
+  ⚠️ **`recordUsage` 是 `createAskPort` 的参数，不是 `AskPort` 的第三个参数** —— 管线只认
+  `(request, signal)` 两参数，而"谁记账"是宿主的事；塞进端口会让测试注入的假端点也得模拟它。
+  守护在 `t-trpg.mjs`（三条：端口交用量、整理交用量、不给 `recordUsage` 时调用照常）
+  + 一条源级断言（`.trpg scenario` 那一行真的把它透给了 `saveScenario` —— 那一段要真网络 + 真
+  Python，套件里跑不了）。**两条探针实测**：把 `createAskPort` 里那行 `recordUsage?.(…)` 拆掉 → 红 1 条；
+  把 `formatScenarioText` 里那行拆掉 → 红 1 条。
 - `.trpg scenario` 命令路径上"用文件名当名字"那一段**没有端到端断言**（要真下载 + 起 Python），只有
   `scenarioNameFromFile` 的单元断言。**结构性缺口，不修** —— 仓库的测试约定不许启动真解释器。
 - 换熵源（把 `secureRng` 换成 `Math.random`）**没有任何行为断言看得见**，只有源码文本断言。

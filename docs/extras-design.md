@@ -394,4 +394,4 @@ core(0) → llm/chat/qq/media(1) → stickers(2) → agent(3) → extra(4) → w
 
 ## 12. 已知缺口（知情取舍）
 
-- **`onRunEnd` 里产生的模型调用不进 token 账**。它发生在 `SessionRegistry.finish()` **之后**，而 `#persist` 对已结束的会话会**重复累加** `usage-today.json`，所以补记要先加一个"只累加增量"的入口 —— 那是 `SessionRegistry` 自己的一处设计隐患，不该由某个扩展顺手改。跑团的做法是把用量写进日志，账面上少算那几百个 token。
+- ~~**`onRunEnd` 里产生的模型调用不进 token 账**~~（**2026-10-17 起已修**）。它发生在 `SessionRegistry.finish()` **之后**，而 `#persist` 对已结束的会话会**重复累加** `usage-today.json` —— 当初记下的修法就是给 `SessionRegistry` 加一个**只叠增量**的入口，`addExtraUsage(usage, at)` 就是这么来的（不碰 `runs`：这些调用不是一次 agent 运行，算进去会让面板上"每次花多少"失真；四个数全 0 时直接返回）。链子：`ExtraRuntimeDeps.recordUsage` → `web/app.ts` → `sessions.addExtraUsage`；扩展那侧只在拿到口子时才上报（缺省 = 不记账、调用照常）。2026-10-19 起跑团**自己发起的那些调用全在这条链上** —— `.rh` 的暗骰叙事、`onRunEnd` 的兜底建议，以及量级最大的那一处：抽取管线与单次格式整理（一份模组最多 6 次调用）。日志仍留着（账本只给总数，"这一片花了多少"只有日志答得上来）。

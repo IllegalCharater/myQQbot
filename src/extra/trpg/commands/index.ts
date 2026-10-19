@@ -77,7 +77,7 @@ export function createCommands(deps: CommandDeps): Record<string, CommandHandler
     ['.trpg start', (command) => createStartCommand({ ...base, command })],
     ['.trpg end', (command) => createEndCommand({ ...base, command })],
     ['.trpg mode', (command) => createModeCommand({ ...base, command })],
-    ['.trpg scenario', (command) => createScenarioCommand({ ...base, command })],
+    ['.trpg scenario', (command) => createScenarioCommand({ ...base, recordUsage: deps.recordUsage, command })],
     // 核对抽取结果（P7-b）：零模型调用、零写入。**排在自己的子命令之后、裸 `.trpg` 之前**
     // （顺序即行为，见文件头那条）。
     ['.trpg check', (command) => createVerifyCommand({ ...base, command })],

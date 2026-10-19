@@ -14,12 +14,20 @@
 // `image-source` 那条"给兜底留位置"的纪律），本文件只把收进来的 `signal` 转交。
 // `chatCompletion` 自己另有一个 `api.timeoutMs` 兜底，两者取更早的那个。
 //
-// ── 已知缺口：这两次调用的用量没进 token 账 ──
+// ── 用量记账（2026-10-19 补上）──
 //
-// 与 `format.ts` / `suggest.ts` 同一条（`format.ts` 头部有完整推导）：这条路径不挂在某个
-// 会话上，而 `SessionRegistry` 没有"只累加增量"的入口，所以只把用量写进日志。
-import { chatCompletion } from '../../../../llm/llm.js';
+// 这条路径不挂在某个会话上，所以它走的是 `SessionRegistry.addExtraUsage`（**只累加增量**、
+// 不动 `runs`）—— 与 `suggest.ts` / `.rh` 的私密叙事同一条链。
+//
+// ⚠️ **`recordUsage` 是 `createAskPort` 的参数，不是 `AskPort` 的第三个参数**：管线只认
+// `(request, signal)` 两参数（那是它唯一的依赖面），而"谁记账"是宿主的事 —— 塞进端口就等于
+// 让管线认识记账，测试注入的假端点也得跟着模拟它。
+//
+// **日志仍然留着**（下面那一行）：补账之后它仍是"这一份模组抽一片花了多少"的最近一处线索，
+// 而账本只给总数。
+import { chatCompletion, addUsage, emptyUsage } from '../../../../llm/llm.js';
 import { EXTRA_PROMPT_JOBS } from '../../../prompts.js';
+import type { ExtraUsage } from '../../../types.js';
 
 /**
  * L2 那一片的入参。字段名与 `EXTRA_PROMPT_JOBS.trpg.extractChunk.user` 的参数逐个对应。
@@ -66,16 +74,25 @@ export type AskOutcome =
   | { ok: true; content: string; usage: string }
   | { ok: false; message: string };
 
-/** 管线收下的那个端口。生产实现是 `askModel`，测试注入假端点。 */
+/** 管线收下的那个端口。生产实现是 `createAskPort(...)`，测试注入假端点。 */
 export type AskPort = (request: AskRequest, signal: AbortSignal) => Promise<AskOutcome>;
 
 /**
- * 真实现：按 `job` 取目录里的固定指令，调一次模型，把**原始内容**交回去。
+ * 造一个**真**端口：按 `job` 取目录里的固定指令，调一次模型，把**原始内容**交回去。
  *
  * 温度恒为 0.2 —— 这两件事都是**转换**而不是创作（同 `formatScenarioText`）：同一份原文
  * 抽两次该抽出同一个结果。
+ *
+ * `recordUsage` 缺省 = 不记账（测试与未接线的宿主），**调用照常** —— 记不上是账面的小缺口，
+ * 不该让一次剧本上传失败（同 `suggest.ts` 那条）。
  */
-export async function askModel(request: AskRequest, signal: AbortSignal): Promise<AskOutcome> {
+export function createAskPort(recordUsage?: ((usage: ExtraUsage) => void) | null): AskPort {
+  return async (request, signal) => askWith(request, signal, recordUsage);
+}
+
+async function askWith(
+  request: AskRequest, signal: AbortSignal, recordUsage?: ((usage: ExtraUsage) => void) | null
+): Promise<AskOutcome> {
   const jobs = EXTRA_PROMPT_JOBS.trpg;
   const content = request.job === 'chunk'
     ? { system: jobs.extractChunk.system, user: jobs.extractChunk.user(request.payload) }
@@ -90,9 +107,10 @@ export async function askModel(request: AskRequest, signal: AbortSignal): Promis
     const usage = result.usage
       ? `prompt=${result.usage.prompt_tokens ?? 0} completion=${result.usage.completion_tokens ?? 0}`
       : '';
-    // ⚠️ **这是这两次调用唯一的用量凭据**（见文件头那条已知缺口）：不进 token 账，
-    // 所以"这份模组抽一次花了多少"只有日志答得上来。同 `format.ts` 那一行。
-    if (usage) console.log(`[trpg] 剧本抽取用量（${request.job}，不进 token 账，见 prompt.ts 头部）：${usage}`);
+    // 记账（进 `usage-today.json` 的独立增量）与日志**两条都要**：账本给总数，日志给
+    // "这一片花了多少"（见文件头）。
+    if (result.usage) recordUsage?.(addUsage(emptyUsage(), result.usage));
+    if (usage) console.log(`[trpg] 剧本抽取用量（${request.job}）：${usage}`);
     return { ok: true, content: String(result.message?.content ?? ''), usage };
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };

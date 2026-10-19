@@ -37,12 +37,13 @@ import { MAX_SCENARIO_BYTES, isFormattedScenario } from '../scenario/parse.js';
 import { saveScenarioText } from '../scenario/save.js';
 import { formatScenarioText } from '../scenario/format.js';
 import { extractScenario } from '../scenario/extract/pipeline.js';
-import { askModel } from '../scenario/extract/prompt.js';
+import { createAskPort } from '../scenario/extract/prompt.js';
 import { renderScenarioList, SCENARIO_USAGE } from '../render/status.js';
 import { argsOf, scenarioIds } from './shared.js';
 import type { CommandHandler } from './shared.js';
 import type { MediaEntry } from '../../../chat/types.js';
 import type { ScenarioStore } from '../store/scenario-store.js';
+import type { ExtraUsage } from '../../types.js';
 import type { AskPort } from '../scenario/extract/prompt.js';
 import type { ExtractResult } from '../scenario/extract/pipeline.js';
 
@@ -67,8 +68,15 @@ export interface SaveScenarioDeps {
    * "必定失败"的实现（见 `t-trpg.mjs`），于是照旧走 `format`。
    */
   analyze?: typeof extractScenario;
-  /** 管线的模型调用端口。缺省 `askModel`（真走 `chatCompletion`）。 */
+  /** 管线的模型调用端口。缺省 `createAskPort(recordUsage)`（真走 `chatCompletion`）。 */
   ask?: AskPort;
+  /**
+   * 用量上报（2026-10-19 补）。这条路最多发 **6 次**模型调用（`MAX_CHUNKS` 片 + 一次归并），
+   * 或者后备那次整理 1 次 —— 它们是"传一份剧本"的全部成本，不记账就没人知道它花了多少。
+   *
+   * 缺省 = 不记账、**调用照常**（测试与未接线的宿主）。
+   */
+  recordUsage?: ((usage: ExtraUsage) => void) | null;
   /** 现在几点（毫秒）。管线的死线靠它算 —— 测试可以给一个自己控制的钟。 */
   now?: () => number;
 }
@@ -132,7 +140,7 @@ export async function saveScenario(
       // 一份 30 页模组的正文塞不进 `MAX_SCENARIO_CHARS`，所以"压缩 + 细节进结构 + 原文另存"
       // 是这条路唯一走得通的做法（见 `extract/pipeline.ts` 文件头）。
       const outcome = await (deps.analyze ?? extractScenario)(doc.text, { name, source: sourceLabel }, {
-        ask: deps.ask ?? askModel,
+        ask: deps.ask ?? createAskPort(deps.recordUsage),
         ...(deps.now ? { now: deps.now } : {})
       });
       if (outcome.ok) {
@@ -142,7 +150,9 @@ export async function saveScenario(
         // 后备：**只让模型把原文整理成规定格式**（这条命令原来唯一的那条路，一次调用）。
         // 两条都失败时把**两条原因都说出来**：管线那句说的是哪一片、哪一步没成，后备那句
         // 说的是"连整理都没成" —— 只说一句会把一半事实丢掉。
-        const formatted = await (deps.format ?? formatScenarioText)(doc.text, { name, source: sourceLabel });
+        const formatted = await (deps.format ?? formatScenarioText)(
+          doc.text, { name, source: sourceLabel }, deps.recordUsage
+        );
         if (!formatted.ok) {
           return `${shown}：${outcome.message}（退一步只做格式整理也没成：${formatted.message}）`;
         }
@@ -214,6 +224,8 @@ export async function saveScenario(
 
 export interface ScenarioCommandDeps {
   scenarios: ScenarioStore;
+  /** 用量上报（透给 `saveScenario`）。缺省 = 不记账。 */
+  recordUsage?: ((usage: ExtraUsage) => void) | null;
   /** 这条命令的词（`'.trpg scenario'`）—— 由 `commands/index.ts` 递进来，见 `argsOf`。 */
   command: string;
 }
@@ -222,10 +234,10 @@ export interface ScenarioCommandDeps {
  * `.trpg scenario [名字]` —— 不带名字时：引用了文件就用文件名当名字，没引用就是**列出剧本库**
  * （清单里那两句正好也说了怎么再传一份）。
  */
-export function createScenarioCommand({ scenarios, command }: ScenarioCommandDeps): CommandHandler {
+export function createScenarioCommand({ scenarios, recordUsage, command }: ScenarioCommandDeps): CommandHandler {
   return async (input) => {
     const name = argsOf(input, command)[0] ?? scenarioNameFromFile(input.media);
     if (!name) return renderScenarioList(scenarioIds(scenarios));
-    return saveScenario(input, name, scenarios);
+    return saveScenario(input, name, scenarios, { recordUsage });
   };
 }

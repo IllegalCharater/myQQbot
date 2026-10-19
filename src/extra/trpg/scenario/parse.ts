@@ -194,7 +194,7 @@ export function parseScenario(raw: unknown, id: string): ScenarioLookup {
 
     // 标量字段：剥掉可选的外层引号（人在 frontmatter 里写 `title: "灯塔"` 很常见）。
     // ⚠️ 上限一律取 `model/limits.ts` 的具名常量，**不写字面量**：这三个数在别处（`beginCampaign`
-    // 落进状态时、`state.ts` 归一化时）也各用一次，写死的话"剧本里的标题能有多长"与"存档里的
+    // 落进状态时、`model/campaign.ts` 的 `normalizeScenario` 归一化时）也各用一次，写死的话"剧本里的标题能有多长"与"存档里的
     // 标题能有多长"会各按各的算，而表现只是某个字段被悄悄截短。
     const plain = value.replace(/^["'“”]+|["'“”]+$/g, '').trim();
     if (key === 'title') skeleton.title = text(plain, MAX_TITLE_CHARS);

@@ -43,7 +43,7 @@ const HIDDEN_SCHEMA = {
  * 而 `action` 的取值在 schema 里是 `enum`，模型看见的就是全部选项。
  *
  * 代价知情：`required` 不能按 `action` 分支（JSON Schema 里没有这个能力），所以"某个 action
- * 少传了必填字段"只能靠 `tools.ts` 里的中文错误文案补救 —— 那批文案因此必须点明"这个 action
+ * 少传了必填字段"只能靠 `tools/character.ts` 里的中文错误文案补救 —— 那批文案因此必须点明"这个 action
  * 需要什么"。
  */
 export const trpgSpec: ExtraSpec = {
