@@ -195,6 +195,21 @@ export function validateRegistry(
       problems.push(`${id}: mode 只能是 'attach' 或 'override'，实际是 ${String(entry.mode)}`);
     }
 
+    // ── lifetimeMs：存活时间（可选）──
+    //
+    // 只拦"写坏了"这一种：`0` 与正数都是合法值，而**不写**才是"用配置兜底"。
+    // 写坏了（`'600'`、`NaN`、负数）不会有任何报错，表现是"永不释放"或"立刻释放" ——
+    // 两种都只在真机上才看得出来，所以在这里当场拒绝。
+    if (entry.lifetimeMs !== undefined) {
+      const value = entry.lifetimeMs;
+      // **必须是 number**：类型上它已经是 `number`，所以这条拦的是 JS 侧的注册表 / 手改过的 spec
+      // （`'600000'`、`null`、`true` 都能被 `Number()` 悄悄转成数，而 `null` 会变成 0 = 永不释放）。
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        problems.push(`${id}: lifetimeMs 必须是 >= 0 的数字（毫秒），实际是 ${String(value)}；`
+          + `不写 = 用配置 extras.idleUnloadMs 兜底，0 = 永不自动释放`);
+      }
+    }
+
     // ── overrideTools：框架契约段要引用的工具名 ──
     //
     // 这三条拦的都是**不会报错地坏掉**的形态：
@@ -811,31 +826,33 @@ export class ExtrasRuntime {
     }
     const binding: OverrideBinding = { id: entry.id, timer: null };
     this.#overrides.set(chatKey, binding);
-    this.#armBindingTimer(chatKey, binding);
+    this.#armBindingTimer(entry, chatKey, binding);
     this.#deps.log(`[extras] ${chatKey} 由 ${entry.id} 接管（${reason}）`);
     return { ok: true, note: `「${entry.title}」已接管这个会话（下一轮运行生效）` };
   }
 
   /**
-   * **附加模式**的空闲卸载窗口：滑动窗口，每次执行都由 `#withExtra` 重起（`0` = 不卸载）。
+   * 这个扩展的存活时间（毫秒，`0` = 不限）。
+   *
+   * **声明优先、配置兜底**（2026-10-19）：`spec.lifetimeMs` 是扩展自己的知识（骰子机器人该常驻、
+   * 要起子进程的重能力该闲着就收），只在**没写**的时候才落回设置页那个 `extras.idleUnloadMs`。
+   * 写了就以声明为准 —— 配置改不动它。
+   *
+   * ⚠️ **两种模式的计法不同，但读的是同一个数**（那是**模式**的性质，不是这个数的性质）：
+   *   • **附加**：滑动窗口 —— `#withExtra` 每次执行都重起（"多久没人用"）；
+   *   • **接管**：从建立绑定那一刻起算的固定租期，执行不续期（"这个人做的接管动作什么时候失效"）。
+   *
+   * ⚠️ **别再让接管去读另一个配置项**：曾经它与附加共用一个数（默认 10 分钟），后果是一局跑团
+   * 玩到一半、那个群自己变回普通群友，群里没有任何提示。现在跑团声明 `lifetimeMs: 0` 就彻底免疫。
    */
-  #attachIdleMs(): number {
+  #lifetimeMs(entry: ExtraEntry): number {
+    const declared = entry.lifetimeMs;
+    if (declared !== undefined) return Math.max(0, Math.trunc(Number(declared)) || 0);
     return Math.max(0, Math.trunc(Number(this.#deps.getConfig().extras?.idleUnloadMs)) || 0);
   }
 
-  /**
-   * **接管模式**的租期：**从建立绑定那一刻起算的固定时长**，执行不续期（`0` = 不自动交还）。
-   *
-   * ⚠️ 与 `#attachIdleMs` **是两个数，别合回去**：曾经共用 `idleUnloadMs`，后果是一局跑团
-   * 玩到一半、那个群自己变回普通群友（群里没有任何提示）。两项的语义不同 ——
-   * 一个是"多久没人用就释放资源"，一个是"这个人做的接管动作什么时候失效"。
-   */
-  #overrideTtlMs(): number {
-    return Math.max(0, Math.trunc(Number(this.#deps.getConfig().extras?.overrideTtlMs)) || 0);
-  }
-
-  #armBindingTimer(chatKey: string, binding: OverrideBinding): void {
-    const ms = this.#overrideTtlMs();
+  #armBindingTimer(entry: ExtraEntry, chatKey: string, binding: OverrideBinding): void {
+    const ms = this.#lifetimeMs(entry);
     if (ms <= 0) return;
     binding.timer = setTimeout(() => this.#onBindingExpired(chatKey, binding), ms);
     binding.timer.unref?.();
@@ -1005,7 +1022,9 @@ export class ExtrasRuntime {
    */
   #armIdleTimer(id: string, slot: LoadedSlot): void {
     // 0 = 常驻不卸载（与仓库"0 = 不限"的惯例一致）。
-    const ms = this.#attachIdleMs();
+    const entry = this.#entries.get(id);
+    if (!entry) return;
+    const ms = this.#lifetimeMs(entry);
     if (ms <= 0) return;
     slot.timer = setTimeout(() => this.#onIdle(id, slot), ms);
     // 别让一个空闲计时器把进程钉住 —— 与 price-feed / 历史压缩巡检同一条姿态。

@@ -736,9 +736,8 @@ const extrasSave = seg("if (sec === 'extras')", "if (sec === 'transcription')");
 
 ok('设置侧栏有「扩展能力」入口并接到渲染函数',
   /\['extras', '扩展能力'\]/.test(js) && /extras: \(\) => renderExtrasSection\(c\)/.test(js));
-ok('区块渲染出三个数字输入框（空闲卸载 / 接管租期 / 每小时上限）',
-  /id="cfg-extras-idle-sec"/.test(extrasSectionSrc) && /id="cfg-extras-override-sec"/.test(extrasSectionSrc)
-  && /id="cfg-extras-maxloads"/.test(extrasSectionSrc));
+ok('区块渲染出两个数字输入框（默认存活时间 / 每小时上限）',
+  /id="cfg-extras-idle-sec"/.test(extrasSectionSrc) && /id="cfg-extras-maxloads"/.test(extrasSectionSrc));
 // 只列"标题（id）"是不够的：管理员看不出这个扩展是干什么的。描述来自 `/api/extras`
 // 的 `description`（它**不是**模型看到的那段工具描述，见 src/extra/types.ts），
 // 而两端有一端漏了都**不会报错** —— 面板只是少一行字。
@@ -747,9 +746,8 @@ ok('每一行渲染了 title、id 与给人看的 description',
   && /\$\{esc\(item\.id\)\}/.test(extrasSectionSrc)
   && /\$\{esc\(item\.description\)\}/.test(extrasSectionSrc));
 // 只有 input 没有 save 时，`val()` 取到 undefined 会**静默回退成当前值** —— 用户改了没反应，且不报错。
-ok('保存分支真的读了这三个输入框',
-  /#cfg-extras-idle-sec/.test(extrasSave) && /#cfg-extras-override-sec/.test(extrasSave)
-  && /#cfg-extras-maxloads/.test(extrasSave));
+ok('保存分支真的读了这两个输入框',
+  /#cfg-extras-idle-sec/.test(extrasSave) && /#cfg-extras-maxloads/.test(extrasSave));
 // 每个扩展一个开关：渲染写 `data-extra-id`，保存按同一个属性收集。两端不同形的话，
 // 开关会"保存了但其实没写进去"，或者写到了别的 id 上。
 ok('扩展开关的 id 两端同形（渲染写 data-extra-id，保存按 data-extra-id 收集）',
@@ -778,17 +776,10 @@ ok('空闲卸载的上限：设置页（秒）×1000 与后端（毫秒）指的
   Number.isFinite(uiIdleSec) && Number.isFinite(beIdleMs) && uiIdleSec * 1000 === beIdleMs,
   `设置页 ${uiIdleSec}s → ${uiIdleSec * 1000}ms，后端 ${beIdleMs}ms`);
 
-// 接管租期是**另一个数**（2026-10-19 从 idleUnloadMs 拆出来）。两端也要同口径，
-// 而且**兜底值必须是 0**（= 不限）—— 兜成 600 秒就是把"跑团玩到一半散场"这个 bug 又装回去，
-// 而它只在用户改过别的设置项时才发作，没人查得出来。
-const uiTtlSec = Number((/clampInt\(val\('#cfg-extras-override-sec',\s*(\d+)\),\s*0,\s*(\d+),/.exec(extrasSave) || [])[1]);
-const uiTtlMaxSec = Number((/clampInt\(val\('#cfg-extras-override-sec',\s*\d+\),\s*0,\s*(\d+),/.exec(extrasSave) || [])[1]);
-const beTtlExpr = (/e\.overrideTtlMs = Math\.round\(clamp\(e\.overrideTtlMs,\s*0,\s*([^,]+),\s*(\d+)\)/.exec(readSrc('core/config.js')) || []);
-ok('接管租期：设置页缺元素时兜 0（= 不限），后端缺值时也兜 0',
-  uiTtlSec === 0 && beTtlExpr[2] === '0', `设置页兜底 ${uiTtlSec}s，后端兜底 ${beTtlExpr[2]}`);
-ok('接管租期的上限：设置页（秒）×1000 与后端（毫秒）指的是同一个值',
-  Number.isFinite(uiTtlMaxSec) && Number.isFinite(beIdleMs) && uiTtlMaxSec * 1000 === beIdleMs,
-  `设置页 ${uiTtlMaxSec}s → ${uiTtlMaxSec * 1000}ms，后端上限 ${beIdleMs}ms`);
+// 这个数是**没声明 `spec.lifetimeMs` 的扩展**的兜底值 —— 界面必须把这句话说出来，
+// 否则管理员会以为改它能影响跑团（跑团自己声明了不限，改这里一点用都没有）。
+ok('界面上写明它是"没声明存活时间的扩展"的兜底',
+  /只对没有自己声明存活时间的扩展生效/.test(extrasSectionSrc));
 const uiLoads = (/clampInt\(val\('#cfg-extras-maxloads',\s*\d+\),\s*(\d+),\s*(\d+),\s*(\d+)\)/.exec(extrasSave) || []).slice(1).join(',');
 // 后端那一段是源码里的写法（`1, 200, 20`，带空格），逐字比会因空格假红 —— 去掉空白再比。
 const beLoads = ((/e\.maxLoadsPerHour = Math\.round\(clamp\(e\.maxLoadsPerHour,\s*([^)]+)\)\);/.exec(readSrc('core/config.js')) || [])[1] || '').replace(/\s+/g, '');

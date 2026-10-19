@@ -756,19 +756,17 @@ export function renderExtrasSection(c) {
     </div>
     ${rows}
     <div class="field-row" style="margin-top:10px">
-      <div class="field"><label>空闲卸载（秒）</label>
+      <div class="field"><label>默认存活时间（秒）</label>
         <input type="number" id="cfg-extras-idle-sec" value="${esc(Math.round(Number(e.idleUnloadMs ?? 600000) / 1000))}" />
-        <div class="hint">只作用于<strong>附加模式</strong>的扩展（如「当前时间」）：多久没人用它就把实现卸掉。
-          填 0 = 常驻不卸载。这是<strong>滑动</strong>窗口 —— 每次执行都往后推。
-          卸载释放的是扩展自己持有的东西（子进程、连接、大缓存）；模块代码本身不会被卸载
-          （Node 没有模块卸载）。</div>
-      </div>
-      <div class="field"><label>接管租期（秒）</label>
-        <input type="number" id="cfg-extras-override-sec" value="${esc(Math.round(Number(e.overrideTtlMs ?? 0) / 1000))}" />
-        <div class="hint">只作用于<strong>接管模式</strong>的扩展（如「跑团」）：<strong>从建立接管那一刻起算</strong>，
-          中途用得多也<strong>不续期</strong>；到点那个会话就<strong>交还主流程</strong> —— 接管人格与它的命令全部消失，
-          群里没有任何提示。<strong>填 0（默认）= 永不自动交还，只能手动卸载</strong>
-          （在群里 <code>/能力 卸载 &lt;id&gt;</code>，或把上面的开关关掉）。</div>
+        <div class="hint">
+          <strong>只对没有自己声明存活时间的扩展生效</strong>（声明在扩展自己那边，写了就以它为准，
+          改这里也动不了）。填 0 = 不限。
+          <ul style="margin:6px 0 0 18px;padding:0">
+            <li><strong>附加模式</strong>（如「当前时间」）：<strong>滑动</strong>的空闲窗口 —— 每次执行都往后推。</li>
+            <li><strong>接管模式</strong>：<strong>从建立接管那一刻起算</strong>，中途用得多也<strong>不续期</strong>；
+              到点那个会话就交还主流程，群里没有任何提示。（「跑团」自己声明了不限，所以它不受这里影响。）</li>
+          </ul>
+        </div>
       </div>
       <div class="field"><label>每小时装载上限</label>
         <input type="number" id="cfg-extras-maxloads" value="${esc(e.maxLoadsPerHour ?? 20)}" />

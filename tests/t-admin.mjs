@@ -332,11 +332,8 @@ ok('/api/extras 带回 mode（attach / override）',
 // 配置回显：脱敏层是黑名单式的，但"__被顺手抹掉"这个风险值得钉一次 ——
 // 面板读不到这两个数就会渲染成默认值，用户改完一保存就把真实配置覆盖掉。
 const cfgRes = await api('/api/config');
-ok('GET /api/config 回显 extras 的四个字段（面板读的入口）',
+ok('GET /api/config 回显 extras 的三个字段（面板读的入口）',
   typeof cfgRes.body?.extras?.idleUnloadMs === 'number'
-  // 接管租期（2026-10-19 加的）：面板读不到它就会渲染成兜底值，用户一保存就把真实配置覆盖掉 ——
-  // 而它的兜底是 0（不限），一声不响地把管理员设的租期清掉。
-  && typeof cfgRes.body?.extras?.overrideTtlMs === 'number'
   && typeof cfgRes.body?.extras?.maxLoadsPerHour === 'number'
   && typeof cfgRes.body?.extras?.enabled === 'object',
   JSON.stringify(cfgRes.body?.extras));

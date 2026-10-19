@@ -311,10 +311,8 @@ export async function saveConfig({ quiet = false } = {}) {
       enabled,
       // 界面上是**秒**，配置里是毫秒。0 = 常驻不卸载，所以下界是 0 而不是某个最小等待；
       // 上下限与后端 normalizeConfigShape 里那组数**必须一致**（漂移的表现是"我填了 X 却按别的数走"）。
+      // 没声明 `spec.lifetimeMs` 的扩展的兜底值（附加与接管共用）。
       idleUnloadMs: clampInt(val('#cfg-extras-idle-sec', 600), 0, 86400, 600) * 1000,
-      // 接管租期。**元素缺失时兜 0**（= 不限）—— 与 `idleUnloadMs` 兜 600 的方向刻意相反：
-      // 一个读不到的值不该悄悄让某个群在玩到一半时被踢回主流程。
-      overrideTtlMs: clampInt(val('#cfg-extras-override-sec', 0), 0, 86400, 0) * 1000,
       maxLoadsPerHour: clampInt(val('#cfg-extras-maxloads', 20), 1, 200, 20)
     };
   }

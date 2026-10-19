@@ -73,9 +73,9 @@ async function flush(times = 8) {
   for (let i = 0; i < times; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
-// 与 `DEFAULT_CONFIG.extras` 同形。**`overrideTtlMs` 缺省 0 = 接管永不自动交还**（2026-10-19 起，
-// 与附加模式的 `idleUnloadMs` 是两个数），所以这里也写 0 —— 各 TTL 用例要自己显式打开它。
-const DEFAULT_EXTRAS = { enabled: {}, idleUnloadMs: 600000, overrideTtlMs: 0, maxLoadsPerHour: 20 };
+// 与 `DEFAULT_CONFIG.extras` 同形。`idleUnloadMs` 是**没声明 `spec.lifetimeMs` 的扩展**的兜底值
+// （两种模式共用，2026-10-19 收回成一个数）。
+const DEFAULT_EXTRAS = { enabled: {}, idleUnloadMs: 600000, maxLoadsPerHour: 20 };
 /** 本套件用的会话标识。**接管按会话隔离**，所以三张表都要带上它。 */
 const G = 'group:1';
 
@@ -99,7 +99,10 @@ const cmd = (name) => ({ names: [name] });
  */
 function makeFakeEntry(id, names, {
   defaultEnabled = true, mode = 'attach', commands = [], body = null, dispose = null, prompt = null,
-  overrideTools = null, onRunEnd = null, toolsFor = null, configPatch = null, intercept = null
+  overrideTools = null, onRunEnd = null, toolsFor = null, configPatch = null, intercept = null,
+  // `spec.lifetimeMs`：**缺省 = 不声明**（落回配置兜底），`0` = 不限。用 `undefined` 区分这两者 ——
+  // 写成 `0` 当缺省的话，"没声明"这一档就再也验不出来了。
+  lifetimeMs = undefined
 } = {}) {
   const counters = { load: 0, dispose: 0, run: 0, command: 0, runEnd: 0 };
   /** 宿主递给 `load()` 的口子 —— 扩展要拿它做"只有宿主才知道怎么做"的事。 */
@@ -111,6 +114,7 @@ function makeFakeEntry(id, names, {
     mode,
     defaultEnabled,
     tools: names.map(spec),
+    ...(lifetimeMs !== undefined ? { lifetimeMs } : {}),
     ...(commands.length ? { commands: commands.map(cmd) } : {}),
     ...(overrideTools ? { overrideTools } : {}),
     async load(deps) {
@@ -505,6 +509,20 @@ await withFakeTimers(async (timers) => {
     async load() { return { handlers: {} }; }
   }], DEFAULT_EXTRAS));
   ok('命令没写 names（或空数组）→ 构造函数抛错', !!badMatch && badMatch.includes('没写 names'), String(badMatch));
+
+  // `lifetimeMs` 写坏了：不会有任何报错，表现是"永不释放"或"立刻释放" —— 两种都只在真机上看得出来。
+  for (const bad of ['600000', Number.NaN, -1]) {
+    const badLife = throws(() => makeRuntime([makeFakeEntry('life', ['t'], { lifetimeMs: bad }).entry], DEFAULT_EXTRAS));
+    ok(`lifetimeMs 写成 ${String(bad)} → 构造函数抛错（不写 = 配置兜底，0 = 不限）`,
+      !!badLife && badLife.includes('lifetimeMs 必须是'), String(badLife));
+  }
+  // 对照：合法值不抛（`0` 与正数都合法，`undefined` = 不声明也合法）。
+  const lifeOk = throws(() => makeRuntime([
+    makeFakeEntry('life0', [], { lifetimeMs: 0 }).entry,
+    makeFakeEntry('life1', [], { lifetimeMs: 60000 }).entry,
+    makeFakeEntry('life2', []).entry
+  ], DEFAULT_EXTRAS));
+  ok('对照：`0` / 正数 / 不写 三种都不抛', lifeOk === null, String(lifeOk));
 }
 
 // ── 7. 声明 ⇄ 实现对账（这套设计唯一的真实漂移点）────────────────────────────
@@ -803,60 +821,83 @@ await withFakeTimers(async (timers) => {
   await runtime.stop();
 }
 
-// 生命时间：**两种模式各用各的数**（2026-10-19 拆开）。
-//   附加 → `idleUnloadMs`（滑动窗口）
-//   接管 → `overrideTtlMs`（从绑定起算的固定租期，缺省 0 = 永不自动交还）
+// 生命时间：**声明优先、配置兜底**（2026-10-19）。
+//
+//   `spec.lifetimeMs` 写了就以它为准（`0` = 不限）；**没写**才落回 `extras.idleUnloadMs`。
+//   两种模式读同一个数，但计法不同（那是模式的性质）：附加 = 滑动窗口；接管 = 从绑定起算的固定租期。
+//
+// 判据是"这个扩展该活多久"是**扩展自己的知识**：骰子机器人该常驻、起子进程的重能力该闲着就收；
+// 而"多久算久"取决于它干什么，不该由管理员的全局口味决定。
+
+// ① 都没声明 → 配置兜底，两种模式各按自己的计法到点。
 await withFakeTimers(async (timers) => {
   const over = makeFakeEntry('ttl_ov', ['ov_tool'], {
     mode: 'override', overrideTools: { sendTool: 'ov_tool' }
   });
   const normal = makeFakeEntry('ttl_at', ['at_tool']);
-  const runtime = makeRuntime([over.entry, normal.entry], {
-    ...DEFAULT_EXTRAS, idleUnloadMs: 1000, overrideTtlMs: 1000
-  });
+  const runtime = makeRuntime([over.entry, normal.entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 1000 });
   await runtime.load('ttl_ov', 'test', G);
   await runtime.load('ttl_at');
   ok('接管绑定与附加装载各有一个计时器', timers.count() === 2, `实际 ${timers.count()} 个`);
 
   timers.advance(1000);
   await flush();
-  ok('到点：附加的**卸载实现**、接管的**交还主流程**（两个数都设上时各自生效）',
+  ok('没声明时用配置兜底：附加的**卸载实现**、接管的**交还主流程**',
     normal.counters.dispose === 1 && runtime.isOverridden(G) === false && over.counters.dispose === 1,
     `over=${over.counters.dispose} normal=${normal.counters.dispose}`);
   await runtime.stop();
 });
 
-// ⚠️ **两个数不能合回去**（这条是 2026-10-19 拆开的理由，也是它唯一的行为断言）：
-// `idleUnloadMs` 到点只会卸掉附加扩展的实现，**接管一点不受影响** —— 曾经两者共用，
-// 后果是"一局跑团玩到一半、那个群自己变回普通群友"，群里没有任何提示。
+// ② 声明 `lifetimeMs: 0`（跑团就是这个）→ **永不自动释放**，配置写多小都没用。
 await withFakeTimers(async (timers) => {
   const over = makeFakeEntry('split_ov', ['ov_tool'], {
-    mode: 'override', overrideTools: { sendTool: 'ov_tool' }
+    mode: 'override', overrideTools: { sendTool: 'ov_tool' }, lifetimeMs: 0
   });
-  const normal = makeFakeEntry('split_at', ['at_tool']);
-  // 附加 1 秒后卸；接管**不限**（缺省 0）。
-  const runtime = makeRuntime([over.entry, normal.entry], {
-    ...DEFAULT_EXTRAS, idleUnloadMs: 1000, overrideTtlMs: 0
-  });
+  const normal = makeFakeEntry('split_at', ['at_tool']);   // 不声明 → 配置兜底
+  const runtime = makeRuntime([over.entry, normal.entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 1000 });
   await runtime.load('split_ov', 'test', G);
   await runtime.load('split_at');
-  ok('接管租期为 0 ⇒ 只 arm 附加那一个计时器',
-    timers.count() === 1, `实际 ${timers.count()} 个`);
+  ok('声明 `lifetimeMs: 0` ⇒ 只 arm 附加那一个计时器', timers.count() === 1, `实际 ${timers.count()} 个`);
 
   timers.advance(1000);
   await flush();
-  ok('★ 附加到点照常卸载，**接管照旧**（不再是"共用同一个数"）',
+  ok('★ 附加照常到点卸载，**接管一点不受影响**（声明优先于配置）',
     normal.counters.dispose === 1 && runtime.isOverridden(G) === true
     && runtime.toolDefs(G).map((d) => d.name).join() === 'ov_tool',
     `normal=${normal.counters.dispose} overridden=${runtime.isOverridden(G)}`);
 
-  // 再走很久也不会到期（0 = 不限），只能手动卸载。
   timers.advance(10 * 60 * 1000);
   await flush();
-  ok('再放 10 分钟也不会自动交还（0 = 只能手动卸载）',
-    runtime.isOverridden(G) === true);
+  ok('再放 10 分钟也不会自动交还（0 = 只能手动卸载）', runtime.isOverridden(G) === true);
   const off = await runtime.unload('split_ov', G);
   ok('对照：手动 `/能力 卸载` 才交还', off.ok === true && runtime.isOverridden(G) === false);
+  await runtime.stop();
+});
+
+// ③ 声明正数 → 到点释放，**配置写另一个值也不影响**；声明 0 的附加扩展同样免疫。
+await withFakeTimers(async (timers) => {
+  const over = makeFakeEntry('decl_ov', ['ov_tool'], {
+    mode: 'override', overrideTools: { sendTool: 'ov_tool' }, lifetimeMs: 500
+  });
+  const normal = makeFakeEntry('decl_at', ['at_tool'], { lifetimeMs: 0 });
+  // 配置写 10 分钟，声明写 500ms / 0 —— 声明赢。
+  const runtime = makeRuntime([over.entry, normal.entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 600000 });
+  await runtime.load('decl_ov', 'test', G);
+  await runtime.load('decl_at');
+  ok('两个声明都盖过配置：只有一个计时器（附加那个声明了 0，不起表）',
+    timers.count() === 1, `实际 ${timers.count()} 个`);
+
+  timers.advance(499);
+  await flush();
+  ok('未到声明值时不交还', runtime.isOverridden(G) === true);
+  timers.advance(1);
+  await flush();
+  ok('★ 声明的 500ms 到点就交还（配置里写的是 10 分钟，不算数）',
+    runtime.isOverridden(G) === false);
+  timers.advance(10 * 60 * 1000);
+  await flush();
+  ok('声明 `lifetimeMs: 0` 的附加扩展同样永不被卸（配置的 10 分钟对它无效）',
+    normal.counters.dispose === 0 && runtime.isLoaded('decl_at'), `dispose=${normal.counters.dispose}`);
   await runtime.stop();
 });
 
@@ -865,7 +906,7 @@ await withFakeTimers(async (timers) => {
   const over = makeFakeEntry('shared', ['shared_tool'], {
     mode: 'override', overrideTools: { sendTool: 'shared_tool' }
   });
-  const runtime = makeRuntime([over.entry], { ...DEFAULT_EXTRAS, overrideTtlMs: 1000 });
+  const runtime = makeRuntime([over.entry], { ...DEFAULT_EXTRAS, idleUnloadMs: 1000 });
   await runtime.load('shared', 'test', 'group:1');
   await runtime.load('shared', 'test', 'group:2');
   ok('两个会话绑同一个接管扩展：实现只 import 一次', over.counters.load === 1, `load=${over.counters.load}`);

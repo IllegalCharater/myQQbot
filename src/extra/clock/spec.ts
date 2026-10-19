@@ -16,6 +16,10 @@ export const clockSpec: ExtraSpec = {
   // 不是一回事：那个是写给**模型**看的、只许取自 `EXTRA_PROMPT_TEXT`。见 types.ts 的说明。
   displayDesc: EXTRA_PROMPT_TEXT.get_current_time.displayDesc,
   defaultEnabled: true,
+  // **刻意不写 `lifetimeMs`**：它是"配置兜底"那一档的样板 —— 没声明的扩展按设置页的
+  // 「空闲卸载（秒）」走（滑动的空闲窗口，每次执行往后推）。要让它常驻就写 `lifetimeMs: 0`；
+  // 要让它只活一分钟就写 `60000`。两种写法都比"让管理员为每个扩展调一个全局值"更对 ——
+  // 对照 `trpg/spec.ts`：跑团声明了 `0`，因为"这一局什么时候结束由人决定"。
   tools: [
     {
       name: 'get_current_time',
