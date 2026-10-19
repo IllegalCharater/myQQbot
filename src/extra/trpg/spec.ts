@@ -96,7 +96,7 @@ export const trpgSpec: ExtraSpec = {
         properties: {
           action: {
             type: 'string',
-            enum: ['start', 'scene', 'flag', 'reveal', 'combat'],
+            enum: ['start', 'scene', 'flag', 'reveal', 'combat', 'advance', 'end'],
             description: PROMPTS.campaign.action
           },
           // 只有 `action=combat` 用它。`required` 不能按 action 分支，所以"这个 action 需要 sub"

@@ -28,7 +28,8 @@
 // 任何群友本来就能传一份剧本把它覆盖掉，所以"能看抽取结果"不增加泄漏面。要收紧只需在这个
 // handler 里加一句判据。
 import { parseStruct } from '../scenario/extract/schema.js';
-import { compileRuleSet, describeMechanic } from '../rules/rule-set.js';
+import { compileRuleSet, describeMechanic, describeTrigger } from '../rules/rule-set.js';
+import { describeEnding } from '../scenario/endings.js';
 import { CHECK_USAGE, renderScenarioList } from '../render/status.js';
 import { argsOf, scenarioIds } from './shared.js';
 import type { CommandHandler } from './shared.js';
@@ -90,6 +91,31 @@ export function createVerifyCommand({ store, scenarios, command }: VerifyCommand
       lines.push('剧情结构：没有可用的 —— 原因见下面的「伴生文件」');
     } else {
       lines.push(`剧情结构：${struct.message}`);
+    }
+
+    // ── 阶段（P8）──
+    //
+    // ⚠️ **只印幕名 / 序号 / 场景 / 完成条件**。`goal` 与 `keeperNotes` 都不印：这条命令
+    // 在**群里**敲，而那两个字段标着"DM 可见 / 仅 DM"。要看它们请直接读
+    // `data/trpg/scenarios/<id>.struct.json` —— 那才是这个页面的"详细信息"。
+    if (struct.ok && struct.struct.acts.length) {
+      lines.push('', `阶段：${struct.struct.acts.length} 幕`);
+      for (const act of struct.struct.acts) {
+        const tail = [
+          act.scenes.length ? `场景：${act.scenes.join('、')}` : '没有关联场景',
+          act.exitCondition ? `完成条件：${describeTrigger(act.exitCondition)}` : ''
+        ].filter(Boolean).join('；');
+        lines.push(`· 第 ${act.order} 幕「${act.name}」${act.visible ? '' : '（暗线幕）'}${tail ? `｜${tail}` : ''}`);
+      }
+    }
+
+    // ── 结局（P8-c）──
+    //
+    // 与阶段那一段同一条边界：**只印名字 / 触发 / 奖励**。`readAloud` 与 `keeperNotes`
+    // 都不印 —— 这条命令在群里敲，而它们要么是"念给玩家听的原文"，要么是"仅 DM"。
+    if (struct.ok && struct.struct.endings.length) {
+      lines.push('', `结局：${struct.struct.endings.length} 个`);
+      for (const ending of struct.struct.endings) lines.push(`· ${describeEnding(ending)}`);
     }
 
     // ── 规则扩展（P7-f）──

@@ -25,6 +25,9 @@ import { err, ok } from '../../../agent/tools/shared.js';
 import { MAX_PLAYERS, MAX_RULE_CHARS, MAX_SCENARIO_ID_CHARS, text } from './limits.js';
 import { appendLog, emptyCampaign, mirrorLog } from './campaign.js';
 import { ruleSetOf } from './rule-set.js';
+import { actForScene, actsOf, firstAct } from '../scenario/acts.js';
+import { endingsOf, findEnding } from '../scenario/endings.js';
+import { triggerFlagNames } from '../rules/rule-set.js';
 import type { JournalPort } from './campaign.js';
 import type { ToolArguments, ToolResult } from '../../../agent/shared/types.js';
 import type { TrpgCampaign, TrpgCharacter, TrpgStatus } from '../types.js';
@@ -147,6 +150,24 @@ function formatDuration(ms: number): string {
  * 线索。公开旗标不算 —— 那些已经说破了。
  */
 export function campaignSummary(campaign: TrpgCampaign, now: number = Date.now()): string {
+  // ── 结局（P8-c）──
+  //
+  // **只可能来自 `campaign.ended`**（模型收团时由代码写下的标记），人敲的 `.trpg end`
+  // 没有它 —— 两种收团路径的摘要形状因此天然不同。结局的名字 / 奖励从**剧本快照**里现查，
+  // 所以这一段永远是代码算的，不是模型说过的话。
+  const ended = campaign.ended;
+  const ending = ended?.endingId
+    ? findEnding(endingsOf(campaign.scenario.struct), ended.endingId)
+    : null;
+  const endingLine = ended
+    ? (ending
+      ? `结局：${ending.name}${ending.rewards ? `（${ending.rewards}）` : ''}`
+      : `结局：${ended.reason || '自由结局'}（自由结局）`)
+    : '';
+  const headline = ended ? (ending ? `（结局：${ending.name}）` : '（自由结局）') : '';
+  // "没解开的事"**排除结局 trigger 点到的旗标**：那一条显然已经解开了，再列出来自相矛盾。
+  const resolved = new Set(ending?.trigger ? triggerFlagNames(ending.trigger) : []);
+
   const who = campaign.players.map((qq) => {
     const card = playerOf(campaign, qq);
     return card ? `${card.name}（${qq}）` : `${qq}（没建卡）`;
@@ -163,13 +184,14 @@ export function campaignSummary(campaign: TrpgCampaign, now: number = Date.now()
     .map((line) => line.replace(/^场景：/, '').trim())
     .filter(Boolean);
   const secrets = Object.entries(campaign.flags)
-    .filter(([, flag]) => !flag.visible).map(([key]) => key);
+    .filter(([key, flag]) => !flag.visible && !resolved.has(key)).map(([key]) => key);
 
   return [
-    `《${campaign.title}》收团。这一局跑了 ${formatDuration(now - campaign.createdAt)}，`
+    `《${campaign.title}》收团${headline}。这一局跑了 ${formatDuration(now - campaign.createdAt)}，`
       + `留下 ${campaign.log.length} 条记录、${campaign.characters.length} 张人物卡。`,
     `玩家：${who.join('、') || '（一个都没有）'}`,
     scenes.length ? `走过的场景：${scenes.join(' → ')}` : '',
+    endingLine,
     secrets.length ? `没解开的事（原本的暗线）：${secrets.join('、')}` : ''
   ].filter(Boolean).join('\n');
 }
@@ -194,8 +216,13 @@ export function endCampaign(chatKey: string, store: TrpgStore): string {
   // `raw/`）住在 `data/trpg/scenarios/`、**以剧本为键**，`.trpg end` 碰不到它们 ——
   // 下次用同一份剧本开局**不用重抽**（那本来就是 7 次模型调用）。不说的话，"存档已经清掉"
   // 会被读成"连剧本也没了"。
+  // ⚠️ **只在剧本真的有结局时**才多这一句（P8-c）：没有 endings 的团，"强制收团"与
+  // "按剧本收团"根本无从区分，加一句只会让人去找一个不存在的结局。
+  const forced = endingsOf(campaign.scenario.struct).length
+    ? '\n（这是强制收团，没有结局叙事。要按剧本的结局收团，等 DM 判定即可）'
+    : '';
   return `${summary}\n（这一局的存档已经清掉；战报留着，剧本库与它抽出来的结构也留着 —— `
-    + '下次用同一份剧本开局不用重抽。要再开一局就敲 `.trpg new <名字>`）';
+    + '下次用同一份剧本开局不用重抽。要再开一局就敲 `.trpg new <名字>`）' + forced;
 }
 
 // ── 开局（**两个入口共用一个实现**）─────────────────────────────────────────
@@ -225,7 +252,11 @@ export function beginCampaign(
   options: BeginOptions = {}
 ): ToolResult {
   const existing = deps.store.read(chatKey);
-  if (existing && args?.restart !== true) {
+  // ⚠️ **模型收过团的存档当成"没有"**（P8-c）：正常路径上收尾会把它删掉，但如果进程在
+  // "标记了 ended、还没到收尾"之间退出，这个文件会留下来 —— 那时再拒绝开局，这个会话就
+  // 永远开不了新团，而群友只会看到"已经有《X》在跑了"（一个其实已经结束的团）。
+  const spent = Boolean(existing?.ended);
+  if (existing && !spent && args?.restart !== true) {
     // ── 按**状态**分岔（2026-10-19 补）──
     //
     // 原先只有一句"已经有《X》在跑了"，而 `preparing` 的局**并没有在跑** —— 那句话是假话，
@@ -313,6 +344,15 @@ export function beginCampaign(
       }
     }
   }
+
+  // ── 分幕的起点（P8）──
+  //
+  // 落在**当前场景所属那一幕**（开局时给了一个属于第 2 幕的场景，就该从第 2 幕起）；
+  // 场景不属于任何一幕、或者根本没有 acts 时取第一幕 / `''`（单幕模式）。
+  //
+  // ⚠️ 这一步**必须在快照之后**：`campaign.scenario.struct` 才是这一局冻结的那一份。
+  const openingActs = actsOf(campaign.scenario.struct);
+  campaign.currentAct = (actForScene(openingActs, campaign.scene) ?? firstAct(openingActs))?.id ?? '';
 
   // 战报要的"这次新加的那一条"就是**写之前**的 `seq`（它单调递增，见 `mirrorLog`）。
   const beforeSeq = campaign.seq;

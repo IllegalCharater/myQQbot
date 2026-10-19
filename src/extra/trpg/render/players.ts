@@ -10,6 +10,7 @@ import { MAX_NOTES, MAX_PLAYERS, MAX_STATS_PER_CHARACTER } from '../model/limits
 import { currentActor, immobileNames } from '../model/combat.js';
 import { formatInitiative } from './format.js';
 import { playerOf } from '../model/session.js';
+import { actsOf, findAct, firstAct, visibleActs } from '../scenario/acts.js';
 import type { TrpgCampaign, TrpgCharacter } from '../types.js';
 
 /** 玩家那份的标题行。与模型那份分开：两边受众不同，形状也可以各自演进。 */
@@ -131,6 +132,17 @@ export function renderForPlayers(campaign: TrpgCampaign | null): string {
   if (campaign.status === 'preparing') {
     lines.push(`状态：准备中（${campaign.players.length}/${MAX_PLAYERS} 人已加入）`
       + '—— 都建卡并确认之后敲 `.trpg start` 开跑');
+  }
+  // ── 阶段（P8）──
+  //
+  // ⚠️ **只数可见幕**：分母里混进暗线幕，等于把"还有几幕"这件事漏出去。
+  // 当前幕本身是暗线幕时**整段不出现** —— 与"一条全是问号的旗标本身就是一次泄漏"同一条判据。
+  const acts = actsOf(campaign.scenario.struct);
+  if (acts.length) {
+    const current = findAct(acts, campaign.currentAct) ?? firstAct(acts);
+    const shown = visibleActs(acts);
+    const index = current ? shown.findIndex((act) => act.id === current.id) + 1 : 0;
+    if (current?.visible && index > 0) lines.push(`阶段：第 ${index} 幕 / 共 ${shown.length} 幕`);
   }
   if (campaign.scene) lines.push(`场景：${campaign.scene}`);
   lines.push('', ...playerSections(campaign));

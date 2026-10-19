@@ -9,6 +9,7 @@
 // 会原样显示。`renderScenarioList` 被 `.trpg scenario`、`.trpg new` 与向导共用（三处都是群友可见），
 // 所以它也守这条。
 import { renderForPlayers } from './players.js';
+import { describeEnding, endingsOf } from '../scenario/endings.js';
 import { parseStruct } from '../scenario/extract/schema.js';
 import { describeMechanic } from '../rules/rule-set.js';
 import type { RuntimeRuleSet } from '../rules/rule-set.js';
@@ -200,6 +201,18 @@ export function renderBriefing(campaign: TrpgCampaign | null, catalog: BriefingC
   if (catalog.set !== undefined) {
     const notes = renderRuleNotes(catalog.set);
     if (notes) lines.push('', notes);
+  }
+
+  // ── 结局清单（P8-c）──
+  //
+  // ⚠️ **模型必须有这份清单**：提示词要求它"每轮检查是否满足某个结局的触发条件"，没有清单
+  // 它连有哪些结局都不知道，那句话就是空话。只印 `name / trigger / rewards` ——
+  // `readAloud` 与 `keeperNotes` **不进提示词**（前者只在 `action=end` 的回执里出现一次，
+  // 后者连那儿都不去）。
+  const endings = endingsOf(campaign?.scenario.struct);
+  if (endings.length) {
+    lines.push('', '本剧本的结局（满足触发条件时用 campaign 的 action=end 收团）：');
+    for (const ending of endings) lines.push(`· ${describeEnding(ending)}`);
   }
 
   return lines.join('\n');

@@ -45,7 +45,10 @@ import type { CheckJudge } from './check.js';
  */
 export const MECHANIC_TYPES = [
   'check_modifier', 'conditional_immunity', 'san_trigger', 'npc_trait',
-  'location_effect', 'environmental_effect', 'item_effect', 'narrative_hook'
+  'location_effect', 'environmental_effect', 'item_effect', 'narrative_hook',
+  // P8-b：这两条**不参与检定与伤害**，只影响"推进保证"（阈值覆盖 / 切幕策略）。
+  // 它们照旧走 `narrate` handler，于是 `applyCheckModifiers` / `damageBlockers` 自然忽略它们。
+  'advancement_threshold', 'stage_advance'
 ] as const;
 
 export type MechanicType = (typeof MECHANIC_TYPES)[number];
@@ -152,6 +155,32 @@ const EFFECT_EXCLUSIONS: Readonly<Record<EffectHandler, readonly EffectHandler[]
 
 // ── 形状 ─────────────────────────────────────────────────────────────────────
 
+/**
+ * 推进度的三个指标（P8-b）。
+ *
+ * ⚠️ 与 `types.ts` 的 `ADVANCEMENT_METRICS` **是两份**，而且只能两份：`rules/**` 的纯度闸门
+ * 禁止它 import 本模块之外的任何东西（连 `node:` 都不许）。三条断言钉住两边逐字一致
+ * （`t-trpg-rules`），所以漂移会当场红。
+ */
+export const ADVANCE_METRICS = ['scene', 'flag', 'act'] as const;
+export type AdvanceMetric = (typeof ADVANCE_METRICS)[number];
+
+/**
+ * 一条"推进保证"指令（P8-b）。**只对 `advancement_threshold` / `stage_advance` 有效。**
+ *
+ * - `advancement_threshold` 要 `{ metric, turns }`：把某个指标的阈值覆盖成 `turns` 轮。
+ * - `stage_advance` 要 `{ mode }`：当前幕的 `exitCondition` 成立时，是**只提示**（`hint`，缺省）
+ *   还是**自动切幕**（`auto`）。
+ *
+ * ⚠️ **它不走 `effect.params`**：`narrate` 的 params 会被 `coerceEffect` **丢掉**
+ * （"免疫与叙事提示不吃参数"），把阈值塞进去等于写进一个黑洞。所以它是机制自己的**字段**。
+ */
+export interface AdvanceDirective {
+  metric?: AdvanceMetric;
+  turns?: number;
+  mode?: 'hint' | 'auto';
+}
+
 /** 一条**编译得过**的机制。 */
 export interface RuleMechanic {
   type: MechanicType;
@@ -162,6 +191,8 @@ export interface RuleMechanic {
   effect: { handler: EffectHandler; params: Readonly<Record<string, unknown>> };
   /** 原文里逐字照抄的那几句（L4 拿它去原文里核对）。 */
   sourceQuote: string;
+  /** 推进保证指令（只有 `advancement_threshold` / `stage_advance` 有）。见 `AdvanceDirective`。 */
+  advance?: AdvanceDirective;
 }
 
 /**
@@ -181,6 +212,8 @@ export interface RuleDraftMechanic {
   trigger: unknown;
   effect: unknown;
   sourceQuote: string;
+  /** 推进保证指令（P8-b）。收 `unknown`，唯一解释处是 `coerceAdvance`。 */
+  advance?: unknown;
 }
 
 export interface RuleExtensionDraft {
@@ -417,6 +450,76 @@ export function triggerFlagNames(node: TriggerNode | null): string[] {
 }
 
 /**
+ * 单独编译一条触发条件（**分幕的 entry / exit 用它**）。
+ *
+ * `undefined` / `null` = **无条件**（`node: null`）—— 与 `compileRuleSet` 里
+ * "`narrate` 允许不写 trigger"同一条读法。
+ *
+ * ⚠️ **不新增第三套条件语法**：幕的进出条件就是机制 trigger 那一套（flag / all_of / …），
+ * 判据在 `coerceTrigger` 一处。另写一份的话，"同一个旗标组合在机制里成立、在幕里不成立"
+ * 这种分岔不会有任何报错。
+ */
+export type TriggerLookup = { ok: true; node: TriggerNode | null } | { ok: false; reason: string };
+
+export function compileTrigger(raw: unknown): TriggerLookup {
+  if (raw === undefined || raw === null) return { ok: true, node: null };
+  const made = coerceTrigger(raw);
+  return made.ok ? { ok: true, node: made.node } : { ok: false, reason: made.reason };
+}
+
+/**
+ * 这条条件在**这个局面**下成不成立。`null` 节点 = **无条件成立**（同 `matcher`）。
+ *
+ * 求值器只有 `matcher` 一份 —— 幕的推进与机制的命中因此永远给同一个答案。
+ */
+export function triggerMatches(node: TriggerNode | null, ctx: MechanicContext): boolean {
+  return matcher(node)(ctx);
+}
+
+/**
+ * **条件还差什么**（`campaign action=advance` 的回执用它）。
+ *
+ * 返回**没被满足的那几条**的人话（`旗标「钥匙到手」= 是（现在是「否」）`）；全满足或无条件
+ * 时返回空数组。三种组合子各有各的说法：
+ * - `all_of`：逐条列（每一条都得满足）；
+ * - `any_of`：只有**一条都不满足**时才算没满足，那时列出"任一满足即可"的那几句；
+ * - `none_of`：只有**有子条件意外成立**时才算没满足。
+ *
+ * ⚠️ 它是 `triggerMatches` 的**解释版**，不是第二份判据：两者都依赖同一棵 `TriggerNode`，
+ * 而"成不成立"的唯一答案永远来自 `matcher`。这里只负责在**不成立**时说出为什么。
+ */
+export function explainUnmet(node: TriggerNode | null, ctx: MechanicContext): string[] {
+  if (!node) return [];
+  switch (node.op) {
+    case 'flag': {
+      const actual = (ctx.flags[node.key] ?? '').trim();
+      if (actual === node.value) return [];
+      return [`旗标「${node.key}」= ${node.value}（现在是「${actual || '还没写'}」）`];
+    }
+    case 'scene':
+      return ctx.scene.trim() === node.value ? [] : [`场景是「${node.value}」（现在是「${ctx.scene || '还没定'}」）`];
+    case 'actor':
+      return ctx.actor.trim() === node.value ? [] : [`行动者是「${node.value}」（现在是「${ctx.actor || '不知道'}」）`];
+    case 'skill':
+      return ctx.skill.trim() === node.value ? [] : [`技能是「${node.value}」（现在是「${ctx.skill || '不知道'}」）`];
+    case 'all_of':
+      return node.items.flatMap((item) => explainUnmet(item, ctx));
+    case 'any_of': {
+      const each = node.items.map((item) => explainUnmet(item, ctx));
+      // **任一条满足就通过**（`some` 而不是 `every`：写成 `every` 的话，"一条满足、一条不满足"
+      // 的 `any_of` 会被报成没满足 —— 而它明明是满足的）。
+      if (each.some((list) => list.length === 0)) return [];
+      return [`以下任一满足即可：${each.map((list) => list[0] ?? '').filter(Boolean).join(' 或 ')}`];
+    }
+    default: {
+      // `none_of`：子条件里**有成立的**才算没满足
+      const hit = node.items.find((item) => explainUnmet(item, ctx).length === 0);
+      return hit ? [`不应该满足：${describeTrigger(hit)}`] : [];
+    }
+  }
+}
+
+/**
  * 一条机制的**一行说明**。
  *
  * 唯一拼法：提示词那一节（P7-e）与三条工具的回执都调它 —— 各拼一遍的话，"回执里说的"与
@@ -468,6 +571,45 @@ function matcher(node: TriggerNode | null): (ctx: MechanicContext) => boolean {
  * - `{ ok: true }` → 编译好了，可能有 `warnings`（认不出的 type 降级、条数超限截断）。
  * - `{ ok: false, problems }` → **拒绝**。每一条都自报家门（第几条、错在哪），由 P7-f 拼成回执。
  */
+/** 覆盖阈值的合法区间。住在 `rules/` 里是因为 `model/limits.ts` 进不来（纯度闸门）。 */
+const MIN_ADVANCE_TURNS = 1;
+const MAX_ADVANCE_TURNS = 99;
+
+/**
+ * 编译一条推进保证指令（P8-b）。
+ *
+ * 三档：不是那两种类型 → 不看（返回 `undefined`，调用方会记一条 warning）；是 → **坏就拒绝**
+ * （阈值写错会让提示永远不发、或者每轮都发，而两种症状都像"这个功能没做"）。
+ */
+function coerceAdvance(
+  type: MechanicType, raw: unknown
+): { ok: true; value?: AdvanceDirective } | { ok: false; reason: string } {
+  if (type !== 'advancement_threshold' && type !== 'stage_advance') {
+    return { ok: true };
+  }
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown> : {};
+  if (type === 'advancement_threshold') {
+    const metric = String(source.metric ?? '').trim();
+    if (!(ADVANCE_METRICS as readonly string[]).includes(metric)) {
+      return { ok: false, reason: `advancement_threshold 要写 advance.metric（${ADVANCE_METRICS.join(' / ')}）` };
+    }
+    const turns = intIn(source.turns, MIN_ADVANCE_TURNS, MAX_ADVANCE_TURNS);
+    if (turns === null) {
+      return {
+        ok: false,
+        reason: `advancement_threshold 的 advance.turns 要是 ${MIN_ADVANCE_TURNS}–${MAX_ADVANCE_TURNS} 的整数`
+      };
+    }
+    return { ok: true, value: { metric: metric as AdvanceMetric, turns } };
+  }
+  const mode = String(source.mode ?? 'hint').trim();
+  if (mode !== 'hint' && mode !== 'auto') {
+    return { ok: false, reason: 'stage_advance 的 advance.mode 只能是 hint / auto' };
+  }
+  return { ok: true, value: { mode } };
+}
+
 export function compileRuleSet(raw: unknown): RuleSetLookup {
   if (raw === null || raw === undefined) return { ok: true, set: EMPTY_RULE_SET };
   if (typeof raw !== 'object' || Array.isArray(raw)) {
@@ -513,9 +655,13 @@ export function compileRuleSet(raw: unknown): RuleSetLookup {
     }
 
     // ── trigger ──
+    // 这三类**不要求 trigger**：叙事提示本来就可以无条件；阈值与切幕策略不是"什么条件下生效"，
+    // 它们的语义在 `advance` 那一栏里。
+    const triggerOptional = type === 'narrative_hook'
+      || type === 'advancement_threshold' || type === 'stage_advance';
     let trigger: TriggerNode | null = null;
     if (item.trigger === undefined || item.trigger === null) {
-      if (type !== 'narrative_hook') {
+      if (!triggerOptional) {
         problems.push(`第 ${index} 条机制（${type}）没写 trigger —— 无条件生效的判定会让每一次检定都受影响`);
         return;
       }
@@ -530,7 +676,10 @@ export function compileRuleSet(raw: unknown): RuleSetLookup {
 
     // ── effect ──
     let effect: Effect;
-    if (type === 'narrative_hook') {
+    if (type === 'advancement_threshold' || type === 'stage_advance') {
+      // 不参与检定与伤害：照旧挂 `narrate`，于是所有按 handler 过滤的消费点自然忽略它们。
+      effect = { handler: 'narrate', params: {} };
+    } else if (type === 'narrative_hook') {
       // `narrative_hook` 的语义就是"只当提示"，所以它**强制** narrate：写别的 handler 说明
       // 抽取时分类与判定对不上，那该说出来，而不是照着 handler 应用一条分类不明的规则。
       const made = coerceEffect(item.effect);
@@ -567,11 +716,25 @@ export function compileRuleSet(raw: unknown): RuleSetLookup {
     seen.push({ index, handler: effect.handler });
     byTrigger.set(key, seen);
 
+    // ── 推进保证指令（P8-b）──
+    const directive = coerceAdvance(type, item.advance);
+    if (!directive.ok) {
+      problems.push(`第 ${index} 条机制：${directive.reason}`);
+      return;
+    }
+    if (!directive.value && item.advance !== undefined && item.advance !== null) {
+      warnings.push(`第 ${index} 条机制的 advance 用不上（只有 advancement_threshold / stage_advance 认它），已忽略`);
+    }
+
     if (mechanics.length >= MAX_MECHANICS) {
       warnings.push(`机制超过 ${MAX_MECHANICS} 条上限，第 ${index} 条起没进来`);
       return;
     }
-    mechanics.push({ type, note, trigger, effect, sourceQuote, matches: matcher(trigger) });
+    mechanics.push({
+      type, note, trigger, effect, sourceQuote,
+      ...(directive.value ? { advance: directive.value } : {}),
+      matches: matcher(trigger)
+    });
   });
 
   if (problems.length) return { ok: false, problems };

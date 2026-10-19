@@ -79,11 +79,15 @@ export function evaluateWindowTrigger({ entries, identity = {}, policy, roll }: 
   if (entries.some((entry) => entry?.kind === 'image-result')) {
     return { responseTier: 0, reason: '图片生成结果', shouldRespond: true };
   }
-  // 跑团笔记同理：它要么是"群友的认知变了"（扩展刚揭示了什么），要么是"DM 上一轮沉默、
-  // 兜底给了几个方向"。两种都得让模型看到并开口 —— 低档位把它静默消费掉，就等于那条笔记
-  // 白写了（而写它的那一次调用是花了钱的）。
-  if (entries.some((entry) => entry?.kind === 'trpg-note')) {
-    return { responseTier: 0, reason: '跑团笔记', shouldRespond: true };
+  // 跑团的三种子类型同理：群友的认知变了（跑团笔记）、DM 上一轮沉默（行动建议）、
+  // 故事在原地打转（推进提示）。三种都得让模型看到并开口 —— 低档位把它静默消费掉，
+  // 就等于那条条目白写了（而生成它的那一次调用是花了钱的）。
+  // `reason` 按子类型分别写：面板与会话记录里要分得开这三种。
+  const trpgNote = entries.find((entry) => entry?.kind === 'trpg-note');
+  if (trpgNote) {
+    const sub = (trpgNote.trpgNote as Record<string, unknown> | undefined)?.kind;
+    const reason = sub === 'suggest' ? '行动建议' : sub === 'advance' ? '推进提示' : '跑团笔记';
+    return { responseTier: 0, reason, shouldRespond: true };
   }
   if (tier >= 2 && hitKeyword(texts.join('\n'), policy.keywords)) return { responseTier: 2, reason: '关键词命中', shouldRespond: true };
   const rollValue = Number(roll);

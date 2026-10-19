@@ -18,6 +18,9 @@
 | **收尾（二）** 抽取与整理的用量记账 | ✅ | `createAskPort` / `formatScenarioText` 收 `recordUsage`；`.trpg scenario` 透给宿主 | `t-trpg` 553 → **557** |
 | **第三轮** 落地审查发现的 9 条（详见 `AGENTS.md` 的「2026-10-19 第三轮」） | ✅ | `roll` 加 `skill`；暗线旗标遮挡（三条出圈路径）；`preparing` 对模型可见 + `activate` 落日志；拒绝话术按状态分岔；人格里收团改 `.trpg end`；`refund`（报错不占额度）；`.trpg scenario` 拆前后半 + 后台 + `sendText`；两本调用额度；`.pc roll` 覆盖提示 / 战报跨局分界 / `modes.json` mtime 缓存 | `t-trpg` 557 → **607** |
 | **第三轮（续）** 审阅拍板后落地的 8 条（详见 `AGENTS.md` 的「2026-10-19 第三轮（续）」） | ✅ | `roll` 漏填 `skill` 的提醒；`actionSource` 留痕；`.combat` 与收团摘要的两条隐藏泄漏；收团回执说清「什么还在」；start / mode / 降级三处固定文案；限流单位澄清为「份」；`secretRoll` 的档位硬约束 | `t-trpg` 607 → **623** |
+| **P8** 叙事阶段识别（分幕） | ✅ | `StructAct` + L2/L3/L4 全链路；`campaign.currentAct`；`scenario/acts.ts` 的确定性推进；DM 阶段块与玩家「第 N 幕 / 共 M 幕」；`.trpg check` 的幕清单 | `t-trpg` 623 → **644**；`t-trpg-extract` 82 → **95** |
+| **P8-b** 推进保证 | ✅ | `campaign.advancement` 三指标（含 `dirty` / `hinted`）；`model/advance.ts` 的阈值、5 轮冷却与提示正文；`onRunEnd` 接线（只数真人推动、与兜底建议互斥）；`campaign action=advance`（`explainUnmet`）；`advancement_threshold` / `stage_advance` 两条 mechanic；三处标签与人格段 | `t-trpg` 644 → **680**；`t-trpg-rules` 290 → **306** |
+| **P8-c** 模型判定收团（结局） | ✅ | `StructEnding` + L2/L3/L4；`campaign action=end`（endingId 校验 / 自由结局）；`campaign.ended` 标记与「收尾才删存档」；摘要的结局段与「没解开的事」排除；战报 `[结局]`；briefing 结局清单与人格段 | `t-trpg` 680 → **709**；`t-trpg-extract` 95 → **104** |
 
 **全量**：`npm run check` **40 个套件**全绿、`npm run test:all` **50 个套件**全绿（每阶段收尾都做过一次 `rm -rf dist && npm run build` 干净重建再复跑）。
 

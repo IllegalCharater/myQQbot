@@ -110,13 +110,60 @@ export const EXTRACT_CALL_TIMEOUT_MS = 45_000;
 export const EXTRACT_MIN_CALL_MS = 5_000;
 
 /** 剧情结构里每一类（场景 / 人物 / 线索 / 道具 / 机制）最多几条。 */
-export const MAX_STRUCT_ITEMS = 24;/** 结构里每个文本字段的字数上限（梗概、说明、态度、地点……）。 */
+export const MAX_STRUCT_ITEMS = 24;
+/** 结构里每个文本字段的字数上限（梗概、说明、态度、地点……）。 */
 export const MAX_STRUCT_TEXT_CHARS = 200;
 /**
  * 机制那条**引文**的字数上限。它比别的字段宽：引文要能在原文里逐字找得到（L4 的判据），
  * 截短了反而永远对不上。
  */
 export const MAX_STRUCT_QUOTE_CHARS = 300;
+
+// ── 分幕（P8，2026-10-19）────────────────────────────────────────────────────
+//
+// 幕的六个字段都是**每局只在换幕时变**的东西，所以它们不全量进提示词（只有当前幕的
+// goal / 条件 / 下一幕名进，见 `render/model.ts`）。但上限仍然是成本：`keeperNotes`
+// 会进 DM 的上下文，而 `.struct.json` 是抽取产物、可能被模型写得很长。
+
+/** 一份剧本最多分几幕。超过的截掉并记待核项（同 `MAX_STRUCT_ITEMS` 的取舍）。 */
+export const MAX_ACTS = 20;
+/** 幕名 / 幕 id 的字数上限。 */
+export const MAX_ACT_NAME_CHARS = 60;
+/** 本幕目标的字数上限（DM 可见）。 */
+export const MAX_ACT_GOAL_CHARS = 200;
+/** 本幕**幕后信息**的字数上限（只给 DM，绝不进玩家可见文本）。 */
+export const MAX_ACT_KEEPER_CHARS = 400;
+/** 一幕最多关联几个场景。 */
+export const MAX_ACT_SCENES = 24;
+
+// ── 结局（P8-c）──────────────────────────────────────────────────────────────
+//
+// 与幕同一档成本：`readAloud` 只在收团那一刻随回执给模型（**不进提示词**），
+// 而结局清单（名字 + 触发 + 奖励）**每轮都进** briefing，所以条数上限是成本。
+
+/** 一份剧本最多几个结局。超过的截掉并记待核项（同 `MAX_ACTS`）。 */
+export const MAX_ENDINGS = 8;
+/** 结局名 / id 的字数上限。 */
+export const MAX_ENDING_NAME_CHARS = 60;
+/** 结局宣读文本的字数上限（只在 `action=end` 的回执里出现一次）。 */
+export const MAX_ENDING_READ_ALOUD_CHARS = 600;
+/** 奖励那句话的字数上限（进 briefing，每轮都印）。 */
+export const MAX_ENDING_REWARDS_CHARS = 120;
+/** 结局的幕后备注字数上限（只给 DM，且**不进任何提示词**）。 */
+export const MAX_ENDING_KEEPER_CHARS = 400;
+
+// ── 推进度（P8-b）────────────────────────────────────────────────────────────
+//
+// 三个阈值是**默认值**：规则扩展里的 `advancement_threshold` mechanic 可以按模组覆盖
+// （见 `rules/rule-set.ts`）。写成常量而不是配置项的理由同 `EXTRACT_TOTAL_BUDGET_MS` ——
+// 合适的值取决于"这一本模组的节奏"，而那本来就是模组自己的事。
+
+/** 距上次变化超过这么多**轮**才提示。 */
+export const ADVANCE_THRESHOLDS = { scene: 8, flag: 12, act: 20 } as const;
+/** 同一个指标至少隔这么多轮才再提示一次（换指标可以立即落）。 */
+export const ADVANCE_HINT_COOLDOWN = 5;
+// ⚠️ 覆盖阈值的合法区间（1..99）**不在这里**：它由 `rules/rule-set.ts` 在编译期校验，
+// 而 `rules/**` 不许 import 本文件（纯度闸门）。与 `MAX_MECHANICS` 住在那边是同一条理由。
 /**
  * 一份 `struct.json` / `rule.json` 的**序列化字节上限**（读存档快照时用）。
  *

@@ -860,8 +860,9 @@ const anyRng = () => 0.5;
 {
   const {
     MECHANIC_TYPES, EFFECT_HANDLERS, TRIGGER_OPS, TRIGGER_ATOMS, TRIGGER_COMBINATORS,
+    ADVANCE_METRICS,
     EMPTY_RULE_SET, isMechanicType, compileRuleSet, triggerKey, describeTrigger, describeMechanic,
-    activeMechanics, applyCheckModifiers, damageBlockers
+    activeMechanics, applyCheckModifiers, damageBlockers, explainUnmet, triggerMatches
   } = await load('extra/trpg/rules/rule-set.js');
 
   /** 一条**一定编译得过**的机制。`over` 覆盖任意字段。 */
@@ -888,9 +889,11 @@ const anyRng = () => 0.5;
   const ctx = (over = {}) => ({ scene: '', flags: {}, actor: '', skill: '', ...over });
 
   // ── 16a. 两张清单 ──
-  ok('机制类型恰好八种，且与判据同源（多一个少一个都会让抽取层与编译层对不上）',
-    MECHANIC_TYPES.length === 8 && MECHANIC_TYPES.every((t) => isMechanicType(t)),
+  ok('机制类型恰好**十种**（P8-b 加了 advancement_threshold / stage_advance），且与判据同源',
+    MECHANIC_TYPES.length === 10 && MECHANIC_TYPES.every((t) => isMechanicType(t)),
     MECHANIC_TYPES.join('/'));
+  ok('两条推进保证类型都在清单里（不在的话，手写的 rule.json 会被降级成 narrative_hook、静默失效）',
+    isMechanicType('advancement_threshold') && isMechanicType('stage_advance'));
   ok('`narrative_hook` 在清单里（它是认不出的 type 的**降级目标档**，缺了降级无处可去）',
     isMechanicType('narrative_hook'));
   ok('认不出的 type 与空值都不是合法类型（`isMechanicType` 不能退化成真值判断）',
@@ -1337,6 +1340,72 @@ const anyRng = () => 0.5;
     sceneMechanics(camp({ rule: 'broken' }), rules) === null);
   ok('`{op:actor}` / `{op:skill}` 那一类在这一份里**不命中**（行动者要到检定的那一刻才知道，这不是漏了）',
     sceneMechanics(withExt(ext(mech({ trigger: { op: 'actor', value: '守夜人' } }))), rules).length === 0);
+}
+
+// ── 18. 推进保证的规则层（P8-b）：两条新 type、指令编译、`explainUnmet` ──
+{
+  const {
+    ADVANCE_METRICS, compileRuleSet, explainUnmet, triggerMatches
+  } = await load('extra/trpg/rules/rule-set.js');
+  const { ADVANCEMENT_METRICS } = await load('extra/trpg/index.js');
+
+  ok('`rules/` 的 `ADVANCE_METRICS` 与 `types.ts` 的 `ADVANCEMENT_METRICS` 逐字一致（纯度闸门逼出的两份，靠这条钉住）',
+    ADVANCE_METRICS.join(',') === ADVANCEMENT_METRICS.join(','),
+    `${ADVANCE_METRICS.join(',')} vs ${ADVANCEMENT_METRICS.join(',')}`);
+
+  const one = (over = {}) => compileRuleSet({ version: 1, mechanics: [{ type: 'advancement_threshold', ...over }] });
+
+  const threshold = one({ advance: { metric: 'scene', turns: 12 } });
+  ok('`advancement_threshold` **不写 trigger 也能编译**（阈值不是"什么条件下生效"）',
+    threshold.ok && threshold.set.mechanics[0].advance?.metric === 'scene'
+    && threshold.set.mechanics[0].advance?.turns === 12, JSON.stringify(threshold));
+  ok('它的 effect 被固定成 narrate（检定与伤害那些消费点因此自然忽略它）',
+    threshold.ok && threshold.set.mechanics[0].effect.handler === 'narrate');
+
+  const badMetric = one({ advance: { metric: '天气', turns: 3 } });
+  ok('坏 metric → **拒绝**，并说清能写哪三个',
+    !badMetric.ok && badMetric.problems[0].includes('advance.metric') && badMetric.problems[0].includes('scene'),
+    JSON.stringify(badMetric));
+  const badTurns = one({ advance: { metric: 'flag', turns: 0 } });
+  ok('坏 turns（0 / 超上限 / 非数）→ **拒绝**（写错会让提示永远不发或每轮都发）',
+    !badTurns.ok && badTurns.problems[0].includes('advance.turns'), JSON.stringify(badTurns));
+
+  const stageDefault = compileRuleSet({ version: 1, mechanics: [{ type: 'stage_advance' }] });
+  ok('`stage_advance` 缺省是 **hint**（自动切幕必须显式声明）',
+    stageDefault.ok && stageDefault.set.mechanics[0].advance?.mode === 'hint', JSON.stringify(stageDefault));
+  const stageAuto = compileRuleSet({ version: 1, mechanics: [{ type: 'stage_advance', advance: { mode: 'auto' } }] });
+  ok('`auto` 认', stageAuto.ok && stageAuto.set.mechanics[0].advance?.mode === 'auto');
+  const stageBad = compileRuleSet({ version: 1, mechanics: [{ type: 'stage_advance', advance: { mode: '乱写' } }] });
+  ok('乱写的 mode → 拒绝', !stageBad.ok && stageBad.problems[0].includes('hint / auto'), JSON.stringify(stageBad));
+
+  const stray = compileRuleSet({ version: 1, mechanics: [{ type: 'narrative_hook', advance: { metric: 'scene', turns: 3 } }] });
+  ok('别的类型写了 advance → 忽略并记一条 warning（读路径宽容）',
+    stray.ok && !stray.set.mechanics[0].advance
+    && stray.set.warnings.some((line) => line.includes('advance 用不上')), JSON.stringify(stray));
+
+  // ── `explainUnmet`：不满足时逐条说清"还差什么" ──
+  const ctxOf = (flags, scene = '') => ({ scene, flags, actor: '', skill: '' });
+  const flagNode = { op: 'flag', key: '钥匙到手', value: '是' };
+  ok('`explainUnmet`：满足时返回空数组（与 `triggerMatches` 同一个答案）',
+    triggerMatches(flagNode, ctxOf({ 钥匙到手: '是' }))
+    && explainUnmet(flagNode, ctxOf({ 钥匙到手: '是' })).length === 0);
+  ok('不满足时说清差哪个旗标、现在是什么',
+    explainUnmet(flagNode, ctxOf({ 钥匙到手: '否' }))[0] === '旗标「钥匙到手」= 是（现在是「否」）',
+    JSON.stringify(explainUnmet(flagNode, ctxOf({ 钥匙到手: '否' }))));
+  ok('`all_of` 把**每一条**不满足的都列出来（不是只报第一条）',
+    explainUnmet({ op: 'all_of', items: [flagNode, { op: 'flag', key: '灯灭了', value: '是' }] },
+      ctxOf({ 钥匙到手: '否', 灯灭了: '否' })).length === 2);
+  ok('`any_of` 只要有一条满足就通过（那时空数组）',
+    explainUnmet({ op: 'any_of', items: [flagNode, { op: 'flag', key: '灯灭了', value: '是' }] },
+      ctxOf({ 钥匙到手: '否', 灯灭了: '是' })).length === 0);
+  ok('`any_of` 一条都不满足时才报，并说"任一满足即可"',
+    explainUnmet({ op: 'any_of', items: [flagNode, { op: 'flag', key: '灯灭了', value: '是' }] },
+      ctxOf({ 钥匙到手: '否', 灯灭了: '否' }))[0].startsWith('以下任一满足即可'));
+  ok('`none_of`：子条件**有成立**时才算没满足',
+    explainUnmet({ op: 'none_of', items: [flagNode] }, ctxOf({ 钥匙到手: '是' }))[0].startsWith('不应该满足')
+    && explainUnmet({ op: 'none_of', items: [flagNode] }, ctxOf({ 钥匙到手: '否' })).length === 0);
+  ok('无条件（`null`）时永远满足、也永远没有"还差什么"',
+    triggerMatches(null, ctxOf({})) && explainUnmet(null, ctxOf({})).length === 0);
 }
 
 process.exit(done() ? 0 : 1);

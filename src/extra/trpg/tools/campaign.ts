@@ -3,11 +3,16 @@
 // 五件事合成一个工具是有意的（见 `spec.ts` 的说明）：它们的参数互不重叠，而工具 schema 是
 // 请求前缀的一部分 —— 每多一个工具就打散一次提示词缓存。分支用 `action`，取值域在 schema 里是 `enum`。
 import { err, errorMessage, ok } from '../../../agent/tools/shared.js';
-import { MAX_FLAGS, text } from '../model/limits.js';
+import { MAX_ENDING_KEEPER_CHARS, MAX_ENDING_NAME_CHARS, MAX_FLAGS, text } from '../model/limits.js';
 import { appendLog, findCharacter, mirrorLog } from '../model/campaign.js';
 import { advanceCombat, currentActor, endCombat, immobileNames, startCombat } from '../model/combat.js';
-import { ruleSetFor, sceneMechanics } from '../model/rule-set.js';
-import { beginCampaign } from '../model/session.js';
+import { mechanicContextOf, ruleSetFor, sceneMechanics } from '../model/rule-set.js';
+import { beginCampaign, campaignSummary } from '../model/session.js';
+import { actNumber, actsOf, findAct, firstAct, nextAct, resolveAct } from '../scenario/acts.js';
+import { endingsOf, findEnding } from '../scenario/endings.js';
+import type { StructEnding } from '../scenario/extract/schema.js';
+import { advanceTo, resetAdvance } from '../model/advance.js';
+import { explainUnmet, triggerMatches } from '../rules/rule-set.js';
 import { describeSceneMechanics, formatInitiative, formatOrder } from '../render/format.js';
 import { describeMechanic } from '../rules/rule-set.js';
 import { changeNote } from './shared.js';
@@ -86,10 +91,30 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
       const blocked = gate(ctx, { tool: 'campaign:scene', actor: '场景', args, source: args?.actionSource, quota: true });
       if (blocked) return ok(blocked);
       campaign.scene = scene;
+      resetAdvance(campaign, 'scene');
+      // ── 分幕推进（P8）──
+      //
+      // 判据全在 `scenario/acts.ts` 的 `resolveAct`（场景命中 → 当前幕的 exitCondition →
+      // 不动）。**模型不需要显式声明换幕**：这是确定性状态，与 HP / 旗标同一条分界。
+      //
+      // ⚠️ 未知场景**保持当前幕**（不回落第一幕）—— DM 随手写个过场场景不该把进度打回去。
+      const acts = actsOf(campaign.scenario.struct);
+      const step = resolveAct(acts, campaign.currentAct, scene, mechanicContextOf(campaign, '', ''));
+      campaign.currentAct = step.act?.id ?? '';
+      if (step.moved && step.act) resetAdvance(campaign, 'act');
       appendLog(campaign, 'scene', `场景：${scene}`);
+      if (step.moved && step.act) {
+        // 幕名可能属于暗线幕（`visible: false`）—— 那条日志按同一条判据挡在战报外，
+        // 否则 `.log export` 会把"第 3 幕：真凶现身"发进群。
+        appendLog(campaign, 'state', `进入第 ${actNumber(acts, step.act.id)} 幕：${step.act.name}`, step.act.visible);
+      }
+      const actNote = step.moved && step.act
+        ? `\n进入第 ${actNumber(acts, step.act.id)} 幕：${step.act.name}`
+          + '（本幕的目标与完成条件在状态段的【阶段】里）'
+        : '';
       // 换场景是**机制最可能变的那一刻**，所以顺手把"现在压着哪些"报一遍 —— 不给的话 DM
       // 得自己从一大段设定里推出"进了灯塔所以要 -20"，而那正是它最容易推错的地方。
-      return ok(`场景已更新：${scene}${sceneNotes(campaign)}`);
+      return ok(`场景已更新：${scene}${actNote}${sceneNotes(campaign)}`);
     });
   };
 
@@ -134,6 +159,7 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
         changes.push(`旗标：${label} = ${body}${visible ? '' : '（暗线）'}`);
       }
       if (!changes.length) return err('这次调用没有改变任何东西 —— flags 里的值都是空的');
+      resetAdvance(campaign, 'flag');
       appendLog(campaign, 'scene', changeNote(changes), !leaked);
       return ok(`已更新：${changeNote(changes)}`);
     });
@@ -181,6 +207,8 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
       if (flag) {
         if (flag.visible) return ok(`旗标「${name}」本来就是玩家可见的。`);
         flag.visible = true;
+        // 揭示暗线 = 玩家的认知变了：旗标指标归零（人物卡的揭示不算 —— 那不改变旗标）。
+        resetAdvance(campaign, 'flag');
         appendLog(campaign, 'state', `揭示暗线：${name} = ${flag.value}`);
         learned = `暗线「${name} = ${flag.value}」`;
         return ok(`暗线「${name}」现在对玩家可见了。接下来在叙事里自然地承接它 —— 别直接念出来。`);
@@ -295,7 +323,98 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
   };
 
   /**
-   * 战役本身：开局 / 改场景 / 写旗标 / 揭示玩家本该知道的东西 / 战斗。
+   * `action=advance` —— **模型主动宣布推进到下一幕**（P8-b）。
+   *
+   * 三条判据（全部确定性）：
+   *   ① 这一局有分幕、且当前不是最后一幕；
+   *   ② 当前幕的 `exitCondition` 成立（**`null` 视为无条件**：第一幕或线性模组本来就该能推）；
+   *   ③ 不满足时**逐条说出还差什么**（`explainUnmet`）—— 只说"还不能推进"会让模型反复试。
+   *
+   * ⚠️ **不占主行动配额**（`quota: false`，同 `combat`）：切幕是 DM 的记账，不是角色行动。
+   * 去重仍然保留（同一轮连按两次不该走两幕）。
+   */
+  const advanceAct = (ctx: ToolContext, args: ToolArguments): Promise<ToolResult> =>
+    withCampaign(ctx, (campaign) => {
+      const blocked = gate(ctx, {
+        tool: 'campaign:advance', actor: '幕', args, source: args?.actionSource, quota: false
+      });
+      if (blocked) return ok(blocked);
+      const acts = actsOf(campaign.scenario.struct);
+      const current = findAct(acts, campaign.currentAct) ?? firstAct(acts);
+      if (!current) return err('这一局没有分幕（剧本里没有 acts）—— 直接叙事就行，不需要切幕');
+      const next = nextAct(acts, current.id);
+      if (!next) {
+        return err(`已经是最后一幕了（第 ${actNumber(acts, current.id)} 幕「${current.name}」）—— 继续把这一幕演完就好`);
+      }
+      const here = mechanicContextOf(campaign, '', '');
+      if (current.exitCondition && !triggerMatches(current.exitCondition, here)) {
+        const missing = explainUnmet(current.exitCondition, here);
+        return err(`还不能进第 ${actNumber(acts, next.id)} 幕「${next.name}」—— 还差：`
+          + `${missing.join('；') || '这一幕的条件还没满足'}`);
+      }
+      const noCondition = current.exitCondition ? '' : '（这一幕没有完成条件，直接放行）';
+      advanceTo(campaign, next);
+      return ok(`已推进到第 ${actNumber(acts, next.id)} 幕「${next.name}」${noCondition}。`
+        + '本幕的目标与完成条件在状态段的【阶段】里。');
+    });
+
+  /**
+   * `action=end` —— **模型宣布这一局结束**（P8-c）。
+   *
+   * 三条判据：
+   *   ① 给了 `endingId` → 必须**是剧本里真的有的那一个**（硬约束：不许幻觉），
+   *      且它的 `trigger` 成立（不成立就逐条说"还差什么"）；
+   *   ② 没给 `endingId` → `reason` 必填（自由结局）；
+   *   ③ 通过 → 写 `campaign.ended` 标记 + 落一条 `[ending]` 日志，**把摘要回给模型**。
+   *
+   * ⚠️ **存档不在这里删**：`withCampaign` 在处理器之后一定还会 `store.write` 一次，
+   * 直接 `remove` 会被原地复活（表现为"收团了但下一轮还在"）。真正的删除在
+   * `impl.ts` 的 `onRunEnd` —— 那一轮跑完、模型也把结局讲完了才删。
+   *
+   * ⚠️ **摘要只回给模型，不发群**：发群就是"工具代模型发言"，而且模型还要念 `readAloud`。
+   */
+  const endAct = (ctx: ToolContext, args: ToolArguments): Promise<ToolResult> => {
+    const wanted = text(args?.endingId, MAX_ENDING_NAME_CHARS);
+    const reason = text(args?.reason, MAX_ENDING_KEEPER_CHARS);
+    return withCampaign(ctx, (campaign) => {
+      const blocked = gate(ctx, {
+        tool: 'campaign:end', actor: '结局', args, source: args?.actionSource, quota: false
+      });
+      if (blocked) return ok(blocked);
+      const endings = endingsOf(campaign.scenario.struct);
+      let ending: StructEnding | null = null;
+      if (wanted) {
+        ending = findEnding(endings, wanted);
+        if (!ending) {
+          const list = endings.map((item) => item.name).join('、');
+          return err(`没有叫「${wanted}」的结局。这份剧本的结局有：${list || '（一个都没有）'}`);
+        }
+        const here = mechanicContextOf(campaign, '', '');
+        if (ending.trigger && !triggerMatches(ending.trigger, here)) {
+          const missing = explainUnmet(ending.trigger, here);
+          return err(`还不能宣布「${ending.name}」—— 还差：${missing.join('；') || '条件还没满足'}`);
+        }
+      } else if (!reason) {
+        return err('要收团就给一个 endingId（剧本里的结局），'
+          + '或者给一个 reason（一句话说明为什么结束）');
+      }
+      campaign.ended = { endingId: ending?.id ?? '', reason, at: Date.now() };
+      // 战报里那一条：**只有模型收团才有**（人敲 `.trpg end` 不落）。自由结局把 reason 写进去，
+      // 好让读战报的人知道"这一局为什么结束"。
+      appendLog(campaign, 'ending',
+        `结局：${ending ? ending.name : reason || '自由结局'}${ending ? '' : '（自由结局）'}`);
+      const summary = campaignSummary(campaign);
+      const tail = ending
+        ? `把这一段结局讲给群里听 —— 下面是剧本里写的那份，可以按需改写，别照抄：\n${ending.readAloud}`
+        : (endings.length
+          ? '把收场讲给群里听（这是自由结局，剧本里的结局一个都没用上）。'
+          : '把收场讲给群里听。本剧本没有预定义结局，按 reason 收团。');
+      return ok(`${summary}\n\n${tail}`);
+    });
+  };
+
+  /**
+   * 战役本身：开局 / 改场景 / 写旗标 / 揭示玩家本该知道的东西 / 战斗 / 推进到下一幕 / 收团。
    */
   return async (ctx, args) => {
     try {
@@ -305,10 +424,14 @@ export function createCampaignHandler(deps: CampaignHandlerDeps): Handler {
         case 'flag': return await setFlags(ctx, args);
         case 'reveal': return await reveal(ctx, args);
         case 'combat': return await combatAction(ctx, args);
+        case 'advance': return await advanceAct(ctx, args);
+        case 'end': return await endAct(ctx, args);
         default:
-          return err(`campaign 的 action 只能是 start / scene / flag / reveal / combat，收到「${String(args?.action ?? '')}」`
+          return err(`campaign 的 action 只能是 start / scene / flag / reveal / combat / advance / end，收到「${String(args?.action ?? '')}」`
             + '—— start 开局、scene 换场景、flag 写剧情旗标（含暗线）、reveal 把藏起来的东西揭示给玩家、'
-            + 'combat 排先攻与推进战斗回合（用 sub 选 start / next / end）');
+            + 'combat 排先攻与推进战斗回合（用 sub 选 start / next / end）、'
+            + 'advance 推进到下一幕（只在剧本分了幕、且本幕的完成条件已满足时才行）、'
+            + 'end 收团（给 endingId 就走剧本里的结局，不给就带 reason 自由收场）');
       }
     } catch (error) {
       return err(errorMessage(error));

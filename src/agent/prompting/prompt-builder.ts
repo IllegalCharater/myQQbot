@@ -202,10 +202,13 @@ function formatEntry(m: ChatMessage, { withId = true, config = null }: { withId?
   }
   // 跑团扩展的两种机器条目（同一种 kind，标签按 `trpgNote.kind` 分）——
   // 与出图那三个标签分开是同一个理由：**模型看到不同标签要做的事不同**。
-  // 【跑团笔记】= 群友的认知变了（在叙事里自然承接）；【行动建议】= 你上一轮没说话，
-  // 这些方向得用你自己的话讲出来。
+  // 三种标签，受众都是模型，但**要做的事不同**：【跑团笔记】= 群友的认知变了（自然承接）；
+  // 【行动建议】= 你上一轮没说话（用你自己的话给方向）；【推进提示】= 故事在原地打转
+  // （只是事实，不是命令）。**不许压成一个** —— 压了模型就分不出该做什么。
   if (m.kind === 'trpg-note') {
-    const label = asRecord(m.trpgNote).kind === 'suggest' ? '【行动建议】' : '【跑团笔记】';
+    const noteKind = asRecord(m.trpgNote).kind;
+    const label = noteKind === 'suggest' ? '【行动建议】'
+      : noteKind === 'advance' ? '【推进提示】' : '【跑团笔记】';
     return `[${formatShortTime(m.ts)}] ${label}${String(m.text || '')}`;
   }
   const notes = (config ?? getConfig()).memberNotes || {};

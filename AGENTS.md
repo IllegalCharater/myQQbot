@@ -427,7 +427,7 @@ extra/trpg/
 ├─ rules/        【纯函数】不得 import 到本目录之外（连 node: 都不许）
 ├─ model/        【领域模型】纯数据变换；**不许出现 node:fs / node:path**，读写收 store 端口
 ├─ store/        【存储】真正做 I/O 的那一层
-├─ scenario/     【剧本格式】字节/文本 ↔ 领域对象，纯函数
+├─ scenario/     【剧本格式】字节/文本 ↔ 领域对象，纯函数（`acts.ts` = 分幕的运行期助手）
 │  └─ extract/    【抽取管线】P7 的四级流水线（切片 / 逐片抽取 / 归并 / 校验），同 model/ 那条纪律
 ├─ commands/     【玩家命令】入口是人：零 LLM 成本、只返回回执文本、不碰 sender
 ├─ tools/        【模型工具】入口是模型：改状态、写日志、要求模型自己开口
@@ -697,8 +697,8 @@ extra/trpg/
   四条边界：**抽取器截断过的正文当场拒**（截断 = 人还能改的时候不说、跑起来才少半段，同 `MAX_SCENARIO_CHARS` 的约定）；**模型整理出来的东西要再过一遍 `parseScenario` 才落库**（后置条件是"返回的文本一定是规定格式"，不满足就如实报错 —— 信任它就会变成"开局了但什么都没注入"）；**下载失败与读不出来分开报**（"下载「X」失败" vs "读「X」失败"，两件事，压成一句会让人往错的方向查）；**回执里带来源格式与解码痕迹**（PDF 没有 frontmatter，标题会退化成文件名 —— 不说的话群友会以为"我明明写了 title"；非 UTF-8 是我们替它猜的一档，更不能默默做）。
   已知代价：白名单群里**任何群友**都能存剧本、也能覆盖同名剧本（要收紧只需在 handler 里加一句判据，同 `/能力` 的权限）。
 
-- 守护：`tests/t-trpg-rules.mjs`（289 条：逐面核对解析与求值、`kh`/`kl` 与 `k`/`q` 等价、多组/括号/四则/乘方、奖惩骰的 `combine` 两条边界、21 种非法输入的 `code` 与文案、200 组不变式、坏随机源被夹回、**穷举校验真的抓得住两类坏表**（漏兜底 / 顺序写反）、**条件表达式的白名单与拒绝路径**（函数调用、属性访问、下标、赋值、分号、注释、字符串一律拒，除零抛错）、**规则表存储**（懒补齐种子、坏表拒绝且照样列表、改了文件不重启也生效）、**先攻排序（按 `initiative` 降序、同值稳定、卡上没那个属性按 0 排后面）与指针推进（`clampTurn` / `advance` 的绕回）**、「同一个骰面在两种判定下结论相反」证明接缝真的存在）、`tests/t-trpg.mjs`（623 条：状态层上限与归一化**含旧形状迁移**、4 个工具的正反路径、**剧本解析与开局注入**（骨架落进状态、正文快照、改了文件不影响正在跑的团）、**规则表回落与拒绝**、`.trpg start` 命令与工具共用实现、工作台列表与删除、**两种模式（`toolsFor` 的工具子集、`prompt` 的**空 body**、`.trpg mode` 的四种回答、`onRunEnd` 的"助手不兜底"+对照组，以及**真起 app** 断言助手会话只拿到 say/roll、system prompt **一份人格都没有**（只剩框架契约两段））**、**`.trpg scenario` 的早退分支、`saveScenarioText` 的四条分支（正常/截断/对照/超长）、格式匹配的四条判据、模型整理的三条（含"格式本来就对 → 一次调用都不发"这条**成本性质**，以及"模型给的东西不合规时如实失败"）、**抽取与整理那两次调用真的进账**（端口报账 / 整理报账 / 不传 `recordUsage` 时调用照常，三条）**（三条编码判据随实现搬进 Python，改由 `t-document.mjs` 守）、`prompt` 的三段段序、**可见性两套投影（含一条专门的泄漏断言）**、行动经济（去重/配额/新 ctx 即新回合）、`reveal` 与它的回流条目、**`onRunEnd` 的六条判据（起真假模型端点，因为"没发条目"在生成失败时也是绿的 —— 那是假绿）**、**源级断言：掷骰路径上不许出现 `Math.random`、`node:crypto` 只在 `entropy.ts`**、**5q 段：每条命令的回执都不含 Markdown 的 `**`（行为层逐条跑两遍 + 源码层剥注释扫群友可见文案的全部落点，含主流程的 `web/onebot/commands.ts`；配一条正对照 —— 同一个扫描在 `rules/dice.ts` 上必须找得到 `**`，那是乘方）**、**助手模式的拦截（2026-10-16 加）：判据逐条（`.r` / `。r` / `R` 前缀与归一化、纯数字不算、不做子串匹配、`3d6x` 与半句话一律静默）、掷骰与静默两种返回、越界表达式回可读原因、有战役时记日志、DM 模式不拦**、**`configPatch` 的五条（抬到下限 / 是下限不是覆盖 / `0` 原样留着 / 助手不抬 / 对照复原）**、**命令面的流程形状（25 条 handler 键 —— 12 条声明，其中 4 条带 `subs`，另 2 条是裸命令、`subs` 展开后子命令优先于裸命令、向导的五步段序且指向 `.` 面的词形、剧本列出、起局列出、乱名字起局明说没有注入、认不出的子命令回命令清单、`scenarioNameFromFile` 的六种输入）**、**5h 段的会话全链路（没局时三条命令各自的引导 → `.trpg new` 建出 `preparing` 且发起人自动进名单 → 第二个人 join / 重复 join / 满员 8 人 / 满员时建卡也进不来 → 卡没建好时 `start` 逐人报缺 → `.pc new` 的归属与「未确认」、重名与重复建卡被拒 → 没先 join 直接建卡也算报名 → `.pc confirm` 报还差谁 → 全员确认后 `start` 推成 `active`、再 start 说「已经在跑」 → `.pc show` 的三条路（自己 / 别人 / 不存在）→ `.pc save` 的凭据 → `.trpg end` 的摘要（时长/玩家/场景/暗线）与存档真的没了 → 旧存档迁移（缺 `status` 读成 `active`、`players` 空、`confirmed` false、旧旗标仍可见）→ 战报（命令路与工具路都进、append-only 逐字不变、收团不清战报））**、**5i 段的检定与暗骰（`.ra` 的公开检定与三条「做不了」的分流、`.st` 的填值/回显/钳制/确认后被拒、`.rh` 的整串回执与私聊投递与那次独立模型调用与「不留痕」、没装端口时不掷）**、**P5/P6 段（`.combat start/next/end` 三条回执与三条「做不了」、重排、卡上没有 `initiative` 属性时照样排并说出来、倒下的人自动跳过而 `hpMax` 为 0 不算倒下、「行动即推进」按名字匹配、`combat` 不占配额、两条路（命令/工具）共用 `model/combat.ts`；战报的 `visible` 判据（镜像按条滤 + 导出边界再查一遍）、`.log export` 的落盘与文件名与三条「导不了」、面板第三列与那条相反的 confirm 文案）**、**7a 段的调用闸门（`.trpg scenario` 被拦 = 整条不做 / `.rh` 被拦 = 只省叙事 / 按会话算 / 列剧本库不记账）与 7c 段的战报跨局分界、`modes.json` 的 mtime 缓存**、以及真起 `createApp()` 的端到端：接管会话的模型请求里只剩跑团那 4 个、system prompt 是跑团人格且不含主人格、能力段让位、`say` 那一轮真的被判成 `done`、`trpg-note` 能唤醒一轮并把标签送进正文、`/api/extras` 标成 override、**接管群的窗口容量与历史深度都被抬到下限而对照群一点没变**，对照组是**没被接管的群照常**）。
-- `tests/t-media-source.mjs` 第 10 段（**群文件段**：真机实测的字段逐字可用、带 url、只有 file_id 时仍产出、两样都没有才不产出、文本化仍是 `[文件X.md]` 占位符）、`tests/t-extras.mjs` 第 16 段（`runEnded`：只有接管那个会话的扩展收得到、关掉扩展立即收不到、没有 `onRunEnd` 的实现静默跳过、钩子抛错不往上抛、`load(deps)` 收得到宿主的口子）、`tests/t-trpg-extract.mjs`（82 条：L1 切片的确定性与 `droppedChars` 计数、L2 每片的 payload 逐字对得上与脚本式假端点的调用次数、L3 归并的每条判据、L4 四条校验（引文找得到 / 超限截断 / 认不出的 type / 合成正文必须过 `isFormattedScenario`）、`.struct.json` 与 `.rule.json` 的读写与坏文件拒绝、预算降级那一路的产物。两条纪律：**纯函数直接取 `scenario/extract/*.js` 而不走桶文件**（桶不转发它们，所以改了导出名会当场炸、不会静默退化），且每个"本该不调用模型"的用例都要**重装一份全新的脚本数组**（假端点是消耗式的，复用引用等于没装）。**证明不了**真模型在真实 PDF 上抽得对不对 —— 那是人工冒烟项）。
+- 守护：`tests/t-trpg-rules.mjs`（306 条：逐面核对解析与求值、`kh`/`kl` 与 `k`/`q` 等价、多组/括号/四则/乘方、奖惩骰的 `combine` 两条边界、21 种非法输入的 `code` 与文案、200 组不变式、坏随机源被夹回、**穷举校验真的抓得住两类坏表**（漏兜底 / 顺序写反）、**条件表达式的白名单与拒绝路径**（函数调用、属性访问、下标、赋值、分号、注释、字符串一律拒，除零抛错）、**规则表存储**（懒补齐种子、坏表拒绝且照样列表、改了文件不重启也生效）、**先攻排序（按 `initiative` 降序、同值稳定、卡上没那个属性按 0 排后面）与指针推进（`clampTurn` / `advance` 的绕回）**、「同一个骰面在两种判定下结论相反」证明接缝真的存在）、`tests/t-trpg.mjs`（709 条：状态层上限与归一化**含旧形状迁移**、4 个工具的正反路径、**剧本解析与开局注入**（骨架落进状态、正文快照、改了文件不影响正在跑的团）、**规则表回落与拒绝**、`.trpg start` 命令与工具共用实现、工作台列表与删除、**两种模式（`toolsFor` 的工具子集、`prompt` 的**空 body**、`.trpg mode` 的四种回答、`onRunEnd` 的"助手不兜底"+对照组，以及**真起 app** 断言助手会话只拿到 say/roll、system prompt **一份人格都没有**（只剩框架契约两段））**、**`.trpg scenario` 的早退分支、`saveScenarioText` 的四条分支（正常/截断/对照/超长）、格式匹配的四条判据、模型整理的三条（含"格式本来就对 → 一次调用都不发"这条**成本性质**，以及"模型给的东西不合规时如实失败"）、**抽取与整理那两次调用真的进账**（端口报账 / 整理报账 / 不传 `recordUsage` 时调用照常，三条）**（三条编码判据随实现搬进 Python，改由 `t-document.mjs` 守）、`prompt` 的三段段序、**可见性两套投影（含一条专门的泄漏断言）**、行动经济（去重/配额/新 ctx 即新回合）、`reveal` 与它的回流条目、**`onRunEnd` 的六条判据（起真假模型端点，因为"没发条目"在生成失败时也是绿的 —— 那是假绿）**、**源级断言：掷骰路径上不许出现 `Math.random`、`node:crypto` 只在 `entropy.ts`**、**5q 段：每条命令的回执都不含 Markdown 的 `**`（行为层逐条跑两遍 + 源码层剥注释扫群友可见文案的全部落点，含主流程的 `web/onebot/commands.ts`；配一条正对照 —— 同一个扫描在 `rules/dice.ts` 上必须找得到 `**`，那是乘方）**、**助手模式的拦截（2026-10-16 加）：判据逐条（`.r` / `。r` / `R` 前缀与归一化、纯数字不算、不做子串匹配、`3d6x` 与半句话一律静默）、掷骰与静默两种返回、越界表达式回可读原因、有战役时记日志、DM 模式不拦**、**`configPatch` 的五条（抬到下限 / 是下限不是覆盖 / `0` 原样留着 / 助手不抬 / 对照复原）**、**命令面的流程形状（25 条 handler 键 —— 12 条声明，其中 4 条带 `subs`，另 2 条是裸命令、`subs` 展开后子命令优先于裸命令、向导的五步段序且指向 `.` 面的词形、剧本列出、起局列出、乱名字起局明说没有注入、认不出的子命令回命令清单、`scenarioNameFromFile` 的六种输入）**、**5h 段的会话全链路（没局时三条命令各自的引导 → `.trpg new` 建出 `preparing` 且发起人自动进名单 → 第二个人 join / 重复 join / 满员 8 人 / 满员时建卡也进不来 → 卡没建好时 `start` 逐人报缺 → `.pc new` 的归属与「未确认」、重名与重复建卡被拒 → 没先 join 直接建卡也算报名 → `.pc confirm` 报还差谁 → 全员确认后 `start` 推成 `active`、再 start 说「已经在跑」 → `.pc show` 的三条路（自己 / 别人 / 不存在）→ `.pc save` 的凭据 → `.trpg end` 的摘要（时长/玩家/场景/暗线）与存档真的没了 → 旧存档迁移（缺 `status` 读成 `active`、`players` 空、`confirmed` false、旧旗标仍可见）→ 战报（命令路与工具路都进、append-only 逐字不变、收团不清战报））**、**5i 段的检定与暗骰（`.ra` 的公开检定与三条「做不了」的分流、`.st` 的填值/回显/钳制/确认后被拒、`.rh` 的整串回执与私聊投递与那次独立模型调用与「不留痕」、没装端口时不掷）**、**P5/P6 段（`.combat start/next/end` 三条回执与三条「做不了」、重排、卡上没有 `initiative` 属性时照样排并说出来、倒下的人自动跳过而 `hpMax` 为 0 不算倒下、「行动即推进」按名字匹配、`combat` 不占配额、两条路（命令/工具）共用 `model/combat.ts`；战报的 `visible` 判据（镜像按条滤 + 导出边界再查一遍）、`.log export` 的落盘与文件名与三条「导不了」、面板第三列与那条相反的 confirm 文案）**、**7a 段的调用闸门（`.trpg scenario` 被拦 = 整条不做 / `.rh` 被拦 = 只省叙事 / 按会话算 / 列剧本库不记账）与 7c 段的战报跨局分界、`modes.json` 的 mtime 缓存**、以及真起 `createApp()` 的端到端：接管会话的模型请求里只剩跑团那 4 个、system prompt 是跑团人格且不含主人格、能力段让位、`say` 那一轮真的被判成 `done`、`trpg-note` 能唤醒一轮并把标签送进正文、`/api/extras` 标成 override、**接管群的窗口容量与历史深度都被抬到下限而对照群一点没变**，对照组是**没被接管的群照常**）。
+- `tests/t-media-source.mjs` 第 10 段（**群文件段**：真机实测的字段逐字可用、带 url、只有 file_id 时仍产出、两样都没有才不产出、文本化仍是 `[文件X.md]` 占位符）、`tests/t-extras.mjs` 第 16 段（`runEnded`：只有接管那个会话的扩展收得到、关掉扩展立即收不到、没有 `onRunEnd` 的实现静默跳过、钩子抛错不往上抛、`load(deps)` 收得到宿主的口子）、`tests/t-trpg-extract.mjs`（104 条：L1 切片的确定性与 `droppedChars` 计数、L2 每片的 payload 逐字对得上与脚本式假端点的调用次数、L3 归并的每条判据、L4 四条校验（引文找得到 / 超限截断 / 认不出的 type / 合成正文必须过 `isFormattedScenario`）、`.struct.json` 与 `.rule.json` 的读写与坏文件拒绝、预算降级那一路的产物。两条纪律：**纯函数直接取 `scenario/extract/*.js` 而不走桶文件**（桶不转发它们，所以改了导出名会当场炸、不会静默退化），且每个"本该不调用模型"的用例都要**重装一份全新的脚本数组**（假端点是消耗式的，复用引用等于没装）。**证明不了**真模型在真实 PDF 上抽得对不对 —— 那是人工冒烟项）。
 
 **那条端到端堵的是一个真实的守护空白**：`web/app.ts` 里 `isOverridden(chatKey) ? mine : [...BUILTIN_TOOLS, ...mine]` 是"接管时内置工具让位"的**唯一**实现处，而 `extras.toolDefs()` 那一层的断言**看不见它**（那一层只管扩展自己那几个）。实测探针：把那一行改成总是拼上内置工具 → 全部既有套件里只有 `t-trpg.mjs` 会红，而它报出的正是"接管会话拿到一堆内置工具 + 4 个跑团工具"。
 
@@ -748,6 +748,103 @@ extra/trpg/
 6. **三处固定文案**：`.trpg start` 给第一个动作的例子；`.trpg mode 助手` 明说"@ 我也不会回"；抽取降级回执明说"这一局不会应用剧本里的特殊规则"并给出重试的路。
 7. **限流单位澄清**：`SCENARIO_BUDGET` 数的是**份**（触发次数），不是模型调用次数 —— 一份的成本在 0 / 1 / 7 之间浮动，所以上界是 35 次调用/时、700 次/天。回执与文档都改成"份"。
 8. **暗骰叙事把档位写成硬约束**（[extra/prompts.ts](src/extra/prompts.ts) 的 `secretRoll`）：模型本来就拿得到档位（只拿不到点数），缺的是"叙事必须与它一致"这一句。
+
+### 分幕：运行时识别"现在演到第几幕"（P8，2026-10-19）
+
+**来源是 P7 的抽取产物**：`ScenarioStruct.acts: StructAct[]`（`scenario/extract/schema.ts`）。旧 `.struct.json` 没有这一栏 → `[]` → **单幕模式**（`currentAct === ''`），不报错、不阻断任何既有玩法。
+
+```
+StructAct = { id, name, order, goal, keeperNotes, entryCondition, exitCondition, scenes: string[], visible }
+```
+
+四条判据：
+
+- **场景用 `name` 引用，不是 id** —— `StructScene` 本来就没有 id，而 `name` 已经是 `mergeStructs` 的去重键。加 id 会牵动 `coerceStruct` / `mergeStructs` / `describeStruct` / `.trpg check` 四处。
+- **条件复用机制的 `TriggerNode`**（`flag` / `all_of` / …），由 `rules/rule-set.ts` 新导出的 `compileTrigger` / `triggerMatches` 一处编译、一处求值。**不新增第二套条件语言** —— 两份的话，"同一个旗标组合在机制里成立、在幕里不成立"不会有任何报错。
+- **条件在抽取时就编译**（`coerceAct`）：坏条件当场丢掉并记待核项，运行期不必再判一次语法。
+- **`visible` 合并取 AND**（任何一片说该藏就藏）：多藏一条只是玩家少看见一点，少藏一条是泄漏。
+
+**运行期状态是 `TrpgCampaign.currentAct`**（`''` = 不分幕）。⚠️ `model/` **只当它是个字符串**（不做"这一幕存不存在"的校验 —— 那是 `parseStruct` 的事）；三个消费点统一在找不到时回落第一幕。三处消费点：
+
+| 时机 | 判据 | 位置 |
+| --- | --- | --- |
+| 开局 | 当前场景所属那一幕，否则第一幕 | `model/session.ts` 的 `beginCampaign` |
+| 换场景 | 场景命中 → 当前幕的 `exitCondition` 成立 → **不动** | `tools/campaign.ts` 的 `setScene` → `scenario/acts.ts` 的 `resolveAct` |
+| 渲染 | 见下 | `render/model.ts` / `render/players.ts` |
+
+`scenario/acts.ts` 是这套判据的**唯一落点**（纯函数）：`actsOf` / `findAct` / `actForScene` / `nextAct` / `actNumber` / `visibleActs` / `resolveAct`。**场景名的比较先精确、再去空白与标点后比较**；⚠️ **刻意不做双向包含** —— `"灯塔"` 与 `"灯塔地下室"` 互相包含，那会让刚进地下室就命中上一层，把进度提前推走。**未知场景保持当前幕**（DM 随手写个过场不该把进度打回去）—— 那比不推进坏得多。
+
+**两份渲染的受众不同**：
+
+- **DM**（`renderForModel` 的状态段，插在 `—— 角色 ——` 之前 = 只在换幕时变，能命中前缀缓存）：`本幕 / 目标 / 完成条件 / 幕后（keeperNotes）/ 下一幕名`。**下一幕只给名字** —— 给了 goal 与 keeperNotes，模型会把下一幕提前演掉。没有注入剧本时整段不出现；注入了剧本但没分幕时印一句「本模组未分幕」。
+- **玩家**（`renderForPlayers` → `.trpg status`）：只印 `阶段：第 N 幕 / 共 M 幕`。⚠️ **M 只数 `visible` 的幕**（分母里混进暗线幕就是泄漏），**当前幕不可见时整段不出现**（同"一条全是问号的旗标本身就是泄漏"）。
+
+**`.trpg check` 印幕名 / 序号 / 场景 / 完成条件，不印 `goal` 与 `keeperNotes`** —— 那条命令在**群里**敲，而这两个字段标着"DM 可见 / 仅 DM"。要看它们请直接读 `.struct.json`。
+
+⚠️ **快照冻结**：`campaign.scenario.struct` 是开局时的快照，所以**正在跑的团不会凭空长出 acts** —— 要让老团用上分幕只能 `.trpg new` 重开。这不是 bug，是"改剧本文件不影响正在跑的团"那条既有不变量的推论。
+
+上限在 `model/limits.ts`：`MAX_ACTS = 20`、`MAX_ACT_SCENES = 24`、`MAX_ACT_GOAL_CHARS = 200`、`MAX_ACT_KEEPER_CHARS = 400`。L2 提示词念的这四个数**由 `ChunkPayload` 递进去**（`prompts.ts` 零 import，写死就会与 `limits.ts` 漂移）。
+
+**守护**：`t-trpg-extract` 15 条（驼峰/蛇形都收、缺 `order` 补位、`order` 冲突重编号、坏条件丢弃并记待核项、按 id 合并、`visible` 取 AND、`verifyActs` 两类待核项 + 一条对照、旧文件空数组、**端到端确认 `extractScenario` 真的调了 `verifyActs`**、payload 带上四个上限）；`t-trpg` 21 条（开局落点两种、无 acts 空串、DM 阶段块五项、keeperNotes 只在 DM、下一幕不给 keeperNotes、玩家"第 N/共 M"只数可见幕、玩家不含 keeperNotes 与目标、自动推进三条、exitCondition 推进、暗线幕两边、无剧本整段不出现、`.trpg check` 不印 goal/keeperNotes、旧存档迁移、**源级：玩家可见落点里一次都不提 keeperNotes**）。
+**探针**：DM 阶段段恒空 → 红 3；玩家那行去掉 → 红 1；`resolveAct` 恒不推进 → 红 3；开局不设 `currentAct` → 红 2；把 `extractScenario` 里那行 `verifyActs(struct)` 注释掉 → **`t-trpg-extract` 红 1**（这正是"接线与判据是两件事"的实证：只测函数本身时它照样全绿）。
+
+### 推进保证：让"原地打转"变成事实（P8-b，2026-10-19）
+
+**三件事，各归各的层**：度量在 `model/advance.ts`（纯）、回流走 `onRunEnd` 与 `deliverNote`（接线）、切幕入口是 `campaign` 的 `action=advance`（工具）。
+
+**度量**是 `campaign.advancement: { scene, flag, act }`（+ 两个内部字段 `dirty` / `hinted`），**每轮收尾 +1**，变更点归零。
+
+- ⚠️ **`dirty` 不能省**：变更发生在某一轮里，而那一轮的收尾同样会 +1，于是"刚换完场景"会被记成 1 而不是 0，**所有阈值整体偏移一格**。变更点置 `dirty`，收尾时不清零也不 +1，然后清空 —— 那一轮精确落在 0。
+- ⚠️ **只数"真人推动且 `done`/`noreply`"的运行**：提示自己唤醒的那一轮若也计数，阈值会自己跑赢自己；报错 / 中止没有推进可言。这条守卫与兜底建议那条是**同一个谓词**（`isPersonMessage`）。
+- **变更点只有一个置位函数**（`resetAdvance`），四个调用点：`setScene` 的 scene / act、`setFlags` 与 `reveal` 的 flag。⚠️ 手写 `campaign.advancement.x = 0` 会漏掉 `dirty`，而症状只是"提示晚一轮"。套件里有一条**源级断言**扫这四个调用点。
+
+**阈值**默认 8 / 12 / 20（`ADVANCE_THRESHOLDS`），规则扩展的 `advancement_threshold` 覆盖它（同一指标多条 → 后者赢）。阈值**不进配置项**：合适的值取决于这一本模组的节奏，而那本来就是模组自己的事（同 `EXTRACT_TOTAL_BUDGET_MS`）。
+
+**提示**是 `kind: 'advance'` 的回流条目，正文**只陈述事实**（第几幕、几轮没变化、本幕目标、完成条件与是否满足），结尾明说"不是命令"。⚠️ **正文不含 `keeperNotes`** —— 它只给 DM，但会被模型原样念出来。
+
+- **冷却按指标、按轮**（5 轮，`hinted` 落盘，重启仍有效）；**换指标可以立即落**。
+- **与兜底建议互斥**：DM 整轮沉默时只落【行动建议】（更紧急），不落提示、**也不烧冷却**（下一轮开口时还能照常提示）。
+
+**`campaign action=advance`**（不新增工具，只加一个 action）：校验当前幕的 `exitCondition`（`null` = 无条件放行），不满足时用 `explainUnmet` **逐条**说"还差什么"（`旗标「钥匙到手」= 是（现在是「否」）`）。**不占主行动配额**（`quota: false`，同 `combat`）。
+
+**`stage_advance`** 管"完成条件满足时怎么办"：缺省 `hint`（只提示），显式 `auto` 才由代码切幕（一次运行**最多切一幕**，免得链式跳过中间幕）。
+
+**DSL 的接缝**：两条新类型把数据放在机制的 `advance` 字段里，**不走 `effect.params`** —— `narrate` 的 params 会被 `coerceEffect` **丢掉**（"免疫与叙事提示不吃参数"），塞进去等于写进黑洞。编译期：`advancement_threshold` 必须给合法 `metric` + `turns`（1..99），`stage_advance` 的 `mode` 只认 `hint`/`auto`，**坏就拒绝**（阈值写错会让提示永远不发或每轮都发，两种症状都像"这个功能没做"）。两条类型**不要求 `trigger`**，`effect` 固定成 `narrate`（于是检定/伤害那些按 handler 过滤的消费点自然忽略它们）。`MECHANIC_TYPES` 因此变成**十种**。
+
+**三个标签在三处要一起改**（否则新 kind 会冒充旧标签）：`formatEntry`（`【跑团笔记】/【行动建议】/【推进提示】`）、`chat/store.ts` 的 `appendTrpgNote`（`senderName`）、`response-policy`（唤醒理由）。人格段里另有一段"三种回流条目怎么读"，**三种必须分开说**。
+
+**守护**：`t-trpg-rules` 16 条（两条新 type 的编译正反路径、`advance` 字段被忽略的 warning、`explainUnmet` 的四种组合子、`ADVANCE_METRICS` ⇄ `ADVANCEMENT_METRICS` 逐字一致）；`t-trpg` 36 条（计数与 `dirty`、阈值覆盖、冷却与换指标、提示正文含/不含什么、`advanceTo`、`onRunEnd` 的六条接线、`action=advance` 的四条、`stage_advance` 两档、三处标签、人格段、两条源级断言）。
+**探针**：去掉 `dirty` → 红 2；冷却恒放行 → 红 4（2 单元 + 2 集成）；`action=advance` 不校验条件 → 红 2；标签不分支 → 红 1；拿掉"非真人推动"守卫 → 红 1（外加 9 条既有兜底用例连带 —— 它们本来就靠同一个谓词）。
+
+### 结局：模型也能判定的收团（P8-c，2026-10-19）
+
+**来源**：`ScenarioStruct.endings`（`StructEnding = { id, name, trigger, readAloud, rewards, keeperNotes }`）。旧 `.struct.json` 没有这一栏 → `[]`（`action=end` 仍可用，只是只能"自由结局"）。
+
+- `trigger` 复用 `TriggerNode`（与幕的进出条件、机制 trigger **同一套语法与求值器**），抽取时就编译，坏条件当场丢掉并记待核项。
+- `rewards` 是**一句人话**，代码**不结算** —— 收团后人物卡就删了，结算无意义。
+- `readAloud` **不进提示词**，只在 `action=end` 的回执里出现一次；`keeperNotes` **连那儿都不去**。
+- L4 `verifyEndings` 只报一件事：**没有触发条件的结局**。模型被告知"每轮检查是否满足"，那种结局会让它**第一轮就把团收掉**。
+
+**两条收团路径，语义不同**：
+
+| | 人敲 `.trpg end` | 模型 `campaign action=end` |
+| --- | --- | --- |
+| 校验 | 跳过 | `endingId` 必须真实存在（硬约束：不许幻觉），且 `trigger` 成立（不成立用 `explainUnmet` 逐条说"还差什么"） |
+| 摘要 | 群友可见的命令回执 | **只回给模型**（发群就是"工具代模型发言"） |
+| 结局段 | ❌ | ✅（名字 + 奖励，**从剧本快照算**） |
+| 宣读文本 | ❌ | ✅ |
+| 存档 | **立刻删** | **这一轮收尾才删** |
+| 战报 `[结局]` | ❌ | ✅ |
+
+**删除时机的那个坑**：`withCampaign` 在处理器之后**一定**还会 `store.write` 一次，所以在 `action=end` 里直接 `store.remove` 会把它**原地复活**（症状：收团了，但下一轮还在）。所以处理器只写 `campaign.ended = { endingId, reason, at }`，真正删除在 `impl.ts` 的 `onRunEnd`（那一轮跑完、模型也把结局讲完了）。⚠️ 进程在"标记了、还没到收尾"之间退出会留下一个 `ended` 的存档 —— **`beginCampaign` 把它当成"没有"**，否则那个会话永远开不了新团，而群友只会看到"已经有《X》在跑了"（一个其实已经结束的团）。
+
+**摘要**由 `campaign.ended` 驱动（人敲的没有这个标记）：首句带「（结局：X）」或「（自由结局）」，多一行「结局：X（奖励）」或「结局：reason（自由结局）」，并且**"没解开的事"排除结局 trigger 点到的旗标**（用 `triggerFlagNames`）—— 结局都触发了，那条旗标显然已经解开，再列出来自相矛盾。
+
+**战报**那一条是 `appendLog(campaign, 'ending', '结局：…')`，经 `mirrorLog` 的 `visible` 过滤；`KIND_LABEL` 里 `ending: '结局'`。**人敲的路径不落这条**（源级断言钉住 `session.ts` 里没有 `appendLog(..., 'ending')`）。
+
+**提示词两处**：`renderBriefing` 的中间段加"本剧本的结局"（只印 name / trigger / rewards —— 模型要靠它每轮检查），人格段加【什么时候该收团】（"不确定的时候不要强行宣布"）。`.trpg check` 印结局清单，**不印 `readAloud` 与 `keeperNotes`**（那条命令在群里敲）。
+
+**守护**：`t-trpg` 29 条、`t-trpg-extract` 9 条。**探针**：未知 id 不拦 → 红 1；收尾不删存档 → 红 1；暗线不排除结局 trigger 旗标 → 红 1；摘要忽略 `ended` → 红 5（结局段 / 自由结局那几句）；"强制收团"那句恒出现 → 红 1；briefing 不印结局 → 红 1。
 
 ⚠️ **本轮又踩了一次"手改 `dist/` 做探针之后 `npm run build` 不会改回来"**：`t-trpg` 的整个 7a 段因此假红过一次（`takeNarrationBudget` 还是探针版的 `return true`）。凡是对 `dist/` 动过手，复原一律 `rm -rf dist && npm run build`。
 

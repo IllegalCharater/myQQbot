@@ -31,13 +31,13 @@ const { ok, done } = checker();
 
 const { outlineDocument } = await load('extra/trpg/scenario/extract/outline.js');
 const { coerceStruct, parseStruct, emptyStruct } = await load('extra/trpg/scenario/extract/schema.js');
-const { mergeStructs, extractScenario } = await load('extra/trpg/scenario/extract/pipeline.js');
+const { mergeStructs, extractScenario, verifyActs, verifyEndings } = await load('extra/trpg/scenario/extract/pipeline.js');
 // ⚠️ **机制的类型清单与判据只有一处**（`rules/rule-set.ts`）：抽取层（`schema.ts` / `prompts.ts`）
 // 一份都不存，`pipeline.ts` 把它当参数递进提示词。所以这里也从权威那一处取 —— 这条 import
 // 本身就是"没有第二份定义"的证据（`schema.ts` 里那个 `STRUCT_MECHANIC_TYPES` 已随 P7-c 删掉）。
 const { MECHANIC_TYPES, TRIGGER_OPS, EFFECT_HANDLERS, isMechanicType } =
   await load('extra/trpg/rules/rule-set.js');
-const { MAX_CHUNKS, MAX_CHUNK_CHARS, MAX_STRUCT_ITEMS } = await load('extra/trpg/model/limits.js');
+const { MAX_CHUNKS, MAX_CHUNK_CHARS, MAX_STRUCT_ITEMS, MAX_ACTS, MAX_ACT_SCENES } = await load('extra/trpg/model/limits.js');
 const { ScenarioStore } = await load('extra/trpg/index.js');
 
 /**
@@ -665,6 +665,161 @@ const chunkOf = (body) => ({ ok: true, content: JSON.stringify(body), usage: '' 
     && outOfTime.outcome.message === '抽取没成：时间预算用完了，没来得及合成剧本文件'
     && outOfTime.seen.filter((r) => r.job === 'merge').length === 0,
     JSON.stringify(outOfTime.outcome));
+}
+
+// ── 分幕（P8）：`coerceStruct` 收 acts / `mergeStructs` 按 id 合并 / `verifyActs` 的两类待核项 ──
+//
+// 四个判据全是**纯函数**，所以不必起假端点。它们守的是"幕抽得对不对"—— 抽坏了不会报错，
+// 只会表现为"分幕好像没生效"，所以每一条都必须有断言。
+{
+  // ① 形状：驼峰与蛇形都收、缺 `order` 按数组位置补、坏条件当场丢掉并记待核项。
+  const warnings = [];
+  const struct = coerceStruct({
+    scenes: [{ name: '灯塔' }, { name: '码头' }],
+    acts: [
+      { id: 'a1', name: '抵达', goal: '进城', keeperNotes: '幕后一句',
+        scenes: ['码头'], exitCondition: { op: 'flag', key: '已抵达', value: '是' } },
+      { name: '对峙', keeper_notes: 'snake 也收', order: 2,
+        entry_condition: { op: 'flag', key: '坏了', value: '' }, scenes: ['灯塔'] }
+    ]
+  }, warnings);
+  ok('`coerceStruct` 收 acts：驼峰与蛇形都认（模型可能照文档写成 keeper_notes）',
+    struct?.acts.length === 2 && struct.acts[1].keeperNotes === 'snake 也收', JSON.stringify(struct?.acts));
+  ok('缺 `order` 按数组位置补 1..N（数组顺序才是权威）',
+    struct.acts[0].order === 1 && struct.acts[1].order === 2, JSON.stringify(struct.acts.map((a) => a.order)));
+  ok('坏条件**当场丢掉并记待核项**（运行期不必再判一次语法）',
+    struct.acts[1].entryCondition === null
+    && warnings.some((line) => line.includes('进入条件写坏了')), JSON.stringify(warnings));
+  ok('好条件被编译成节点（不是原样透传的 JSON）',
+    struct.acts[0].exitCondition?.op === 'flag', JSON.stringify(struct.acts[0].exitCondition));
+
+  // ② `order` 冲突：按数组顺序重编号并说一句（不拒绝整份表）。
+  const w2 = [];
+  const conflict = coerceStruct({
+    acts: [{ name: '甲', order: 2 }, { name: '乙', order: 2 }]
+  }, w2);
+  ok('`order` 重复 → 按数组顺序重编号并记一条',
+    conflict.acts.map((act) => act.order).join(',') === '1,2'
+    && w2.some((line) => line.includes('order 有缺失或重复')), JSON.stringify(conflict.acts));
+
+  // ③ 归并：同一幕跨两片 → scenes 取并集、空字段被补上、visible 取 AND。
+  const merged = mergeStructs([
+    { ...emptyStruct(), scenes: [{ name: '灯塔', summary: '', npcs: [], clues: [] }],
+      acts: [{ id: 'a1', name: '抵达', order: 1, goal: '', keeperNotes: '', entryCondition: null,
+        exitCondition: null, scenes: ['灯塔'], visible: true }] },
+    { ...emptyStruct(), acts: [{ id: 'a1', name: '抵达', order: 1, goal: '进城', keeperNotes: '幕后',
+      entryCondition: null, exitCondition: { op: 'flag', key: '到了', value: '是' },
+      scenes: ['码头'], visible: false }] }
+  ]);
+  ok('同一幕跨两片 → 按 id 合并（scenes 取并集、空字段被补上）',
+    merged.acts.length === 1 && merged.acts[0].scenes.join(',') === '灯塔,码头'
+    && merged.acts[0].goal === '进城' && merged.acts[0].keeperNotes === '幕后',
+    JSON.stringify(merged.acts));
+  ok('`visible` 取 **AND**：任何一片说该藏就藏（少藏一条是泄漏）',
+    merged.acts[0].visible === false);
+
+  // ④ L4 交叉校验：幕引用了结构里没有的场景 / 这一幕无从推进。
+  const checked = { ...emptyStruct(), scenes: [{ name: '灯塔', summary: '', npcs: [], clues: [] }],
+    acts: [
+      { id: 'a1', name: '抵达', order: 1, goal: '', keeperNotes: '', entryCondition: null,
+        exitCondition: null, scenes: ['不存在的场景'], visible: true },
+      { id: 'a2', name: '空幕', order: 2, goal: '', keeperNotes: '', entryCondition: null,
+        exitCondition: null, scenes: [], visible: true }
+    ] };
+  verifyActs(checked);
+  ok('幕引用了结构里没有的场景 → 记待核项（自动推进会轮不到它）',
+    checked.warnings.some((line) => line.includes('引用了结构里没有的场景')), JSON.stringify(checked.warnings));
+  ok('既没有场景也没有条件 → 记待核项',
+    checked.warnings.some((line) => line.includes('自动推进轮不到它')), JSON.stringify(checked.warnings));
+  ok('对照：结构里有的场景不报（不是见谁都报）',
+    !checked.warnings.some((line) => line.includes('灯塔')), JSON.stringify(checked.warnings));
+
+  // ⑤ 旧 `.struct.json` 没有 acts → []，单幕模式（不报错）。
+  const legacy = parseStruct({ scenes: [{ name: '灯塔' }] });
+  ok('旧 `.struct.json`（没有 acts）解析出空数组 —— 单幕模式，不报错',
+    legacy.ok && legacy.struct.acts.length === 0);
+
+  // ⑥ 接线：`extractScenario` 的 L4 真的会跑 `verifyActs`。
+  // ⚠️ 这一条**不能省**：前面 ④ 测的是函数本身，把 `extractScenario` 里那一行删掉、
+  // 套件照样全绿（探针实测过 9 条红里没有一条来自这里）。接线与判据是两件事。
+  const wiringText = '# 一\n\n' + '甲'.repeat(500);
+  const wiringScript = [
+    chunkOf({ summary: '', scenes: [{ name: '灯塔', summary: '', npcs: [], clues: [] }],
+      acts: [{ id: 'a1', name: '抵达', order: 1, scenes: ['根本没有这个场景'] }] }),
+    { ok: true, content: '```markdown\n' + FORM + '\n```' }
+  ];
+  const wiring = fakeAsk(wiringScript);
+  const wired = await extractScenario(wiringText, { name: '接线', source: 'text' }, { ask: wiring.port });
+  ok('端到端：`extractScenario` 的 L4 真的跑了 `verifyActs`（幕引用了不存在的场景 → 待核项）',
+    wired.ok === true && wired.result.struct.warnings.some((line) => line.includes('引用了结构里没有的场景')),
+    JSON.stringify(wired.ok ? wired.result.struct.warnings : wired));
+  ok('端到端：每片的 payload 带上幕的四个上限（提示词念的与 `model/limits.ts` 是同一份）',
+    wiring.seen[0].payload.maxActs === MAX_ACTS
+    && wiring.seen[0].payload.maxActScenes === MAX_ACT_SCENES,
+    JSON.stringify({ maxActs: wiring.seen[0].payload.maxActs, maxActScenes: wiring.seen[0].payload.maxActScenes }));
+}
+
+// ── 结局（P8-c）：`coerceStruct` 收 endings / 归并 / `verifyEndings` ──────────────
+//
+// 与分幕那一段同一条纪律：全是纯函数，不必起假端点。守的是"结局抽得对不对"——
+// 抽坏了不会报错，只会表现为"结局永远触发不了"，或者更糟：**没有触发条件的结局会被模型
+// 第一轮就宣布**，而群里看到的只是"这团怎么一下就结束了"。
+{
+  const warnings = [];
+  const struct = coerceStruct({
+    endings: [
+      { id: 'e1', name: '远行', trigger: { op: 'flag', key: '灯灭了', value: '是' },
+        readAloud: '天亮了。', rewards: 'SAN +1D6', keeperNotes: '守塔人没走' },
+      { name: '留守', read_aloud: 'snake 也收', keeper_notes: 'snake 备注',
+        trigger: { op: 'flag', key: '坏了', value: '' } }
+    ]
+  }, warnings);
+  ok('`coerceStruct` 收 endings：驼峰与蛇形都认',
+    struct?.endings.length === 2 && struct.endings[1].readAloud === 'snake 也收'
+    && struct.endings[1].keeperNotes === 'snake 备注', JSON.stringify(struct?.endings));
+  ok('坏 trigger **当场丢掉并记待核项**（按"没有触发条件"处理）',
+    struct.endings[1].trigger === null
+    && warnings.some((line) => line.includes('结局「留守」的触发条件写坏了')), JSON.stringify(warnings));
+  ok('好 trigger 被编译成节点',
+    struct.endings[0].trigger?.op === 'flag', JSON.stringify(struct.endings[0].trigger));
+  ok('`rewards` 是自由文本（不解析成对象）', struct.endings[0].rewards === 'SAN +1D6');
+
+  const dupWarnings = [];
+  const dup = coerceStruct({
+    endings: [{ name: '甲', id: 'same' }, { name: '乙', id: 'same' }]
+  }, dupWarnings);
+  ok('结局 id 重复 → 只留第一条并记待核项',
+    dup.endings.length === 1 && dup.endings[0].name === '甲'
+    && dupWarnings.some((line) => line.includes('结局 id「same」重复')), JSON.stringify(dupWarnings));
+
+  // 归并：同一结局跨两片 → 补空不覆盖。
+  const merged = mergeStructs([
+    { ...emptyStruct(), endings: [{ id: 'e1', name: '远行', trigger: null, readAloud: '',
+      rewards: '', keeperNotes: '' }] },
+    { ...emptyStruct(), endings: [{ id: 'e1', name: '远行',
+      trigger: { op: 'flag', key: '灯灭了', value: '是' }, readAloud: '天亮了。',
+      rewards: 'SAN +1D6', keeperNotes: '守塔人没走' }] }
+  ]);
+  ok('同一结局跨两片 → 按 id 合并（空字段被补上）',
+    merged.endings.length === 1 && merged.endings[0].readAloud === '天亮了。'
+    && merged.endings[0].rewards === 'SAN +1D6' && merged.endings[0].trigger?.op === 'flag',
+    JSON.stringify(merged.endings));
+
+  // L4：没有触发条件的结局要报（那会让模型第一轮就收团）。
+  const checked = { ...emptyStruct(), endings: [
+    { id: 'e1', name: '远行', trigger: null, readAloud: '', rewards: '', keeperNotes: '' },
+    { id: 'e2', name: '留守', trigger: { op: 'flag', key: '留下', value: '是' },
+      readAloud: '', rewards: '', keeperNotes: '' }
+  ] };
+  verifyEndings(checked);
+  ok('没有触发条件的结局 → 记待核项（否则模型可以第一轮就把团收掉）',
+    checked.warnings.some((line) => line.includes('没有触发条件')), JSON.stringify(checked.warnings));
+  ok('对照：有触发条件的那一个不报', !checked.warnings.some((line) => line.includes('留守')),
+    JSON.stringify(checked.warnings));
+
+  const legacy = parseStruct({ scenes: [{ name: '灯塔' }] });
+  ok('旧 `.struct.json`（没有 endings）解析出空数组 —— 自由结局仍然可用',
+    legacy.ok && legacy.struct.endings.length === 0);
 }
 
 console.log('\n—— 说明：真模型在真实模组上的抽取质量只能人工冒烟，套件证明不了它用得对。');

@@ -28,7 +28,9 @@
 // 有一条闸门，与 `model/` 同形）：落盘是 `store/` 的事，这一层要能脱离磁盘被测。
 import {
   EXTRACT_CALL_TIMEOUT_MS, EXTRACT_MIN_CALL_MS, EXTRACT_TOTAL_BUDGET_MS,
-  MAX_CHARACTERS, MAX_FLAGS, MAX_STRUCT_ITEMS, MAX_STRUCT_TEXT_CHARS, MAX_STRUCT_QUOTE_CHARS
+  MAX_ACT_GOAL_CHARS, MAX_ACT_KEEPER_CHARS, MAX_ACT_SCENES, MAX_ACTS, MAX_CHARACTERS,
+  MAX_ENDING_KEEPER_CHARS, MAX_ENDING_READ_ALOUD_CHARS, MAX_ENDING_REWARDS_CHARS, MAX_ENDINGS, MAX_FLAGS,
+  MAX_STRUCT_ITEMS, MAX_STRUCT_TEXT_CHARS, MAX_STRUCT_QUOTE_CHARS
 } from '../../model/limits.js';
 import { isFormattedScenario } from '../parse.js';
 import { BODY_BUDGET, stripFence } from '../format.js';
@@ -140,7 +142,7 @@ function cap<T>(items: T[], limit: number, label: string, warnings: string[]): T
  * 顺序即缓存，同一份原文两次抽取必须并出同一个结果。
  */
 export function mergeStructs(parts: readonly ScenarioStruct[]): ScenarioStruct {
-  const merged: ScenarioStruct = { summary: '', scenes: [], npcs: [], clues: [], items: [], mechanics: [], warnings: [] };
+  const merged: ScenarioStruct = { summary: '', scenes: [], npcs: [], clues: [], items: [], mechanics: [], acts: [], endings: [], warnings: [] };
 
   const summaries: string[] = [];
   const sceneAt = new Map<string, number>();
@@ -148,6 +150,8 @@ export function mergeStructs(parts: readonly ScenarioStruct[]): ScenarioStruct {
   const clueAt = new Map<string, number>();
   const itemAt = new Map<string, number>();
   const mechanicAt = new Map<string, number>();
+  const actAt = new Map<string, number>();
+  const endingAt = new Map<string, number>();
 
   for (const part of parts) {
     if (part.summary) summaries.push(part.summary);
@@ -205,6 +209,40 @@ export function mergeStructs(parts: readonly ScenarioStruct[]): ScenarioStruct {
       mechanicAt.set(key, merged.mechanics.length);
       merged.mechanics.push({ ...mechanic });
     }
+
+    // 幕：**按 id 合并**（同一幕可能横跨两片）。合并方向是"补空、不覆盖" —— 与上面几类
+    // 同一条取舍；`visible` 取 **AND**（任何一片说它该藏就藏：多藏一条只是玩家少看见一点，
+    // 少藏一条是泄漏）。
+    for (const act of part.acts) {
+      const at = actAt.get(act.id);
+      if (at === undefined) {
+        actAt.set(act.id, merged.acts.length);
+        merged.acts.push({ ...act, scenes: [...act.scenes] });
+        continue;
+      }
+      const kept = merged.acts[at];
+      if (!kept.goal) kept.goal = act.goal;
+      if (!kept.keeperNotes) kept.keeperNotes = act.keeperNotes;
+      if (!kept.entryCondition) kept.entryCondition = act.entryCondition;
+      if (!kept.exitCondition) kept.exitCondition = act.exitCondition;
+      kept.visible = kept.visible && act.visible;
+      for (const scene of act.scenes) if (!kept.scenes.includes(scene)) kept.scenes.push(scene);
+    }
+
+    // 结局：同样按 id 合并、**补空不覆盖**（同一段结局可能横跨两片）。
+    for (const ending of part.endings) {
+      const at = endingAt.get(ending.id);
+      if (at === undefined) {
+        endingAt.set(ending.id, merged.endings.length);
+        merged.endings.push({ ...ending });
+        continue;
+      }
+      const kept = merged.endings[at];
+      if (!kept.trigger) kept.trigger = ending.trigger;
+      if (!kept.readAloud) kept.readAloud = ending.readAloud;
+      if (!kept.rewards) kept.rewards = ending.rewards;
+      if (!kept.keeperNotes) kept.keeperNotes = ending.keeperNotes;
+    }
   }
 
   merged.summary = summaries.join(' / ').slice(0, MAX_STRUCT_TEXT_CHARS * 4);
@@ -213,6 +251,8 @@ export function mergeStructs(parts: readonly ScenarioStruct[]): ScenarioStruct {
   merged.clues = cap(merged.clues, MAX_STRUCT_ITEMS, '线索', merged.warnings);
   merged.items = cap(merged.items, MAX_STRUCT_ITEMS, '道具', merged.warnings);
   merged.mechanics = cap(merged.mechanics, MAX_STRUCT_ITEMS, '机制', merged.warnings);
+  merged.acts = cap(merged.acts, MAX_ACTS, '幕', merged.warnings);
+  merged.endings = cap(merged.endings, MAX_ENDINGS, '结局', merged.warnings);
   return merged;
 }
 
@@ -264,6 +304,59 @@ function verifyMechanics(struct: ScenarioStruct): RuleExtensionDraft | null {
   if (compiled.ok) struct.warnings.push(...compiled.set.warnings);
   else struct.warnings.push(...compiled.problems);
   return draft;
+}
+
+/**
+ * 幕的**交叉校验**（L4）。
+ *
+ * 两类都是"不跑就发现不了"的错：
+ *   ① 幕引用的场景名在结构里找不到 —— 自动推进**永远轮不到这一幕**，而群里只会觉得
+ *      "分幕好像没生效"；
+ *   ② 这一幕既没有关联场景、也没有进出条件 —— 同上，而且连手改都无从下手。
+ *
+ * **只记待核项，不拒绝**（同 `verifyMechanics` 那条取舍）：抽得糙的幕仍然能跑（单幕或半自动），
+ * 拒绝会让整份剧本白抽一遍。
+ *
+ * **导出只为单测**（同 `scenarioNameFromFile`）：真跑一遍要起假端点，而这四个判据是纯函数。
+ */
+export function verifyActs(struct: ScenarioStruct): void {
+  if (!struct.acts.length) return;
+  const names = new Set(struct.scenes.map((scene) => scene.name).filter(Boolean));
+  for (const act of struct.acts) {
+    const missing = act.scenes.filter((scene) => !names.has(scene));
+    if (missing.length) {
+      struct.warnings.push(
+        `第 ${act.order} 幕「${act.name}」引用了结构里没有的场景：${missing.join('、')}（自动推进会轮不到这一幕）`
+      );
+    }
+    if (!act.scenes.length && !act.entryCondition && !act.exitCondition) {
+      struct.warnings.push(
+        `第 ${act.order} 幕「${act.name}」既没有关联场景也没有进出条件，自动推进轮不到它`
+      );
+    }
+  }
+}
+
+/**
+ * 结局的**交叉校验**（L4）。
+ *
+ * 只报一件事：**没有触发条件的结局**。那种结局等于"随时可以结束"，而模型被告知
+ * "每轮检查是否满足" —— 于是它会在第一轮就把团收掉，且没有任何报错。
+ *
+ * ⚠️ **不校验 trigger 里的旗标存不存在**：旗标是 DM 运行时起的（`campaign action=flag`），
+ * 模组里没写不代表错。所以这里不查"引用了结构里没有的旗标"（与 `verifyActs` 查场景名不同：
+ * 场景名是剧本内的结构，旗标是运行期的事实）。
+ *
+ * **导出只为单测**（同 `verifyActs`）。
+ */
+export function verifyEndings(struct: ScenarioStruct): void {
+  if (!struct.endings.length) return;
+  for (const ending of struct.endings) {
+    if (ending.trigger) continue;
+    struct.warnings.push(
+      `结局「${ending.name}」没有触发条件 —— 它随时可以被宣布，模型可能第一轮就把团收掉`
+    );
+  }
 }
 
 /** 归并结果给 L3 看的那一份：**不含 `warnings`**（那是我们的账，不是给模型看的资料）。 */
@@ -322,6 +415,14 @@ export async function extractScenario(
       maxItems: MAX_STRUCT_ITEMS,
       maxTextChars: MAX_STRUCT_TEXT_CHARS,
       maxQuoteChars: MAX_STRUCT_QUOTE_CHARS,
+      maxActs: MAX_ACTS,
+      maxActScenes: MAX_ACT_SCENES,
+      maxActGoalChars: MAX_ACT_GOAL_CHARS,
+      maxActKeeperChars: MAX_ACT_KEEPER_CHARS,
+      maxEndings: MAX_ENDINGS,
+      maxEndingReadAloudChars: MAX_ENDING_READ_ALOUD_CHARS,
+      maxEndingRewardsChars: MAX_ENDING_REWARDS_CHARS,
+      maxEndingKeeperChars: MAX_ENDING_KEEPER_CHARS,
       mechanicTypes: MECHANIC_TYPES,
       // 另外两张清单也递进去：提示词念的与 `compileRuleSet` 认的必须是同一份（见 `ChunkPayload`）。
       triggerOps: TRIGGER_OPS,
@@ -394,6 +495,8 @@ export async function extractScenario(
 
   // ── L4：校验（在正文过关之后做，于是待核项一定跟着一份可用的文件一起交出去）──
   verifyQuotes(struct, String(text ?? ''));
+  verifyActs(struct);
+  verifyEndings(struct);
   const ruleExt = verifyMechanics(struct);
 
   return {

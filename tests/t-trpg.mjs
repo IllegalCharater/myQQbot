@@ -3152,6 +3152,527 @@ const status = (key) => store.read(key);
     plain978.isError !== true && !body(plain978).includes('这一场景下生效的规则'), body(plain978));
 }
 
+// ── 5s. 分幕（P8）：开局落在哪一幕、换场景怎么推进、两份渲染各印什么 ─────────────
+//
+// 三条判据各自"错了也不报错"：开局算错 → 整局停在第 1 幕；推进算错 → 永远不换幕
+// （群里只觉得"分幕好像没做"）；渲染算错 → keeperNotes 直接漏给玩家。所以每条都要钉。
+{
+  const rt = createRuntime();
+  const store = new TrpgStore();
+  const scenarios = new ScenarioStore();
+  const cmds = rt.commandHandlers;
+  const call = (name, key, args) => rt.handlers[name](fakeCtx(key), args);
+  const camp = (key) => store.read(key);
+  const KEY = 'group:acts';
+
+  const structWith = (acts) => ({
+    summary: '',
+    scenes: [{ name: '码头', summary: '', npcs: [], clues: [] },
+      { name: '灯塔', summary: '', npcs: [], clues: [] }],
+    npcs: [], clues: [], items: [], mechanics: [], warnings: [], acts
+  });
+  const ACTS = [
+    { id: 'a1', name: '抵达', order: 1, goal: '把玩家送进灯塔', keeperNotes: '守夜人其实是凶手',
+      entryCondition: null, exitCondition: { op: 'flag', key: '已入塔', value: '是' },
+      scenes: ['码头'], visible: true },
+    { id: 'a2', name: '对峙', order: 2, goal: '让玩家认出守夜人', keeperNotes: '他真的在撒谎',
+      entryCondition: { op: 'flag', key: '已入塔', value: '是' }, exitCondition: null,
+      scenes: ['灯塔'], visible: true },
+    { id: 'a3', name: '真相', order: 3, goal: '', keeperNotes: '钥匙在灯芯里',
+      entryCondition: null, exitCondition: null, scenes: [], visible: false }
+  ];
+  scenarios.write('分幕团', '---\ntitle: 分幕团\n---\n正文。');
+  scenarios.writeExtras('分幕团', { struct: structWith(ACTS) });
+
+  await call('campaign', KEY, { action: 'start', scenario: '分幕团' });
+  ok('开局：有 acts 时 `currentAct` = 第一幕',
+    camp(KEY)?.currentAct === 'a1', String(camp(KEY)?.currentAct));
+
+  const SKEY = 'group:acts-scene';
+  await call('campaign', SKEY, { action: 'start', scenario: '分幕团', scene: '灯塔' });
+  ok('开局时场景属于第 2 幕 → 从第 2 幕起（不是死板地永远第一幕）',
+    camp(SKEY)?.currentAct === 'a2', String(camp(SKEY)?.currentAct));
+
+  const NKEY = 'group:acts-none';
+  scenarios.write('无幕团', '---\ntitle: 无幕团\n---\n正文。');
+  await call('campaign', NKEY, { action: 'start', scenario: '无幕团' });
+  ok('没有 acts 的剧本 → `currentAct` 是空串（单幕模式，不报错）',
+    camp(NKEY)?.currentAct === '', JSON.stringify(camp(NKEY)?.currentAct));
+
+  // ── DM 那份（模型的状态段）──
+  const dm = rt.prompt(KEY).body[2];
+  ok('DM 状态段有阶段块：第几幕 / 幕名 / 目标 / 完成条件 / 下一幕',
+    /—— 阶段（第 1 幕 \/ 共 3 幕）——/.test(dm) && /本幕：抵达/.test(dm)
+    && /目标：把玩家送进灯塔/.test(dm) && /完成条件：旗标：已入塔 = 是/.test(dm)
+    && /下一幕：对峙/.test(dm), dm.slice(0, 700));
+  ok('DM 状态段带**本幕**的 keeperNotes（幕后信息只给 DM）',
+    /幕后：守夜人其实是凶手/.test(dm), dm.slice(0, 700));
+  ok('下一幕**只给名字**，不给它的 keeperNotes（说多了模型会提前演）',
+    !/他真的在撒谎/.test(dm), dm.slice(0, 700));
+
+  // ── 玩家那份 ──
+  const pv = renderForPlayers(camp(KEY));
+  ok('玩家视角：阶段 第 1 幕 / 共 2 幕（**只数可见幕**，暗线幕不进分母）',
+    /阶段：第 1 幕 \/ 共 2 幕/.test(pv), pv.slice(0, 300));
+  ok('玩家视角**不含** keeperNotes 与目标',
+    !/守夜人其实是凶手/.test(pv) && !/把玩家送进灯塔/.test(pv), pv.slice(0, 400));
+
+  // ── 自动推进 ──
+  const toLighthouse = await call('campaign', KEY, { action: 'scene', scene: '灯塔' });
+  ok('换到第 2 幕的场景 → 自动进入第 2 幕，回执明说（模型不必自己声明换幕）',
+    camp(KEY)?.currentAct === 'a2' && /进入第 2 幕：对峙/.test(body(toLighthouse)), body(toLighthouse));
+  await call('campaign', KEY, { action: 'scene', scene: '走廊' });
+  ok('未知场景**保持当前幕**（DM 随手写过场不该把进度打回去）',
+    camp(KEY)?.currentAct === 'a2', String(camp(KEY)?.currentAct));
+  await call('campaign', KEY, { action: 'scene', scene: '码头' });
+  ok('场景命中优先：回到第 1 幕的场景就切回第 1 幕',
+    camp(KEY)?.currentAct === 'a1', String(camp(KEY)?.currentAct));
+
+  const EKEY = 'group:acts-exit';
+  await call('campaign', EKEY, { action: 'start', scenario: '分幕团' });
+  await call('campaign', EKEY, { action: 'flag', flags: { 已入塔: '是' } });
+  const exitStep = await call('campaign', EKEY, { action: 'scene', scene: '过渡场景' });
+  ok('场景没命中、但当前幕的 `exitCondition` 成立 → 进入下一幕（不靠场景名）',
+    camp(EKEY)?.currentAct === 'a2' && /进入第 2 幕/.test(body(exitStep)), body(exitStep));
+
+  // ── 暗线幕：玩家整段不出现，DM 那份照常且带标记 ──
+  const hidden = camp(KEY);
+  hidden.currentAct = 'a3';
+  store.write(hidden);
+  ok('当前幕是暗线幕：玩家视角**整段不出现**（连"第几幕"都不印）',
+    !/阶段：/.test(renderForPlayers(camp(KEY))), renderForPlayers(camp(KEY)).slice(0, 300));
+  ok('对照：DM 那份照常显示并标 [暗线幕]',
+    /\[暗线幕\]/.test(rt.prompt(KEY).body[2]), rt.prompt(KEY).body[2].slice(0, 700));
+
+  // ── 没有 acts / 没有剧本 ──
+  ok('没有 acts 的剧本：DM 那份印一句「本模组未分幕」',
+    /本模组未分幕/.test(rt.prompt(NKEY).body[2]), rt.prompt(NKEY).body[2].slice(0, 500));
+  ok('玩家那份**不印**那句（那是 DM 的信息）',
+    !/本模组未分幕/.test(renderForPlayers(camp(NKEY))));
+  const BKEY = 'group:acts-sandbox';
+  await call('campaign', BKEY, { action: 'start', title: '沙盒' });
+  ok('没有注入剧本的沙盒团：阶段段**整段不出现**（每轮一行"未分幕"只是噪音）',
+    !/—— 阶段/.test(rt.prompt(BKEY).body[2]), rt.prompt(BKEY).body[2].slice(0, 400));
+
+  // ── `.trpg check` 的管理员表面 ──
+  const checked = String(await cmds['.trpg check']({
+    chatKey: KEY, senderId: '1', text: '.trpg check 分幕团', media: [], replyToMessageId: null
+  }));
+  ok('`.trpg check` 列出幕名 / 序号 / 场景 / 完成条件',
+    /第 1 幕「抵达」/.test(checked) && /完成条件：旗标：已入塔 = 是/.test(checked), checked);
+  ok('`.trpg check` **不印** goal 与 keeperNotes（这条命令在群里敲）',
+    !checked.includes('把玩家送进灯塔') && !checked.includes('守夜人其实是凶手'), checked);
+
+  // ── 迁移与源级 ──
+  ok('旧存档没有 `currentAct` → 读成空串（单幕模式，不报错）',
+    normalizeCampaign({ title: '旧' }, 'group:legacy')?.currentAct === '');
+  const playerSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/extra/trpg/render/players.ts'), 'utf8'));
+  const cmdSrc = ['commands/verify.ts', 'commands/session.ts', 'commands/mode.ts', 'commands/combat.ts',
+    'commands/check.ts', 'commands/scenario.ts', 'commands/log.ts', 'commands/character.ts']
+    .map((rel) => stripComments(fs.readFileSync(path.join(ROOT, 'src/extra/trpg', rel), 'utf8'))).join('\n');
+  ok('源级：玩家可见的落点（`render/players.ts` + `commands/`）里一次都不提 keeperNotes',
+    !/keeperNotes/.test(playerSrc) && !/keeperNotes/.test(cmdSrc));
+}
+
+// ── 5t. 推进保证（P8-b）：计数、阈值、冷却、提示正文、切幕、onRunEnd 接线 ────────
+//
+// 这一段的判据分三层，缺一层就有东西看不见：
+//   ① **纯逻辑**（`model/advance.ts`）：计数与 `dirty`、阈值覆盖、冷却、正文；
+//   ② **接线**（`onRunEnd`）：超阈值落一条、冷却中不落、换指标立即落、与建议互斥；
+//   ③ **命令**（`action=advance`）：条件校验与"还差什么"。
+{
+  const { ADVANCE_HINT_COOLDOWN, ADVANCE_THRESHOLDS } = await load('extra/trpg/model/limits.js');
+  const {
+    advanceHintText, advanceTo, hintAllowed, markHinted, pickHint, resetAdvance,
+    stageAdvanceMode, stageHintText, thresholdsOf, tickAdvancement
+  } = await load('extra/trpg/model/advance.js');
+  const { actsOf, nextAct } = await load('extra/trpg/scenario/acts.js');
+  const { compileRuleSet } = await load('extra/trpg/rules/rule-set.js');
+  const { ChatStore } = await load('chat/store.js');
+  const { buildPastState } = await load('agent/prompting/prompt-builder.js');
+
+  const bare = () => emptyCampaign('group:adv', { title: 't', system: '', rule: 'generic' });
+  const ctxOf = (over = {}) => ({ scene: '', flags: {}, actor: '', skill: '', ...over });
+  const withActs = () => {
+    const camp = bare();
+    camp.scenario = {
+      id: 'x', body: '',
+      struct: { scenes: [], acts: [
+        { id: 'a1', name: '抵达', order: 1, goal: '把玩家送进灯塔', keeperNotes: '守夜人其实是凶手',
+          exitCondition: { op: 'flag', key: '已入塔', value: '是' }, scenes: ['码头'], visible: true },
+        { id: 'a2', name: '对峙', order: 2, scenes: ['灯塔'], visible: true }
+      ] }
+    };
+    camp.currentAct = 'a1';
+    return camp;
+  };
+
+  // ── ① 纯逻辑 ──
+  const c = bare();
+  tickAdvancement(c);
+  ok('一轮收尾：三个指标一起 +1',
+    c.advancement.scene === 1 && c.advancement.flag === 1 && c.advancement.act === 1);
+  resetAdvance(c, 'scene');
+  ok('变更点：计数归零并置 `dirty`（否则本轮的收尾会把它记成 1）',
+    c.advancement.scene === 0 && c.advancement.dirty?.scene === true);
+  tickAdvancement(c);
+  ok('变更那一轮收尾后仍然是 **0** —— 这就是 `dirty` 的全部意义',
+    c.advancement.scene === 0 && c.advancement.flag === 2 && c.advancement.act === 2
+    && c.advancement.dirty === undefined, JSON.stringify(c.advancement));
+
+  ok('默认阈值 8 / 12 / 20，按指标独立',
+    thresholdsOf(null).scene === ADVANCE_THRESHOLDS.scene
+    && thresholdsOf(null).flag === 12 && thresholdsOf(null).act === 20);
+
+  const overridden = compileRuleSet({ version: 1, mechanics: [
+    { type: 'advancement_threshold', advance: { metric: 'scene', turns: 3 } }
+  ] });
+  ok('规则扩展可以覆盖某个指标的阈值（其余仍取默认）',
+    overridden.ok && thresholdsOf(overridden.set).scene === 3 && thresholdsOf(overridden.set).flag === 12,
+    JSON.stringify(overridden));
+
+  const h = bare();
+  h.advancement.scene = 7;
+  ok('低于阈值 → 不提示', pickHint(h, null) === null);
+  h.advancement.scene = 8;
+  ok('到阈值 → 提示，并说出是哪个指标、几轮',
+    pickHint(h, null)?.metric === 'scene' && pickHint(h, null)?.turns === 8);
+  markHinted(h, 'scene');
+  ok('冷却：刚提示过，同一指标 +2 轮内不再提示',
+    pickHint(h, null) === null && !hintAllowed(h, 'scene'));
+  h.advancement.flag = 12;
+  ok('**换指标可以立即落**（冷却按指标分开记）', pickHint(h, null)?.metric === 'flag');
+  h.advancement.scene = 8 + ADVANCE_HINT_COOLDOWN;
+  ok('同一指标再过 ' + ADVANCE_HINT_COOLDOWN + ' 轮才允许再提示',
+    hintAllowed(h, 'scene') && pickHint(h, null)?.metric === 'scene');
+
+  const text = advanceHintText(withActs(), { metric: 'scene', turns: 9, threshold: 8 }, ctxOf());
+  ok('提示正文说清：第几幕、几轮没变化、本幕目标、完成条件与是否满足',
+    text.includes('第 1 幕「抵达」') && text.includes('已连续 9 轮没有场景变化')
+    && text.includes('本幕目标：把玩家送进灯塔') && text.includes('未满足')
+    && text.includes('不是命令'), text);
+  ok('提示正文**不含** keeperNotes（幕后信息不进任何可能被念出来的文本）',
+    !text.includes('守夜人其实是凶手'), text);
+  ok('完成条件满足时说"已满足"',
+    advanceHintText(withActs(), { metric: 'flag', turns: 13, threshold: 12 }, ctxOf({ flags: { 已入塔: '是' } }))
+      .includes('已满足'));
+  ok('没有分幕时只说"没有分幕"那一句（沙盒团同样会打转）',
+    advanceHintText(bare(), { metric: 'scene', turns: 9, threshold: 8 }, ctxOf())
+      .startsWith('当前没有分幕'));
+
+  ok('`stage_advance` 没声明时返回 null（P8-a 的行为不变）', stageAdvanceMode(null) === null);
+  ok('缺省是 hint',
+    stageAdvanceMode(compileRuleSet({ version: 1, mechanics: [{ type: 'stage_advance' }] }).set) === 'hint');
+  ok('显式 auto 才是 auto',
+    stageAdvanceMode(compileRuleSet({
+      version: 1, mechanics: [{ type: 'stage_advance', advance: { mode: 'auto' } }]
+    }).set) === 'auto');
+
+  const stageText = stageHintText(withActs(), ctxOf({ 已入塔: '是' }));
+  ok('"完成条件已满足"的提示说出下一幕名字，但**不替 DM 切幕**',
+    stageText.includes('已经满足') && stageText.includes('下一幕是「对峙」')
+    && stageText.includes('由你决定'), stageText);
+
+  const moved = withActs();
+  advanceTo(moved, nextAct(actsOf(moved.scenario.struct), 'a1'));
+  ok('`advanceTo`：改 currentAct、把 act 计数归零、落一条 `[state]` 日志',
+    moved.currentAct === 'a2' && moved.advancement.act === 0
+    && moved.log.some((entry) => entry.kind === 'state' && entry.text.includes('推进到第 2 幕')),
+    JSON.stringify(moved.log));
+
+  // ── ② onRunEnd 接线 ──
+  const notes = [];
+  const rt2 = createRuntime({ deliverNote: (key, note) => notes.push({ key, ...note }) });
+  const scenarios2 = new ScenarioStore();
+  const md = (title) => ['---', 'title: ' + title, '---', '正文。'].join(String.fromCharCode(10));
+  scenarios2.write('推进团', md('推进团'));
+  scenarios2.writeExtras('推进团', {
+    struct: {
+      scenes: [{ name: '码头', summary: '', npcs: [], clues: [] },
+        { name: '灯塔', summary: '', npcs: [], clues: [] }],
+      acts: [
+        { id: 'a1', name: '抵达', order: 1, goal: '把玩家送进灯塔', keeperNotes: '幕后一句',
+          exitCondition: { op: 'flag', key: '已入塔', value: '是' }, scenes: ['码头'], visible: true },
+        { id: 'a2', name: '对峙', order: 2, scenes: ['灯塔'], visible: true }
+      ]
+    }
+  });
+  const R = 'group:adv-run';
+  await rt2.handlers.campaign(fakeCtx(R), { action: 'start', scenario: '推进团', scene: '码头' });
+  const human = [{ kind: undefined, text: '我推开门' }];
+  const runEnd = (status = 'done', trigger = human, key = R) =>
+    rt2.onRunEnd({ chatKey: key, status, sentCount: 1, trigger });
+  const readR = () => new TrpgStore().read(R);
+  const setMetric = (metric, value, key = R) => {
+    const camp = new TrpgStore().read(key);
+    camp.advancement[metric] = value;
+    new TrpgStore().write(camp);
+  };
+
+  setMetric('scene', 8);
+  notes.length = 0;
+  await runEnd();
+  ok('超阈值 → 落一条【推进提示】（`kind: advance`），正文说清几轮没变化',
+    notes.length === 1 && notes[0].kind === 'advance' && notes[0].text.includes('已连续 9 轮没有场景变化'),
+    JSON.stringify(notes));
+
+  notes.length = 0;
+  await runEnd();
+  ok('冷却中 → 不落（`hinted` 落盘，重启也记得）', notes.length === 0, JSON.stringify(notes));
+
+  setMetric('flag', 12);
+  notes.length = 0;
+  await runEnd();
+  ok('**换指标立即落**', notes.length === 1 && notes[0].text.includes('剧情旗标'), JSON.stringify(notes));
+
+  const beforeSkip = readR().advancement.scene;
+  notes.length = 0;
+  await runEnd('done', [{ kind: 'trpg-note', text: '机器条目' }]);
+  ok('**非真人推动的运行不计轮、也不落提示**（否则提示自己喂大自己）',
+    notes.length === 0 && readR().advancement.scene === beforeSkip, String(readR().advancement.scene));
+
+  const beforeError = readR().advancement.scene;
+  await runEnd('error');
+  ok('报错的那一轮不计数（没有推进可言）', readR().advancement.scene === beforeError);
+
+  notes.length = 0;
+  await runEnd('noreply');
+  ok('沉默的那一轮**只落建议**（这里模型调不通所以一条都没有），不落推进提示',
+    notes.every((note) => note.kind !== 'advance'), JSON.stringify(notes));
+
+  // ── ③ `campaign action=advance` ──
+  const C = 'group:adv-cmd';
+  await rt2.handlers.campaign(fakeCtx(C), { action: 'start', scenario: '推进团' });
+  const denied = await rt2.handlers.campaign(fakeCtx(C), { action: 'advance' });
+  ok('条件不满足 → 拒绝，并**逐条说出还差什么**',
+    denied.isError === true && /还差/.test(body(denied)) && /旗标「已入塔」/.test(body(denied)), body(denied));
+  await rt2.handlers.campaign(fakeCtx(C), { action: 'flag', flags: { 已入塔: '是' } });
+  const advanced = await rt2.handlers.campaign(fakeCtx(C), { action: 'advance' });
+  ok('条件满足 → 推进到下一幕，回执点名新幕',
+    advanced.isError !== true && /已推进到第 2 幕「对峙」/.test(body(advanced))
+    && new TrpgStore().read(C)?.currentAct === 'a2', body(advanced));
+  const lastOne = await rt2.handlers.campaign(fakeCtx(C), { action: 'advance' });
+  ok('已经是最后一幕 → 拒绝并说清',
+    lastOne.isError === true && /最后一幕/.test(body(lastOne)), body(lastOne));
+
+  const N = 'group:adv-none';
+  scenarios2.write('无幕团2', md('无幕团2'));
+  await rt2.handlers.campaign(fakeCtx(N), { action: 'start', scenario: '无幕团2' });
+  const none = await rt2.handlers.campaign(fakeCtx(N), { action: 'advance' });
+  ok('没有分幕 → 拒绝并让人直接叙事', none.isError === true && /没有分幕/.test(body(none)), body(none));
+
+  // ── ④ stage_advance 的两个档 ──
+  const stageStruct = {
+    scenes: [{ name: '码头', summary: '', npcs: [], clues: [] }],
+    acts: [
+      { id: 'a1', name: '抵达', order: 1, exitCondition: { op: 'flag', key: '已入塔', value: '是' },
+        scenes: ['码头'], visible: true },
+      { id: 'a2', name: '对峙', order: 2, scenes: ['码头'], visible: true }
+    ]
+  };
+  const AUTO = 'group:adv-auto';
+  scenarios2.write('自动幕', md('自动幕'));
+  scenarios2.writeExtras('自动幕', {
+    struct: stageStruct,
+    ruleExt: { version: 1, mechanics: [{ type: 'stage_advance', advance: { mode: 'auto' } }] }
+  });
+  await rt2.handlers.campaign(fakeCtx(AUTO), { action: 'start', scenario: '自动幕' });
+  await rt2.handlers.campaign(fakeCtx(AUTO), { action: 'flag', flags: { 已入塔: '是' } });
+  notes.length = 0;
+  await runEnd('done', human, AUTO);
+  const autoCamp = new TrpgStore().read(AUTO);
+  ok('`stage_advance auto`：收尾时**自动**切到下一幕并落一条日志',
+    autoCamp?.currentAct === 'a2'
+    && autoCamp.log.some((entry) => entry.text.includes('推进到第 2 幕')),
+    JSON.stringify(autoCamp?.log.slice(-2)));
+
+  const HINT = 'group:adv-hint';
+  scenarios2.write('提示幕', md('提示幕'));
+  scenarios2.writeExtras('提示幕', {
+    struct: stageStruct,
+    ruleExt: { version: 1, mechanics: [{ type: 'stage_advance', advance: { mode: 'hint' } }] }
+  });
+  await rt2.handlers.campaign(fakeCtx(HINT), { action: 'start', scenario: '提示幕' });
+  await rt2.handlers.campaign(fakeCtx(HINT), { action: 'flag', flags: { 已入塔: '是' } });
+  notes.length = 0;
+  await runEnd('done', human, HINT);
+  ok('`stage_advance hint`（缺省）：**只落提示、不切幕**',
+    new TrpgStore().read(HINT)?.currentAct === 'a1'
+    && notes.length === 1 && notes[0].text.includes('已经满足'), JSON.stringify(notes));
+
+  // ── ⑤ 标签与人格段 ──
+  const chat = new ChatStore();
+  chat.appendTrpgNote('group:adv-note', { noteKind: 'advance', text: '事实一句' });
+  const past = buildPastState(chat, 'group:adv-note', { limit: 10 });
+  ok('`formatEntry` 把 `advance` 子类型印成【推进提示】（与【行动建议】分开）',
+    past.text.includes('【推进提示】'), past.text);
+  const stored = chat.recent('group:adv-note', { limit: 1 })[0];
+  ok('`appendTrpgNote` 的 senderName 也按子类型分（面板与摘要里看得见）',
+    stored?.senderName === '推进提示', String(stored?.senderName));
+  const persona = rt2.prompt('group:adv-persona').body[0];
+  ok('人格段把三种回流标签分开说（压成一个模型就分不出该做什么）',
+    ['【跑团笔记】', '【行动建议】', '【推进提示】'].every((label) => persona.includes(label)),
+    persona.slice(-400));
+
+  // ── ⑥ 源级：变更点与配额 ──
+  const campSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/extra/trpg/tools/campaign.ts'), 'utf8'));
+  ok('源级：四个变更点都走 `resetAdvance`，没人手写 `advancement.x = 0`（漏了 `dirty` 只会让提示晚一轮）',
+    (campSrc.match(/resetAdvance\(campaign, 'scene'\)/g) ?? []).length === 1
+    && (campSrc.match(/resetAdvance\(campaign, 'flag'\)/g) ?? []).length === 2
+    && (campSrc.match(/resetAdvance\(campaign, 'act'\)/g) ?? []).length === 1
+    && !/advancement\.\w+ = 0/.test(campSrc));
+  ok('源级：`action=advance` 不占主行动配额（quota: false，同 combat）',
+    /tool: 'campaign:advance'[\s\S]{0,160}?quota: false/.test(campSrc));
+}
+
+// ── 5u. 模型判定收团（P8-c）：结局校验、两种收团路径、战报与删除时机 ──────────
+//
+// 四条判据各自"错了也不报错"：未知 endingId 被放行 → 模型念一个不存在的结局；摘要里的
+// 结局段来自模型的话 → 幻觉进了"代码算的"那一段；人敲与模型收团形状一样 → 两种语义混成
+// 一种；存档删早了 → 模型这一轮念不完结局。
+{
+  const rt = createRuntime({ deliverNote: () => {} });
+  const scenarios = new ScenarioStore();
+  const md = (title) => ['---', 'title: ' + title, '---', '正文。'].join(String.fromCharCode(10));
+  const call = (name, key, args) => rt.handlers[name](fakeCtx(key), args);
+  const camp = (key) => new TrpgStore().read(key);
+  const journal = new JournalStore();
+  const cmds = rt.commandHandlers;
+  // 键是 `<命令> <子命令>`（带空格），所以要取前两个词 —— 只取第一个会落到裸 `.trpg` 上。
+  const say = (key, text) => {
+    const words = text.split(' ');
+    const handler = cmds[`${words[0]} ${words[1] ?? ''}`] ?? cmds[words[0]];
+    return handler({ chatKey: key, senderId: '1', text, media: [], replyToMessageId: null });
+  };
+
+  scenarios.write('结局团', md('结局团'));
+  scenarios.writeExtras('结局团', {
+    struct: {
+      scenes: [{ name: '码头', summary: '', npcs: [], clues: [] }],
+      endings: [
+        { id: 'e1', name: '远行', trigger: { op: 'flag', key: '灯塔熄灭', value: '是' },
+          readAloud: '天亮时你们把灯重新点着了。', rewards: 'SAN +1D6',
+          keeperNotes: '守塔人没有跟着离开' },
+        { id: 'e2', name: '留守', trigger: { op: 'flag', key: '留下', value: '是' },
+          readAloud: '你们决定留在灯塔。', rewards: '' }
+      ]
+    }
+  });
+  scenarios.write('无结局团', md('无结局团'));
+
+  // ── ① 三种校验 ──
+  const K = 'group:end-main';
+  await call('campaign', K, { action: 'start', scenario: '结局团' });
+  const unknown = await call('campaign', K, { action: 'end', endingId: '不存在的' });
+  ok('未知 endingId → **拒绝**并列出真实的结局（硬约束：不许幻觉出剧本没有的结局）',
+    unknown.isError === true && /没有叫「不存在的」的结局/.test(body(unknown))
+    && /远行/.test(body(unknown)) && /留守/.test(body(unknown)), body(unknown));
+  const unmet = await call('campaign', K, { action: 'end', endingId: '远行' });
+  ok('触发条件不满足 → 拒绝，并**逐条**说清还差什么',
+    unmet.isError === true && /还差/.test(body(unmet)) && /灯塔熄灭/.test(body(unmet)), body(unmet));
+  const noReason = await call('campaign', K, { action: 'end' });
+  ok('既没 endingId 也没 reason → 拒绝并说清两条路',
+    noReason.isError === true && /endingId/.test(body(noReason)) && /reason/.test(body(noReason)),
+    body(noReason));
+
+  // 把触发旗标设成**暗线**：收团后它不该再出现在"没解开的事"里（那一条显然已经解开了）。
+  await call('campaign', K, { action: 'flag', flags: { 灯塔熄灭: '是' }, visible: false });
+  const ended = await call('campaign', K, { action: 'end', endingId: '远行' });
+  ok('条件满足 → 收团；首句带「（结局：远行）」',
+    ended.isError !== true && /（结局：远行）/.test(body(ended)), body(ended));
+  ok('摘要里有一行「结局：远行（SAN +1D6）」—— 这一段**来自代码**（剧本快照），不是模型的话',
+    /结局：远行（SAN \+1D6）/.test(body(ended)), body(ended));
+  ok('回执把**宣读文本**给模型（它只在收团这一刻需要）',
+    /天亮时你们把灯重新点着了/.test(body(ended)), body(ended));
+  ok('回执**不给** keeperNotes（结局已经结束，再给只会诱使模型多说）',
+    !/守塔人没有跟着离开/.test(body(ended)), body(ended));
+  ok('"没解开的事"**排除结局 trigger 点到的旗标**（它显然已经解开了）',
+    !/没解开的事/.test(body(ended)), body(ended));
+  ok('`campaign.ended` 标记写下了（endingId + reason + 时间）',
+    camp(K)?.ended?.endingId === 'e1' && typeof camp(K)?.ended?.at === 'number',
+    JSON.stringify(camp(K)?.ended));
+
+  // ── ② 战报与删除时机 ──
+  ok('这一刻存档**还在**（删除发生在这一轮的收尾，好让模型把结局讲完）', camp(K) !== null);
+  ok('战报里已经有 [结局] 那一条，且是最后一条',
+    (() => {
+      const entries = journal.read(K).filter((entry) => entry.visible !== false);
+      const last = entries[entries.length - 1];
+      return last?.kind === 'ending' && last.text === '结局：远行';
+    })(), JSON.stringify(journal.read(K).slice(-2)));
+  await rt.onRunEnd({ chatKey: K, status: 'done', sentCount: 1, trigger: [{ kind: undefined, text: 'x' }] });
+  ok('收尾之后存档**真的没了**（工具里删会被 `withCampaign` 的写回复活）', camp(K) === null);
+  ok('战报**留着**（收团不清战报）',
+    journal.read(K).some((entry) => entry.kind === 'ending'));
+
+  // ── ③ 自由结局 ──
+  const F = 'group:end-free';
+  await call('campaign', F, { action: 'start', scenario: '结局团' });
+  const free = await call('campaign', F, { action: 'end', reason: '朋友们各自散了' });
+  ok('给了 reason、没给 endingId → 自由结局；首句是「（自由结局）」',
+    free.isError !== true && /（自由结局）/.test(body(free)), body(free));
+  ok('摘要里那一段写的是 reason，并标「（自由结局）」',
+    /结局：朋友们各自散了（自由结局）/.test(body(free)), body(free));
+  ok('自由结局也进战报（战报要知道这一局为什么结束）',
+    journal.read(F).some((entry) => entry.kind === 'ending' && entry.text.includes('朋友们各自散了')));
+
+  const Z = 'group:end-noendings';
+  await call('campaign', Z, { action: 'start', scenario: '无结局团' });
+  const noEndings = await call('campaign', Z, { action: 'end', reason: '演不下去了' });
+  ok('剧本**没有 endings** 时 `action=end` 仍可用，回执明说"本剧本没有预定义结局"',
+    noEndings.isError !== true && /没有预定义结局/.test(body(noEndings)), body(noEndings));
+
+  // ── ④ 人敲的 `.trpg end`（强制收团）──
+  const H = 'group:end-human';
+  await call('campaign', H, { action: 'start', scenario: '结局团' });
+  const human = String(await say(H, '.trpg end'));
+  ok('人敲的 `.trpg end`：剧本有 endings 时**末尾多一句**「这是强制收团」',
+    /这是强制收团/.test(human), human);
+  ok('而且**没有**结局段（那一段只属于模型触发）',
+    !/结局：远行/.test(human) && !/（结局：/.test(human), human);
+  ok('人敲的路径**不落** `[结局]` 条目',
+    !journal.read(H).some((entry) => entry.kind === 'ending'), JSON.stringify(journal.read(H).map((e) => e.kind)));
+  ok('人敲的路径**立刻**删存档', camp(H) === null);
+
+  const H2 = 'group:end-human2';
+  await call('campaign', H2, { action: 'start', scenario: '无结局团' });
+  const human2 = String(await say(H2, '.trpg end'));
+  ok('剧本没有 endings 时，人敲的回执**逐字不变**（不多那句话）',
+    !/强制收团/.test(human2), human2);
+
+  // ── ⑤ 进程中断留下的 ended 存档可以被新开局覆盖 ──
+  const L = 'group:end-leftover';
+  await call('campaign', L, { action: 'start', scenario: '结局团' });
+  await call('campaign', L, { action: 'end', reason: '中断前那一次' });
+  ok('夹具：那个会话此刻是"已收团但没删"的状态', camp(L)?.ended !== undefined);
+  const fresh = await call('campaign', L, { action: 'start', title: '换个新团' });
+  ok('**ended 的存档当成没有**：新开局能覆盖（否则这个会话永远开不了新团）',
+    fresh.isError !== true && camp(L)?.title === '换个新团' && camp(L)?.ended === undefined,
+    body(fresh));
+
+  // ── ⑥ 提示词 ──
+  const P = 'group:end-prompt';
+  await call('campaign', P, { action: 'start', scenario: '结局团' });
+  const briefing = rt.prompt(P).body[1];
+  ok('briefing 里有结局清单（名字 + 触发 + 奖励）—— 模型要靠它"每轮检查"',
+    /本剧本的结局/.test(briefing) && /远行 —— 旗标：灯塔熄灭 = 是（SAN \+1D6）/.test(briefing),
+    briefing.slice(-400));
+  ok('briefing **不含**宣读文本与幕后信息（前者只在收团回执里出现一次）',
+    !/天亮时你们把灯重新点着了/.test(briefing) && !/守塔人没有跟着离开/.test(briefing));
+  const persona = rt.prompt(P).body[0];
+  ok('人格段有「什么时候该收团」，且明说"不确定时不要强行宣布"',
+    /【什么时候该收团】/.test(persona) && /不确定的时候不要强行宣布/.test(persona),
+    persona.slice(-500));
+
+  // ── ⑦ 源级：两条路径不混 ──
+  const sessSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/extra/trpg/model/session.ts'), 'utf8'));
+  ok('源级：人敲的收团路径**不写** `[结局]` 日志（那一条只属于模型触发）',
+    !/appendLog\([^)]*'ending'/.test(sessSrc));
+  const toolSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src/extra/trpg/tools/campaign.ts'), 'utf8'));
+  ok('源级：`action=end` 不占主行动配额（quota: false，同 combat/advance）',
+    /tool: 'campaign:end'[\s\S]{0,160}?quota: false/.test(toolSrc));
+}
+
 // ── 6. 注册表接点与 `onRunEnd` ──────────────────────────────────────────────
 {
   const entry = EXTRA_REGISTRY.find((item) => item.id === 'trpg');

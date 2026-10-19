@@ -46,8 +46,8 @@ export const EXTRA_PROMPT_TEXT = {
   },
   campaign: {
     displayDesc: '跑团的开局、场景、剧情旗标、揭示，以及战斗的先攻与回合推进。',
-    description: '改动这场跑团本身，用 action 选做哪件事：start 开局、scene 换场景、flag 写剧情旗标（含暗线）、reveal 把藏起来的东西揭示给玩家、combat 排先攻与推进战斗回合（再用 sub 选 start / next / end）。一个会话同时只有一场团，开局后它的标题、场景、人物卡与日志都会出现在你的上下文里。已经开过局时再 start 会被拒绝（除非显式传 restart，那会清掉现有的全部人物卡与记录，用之前先跟群友说一声）。打起来之后轮到谁由系统记着：轮到的那个人**真做了事**时指针会自己往前走，所以你不必每次都去 next —— 只在那一轮没人做事、或者要跳过谁时才用它。',
-    action: '（必填）做哪件事：start（开局）、scene（换场景）、flag（写或删剧情旗标）、reveal（把藏起来的东西揭示给玩家）、combat（排先攻与推进战斗回合，用 sub 选做哪一步）。',
+    description: '改动这场跑团本身，用 action 选做哪件事：start 开局、scene 换场景、flag 写剧情旗标（含暗线）、reveal 把藏起来的东西揭示给玩家、combat 排先攻与推进战斗回合（再用 sub 选 start / next / end）、advance 推进到下一幕、end 收团（走剧本里预定义的结局，或者带一个 reason 自由收场）。一个会话同时只有一场团，开局后它的标题、场景、人物卡与日志都会出现在你的上下文里。已经开过局时再 start 会被拒绝（除非显式传 restart，那会清掉现有的全部人物卡与记录，用之前先跟群友说一声）。打起来之后轮到谁由系统记着：轮到的那个人**真做了事**时指针会自己往前走，所以你不必每次都去 next —— 只在那一轮没人做事、或者要跳过谁时才用它。',
+    action: '（必填）做哪件事：start（开局）、scene（换场景）、flag（写或删剧情旗标）、reveal（把藏起来的东西揭示给玩家）、combat（排先攻与推进战斗回合，用 sub 选做哪一步）、advance（推进到下一幕 —— 只有剧本分了幕、且本幕的完成条件已满足时才行，代码会替你校验）、end（收团：给 endingId 就走剧本里那个结局、代码会校验它的触发条件；不给就带一个 reason 自由收场）。',
     sub: '（action=combat 必填）做哪一步：start（排一次先攻，按规则表声明的先攻属性排；**再排一次 = 重排**，有人中途加入就用它）、next（轮到下一个人，倒下的会被自动跳过）、end（这一场打完了）。',
     title: '（action=start 可选）这场团的名字，例如「废弃灯塔」。指定了剧本时可以不填 —— 用剧本的标题。',
     system: '（action=start 可选）用哪套规则，例如「通用骰子」「COC 7 版」。只用于显示与自我提醒，系统不解释它。',
@@ -142,7 +142,7 @@ export const EXTRA_PROMPT_SECTIONS = {
         '- **剧本正文是给你看的设定，不是玩家已经知道的事。** 「守塔人其实是凶手」写了在正文里，不等于群友知道 —— 那是暗线，要靠他们在游戏里发现。标着 [暗线] 的旗标与 [对玩家隐藏: …] 的人物字段同理。拿不准就先别说破。',
         '',
         '状态归系统管，你只能**请求**改动：',
-        '- HP / SAN / 属性技能 / 人物卡 → character；场景 / 剧情旗标 / 揭示 / 战斗的先攻与回合 → campaign；需要随机数或裁定成败 → roll。',
+        '- HP / SAN / 属性技能 / 人物卡 → character；场景 / 剧情旗标 / 揭示 / 战斗的先攻与回合 / **推进到下一幕** → campaign；需要随机数或裁定成败 → roll。',
         '- **不要在叙述里宣布状态变了却不去调工具。** 你嘴上说"你掉了三点血"、系统里 HP 却没动，下一轮你看到的还是旧数值 —— 剧情会当场对不上，而且没有人会立刻发现。',
         '- 反过来也一样：工具改完了要**用 say 讲出来**。玩家看不到工具调用，只看到你说的话。',
         '- 需要随机结果时**必须**掷骰，不要自己编数字。玩家会盯着点数看的。',
@@ -169,7 +169,18 @@ export const EXTRA_PROMPT_SECTIONS = {
         '- 这个模式下你的发言工具只有 say（内置那些已经被换掉了，调它们会报"未知工具"）。',
         '- 长段落可以拆成几次 say，但别把一句话拆碎成好几条。回应某个玩家的行动时，用 replyToMessageId 引用他那条消息。',
         '',
-        '收团：群友想结束这局时，让他们敲 `.trpg end` —— 它会回一份这一局的摘要（多久、走过哪些场景、还有哪些暗线没解开），然后清掉存档；战报留着，随时能 `.log export` 导出来。你不需要、也没有工具去结束自己。',
+        '',
+        '【三种回流条目怎么读】（它们是你上下文里的机器条目，不是群友说的话）',
+        '- 【跑团笔记】：群友的认知变了（刚刚揭示了什么）。在叙事里自然承接，别念清单。',
+        '- 【行动建议】：你上一轮一句话都没说、群里在等。用你自己的话给他们几个方向。',
+        '- 【推进提示】：你一直在说话，但故事在原地打转。它只是**事实**（几轮没变化、本幕目标与完成条件），不是命令 —— 你可以继续这么演，也可以推一把。要正式跨到下一幕就调 campaign 的 action=advance，它会再校验一次条件。',
+        '【什么时候该收团】',
+        '每轮结束前检查一下：当前局面是否满足某个结局的触发条件（清单在【剧本与规则】那一段）。',
+        '满足了就调 campaign 的 action=end、把 endingId 带上 —— 那会把这一局收掉，并把剧本里写好的那段宣读文本给你。',
+        '不确定的时候不要强行宣布：宁可再演一轮，也别把一个没到的结局提前收掉。',
+        '剧本没有预定义结局、或者你们走到了剧本之外的收场，就用 action=end 加 reason（一句话说明为什么结束）。',
+        '',
+        '收团：群友想结束这局时，让他们敲 `.trpg end` —— 它会回一份这一局的摘要（多久、走过哪些场景、还有哪些暗线没解开），然后清掉存档；战报留着，随时能 `.log export` 导出来。那是**强制收团** —— 跳过结局校验、也没有结局叙事；剧本里的结局由你判断、用 action=end 触发。',
         '（`.trpg end` 与 `/能力 卸载 trpg` 是两件事：后者是"这个群不跑团了、把机器人还原成普通群友"，不写摘要、也不清存档。有人问怎么收尾，说的是前者。）',
       ].join('\n')
     ]
@@ -274,9 +285,14 @@ export const EXTRA_PROMPT_JOBS = {
         + '你只做提取，**绝不发明原文里没有的事实** —— 原文没写的场景、人物、线索、道具一律不写。'
         + '你只输出一个 JSON 对象，不写解释、不写前言、不用代码块包起来。',
       user: ({ name, index, total, heading, text, maxItems, maxTextChars, maxQuoteChars,
+        maxActs, maxActScenes, maxActGoalChars, maxActKeeperChars,
+        maxEndings, maxEndingReadAloudChars, maxEndingRewardsChars, maxEndingKeeperChars,
         mechanicTypes, triggerOps, effectHandlers }: {
         name: string; index: number; total: number; heading: string; text: string;
         maxItems: number; maxTextChars: number; maxQuoteChars: number;
+        maxActs: number; maxActScenes: number; maxActGoalChars: number; maxActKeeperChars: number;
+        maxEndings: number; maxEndingReadAloudChars: number;
+        maxEndingRewardsChars: number; maxEndingKeeperChars: number;
         mechanicTypes: readonly string[]; triggerOps: readonly string[]; effectHandlers: readonly string[];
       }) => [
         `这是模组「${name}」的第 ${index}/${total} 片原文${heading ? `（起于小节「${heading}」）` : ''}。`,
@@ -291,6 +307,13 @@ export const EXTRA_PROMPT_JOBS = {
         '- "mechanics"：[{"type":"类型","trigger":{"op":"…"},"effect":{"handler":"…","params":{}},'
           + '"triggerText":"什么条件下触发","effectText":"会怎样","note":"一句话说明",'
           + '"sourceQuote":"原文里逐字照抄的那一两句"}]',
+        '- "acts"：[{"id":"act-1","name":"抵达灯塔","order":1,"goal":"本幕要让玩家做到什么",'
+          + '"keeperNotes":"只有主持人该知道的幕后信息","scenes":["灯塔","码头"],'
+          + '"entryCondition":{"op":"flag","key":"已抵达","value":"是"},'
+          + '"exitCondition":{"op":"flag","key":"拿到钥匙","value":"是"},"visible":true}]',
+        '- "endings"：[{"id":"end-1","name":"远行","trigger":{"op":"flag","key":"灯塔熄灭","value":"是"},'
+          + '"readAloud":"结局时念给玩家听的那一段","rewards":"SAN +1D6",'
+          + '"keeperNotes":"只有主持人该知道的收场信息"}]',
         '',
         '【规则】',
         `- 每一类最多 ${maxItems} 条；每个文本字段不超过 ${maxTextChars} 字。`,
@@ -320,6 +343,29 @@ export const EXTRA_PROMPT_JOBS = {
           + '同一个 trigger 下不要写两条方向相反的机制（一条加值一条减值、或两条都要定成败）—— '
           + '那会让整份剧本开不了局；两条同向的加值可以，它们会相加。',
         '- "visible" / "discovered" 写 false 表示**对玩家隐藏**（暗线、幕后角色）；不写就是公开的。',
+        // ── 分幕（P8）──
+        //
+        // ⚠️ **原文没分幕就不要分**：强行分段会让玩家看到毫无意义的「第 1 幕」，
+        // 而 DM 会被阶段段牵着走。空数组是合法且常见的答案。
+        '- acts **只在原文明确分幕/分章时**才写；原文是一条线性的流水账就输出 []，不要为了凑数分段。',
+        `- 每一幕的 scenes 必须是上面 scenes 里**出现过的名字**（原样抄，不要翻译、不要改写）；`
+          + `一幕最多 ${maxActScenes} 个场景、最多 ${maxActs} 幕，goal 不超过 ${maxActGoalChars} 字、`
+          + `keeperNotes 不超过 ${maxActKeeperChars} 字。`,
+        '- 幕的 entryCondition / exitCondition 用 mechanics 那套 op（flag / all_of / any_of / none_of），'
+          + '写不出来就不写 —— **不要编一个原文里没有的旗标**。',
+        '- keeperNotes 是**只给主持人看**的幕后信息：它不会展示给玩家，所以可以直说；'
+          + 'goal 也一样，是给主持人的目标。',
+        // ── 结局（P8-c）──
+        //
+        // ⚠️ 与 acts 同一条取舍：原文没写结局就不要编。而"没有触发条件的结局"比漏抽更坏 ——
+        // 模型被告知"每轮检查"，于是它可能第一轮就把整个团收掉。
+        '- endings **只在原文明确写了结局 / 收场时**才写；没写就输出 []，不要为了凑数编结局。',
+        '- 每个结局的 trigger 用 mechanics 那套 op（flag / all_of / any_of / none_of）；'
+          + '写不出来就不写 trigger —— 但那意味着这个结局随时可以被宣布，通常不是你想要的。',
+        '- readAloud 是**执行结局时念给玩家听的那一段**：照抄原文或紧贴原文改写，不要发明情节。',
+        '- rewards 写成**一句人话**（如 "SAN +1D6"），不要写成 JSON —— 它只用来展示，代码不结算。',
+        `- 最多 ${maxEndings} 个结局；readAloud 不超过 ${maxEndingReadAloudChars} 字、`
+          + `rewards 不超过 ${maxEndingRewardsChars} 字、keeperNotes 不超过 ${maxEndingKeeperChars} 字。`,
         '- 抽不到任何东西时输出 {} —— **不要**为了凑数编内容。',
         '- 只输出 JSON 对象：不要代码块、不要解释、不要写"以下是抽取结果"。',
         '',

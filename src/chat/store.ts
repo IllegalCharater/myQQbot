@@ -793,7 +793,8 @@ export class ChatStore {
     const body = String(text ?? '').trim().slice(0, 1500);
     return this.appendAsyncResult(chatKey, {
       kind: 'trpg-note',
-      senderName: kind === 'suggest' ? '行动建议' : '跑团笔记',
+      // 三种子类型各有一个中文名（面板与摘要里看得见）：行动建议 / 推进提示 / 跑团笔记。
+      senderName: kind === 'suggest' ? '行动建议' : kind === 'advance' ? '推进提示' : '跑团笔记',
       text: body,
       ts,
       extra: { trpgNote: { kind, chars: Array.from(body).length } }

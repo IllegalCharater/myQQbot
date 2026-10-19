@@ -93,6 +93,55 @@ export interface TrpgCharacter {
 /** 一局处在哪一步。见 `model/session.ts` 的状态机。 */
 export type TrpgStatus = 'preparing' | 'active';
 
+/** 推进度的三个指标。 */
+export type AdvancementMetric = 'scene' | 'flag' | 'act';
+
+/** 三个指标的**权威顺序**（渲染、裁决平手时按它走）。 */
+export const ADVANCEMENT_METRICS = ['scene', 'flag', 'act'] as const;
+
+/**
+ * **推进度**（P8-b）：每个指标"距上次变化过了几轮"。
+ *
+ * ── 为什么计数器在存档里，而不是从日志里现算 ──
+ *
+ * `campaign.log` 里没有"轮"的边界（一次运行可能写好几条、也可能一条不写），所以从日志
+ * 反推轮数要么加一种"回合标记"条目（60 条的环形缓冲会被它吃掉），要么按时间猜。
+ * 三个小整数 + 收尾时 +1 是唯一确定的做法。
+ *
+ * ── `dirty` 是什么 ──
+ *
+ * ⚠️ **没有它，所有阈值会整体偏移一格**：变更发生在某一轮里，而那一轮的收尾同样会 +1，
+ * 于是"刚换完场景"记成 1 而不是 0。`dirty` 记着"本轮已经变过"，收尾时不清零也不 +1，
+ * 然后清空 —— 变更那一轮精确地落在 0。
+ *
+ * ── `hinted` 是什么 ──
+ *
+ * 上一次落【推进提示】时那个指标的计数。冷却判据是 `当前 - 上次 >= ADVANCE_HINT_COOLDOWN`，
+ * **按轮算而不是按时间**：与"轮"同源，重启后仍然成立，测试也不用拨钟。
+ */
+/**
+ * 模型宣布的**收团**（P8-c）。人敲的 `.trpg end` 不写它 —— 两种收团路径靠它区分。
+ *
+ * ⚠️ **它只是一个标记**：真正删存档发生在**这一轮收尾**（`impl.ts` 的 `onRunEnd`）。
+ * 理由见 `tools/campaign.ts` 的 `endAct`：工具处理完之后 `withCampaign` 一定会再
+ * `store.write` 一次，在处理器里直接 `remove` 会被原地复活。
+ */
+export interface TrpgEnded {
+  /** 结局 id；`''` = **自由结局**（剧本没有这个结局，或者你们走到了剧本之外的收场）。 */
+  endingId: string;
+  /** 收团原因（自由结局必填；有结局时也留一份，便于日志与排查）。 */
+  reason: string;
+  at: number;
+}
+
+export interface TrpgAdvancement {
+  scene: number;
+  flag: number;
+  act: number;
+  dirty?: Partial<Record<AdvancementMetric, true>>;
+  hinted?: Partial<Record<AdvancementMetric, number>>;
+}
+
 /** 一条跑团日志。 */
 export interface TrpgLogEntry {
   /** 单调递增序号，**渲染时会印出来**（模型与群友都靠它指代"第 N 条"）。 */
@@ -245,6 +294,14 @@ export interface TrpgCampaign {
   /** 当前场景的一句话描述。 */
   scene: string;
   /**
+   * 当前处在**第几幕**（`struct.acts[].id`）。`''` = 这一局不分幕（沙盒 / 手写剧本 / 旧存档）。
+   *
+   * ⚠️ **它只是一个字符串**：`model/` 不认识 acts 长什么样（那是
+   * `scenario/extract/schema.ts` 的 `parseStruct` 的事），所以这里**不做**"这一幕存不存在"
+   * 的校验。存着一个找不到的 id 时，消费点统一**回落第一幕**（见 `scenario/acts.ts`）。
+   */
+  currentAct: string;
+  /**
    * 这一局用过的剧本 —— **开局时快照进来的，不是引用**。
    *
    * 为什么是快照：改剧本文件不该影响正在跑的团；存档要自洽（备份/恢复一致）；正文的落点与
@@ -264,6 +321,16 @@ export interface TrpgCampaign {
    * "少做一件事"而不是"多做一件事"**。
    */
   combat: TrpgCombat | null;
+  /**
+   * 推进度（P8-b）。**每一轮收尾时更新**（`model/advance.ts` 的 `tickAdvancement`），
+   * 变更点把它归零。旧存档没有这一栏 → 三项 0（`normalizeCampaign` 补）。
+   */
+  advancement: TrpgAdvancement;
+  /**
+   * 模型宣布收团时的那份标记（P8-c）。**缺省 `undefined`** = 还在跑、或者还没被模型收过。
+   * 人敲的 `.trpg end` 不写它。
+   */
+  ended?: TrpgEnded;
   log: TrpgLogEntry[];
   /** 下一条日志的序号。单调递增、**只增不减**（截断旧日志不会让它回退，否则序号会重复）。 */
   seq: number;

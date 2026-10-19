@@ -7,13 +7,16 @@
 //     于是它能在不建任何临时目录的前提下被测。写盘在 `store/campaign-store.ts`。
 import { MAX_SCENARIO_CHARS } from '../types.js';
 import {
-  MAX_CHARACTERS, MAX_FLAGS, MAX_FLAG_VALUE_CHARS, MAX_LOG_CHARS, MAX_LOG_STORED, MAX_NAME_CHARS,
+  MAX_ACT_NAME_CHARS, MAX_CHARACTERS, MAX_ENDING_KEEPER_CHARS, MAX_ENDING_NAME_CHARS,
+  MAX_FLAGS, MAX_FLAG_VALUE_CHARS, MAX_LOG_CHARS, MAX_LOG_STORED, MAX_NAME_CHARS,
   MAX_PLAYERS, MAX_RULE_CHARS, MAX_SCENARIO_ID_CHARS, MAX_SCENE_CHARS, MAX_STRUCT_BYTES,
   MAX_SYSTEM_CHARS, MAX_TITLE_CHARS, clampInt, text
 } from './limits.js';
 import { normalizeCharacter } from './character.js';
 import { normalizeCombat } from './combat.js';
-import type { TrpgCampaign, TrpgCharacter, TrpgFlag, TrpgLogEntry, TrpgScenarioRef } from '../types.js';
+import { ADVANCEMENT_METRICS } from '../types.js';
+import type { TrpgEnded } from '../types.js';
+import type { AdvancementMetric, TrpgAdvancement, TrpgCampaign, TrpgCharacter, TrpgFlag, TrpgLogEntry, TrpgScenarioRef } from '../types.js';
 
 function normalizeLogEntry(raw: unknown): TrpgLogEntry | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -71,6 +74,7 @@ export function normalizeCampaign(raw: unknown, chatKey: string): TrpgCampaign |
   }
   // 留档只留最近 MAX_LOG_STORED 条。**序号不回退**：下面 seq 取最大值 + 1。
   const trimmed = log.slice(-MAX_LOG_STORED);
+  const endedRef = normalizeEnded(source.ended);
   const maxSeq = trimmed.reduce((max, entry) => Math.max(max, entry.seq), 0);
 
   return {
@@ -85,12 +89,19 @@ export function normalizeCampaign(raw: unknown, chatKey: string): TrpgCampaign |
     system: text(source.system, MAX_SYSTEM_CHARS),
     rule: text(source.rule, MAX_RULE_CHARS),
     scene: text(source.scene, MAX_SCENE_CHARS),
+    // 分幕（P8）：**只做类型/长度**，不校验"这一幕在不在" —— 那是 `scenario/extract/schema.ts`
+    // 的活，而 `model/` 不认识 acts。缺字段（旧存档）读成 `''` = 单幕模式。
+    currentAct: text(source.currentAct, MAX_ACT_NAME_CHARS),
     scenario: normalizeScenario(source.scenario),
     flags,
     characters,
     // ⚠️ **迁移取"少做一件事"的那一边**：旧存档没有 `combat`，读成 `null`（= 没在打）。
     // 不会拦住任何既有玩法，也不会凭空造出一场谁都没开始的战斗。
     combat: normalizeCombat(source.combat),
+    // 旧存档没有这一栏 → 三项 0（不报错：推进度是旁路度量，缺了不影响任何玩法）。
+    advancement: normalizeAdvancement(source.advancement),
+    // 模型收团的标记（P8-c）。缺省不写这个键 —— 人敲的 `.trpg end` 与还在跑的团都没有它。
+    ...(endedRef ? { ended: endedRef } : {}),
     log: trimmed,
     seq: Math.max(clampInt(source.seq, 1, Number.MAX_SAFE_INTEGER, 1), maxSeq + 1),
     createdAt: clampInt(source.createdAt, 0, Number.MAX_SAFE_INTEGER, now),
@@ -165,6 +176,56 @@ function extrasField(raw: unknown): Record<string, unknown> | null {
   return raw as Record<string, unknown>;
 }
 
+/**
+ * 推进度的归一化（P8-b）。**读路径永远比写路径宽**：坏值一律夹回，缺字段给 0。
+ *
+ * `dirty` / `hinted` 是**可选的**：两者都为空时不写这两个键，于是"没有推进度"的存档
+ * 与"刚开一局"的存档逐字同形。
+ */
+/**
+ * 收团标记的归一化（P8-c）。**读路径比写路径宽**：形状不对就当没有（不会让整局读不出来）。
+ *
+ * `endingId` 允许是空串（自由结局）；`reason` 同理。`at` 取不到就给 0 —— 它只用于展示。
+ */
+function normalizeEnded(raw: unknown): TrpgEnded | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const source = raw as Record<string, unknown>;
+  return {
+    endingId: text(source.endingId, MAX_ENDING_NAME_CHARS),
+    reason: text(source.reason, MAX_ENDING_KEEPER_CHARS),
+    at: clampInt(source.at, 0, Number.MAX_SAFE_INTEGER, 0)
+  };
+}
+
+function normalizeAdvancement(raw: unknown): TrpgAdvancement {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown> : {};
+  const out: TrpgAdvancement = {
+    scene: clampInt(source.scene, 0, Number.MAX_SAFE_INTEGER, 0),
+    flag: clampInt(source.flag, 0, Number.MAX_SAFE_INTEGER, 0),
+    act: clampInt(source.act, 0, Number.MAX_SAFE_INTEGER, 0)
+  };
+  const dirty = source.dirty;
+  if (dirty && typeof dirty === 'object' && !Array.isArray(dirty)) {
+    const kept: Partial<Record<AdvancementMetric, true>> = {};
+    for (const metric of ADVANCEMENT_METRICS) {
+      if ((dirty as Record<string, unknown>)[metric] === true) kept[metric] = true;
+    }
+    if (Object.keys(kept).length) out.dirty = kept;
+  }
+  const hinted = source.hinted;
+  if (hinted && typeof hinted === 'object' && !Array.isArray(hinted)) {
+    const kept: Partial<Record<AdvancementMetric, number>> = {};
+    for (const metric of ADVANCEMENT_METRICS) {
+      const value = (hinted as Record<string, unknown>)[metric];
+      if (value === undefined) continue;
+      kept[metric] = clampInt(value, 0, Number.MAX_SAFE_INTEGER, 0);
+    }
+    if (Object.keys(kept).length) out.hinted = kept;
+  }
+  return out;
+}
+
 function normalizeScenario(raw: unknown): TrpgScenarioRef {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { id: '', body: '' };
   const source = raw as Record<string, unknown>;
@@ -197,10 +258,12 @@ export function emptyCampaign(
     system: text(system, MAX_SYSTEM_CHARS),
     rule: text(rule, MAX_RULE_CHARS),
     scene: '',
+    currentAct: '',
     scenario: { id: '', body: '' },
     flags: {},
     characters: [],
     combat: null,
+    advancement: { scene: 0, flag: 0, act: 0 },
     log: [],
     seq: 1,
     createdAt: now,

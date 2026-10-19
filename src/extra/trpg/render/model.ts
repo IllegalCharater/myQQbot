@@ -19,6 +19,8 @@
 // 是同一条纪律。
 import { MAX_LOG_RENDER, MAX_NOTES, MAX_STATS_PER_CHARACTER } from '../model/limits.js';
 import { currentActor, immobileNames } from '../model/combat.js';
+import { actNumber, actsOf, findAct, firstAct, nextAct } from '../scenario/acts.js';
+import { describeTrigger } from '../rules/rule-set.js';
 import { formatInitiative } from './format.js';
 import { logLine, playerSections } from './players.js';
 import type { TrpgCampaign, TrpgCharacter } from '../types.js';
@@ -79,6 +81,38 @@ function modelCharacterLine(card: TrpgCharacter, { preparing = false }: { prepar
     notes.length ? `备注：${notes.join('；')}` : '',
     marks.length ? `⚠ ${marks.join('；')}` : ''
   ].filter(Boolean).join(' ｜ ');
+}
+
+/**
+ * **阶段段**（P8）：当前第几幕、本幕目标、完成条件、下一幕名。
+ *
+ * ── 三条边界 ──
+ *
+ * - **只给模型**：`goal` / `keeperNotes` / 完成条件都是 DM 的东西，玩家那份只印
+ *   "第 N 幕 / 共 M 幕"（见 `render/players.ts`）。`keeperNotes` 尤其 —— 它是幕后信息。
+ * - **没有注入剧本时整段不出现**：沙盒团没有"第几幕"可言，印一句"未分幕"只是每轮多一行噪音。
+ *   注入了剧本但没分幕时才印那句（那正是"这份模组没分幕"这条事实的落点）。
+ * - **下一幕只给名字**（不给它的 goal / keeperNotes）：说多了模型会提前把下一幕演掉。
+ *
+ * 位置：`renderForModel` 把它插在 `head` 之后、`—— 角色 ——` 之前 —— 它只在**换幕**时变，
+ * 比日志稳定得多，放前面才能让同一幕的几轮命中前缀缓存。
+ */
+function renderActForModel(campaign: TrpgCampaign): string {
+  if (!campaign.scenario.id) return '';
+  const acts = actsOf(campaign.scenario.struct);
+  if (!acts.length) return '—— 阶段 ——\n本模组未分幕（按主线自由推进）。';
+  const current = findAct(acts, campaign.currentAct) ?? firstAct(acts);
+  if (!current) return '';
+  const index = actNumber(acts, current.id) || 1;
+  const lines = [`—— 阶段（第 ${index} 幕 / 共 ${acts.length} 幕）——`];
+  lines.push(`本幕：${current.name}${current.visible ? '' : ' [暗线幕]'}`);
+  if (current.goal) lines.push(`目标：${current.goal}`);
+  // 完成条件印成 `describeTrigger` 的人话（`旗标：钥匙到手 = 是`），与提示词里机制那一节同形。
+  if (current.exitCondition) lines.push(`完成条件：${describeTrigger(current.exitCondition)}`);
+  if (current.keeperNotes) lines.push(`幕后：${current.keeperNotes}`);
+  const next = nextAct(acts, current.id);
+  if (next) lines.push(`下一幕：${next.name}（还没到，不要提前演）`);
+  return lines.join('\n');
 }
 
 /**
@@ -164,5 +198,7 @@ export function renderForModel(campaign: TrpgCampaign | null): string {
   if (dropped > 0) picked.unshift(`（更早的 ${dropped} 条已省略）`);
   tail.push('—— 最近发生（新在下）——', ...(picked.length ? picked : ['（还没有任何记录）']));
 
-  return [...head, ...tail].join('\n');
+  // 阶段段插在 head 与 tail 之间：它只在换幕时变，比日志稳定 —— 放前面才能命中前缀缓存。
+  const actBlock = renderActForModel(campaign);
+  return [...head, ...(actBlock ? ['', actBlock] : []), ...tail].join('\n');
 }

@@ -18,7 +18,8 @@ import { createCommands } from './commands/index.js';
 import { usableScenarios } from './commands/shared.js';
 import { secureRng } from './entropy.js';
 import { appendLog } from './model/campaign.js';
-import { ruleSetFor } from './model/rule-set.js';
+import { mechanicContextOf, ruleSetFor } from './model/rule-set.js';
+import { triggerMatches } from './rules/rule-set.js';
 import { renderForModel } from './render/model.js';
 import { renderBriefing } from './render/status.js';
 import { formatRoll } from './render/format.js';
@@ -30,7 +31,13 @@ import { TrpgModeStore } from './store/mode-store.js';
 import { RuleStore } from './store/rule-store.js';
 import { ScenarioStore } from './store/scenario-store.js';
 import { generateSuggestions } from './suggest.js';
+import {
+  advanceHintText, advanceTo, hintAllowed, markHinted, pickHint, stageAdvanceMode,
+  stageHintText, tickAdvancement
+} from './model/advance.js';
+import { actsOf, findAct, firstAct, nextAct } from './scenario/acts.js';
 import { createHandlers } from './tools/index.js';
+import type { AdvancementMetric } from './types.js';
 import type { ExtraRuntime, ExtraRuntimeDeps, ExtraRunEnd } from '../types.js';
 
 /**
@@ -233,18 +240,76 @@ export function createRuntime(deps: ExtraRuntimeDeps = {}): ExtraRuntime {
      * 产物是一条 `suggest` 回流条目，**由下一轮的主 DM 自己用 say 说出来** —— 这里不代它发群。
      */
     async onRunEnd(session: ExtraRunEnd) {
-      // **助手模式永远不跑兜底。** 它整轮不说话是常态（群友在聊别的），而"给几个行动方向"
-      // 在骰子助手的语境里毫无意义 —— 跑下去只会白烧一次调用，还会把助手叫醒去说一堆
-      // 它这个形态下不该说的话。判据放最前面：它最便宜，也最不容商量。
+      // **助手模式永远不参与。** 它不跑模型，"故事在原地打转"无从谈起；"给几个行动方向"
+      // 在骰子助手的语境里也毫无意义。判据放最前面：它最便宜，也最不容商量。
       if (modes.read(session.chatKey) === 'assistant') return;
-      if (session.status !== 'noreply') return;
+      // 只有**正常收尾**、且**真人推动**的那一轮才是一轮。报错 / 中止没有推进可言；
+      // 而"提示自己唤醒的那一轮"若也计数，阈值会自己跑赢自己。
+      if (session.status !== 'done' && session.status !== 'noreply') return;
       if (!session.trigger.some((entry) => isPersonMessage(entry))) return;
-      const now = Date.now();
-      if (coolingDown(session.chatKey, now)) return;
 
       const campaign = store.read(session.chatKey);
       if (!campaign) return;
-      if (!deps.deliverNote) return;
+
+      // ── 模型已经宣布收团（P8-c）：**这一轮跑完才删存档** ──
+      //
+      // 工具处理完之后 `withCampaign` 还会 `store.write` 一次，所以在处理器里直接删会被
+      // 原地复活。这里删既避开了那一步，又让模型有机会在这一轮把结局讲完。
+      if (campaign.ended) {
+        store.remove(session.chatKey);
+        return;
+      }
+
+      // ── ① 推进度（P8-b）：计数、自动切幕、挑一条要落的提示 ──
+      //
+      // 这一半**不依赖 `deliverNote`**（状态要照常记）、也**不依赖沉默 / 开口** ——
+      // 计数与自动切幕在两种收尾下都要发生。整个包在 try 里：推进度是旁路，失败不该影响收尾。
+      let noteText = '';
+      let noteMetric: AdvancementMetric | null = null;
+      try {
+        tickAdvancement(campaign);
+        const access = ruleSetFor(campaign, rules);
+        const set = access.ok ? access.set : null;
+        const here = mechanicContextOf(campaign, '', '');
+        const acts = actsOf(campaign.scenario.struct);
+        const current = findAct(acts, campaign.currentAct) ?? firstAct(acts);
+        const next = current ? nextAct(acts, current.id) : null;
+        const met = Boolean(current?.exitCondition && triggerMatches(current.exitCondition, here));
+        const stageMode = stageAdvanceMode(set);
+        if (met && next && stageMode === 'auto') {
+          // `auto` 是管理员在规则扩展里**显式声明**的；一次运行最多切一幕（免得链式跳过中间幕）。
+          advanceTo(campaign, next);
+        } else if (met && next && stageMode === 'hint' && hintAllowed(campaign, 'act')) {
+          noteText = stageHintText(campaign, here);
+          noteMetric = 'act';
+        }
+        if (!noteText) {
+          const hint = pickHint(campaign, set);
+          if (hint) {
+            noteText = advanceHintText(campaign, hint, here);
+            noteMetric = hint.metric;
+          }
+        }
+      } catch (error) {
+        console.warn('[trpg] 推进度更新失败:', error instanceof Error ? error.message : error);
+      }
+
+      // ── ② 落不落 ──
+      //
+      // ⚠️ **与兜底建议互斥**：DM 整轮沉默时只落【行动建议】（更紧急），不落【推进提示】、
+      // 也**不烧它的冷却** —— 下一轮它开口时还能照常提示。
+      const deliverHint = Boolean(noteText && noteMetric && deps.deliverNote && session.status !== 'noreply');
+      if (deliverHint && noteMetric) markHinted(campaign, noteMetric);
+      store.write(campaign);
+
+      if (session.status !== 'noreply') {
+        if (deliverHint) deps.deliverNote!(session.chatKey, { kind: 'advance', text: noteText });
+        return;
+      }
+
+      // 下面只剩"DM 整轮沉默"那条路（兜底建议）。
+      const now = Date.now();
+      if (!deps.deliverNote || coolingDown(session.chatKey, now)) return;
 
       lastSuggestAt.set(session.chatKey, now);
       // 这一次调用发生在 `finish()` 之后，所以用量走 `recordUsage`（只叠增量）——

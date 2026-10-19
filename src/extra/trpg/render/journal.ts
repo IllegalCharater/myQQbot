@@ -27,7 +27,9 @@ const KIND_LABEL: Record<string, string> = {
   roll: '掷骰',
   check: '检定',
   state: '状态',
-  scene: '场景'
+  scene: '场景',
+  // P8-c：模型收团那一条。人敲的 `.trpg end` 不落这条。
+  ending: '结局'
 };
 
 /** `2026-10-17 21:03:12`。两段都取自 `core/util.js` —— 不在跑团这一层另写一份补零逻辑。 */

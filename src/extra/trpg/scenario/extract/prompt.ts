@@ -47,6 +47,17 @@ export interface ChunkPayload {
   maxItems: number;
   maxTextChars: number;
   maxQuoteChars: number;
+  /** 分幕（P8）的四个上限。**由调用方从 `model/limits.ts` 递进来**，不在提示词里写死 ——
+   *  写死的话，"幕最多几条"会变成两个数，而它们必然漂移。 */
+  maxActs: number;
+  maxActScenes: number;
+  maxActGoalChars: number;
+  maxActKeeperChars: number;
+  /** 结局（P8-c）的四个上限，同样由调用方从 `model/limits.ts` 递进来。 */
+  maxEndings: number;
+  maxEndingReadAloudChars: number;
+  maxEndingRewardsChars: number;
+  maxEndingKeeperChars: number;
   mechanicTypes: readonly string[];
   triggerOps: readonly string[];
   effectHandlers: readonly string[];
