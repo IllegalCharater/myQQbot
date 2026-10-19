@@ -40,7 +40,7 @@ import {
 import { isFormattedScenario } from '../parse.js';
 import { BODY_BUDGET, stripFence } from '../format.js';
 import { MECHANIC_TYPES, EFFECT_HANDLERS, TRIGGER_OPS, compileRuleSet, type RuleExtensionDraft } from '../../rules/rule-set.js';
-import { outlineDocument, type DocChunk } from './outline.js';
+import { outlineDocument, type DocChunk, type DocOutline } from './outline.js';
 import { coerceStruct, type ScenarioStruct } from './schema.js';
 import { buildRuleExtension } from './mechanics.js';
 import type { AskPort, AskRequest, ChunkPayload } from './prompt.js';
@@ -84,7 +84,35 @@ export interface ExtractResult {
 
 export type ExtractOutcome =
   | { ok: true; result: ExtractResult }
-  | { ok: false; kind: ExtractFailureKind; message: string };
+  | { ok: false; kind: ExtractFailureKind; message: string; salvage: ExtractSalvage };
+
+/**
+ * 抽取**没成**时抢救下来的东西（2026-10-19 加）。
+ *
+ * ── 为什么要有它 ──
+ *
+ * 抽取失败之后调用方会退回 `formatScenarioText`（只让模型把原文重排成规定格式）。那条路
+ * **是有损的**：实测一份 7345 字的模组进去、2687 字出来（少了 63%），而它的产物只有一份
+ * `.md` —— 于是**原文在磁盘上再也没有第二份副本**，管理员连"回去对着原文补结构"都做不到。
+ *
+ * 所以失败路径也要把已经到手的东西交出去：`chunks` 落成 `raw/`（原文切片是这份文件唯一的
+ * 完整副本），`struct` 落成 `.struct.json`（抽到一半的结构比没有强，但它必须**标明不全**，
+ * 见 `salvageOf`）。
+ *
+ * ⚠️ **没有 `ruleExt`**：降级路径不交付 `.rule.json` —— 那是 `ruleSetFor` 在开局时读的东西，
+ * 写了它就等于那一局**真的会应用特殊规则**，而回执上明明写着"不会"。宁可少一样产物，
+ * 也不要让回执里那句话变成谎话（详见 `commands/scenario.ts` 里 `writeExtras` 那一段）。
+ */
+export interface ExtractSalvage {
+  /** 抽到一半的结构。**`null` = 一片都没抽成**（那时 `raw/` 是唯一的产物）。 */
+  struct: ScenarioStruct | null;
+  /** L1 切出来的原文切片（与成功路径同源，只是没能变成交付物）。 */
+  chunks: DocChunk[];
+  totalChars: number;
+  droppedChars: number;
+  /** 真的发出去的模型调用次数 —— **失败也是花了钱的**，回执与账本都要说得出这个数。 */
+  calls: number;
+}
 
 /**
  * 失败**分档**（2026-10-19 加）。取值只有四种，判据是"下一步该做什么不一样"：
@@ -414,6 +442,38 @@ function forPrompt(struct: ScenarioStruct): string {
 // ── 编排 ─────────────────────────────────────────────────────────────────────
 
 /**
+ * 把"已经到手、但没能交出去"的那部分留下来（2026-10-19 加，见 `ExtractSalvage`）。
+ *
+ * ⚠️ **只跑三个只记待核项的校验**（引文 / 幕 / 结局），**刻意不跑 `verifyMechanics`**：
+ * 它返回的是那份规则扩展草稿，而降级路径**不交付 `.rule.json`** —— 跑了只会把"机制编译过了"
+ * 的账记进 `warnings`，读起来像那些机制会生效。回执上那句"这一局不会应用剧本里的特殊规则"
+ * 必须是**真的**。
+ *
+ * ⚠️ 待核项的**第一条是我们的账**："下面是抽到一半的结果"。少了它，这份结构落盘之后与一次
+ * **成功**的抽取长得一模一样 —— 而"看着完整、其实少了一半"正是这一轮在修的那类故障
+ * （DM 会拿着半份结构照常开团，没人知道场景少了一半）。
+ */
+function salvageOf(
+  struct: ScenarioStruct | null, outline: DocOutline, calls: number, source: string
+): ExtractSalvage {
+  if (struct) {
+    // `unshift` 而不是 `push`：这一条要说在**所有**待核项之前 —— 它改变的是后面每一条的读法
+    // （"引文找不到"在"结果只有一半"的背景下是另一件事）。
+    struct.warnings.unshift('这次抽取没成，下面是抽到一半的结果 —— 场景 / NPC / 线索 / 道具都可能不全');
+    verifyQuotes(struct, source);
+    verifyActs(struct);
+    verifyEndings(struct);
+  }
+  return {
+    struct,
+    chunks: outline.chunks,
+    totalChars: outline.totalChars,
+    droppedChars: outline.droppedChars,
+    calls
+  };
+}
+
+/**
  * L2 + L3 + L4。
  *
  * 失败一律是**如实失败**（调用方拿这条消息去回报，或退回 `formatScenarioText`）—— 这里
@@ -421,6 +481,9 @@ function forPrompt(struct: ScenarioStruct): string {
  *
  * 失败时**必带 `kind`**（见 `ExtractFailureKind`）：调用方靠它决定回执里那句"下一步"。
  * 判据是"重发有没有用"，而不是那句报错长什么样 —— 别让调用方去匹配消息文本。
+ *
+ * 失败时**必带 `salvage`**（见 `ExtractSalvage`）：已经到手的原文切片与半份结构要交出去，
+ * 否则降级之后磁盘上连原文的第二份副本都没有（后备那条路是有损的）。
  */
 export async function extractScenario(
   text: string, { name, source }: { name: string; source: string }, deps: ExtractDeps
@@ -435,7 +498,9 @@ export async function extractScenario(
   const outline = outlineDocument(text);
   // `empty` 这一档与别的三档不同：它不是"这次不巧"，而是"这份文件里没有可抽的东西"。
   // 回执因此不能建议重发 —— 重发一次结果逐字相同。
-  if (!outline.chunks.length) return { ok: false, kind: 'empty', message: '这份文件里没有可抽取的正文' };
+  if (!outline.chunks.length) {
+    return { ok: false, kind: 'empty', message: '这份文件里没有可抽取的正文', salvage: salvageOf(null, outline, 0, text) };
+  }
 
   const warnings: string[] = [];
   if (outline.droppedChars > 0) {
@@ -511,7 +576,14 @@ export async function extractScenario(
     // 跳过（`skipped > 0`）时，真凶是预算 —— 那是**配置性的必然**，重发一次还是撞同一堵墙；
     // 而模型答得不对是偶发的。原先两者共用一句"模型一片都没答上来"，把前者也说成了后者。
     const nothing = skipped > 0 ? '时间不够，一片都没抽成' : '模型一片都没答上来';
-    return { ok: false, kind: firstFailureKind ?? (skipped > 0 ? 'timeout' : 'format'), message: `抽取没成：${firstFailure || nothing}` };
+    return {
+      ok: false,
+      kind: firstFailureKind ?? (skipped > 0 ? 'timeout' : 'format'),
+      message: `抽取没成：${firstFailure || nothing}`,
+      // 一片都没成 → 没有结构可抢救，但**原文切片照交**：它是这份文件唯一的完整副本，
+      // 而后备那条路会把原文重排一遍（有损）。
+      salvage: salvageOf(null, outline, calls, text)
+    };
   }
   if (skipped > 0) warnings.push(`时间预算用完，最后 ${skipped} 片没抽（原文已另存）`);
 
@@ -532,7 +604,10 @@ export async function extractScenario(
   // 兜底而不是主路径。改 L2 的死线时**两处要一起看**：把它们并回一条，L3 就又会被挤空。
   const remaining = deadline - now();
   if (remaining <= 0) {
-    return { ok: false, kind: 'timeout', message: '抽取没成：时间预算用完了，没来得及合成剧本文件' };
+    return {
+      ok: false, kind: 'timeout', message: '抽取没成：时间预算用完了，没来得及合成剧本文件',
+      salvage: salvageOf(struct, outline, calls, text)
+    };
   }
   calls += 1;
   const merged = await askWithTimeout(deps.ask, {
@@ -546,15 +621,25 @@ export async function extractScenario(
   // ⚠️ 这一发是**唯一的交付物**，所以它超时与它"请求失败"要分开：前者说明预算给少了
   // （重发无用，得拆小），后者才是网络/接口的偶发问题。合并成一档的话，最需要那句
   // "别再重发了"的场景恰好拿到"建议重发"。
-  if (!merged.ok) return { ok: false, kind: merged.timedOut ? 'timeout' : 'request', message: `合成剧本文件时出错：${merged.message}` };
+  if (!merged.ok) {
+    return {
+      ok: false, kind: merged.timedOut ? 'timeout' : 'request', message: `合成剧本文件时出错：${merged.message}`,
+      salvage: salvageOf(struct, outline, calls, text)
+    };
+  }
 
   const body = stripFence(merged.content);
-  if (!body) return { ok: false, kind: 'format', message: '模型没有给出剧本内容，稍后再试' };
+  if (!body) {
+    return { ok: false, kind: 'format', message: '模型没有给出剧本内容，稍后再试', salvage: salvageOf(struct, outline, calls, text) };
+  }
 
   // **后置条件**：合成的必须是规定格式。不满足就如实失败 —— 把一份解析不了的文件写进
   // 剧本库的表现是"开局了但什么都没注入"，而群里没人知道为什么（同 `format.ts` 那条）。
   if (!isFormattedScenario(body, name)) {
-    return { ok: false, kind: 'format', message: '模型合成出来的东西不是剧本格式（没有骨架）—— 稍后再试一次' };
+    return {
+      ok: false, kind: 'format', message: '模型合成出来的东西不是剧本格式（没有骨架）—— 稍后再试一次',
+      salvage: salvageOf(struct, outline, calls, text)
+    };
   }
 
   // ── L4：校验（在正文过关之后做，于是待核项一定跟着一份可用的文件一起交出去）──

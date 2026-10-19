@@ -1168,7 +1168,18 @@ const status = (key) => store.read(key);
       // 而 `request` 这一档正是"重发有用"的那一档 —— 省掉它回执会走兜底那句
       // "类别没认出来"，下面那条 `/重新发一次/` 当场变红。真管线永远带 `kind`，
       // 这里是**注入的假实现**，所以它得自己把契约补齐。
-      const noPipeline = async () => ({ ok: false, kind: 'request', message: '（本用例验的是后备那条路）' });
+      // ⚠️ `salvage` **同样不能省**（2026-10-19）：降级路径要把"已经到手的原文切片"交出去，
+      // 否则磁盘上只剩一份被重排过的正文（实测 7345 → 2687 字）。真管线永远带这个字段，
+      // 假实现得自己补齐 —— 少了它，下面那条"降级也写 raw/"会因为**注入物缺字段**而假红，
+      // 而那种红指向的是套件自己，不是被测的那段代码。
+      const salvageOf = (struct) => ({
+        struct,
+        chunks: [{ index: 0, heading: '灯塔', chars: PLAIN.length, text: PLAIN }],
+        totalChars: PLAIN.length, droppedChars: 0, calls: 0
+      });
+      const noPipeline = async () => ({
+        ok: false, kind: 'request', message: '（本用例验的是后备那条路）', salvage: salvageOf(null)
+      });
 
       model.requests = [];
       model.script = [{ content: '这条不该被用到' }];
@@ -1189,8 +1200,17 @@ const status = (key) => store.read(key);
         { extract: extract(PLAIN), analyze: noPipeline });
       ok('格式不对 + 管线没成 → 退回让模型整理一次，落库的是**模型给的版本**（不是原文）',
         model.requests.length === 1 && saves.read('整理过的').scenario.title === '灯塔', viaModel);
-      ok('回执里点明"让模型整理过"（它同时解释了两件事：回执为什么慢、内容为什么被重排过）',
-        /已让模型整理/.test(viaModel) && /原文 20 字/.test(viaModel), viaModel);
+      // ── 回执**分阶段**（2026-10-19）──
+      //
+      // 起因是一次实测：《回声公寓》的回执里"带 8 条旗标、4 张人物卡"与"没有剧情结构"并排出现，
+      // 读起来像"抽了、但抽了个空的" —— 而真相是两个阶段**各给了一半**：格式整理那一步重排
+      // 正文、顺手交出骨架里的旗标与人物卡；剧情抽取那一步才是场景 / NPC / 线索 / 道具 / 机制的
+      // 来源，而它这次没成。两个标签并排，管理员才读得出来"哪一半是谁给的"。
+      ok('降级回执**分阶段**：`[剧情抽取] 没成` 与 `[格式整理] 原文不是剧本格式（N 字）` 各说各的',
+        /\[剧情抽取\] 没成/.test(viaModel) && /\[格式整理\] 原文不是剧本格式（20 字）/.test(viaModel),
+        viaModel);
+      ok('分阶段之后**不再有那句含混的"已让模型整理过"**（它把两件事糊成一句，正是矛盾的来源）',
+        !/已让模型整理/.test(viaModel), viaModel);
       // ⚠️ 只印「文本」两个字时，同一批上传里对不上是哪一份（`文本` 既可能是这份 `.md`、
       // 也可能是随手贴的一段设定），而回执是管理员唯一的凭据 —— 所以来源那一栏要带**文件名**。
       ok('来源那一栏带上**文件名**（光印格式名的话，管理员对不上自己刚发的是哪一份）',
@@ -1202,8 +1222,31 @@ const status = (key) => store.read(key);
         { media: [{ kind: 'file', name: '', file: '', url }] }, '无名的', saves, { extract: extract(FORM) });
       ok('（对照）文件没有名字时不硬凑 —— 来源那一栏退回裸的格式名',
         /（来源 文本）/.test(unnamed) && !/没有名字的文件/.test(unnamed), unnamed);
-      ok('退回整理时**明说抽取没成**（只说"整理过"，管理员会以为那份剧本有剧情结构）',
-        /剧情抽取没成/.test(viaModel) && /没有剧情结构/.test(viaModel), viaModel);
+      ok('退回整理时**明说抽取没成**，并逐类点明"一条都没有"（只说"整理过"，管理员会以为那份剧本有剧情结构）',
+        /\[剧情抽取\] 没成/.test(viaModel)
+        && /场景、NPC、线索、道具、机制一条都没有/.test(viaModel), viaModel);
+      // 降级路径上 `raw/` 是这份文件**唯一**的完整副本：后备那条路只把原文重排一遍，
+      // 实测 7345 字进去、2687 字出来。原先这一档一个伴生文件都不写，于是管理员手里
+      // 只剩一份被砍掉 63% 的正文，连回去对照原文都做不到。
+      ok('降级路径**也写 `raw/`**（那是这份文件唯一的完整副本 —— 后备整理是有损的）',
+        saves.read('整理过的').scenario.rawParts === 1,
+        JSON.stringify(saves.list().find((item) => item.id === '整理过的')));
+      ok('而且回执**指向 `.trpg check`**（零模型调用、零写入）—— 那是"这次到底留下了什么"的唯一出口',
+        /这次留下的东西：敲 `\.trpg check 整理过的` 看（零模型调用）/.test(viaModel)
+        && /原文切片 1 片/.test(viaModel), viaModel);
+      // 对照：**没有切片时不许指路** —— 指过去只会让人敲一条什么都不报的命令，
+      // 比不指路更坏（他会以为是自己敲错了）。
+      const noSalvage = async () => ({
+        ok: false, kind: 'request', message: '（本用例验的是"连切片都没有"那一档）'
+      });
+      const bareFallback = await saveScenario({ media }, '没切片的', saves,
+        { extract: extract(PLAIN), analyze: noSalvage, format: async () => ({ ok: true, text: FORM }) });
+      ok('（对照）注入物连 `salvage` 都没有时**不印 `undefined`、也不指路**（防御性读取，'
+        + '与 `kind` 那条同源 —— 假实现是普通对象字面量）',
+        !/undefined/.test(bareFallback) && !/这次留下的东西/.test(bareFallback)
+        // ⚠️ 判据是 `=== 0` 而不是 `=== undefined`：`read()` 里 `rawParts` 恒是一个**数字**
+        // （`#rawCount(id)`，一片都没有时是 0）。拿 `undefined` 去比会永远成立，那条断言就是假的。
+        && saves.read('没切片的').scenario?.rawParts === 0, bareFallback);
       // 降级**不产生 `.rule.json`**，所以这一局一条机制都没有 —— 只说"没有剧情结构"
       // 会被读成"叙事少点细节"，而真相是"整本模组的规矩都不算数"。
       ok('而且**明说特殊规则不生效**，并给出重试的路',
@@ -1248,8 +1291,12 @@ const status = (key) => store.read(key);
         /不是剧本格式/.test(failed) && saves.read('失败了的').ok === false, failed);
       // 两条原因**都要在**：管线那句说的是"哪一片、哪一步没成"，后备那句说的是"连整理都没成"。
       // 只说一句会把一半事实丢掉，而排查的人正是靠这一半去分辨"模型不行"还是"文件不行"。
-      ok('管线与后备**都**没成时，两条原因都在回执里',
-        /本用例验的是后备那条路/.test(failed) && /退一步只做格式整理也没成/.test(failed), failed);
+      ok('管线与后备**都**没成时，两条原因都在回执里（两条都带阶段标签，读得出是哪一步的锅）',
+        // ⚠️ 中间用 `[\s\S]*` 而不是写死整句：`outcome.message` 自己常常是**带括号的**一句话
+        // （真管线的文案就是 `（第 2 片没有返回可解析的 JSON）`），拼出来是双括号。卡死字面量
+        // 会把"文案换了"误判成"这一条坏了"。
+        /\[剧情抽取\] 没成（[\s\S]*本用例验的是后备那条路/.test(failed)
+        && /\[格式整理\] 也没成（/.test(failed), failed);
 
       // ── 拆成"前半就地 / 后半交出去"之后的那条路（2026-10-19）──
       //
@@ -1325,8 +1372,8 @@ const status = (key) => store.read(key);
         saves.read('抽过的').scenario.struct !== undefined
         && saves.read('抽过的').scenario.rawParts === 1,
         JSON.stringify(saves.list().find((item) => item.id === '抽过的')));
-      ok('回执把抽取的账说清楚：几类各几条、切了几片、用了几次调用',
-        /抽出了 1 个场景、1 个 NPC、1 条线索、1 件道具、1 条机制/.test(drawn)
+      ok('回执把抽取的账说清楚：几类各几条、切了几片、用了几次调用（并带 `[剧情抽取]` 阶段标签）',
+        /\[剧情抽取\] 抽出了 1 个场景、1 个 NPC、1 条线索、1 件道具、1 条机制/.test(drawn)
         && new RegExp(`原文 ${PLAIN.length} 字切成 1 片，用了 2 次调用`).test(drawn), drawn);
       ok('**"没进抽取的字数"单独说**：它是管理员判断"要不要手工再传一次"的唯一依据',
         /还有 300 字超出片数上限没进抽取/.test(drawn), drawn);
@@ -1337,6 +1384,36 @@ const status = (key) => store.read(key);
         !/已让模型整理/.test(drawn), drawn);
       ok('抽取成功的回执照旧以"开局怎么敲"收尾（回执的形状不因为走了管线而变）',
         typeof drawn === 'string' && /开局：\.trpg new 抽过的/.test(drawn), drawn);
+
+      // ── 抢救**半份结构**（2026-10-19）──
+      //
+      // 抽取"抽到一半才失败"（第 2 片超时、或者归并没成）时，前几片的结果**已经在手上**了。
+      // 丢掉它等于让管理员从头再来一遍，而 `.struct.json` 是一份**可以手改**的文件 ——
+      // 半份结构比没有结构有用得多。⚠️ 它**不带 `ruleExt`**：降级路径绝不写 `.rule.json`
+      // （那会让"这一局不会应用特殊规则"变成谎话）。
+      model.requests = [];
+      const halfStruct = await saveScenario({ media }, '半份的', saves, {
+        extract: extract(PLAIN),
+        analyze: async () => ({
+          ok: false, kind: 'timeout', message: '抽取调用超时（60 秒）',
+          salvage: salvageOf(STRUCT)
+        }),
+        format: async () => ({ ok: true, text: FORM })
+      });
+      ok('抽取失败时**把半份结构交出去**（`.struct.json` 真的写下去了，管理员可以照着改）',
+        saves.read('半份的').scenario.struct !== undefined
+        && saves.read('半份的').scenario.rawParts === 1, JSON.stringify(saves.list().find((i) => i.id === '半份的')));
+      // ⚠️ 这里**验不了**"第一条待核项是那句『这次抽取没成』"：那句是**管线**的 `salvageOf()`
+      // 加上去的（`warnings.unshift`），而本段注入的假 `analyze` 交出来的是一份手搓的 salvage
+      // —— 真管线的那个函数压根没跑。断言写在这儿只能验到本段自己的夹具，那是假的绿。
+      // 它的落点在 `tests/t-trpg-extract.mjs`（那里跑的是真管线）。
+      ok('抢救路径**绝不写 `.rule.json`**（写了就等于那一局真的会应用特殊规则，而回执说不会）',
+        saves.read('半份的').scenario.ruleExt === undefined,
+        JSON.stringify(saves.read('半份的').scenario.ruleExt));
+      ok('抢救时的回执说得出"抽到一半的剧情结构也在那里"（只说"原文切片"会让人以为结构全丢了）',
+        /抽到一半的剧情结构/.test(halfStruct), halfStruct);
+      ok('`timeout` 那一档的下一步照旧**不劝人重发**（抢救成功也不改变"重发没用"这个事实）',
+        /多半还是不够/.test(halfStruct) && !/重新发一次/.test(halfStruct), halfStruct);
 
       // 管线合成出来的正文**仍然要过 `parseScenario`** —— 抽取不是"绕过正文上限"的后门。
       // 一份 30 页模组被"压缩"成 5 万字（模型没照提示词做）时，这条路必须**如实拒绝**：
@@ -1871,6 +1948,37 @@ const status = (key) => store.read(key);
   ok('伴生文件是半截 JSON → 说"没有可用的"并指向「伴生文件」那一段（成因与上一条不同，两条都得说清）',
     halfJson.includes('剧情结构：没有可用的') && halfJson.includes('伴生文件：') && /解不开/.test(halfJson),
     halfJson);
+
+  // ── "原文切片在、结构不在"是一档**独立**的状态（2026-10-19）──
+  //
+  // 抽取**跑过**、只是没成（超时 / 模型没按格式答），管线把切好的原文交了出来。说"没有抽取产物"
+  // 会让管理员以为得从头再来一遍 —— 而他手里已经有一份完整的原文副本（后备整理实测有损 63%）。
+  // 两种成因（一片都没抽成 / 结构文件坏了）共用这一段：上面那行"剧情结构：…"已经把它们分开了。
+  scenarios.write('切片团', `---\ntitle: 切片团\n---\n${BODY}`);
+  scenarios.writeExtras('切片团', {
+    raw: [{ heading: '一', text: '原文第一片' }, { heading: '二', text: '原文第二片' }]
+  });
+  scenarios.write('坏结构带切片团', `---\ntitle: 坏结构带切片团\n---\n${BODY}`);
+  scenarios.writeExtras('坏结构带切片团', { raw: [{ heading: '一', text: '原文第一片' }] });
+  fs.writeFileSync(scenarios.structFile('坏结构带切片团'), '{ "summary": ', 'utf8');
+
+  const sliced = String(await tell('.trpg check 切片团'));
+  ok('切片在、结构不在 → 说**"抽取产物不全"**（说"没有抽取产物"会让人以为得从头再来一遍），'
+    + '并点明切片还在磁盘上、有几片',
+    sliced.includes('抽取产物不全') && sliced.includes('原文切片还在（2 片')
+    && sliced.includes('data/trpg/scenarios/切片团.raw/'), sliced);
+  ok('而且给出**两条**可执行的路：照着切片手写 struct.json（这条命令只读不写，随便改随便验），或者重抽一遍',
+    sliced.includes('data/trpg/scenarios/切片团.struct.json')
+    && sliced.includes('只读不写') && sliced.includes('.trpg scenario 切片团'), sliced);
+  ok('重抽那条**带上"太长的那份重发多半还是不够"的提醒**（否则这一档又在劝人撞同一堵墙）',
+    /太长的那份重发一次多半还是不够/.test(sliced), sliced);
+  ok('（对照）**没有切片**时仍然说"没有抽取产物" —— 两档不能混（`半截团` 有坏结构但没切片）',
+    halfJson.includes('没有抽取产物') && !halfJson.includes('抽取产物不全'), halfJson);
+  const brokenWithRaw = String(await tell('.trpg check 坏结构带切片团'));
+  ok('（对照）**结构文件坏了、但切片在** → 也走这一档（两种成因共用一段，判据是磁盘上真有几片，'
+    + '不是"回执上说抽过"）',
+    brokenWithRaw.includes('抽取产物不全') && brokenWithRaw.includes('原文切片还在（1 片')
+    && brokenWithRaw.includes('剧情结构：没有可用的'), brokenWithRaw);
 
   const many = String(await tell('.trpg check 多警告团'));
   ok('待核项超过 8 条时**截断并说还有几条**（回执不该长到刷屏；全量都在 struct.json 里）',

@@ -187,6 +187,24 @@ export function createVerifyCommand({ store, scenarios, command }: VerifyCommand
       lines.push(`《${campaign.title}》正在用这份剧本 —— 改完结构文件再敲一次这条命令就能核对。`);
     } else if (struct.ok) {
       lines.push(`要开局：.trpg new ${scenario.id}`);
+    } else if (scenario.rawParts) {
+      // ⚠️ **"原文切片在、结构不在"是一档独立的状态**（2026-10-19 加），不能并进下面那句
+      // "没有抽取产物"：抽取**跑过**，只是没成（超时 / 模型没按格式答），管线把切好的原文
+      // 交了出来。说"没有抽取产物"会让管理员以为得从头再来一遍 —— 而他手里已经有一份完整的
+      // 原文副本（`<id>.raw/`），那正是降级路径最要紧的那件东西（后备整理实测 7345 → 2687 字）。
+      //
+      // ⚠️ 判据是 `scenario.rawParts`（**磁盘上真有几片**），不是"回执上说抽过"。后者没落盘，
+      // 而且这条命令刻意不读任何"上次的回执"。
+      //
+      // ⚠️ 两种成因共用这一段：**一片都没抽成**（`struct` 压根没写）与**结构文件坏了**
+      // （`problems` 非空）。上面那行"剧情结构：…"已经把成因分开了，所以这里**不指方向**
+      // （一种成因的线索在上面、另一种在下面，写死哪一边都会有一半的时候是错的）。
+      lines.push(`抽取产物不全：剧情结构没有可用的，`
+        + `但原文切片还在（${scenario.rawParts} 片，在 data/trpg/scenarios/${scenario.id}.raw/）。`);
+      lines.push(`要补结构：照着切片手写一份 data/trpg/scenarios/${scenario.id}.struct.json，`
+        + '再敲一次这条命令就能核对（它只读不写，随便改随便验）。');
+      lines.push(`要重抽一遍：把原始文件重新发到群里、引用它敲 \`.trpg scenario ${scenario.id}\` —— `
+        + '⚠️ 太长的那份重发一次多半还是不够，先看上面那条建议。');
     } else {
       lines.push('这份剧本没有抽取产物。手写的、格式本来就对的剧本不会走抽取，那是正常的；'
         + `要抽一遍：把原始文件重新发到群里、引用它敲 \`.trpg scenario ${scenario.id}\`。`);

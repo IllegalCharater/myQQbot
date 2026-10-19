@@ -48,7 +48,7 @@ import type { DocumentText } from '../../../media/document/index.js';
 import type { ScenarioStore } from '../store/scenario-store.js';
 import type { ExtraUsage } from '../../types.js';
 import type { AskPort } from '../scenario/extract/prompt.js';
-import type { ExtractFailureKind, ExtractResult } from '../scenario/extract/pipeline.js';
+import type { ExtractFailureKind, ExtractResult, ExtractSalvage } from '../scenario/extract/pipeline.js';
 
 /** 下载超时。这是**命令路径**（群友在等回执），不该被一个慢下载挂住。 */
 const SAVE_TIMEOUT_MS = 15000;
@@ -323,6 +323,9 @@ export async function finishScenario(
   const usedModel = !isFormattedScenario(doc.text, name);
   let finalText = doc.text;
   let analysis: ExtractResult | null = null;
+  // 抽取没成时抢救下来的东西（原文切片 + 半份结构，见 `ExtractSalvage`）。它**只在降级路径**
+  // 上有值，而那条路正是"磁盘上只剩一份被重排过的正文"的那条 —— 所以要把它交出去。
+  let salvage: ExtractSalvage | null = null;
   let extractionNote = '';
   if (usedModel) {
     // 主路：**抽取管线**。它把原文切成几片分别抽、归并成结构化剧情，再合成一份压缩正文 ——
@@ -343,17 +346,25 @@ export async function finishScenario(
         doc.text, { name, source: sourceLabel }, deps.recordUsage
       );
       if (!formatted.ok) {
-        return `${shown}：${outcome.message}（退一步只做格式整理也没成：${formatted.message}）`
+        return `${shown}：[剧情抽取] 没成（${outcome.message}）；[格式整理] 也没成（${formatted.message}）。`
           + `\n${extractFailureAdvice(outcome.kind)}`;
       }
       finalText = formatted.text;
-      // ⚠️ **必须说"特殊规则不生效"**（2026-10-19 补）：降级这条路**不产生 `.rule.json`**，
-      // 所以这一局确实一条机制都没有。原先只说"没有剧情结构、DM 只能从正文里自己读"——
-      // 读者会把那当成"叙事少点细节"，而真相是"整本模组的规矩都不算数"。
+      // ⚠️ **防御性读取**：`analyze` 是**注入的**，套件里的假管线是普通对象字面量，可能压根
+      // 没有 `salvage`（同 `kind` 那条）。少了这层兜底，回执会拼出一个 `undefined`。
+      salvage = outcome.salvage ?? null;
+      // ⚠️ **两个阶段分开说**（2026-10-19 加）。原先这两件事混在一句话里，于是回执**自相矛盾**：
+      // "带 8 条旗标、4 张人物卡"（那是**格式整理**给的）与"没有剧情结构"（那是**剧情抽取**没成）
+      // 并排出现，读起来像"抽了、但抽了个空的"。真相是两个阶段**各给了一半** —— 整理那一步
+      // 只重排正文、顺手交出骨架里的旗标与人物卡；抽取那一步才是场景 / NPC / 线索 / 道具 /
+      // 机制的来源，而它这次没成。实测就是这份 7345 字的《回声公寓》：管理员看到"8 条旗标、
+      // 4 张人物卡"再看到"没有剧情结构"，只会以为抽取坏了，而不知道该往哪儿查。
       // ⚠️ 那句"下一步"**按 `outcome.kind` 分档**，不再固定说"建议重试"（见 `EXTRACT_ADVICE`）。
       // ⚠️ 群友可见，不许有 Markdown 的 `**`（5q 段会扫这个目录）。
-      extractionNote = `剧情抽取没成（${outcome.message}），只做了格式整理 —— `
-        + '这份剧本没有剧情结构，DM 只能从正文里自己读。'
+      extractionNote = `[剧情抽取] 没成（${outcome.message}）。`
+        + `\n[格式整理] 原文不是剧本格式（${doc.text.length} 字），已让模型按剧本格式重排了一遍 —— `
+        + '上面那份正文就是它写的（上面那句里的旗标与人物卡也是它给的）。'
+        + '场景、NPC、线索、道具、机制一条都没有，DM 只能从正文里自己读。'
         + '这一局不会应用剧本里的特殊规则。'
         + `\n${extractFailureAdvice(outcome.kind)}`;
     }
@@ -362,17 +373,32 @@ export async function finishScenario(
   if (!saved.ok) return `${shown}：${saved.message}`;
   // 抽取产物落成**伴生文件**（`.struct.json` + `.rule.json` + `raw/`）。写失败**不回滚**：
   // `.md` 已经是好的，一个旁路文件坏了不该让整份剧本白传一次 —— 如实说出去（同 `writeExtras` 那条约定）。
+  //
+  // ⚠️ **降级路径也要写**（2026-10-19 加），而且那正是它最要紧的一次：抽取没成时 `raw/` 是这份
+  // 文件**唯一**的完整副本 —— 后备那条路只把原文重排一遍，实测 7345 字进去、2687 字出来。
+  // 原先这一档什么都不写，于是管理员手里只剩一份被砍掉 63% 的正文，连回去对照原文都做不到。
   let extrasProblem = '';
-  if (analysis) {
-    const written = scenarios.writeExtras(saved.scenario.id, {
-      struct: analysis.struct,
-      // ⚠️ **一条机制都没抽到时不传 `ruleExt`**（判据是 `analysis.ruleExt` 非空，不是"传了 null"）：
-      // `writeExtras` 的约定是"给了才动"，而 `null` 是一个**给了**的值 —— 它会在剧本目录里落一个
-      // 写着 `null` 的 `.rule.json`，然后 `.trpg check` 报一句"0 条机制"，看起来像抽坏了。
-      ...(analysis.ruleExt ? { ruleExt: analysis.ruleExt } : {}),
-      raw: analysis.chunks.map((chunk) => ({ heading: chunk.heading, text: chunk.text }))
-    });
-    if (!written.ok) extrasProblem = written.message;
+  if (usedModel) {
+    // 结构**可能没有**（一片都没抽成）；规则扩展**降级路径一定没有** —— 两处 ⚠️ 见下。
+    const struct = analysis ? analysis.struct : salvage?.struct ?? null;
+    const ruleExt = analysis ? analysis.ruleExt : null;
+    const chunks = analysis ? analysis.chunks : salvage?.chunks ?? [];
+    // 三样都是"有才传"（`writeExtras` 的约定），所以一片都没抽成时这里**一个键都没有** ——
+    // 那就不必调它：`write()` 那一步已经把上一次留下的伴生文件清掉了。
+    if (struct || ruleExt || chunks.length) {
+      const written = scenarios.writeExtras(saved.scenario.id, {
+        // ⚠️ **一条机制都没抽到时不传 `ruleExt`**（判据是它非空，不是"传了 null"）：
+        // `writeExtras` 的约定是"给了才动"，而 `null` 是一个**给了**的值 —— 它会在剧本目录里落一个
+        // 写着 `null` 的 `.rule.json`，然后 `.trpg check` 报一句"0 条机制"，看起来像抽坏了。
+        ...(struct ? { struct } : {}),
+        // ⚠️ **降级路径绝不写 `ruleExt`**：`.rule.json` 是 `ruleSetFor` 在**开局**时读的那一份，
+        // 写了它就等于那一局**真的会应用特殊规则**，而回执上明明写着"不会"。宁可少一样产物，
+        // 也不要让回执里那句话变成谎话（`analysis ? … : null` 这一行就是那条边界）。
+        ...(ruleExt ? { ruleExt } : {}),
+        ...(chunks.length ? { raw: chunks.map((chunk) => ({ heading: chunk.heading, text: chunk.text })) } : {})
+      });
+      if (!written.ok) extrasProblem = written.message;
+    }
   }
   const skeleton = [
     Object.keys(saved.scenario.flags).length ? `${Object.keys(saved.scenario.flags).length} 条旗标` : '',
@@ -388,19 +414,18 @@ export async function finishScenario(
   const originLabel = shown === NO_FILE_NAME ? sourceLabel : `${sourceLabel}「${shown}」`;
   const origin = [originLabel, ...(doc.pages === undefined ? [] : [`${doc.pages} 页`]),
     ...(doc.encoding && doc.encoding !== 'utf-8' ? [`按 ${doc.encoding} 解码`] : [])].join('，');
-  // ⚠️ 判据是 `!analysis` 而不是 `usedModel`：两档都要花调用，但**只有后备那一档是"整理"**。
-  // 抽取那一档已经把同一件事说得更准了（`extractedNote` 会报切了几片、用了几次），再补一句
-  // "已让模型整理过"等于把"抽取"降格成"排版" —— 管理员会以为这份剧本只有格式被动过，
-  // 而实际上它的剧情结构已经被抽出来并压缩过了。
-  const formattedNote = usedModel && !analysis
-    ? `原文不是剧本格式，已让模型整理过（原文 ${doc.text.length} 字）。\n` : '';
   // 抽取结果的一句话账。**"抽了几片"与"还有多少字没抽"分开说**：后者是管理员判断"要不要
   // 手工再传一次"的唯一依据（原文切片只到片数上限，超出的那些字一份都没进）。
   // 有待核项时**指向 `.trpg check`**（P7-b 起才有那条命令）：这一行只报得出条数，逐条看要
   // 另敲一条 —— 而不指路的话，"待核项 3 条"就成了一句没法追问的话。没有待核项时**不提它**：
   // 那时没有任何东西可看，提一句只是噪音（命令清单里本来就有它）。
+  //
+  // ⚠️ **开头那个阶段标签是回执自洽的唯一依据**（2026-10-19 加）：降级路径上另有一句
+  // `[格式整理]`，两个标签并排，"哪一半是谁给的"才读得出来。原先没有标签，两条信息撞在
+  // 一起就成了"带 8 条旗标、4 张人物卡"+"没有剧情结构"这种自相矛盾（见上面 `extractionNote`）。
+  // ⚠️ 标签用 `[...]` 而**不是** Markdown 的 `**`（5q 段会扫这个目录）。
   const extractedNote = analysis
-    ? `抽出了 ${analysis.struct.scenes.length} 个场景、${analysis.struct.npcs.length} 个 NPC、`
+    ? `[剧情抽取] 抽出了 ${analysis.struct.scenes.length} 个场景、${analysis.struct.npcs.length} 个 NPC、`
       + `${analysis.struct.clues.length} 条线索、${analysis.struct.items.length} 件道具、`
       + `${analysis.struct.mechanics.length} 条机制（原文 ${analysis.totalChars} 字切成 `
       + `${analysis.chunks.length} 片，用了 ${analysis.calls} 次调用`
@@ -410,11 +435,24 @@ export async function finishScenario(
         ? `待核项 ${analysis.struct.warnings.length} 条 —— 敲 \`.trpg check ${saved.scenario.id}\` 逐条看。`
         : '没有待核项。')
     : '';
-  return `${formattedNote}已存剧本「${saved.scenario.id}」：标题「${saved.scenario.title}」`
+  // 降级路径的**唯一线索出口**（2026-10-19 加）：抽取没成时，管理员在群里一处都看不到
+  // "这次到底留下了什么" —— 原文切片、抽到一半的结构、以及没抽成的那些片。`.trpg check`
+  // 零模型调用、零写入，正是为这个场景存在的（见 `commands/verify.ts` 文件头）。
+  //
+  // ⚠️ **只在真有东西可看时才指路**：一片都没抽成、或者伴生文件根本没写进去的时候，指过去
+  // 只会让人敲一条什么都不报的命令（那比不指路更坏：他会以为是自己敲错了）。
+  const salvagePointer = salvage && !extrasProblem && (salvage.chunks?.length ?? 0) > 0
+    ? `这次留下的东西：敲 \`.trpg check ${saved.scenario.id}\` 看（零模型调用）—— `
+      + `原文切片 ${salvage.chunks.length} 片`
+      + (salvage.struct ? '、抽到一半的剧情结构' : '')
+      + '都在那里。'
+    : '';
+  return `已存剧本「${saved.scenario.id}」：标题「${saved.scenario.title}」`
     + `${skeleton ? `，带 ${skeleton}` : ''}，正文 ${saved.scenario.body.length} 字（来源 ${origin}）。`
     + (saved.ignored.length ? `（忽略了不认识的字段：${saved.ignored.join('、')}）` : '')
     + (extractionNote ? `\n${extractionNote}` : '')
     + (extractedNote ? `\n${extractedNote}` : '')
+    + (salvagePointer ? `\n${salvagePointer}` : '')
     + (extrasProblem ? `\n伴生文件没写进去：${extrasProblem}（剧本本身是好的，重传一次能补上）。` : '')
     // 开局那一句必须是**真能开局的词形**：`.trpg new <名字> [规则表]`（`.trpg start`
     // 不带参数，它只把 `preparing` 推到 `active`）。照抄 `start` 的话群友敲下去只会拿到

@@ -741,6 +741,84 @@ const chunkOf = (body) => ({ ok: true, content: JSON.stringify(body), usage: '' 
     l3Timeout.ok === false && l3Timeout.kind === 'timeout'
     && l3Timeout.message === '合成剧本文件时出错：抽取调用超时（1 秒）',
     JSON.stringify(l3Timeout));
+
+  // ── 失败时**必须把已经到手的东西交出去**（`salvage`，2026-10-19）──
+  //
+  // 降级路径是这条命令唯一一条**有损**的路：后备那次整理只把原文重排一遍，实测 7345 字进去、
+  // 2687 字出来。所以"抽取没成"时，已经切好的原文切片（以及抽到一半的结构）是这份文件
+  // **唯一**的完整副本 —— 原先它们随着失败一起被丢掉了，管理员手里只剩一份被砍掉六成的正文，
+  // 连回去对照原文都做不到。
+  //
+  // 六个失败出口**全都要带**，所以这里逐个出口各验一次 —— 漏掉任何一个出口的症状都是
+  // "某一种失败之后东西就没了"，而那种差别只有对着这一张表才看得出来。
+  const salv = (outcome) => (outcome.ok ? null : outcome.salvage);
+  const EXITS = [
+    ['empty（没有正文可抽）', noText.outcome, 0, false],
+    ['format（一片都没成）', allBad, 1, false],
+    ['request（L3 请求失败）', mergeBad, 1, true],
+    ['timeout（预算用尽、没来得及合成）', outOfTime.outcome, 3, true],
+    ['timeout（一片都没轮到）', noTime.outcome, 3, false],
+    ['timeout（L3 撞死线）', l3Timeout, 1, true]
+  ];
+  for (const [label, outcome, chunkCount, hasStruct] of EXITS) {
+    ok(`失败出口 \`${label}\`：` + (hasStruct
+      ? '**半份结构**与原文切片都交出来了'
+      : '**没有结构可抢救**（如实是 `null`），但原文切片照交'),
+      salv(outcome) !== null && salv(outcome) !== undefined
+      && salv(outcome).chunks.length === chunkCount
+      && (salv(outcome).struct === null) === !hasStruct,
+      JSON.stringify({ chunks: salv(outcome)?.chunks?.length, struct: salv(outcome)?.struct !== null }));
+  }
+  ok('`salvage.totalChars` 报的是**切片用的那份原文**的字数（调用方拿它对账"后备整理砍掉了多少"）',
+    salv(outOfTime.outcome).totalChars === THREE.length,
+    JSON.stringify({ got: salv(outOfTime.outcome).totalChars, want: THREE.length }));
+  ok('`salvage.calls` 数的是**真发出去的调用**（失败也是花了钱的 —— 回执与账本都要它）',
+    salv(allBad).calls === 1 && salv(mergeBad).calls === 2
+    && salv(outOfTime.outcome).calls === 1 && salv(noText.outcome).calls === 0,
+    JSON.stringify(EXITS.map(([, o]) => salv(o).calls)));
+
+  // ⚠️ **待核项的第一条是我们的账**（`salvageOf` 里的 `unshift`）：少了它，这份半成品落盘之后
+  // 与一次**成功**的抽取长得一模一样，DM 会拿着它照常开团，而没人知道场景少了一半。
+  // 用 `unshift` 而不是 `push` 也有判据：它改变的是**后面每一条**的读法 ——
+  // "引文找不到"在"结果只有一半"的背景下是另一件事。
+  ok('抢救下来的结构里，**第一条待核项就点明"这次没成"**（而不是混在别的待核项里）',
+    /^这次抽取没成/.test(String(salv(outOfTime.outcome)?.struct?.warnings?.[0] ?? '')),
+    JSON.stringify(salv(outOfTime.outcome)?.struct?.warnings));
+  ok('（对照）**没有结构可抢救时不编这句话** —— 凭空加一条待核项会让调用方以为抢救成功了',
+    salv(allBad).struct === null && salv(noTime.outcome).struct === null
+    && salv(mergeBad).struct.warnings[0] !== undefined,
+    JSON.stringify([salv(allBad).struct, salv(noTime.outcome).struct]));
+
+  // ⚠️ 抢救的结构**要过那三个只记待核项的校验**（引文 / 幕 / 结局）：半份结构里的引文照样
+  // 可能对不上原文，而"抽到一半"不改变这件事 —— 不校验的话，管理员拿到一份**没人核过**的
+  // 结构，而它看起来与成功那一路的产物逐字同形。
+  const salvageQuote = await (async () => {
+    // ⚠️ 这个机制字面量**必须就地写**（不能借用上面 `solid`）：那是另一个块作用域里的夹具。
+    // 引文写成原文（`ONE` 是 500 个「甲」）里找不到的一句 —— 这正是要验的那一条。
+    const mechanic = {
+      type: 'npc_trait', note: '守夜人',
+      trigger: { op: 'actor', value: '守夜人' },
+      effect: { handler: 'narrate', params: {} },
+      triggerText: '遇到守夜人', effectText: '他会开口',
+      sourceQuote: '这句原文里没有'
+    };
+    const { port } = fakeAsk([
+      chunkOf({ mechanics: [mechanic] }),
+      { ok: false, message: '模型挂了' }
+    ]);
+    return extractScenario(ONE, { name: 'x', source: 'text' }, { ask: port });
+  })();
+  ok('抢救的结构仍然**跑过引文校验**（原文里找不到的引文照样记成待核项，排在"这次没成"之后）',
+    salv(salvageQuote)?.struct?.warnings.some((w) => /引文在原文里找不到/.test(w))
+    && /^这次抽取没成/.test(String(salv(salvageQuote)?.struct?.warnings?.[0] ?? '')),
+    JSON.stringify(salv(salvageQuote)?.struct?.warnings));
+  // ⚠️ **降级路径不交付 `.rule.json`，所以它也不该报"机制编译过了"**：`salvageOf` 刻意不跑
+  // `verifyMechanics` —— 跑了就会把那份机制草稿的账记进 `warnings`，读起来像那些机制会生效，
+  // 而回执上明明写着"这一局不会应用剧本里的特殊规则"。判据因此是"没有编译那类话"，
+  // **不是**"没有机制"（`sourceQuote` 那类待核项本来就该在，上面那条验的正是它）。
+  ok('抢救时**不跑机制编译**（`verifyMechanics` 的产出是 `.rule.json` 的原料，而降级路径不交付它）',
+    !salv(salvageQuote).struct.warnings.some((w) => /编译|冲突|认不出/.test(w)),
+    JSON.stringify(salv(salvageQuote).struct.warnings));
 }
 
 // ── 分幕（P8）：`coerceStruct` 收 acts / `mergeStructs` 按 id 合并 / `verifyActs` 的两类待核项 ──
