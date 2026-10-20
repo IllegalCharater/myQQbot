@@ -477,7 +477,7 @@ store.promptContextMaxChars = 32000
    → #compile
         readSkillText() + splitSkillSections()        ← 读文件、按 `## ` 切节，全程不改写
         第 1 段（选节）：system = 覆盖前言 + 规则目录（只有节标题）→ 模型回节号
-        第 2 段（编译）：system = 覆盖前言 + 选中的节**原文逐字** → 正/负两段提示词
+        第 2 段（编译）：system = 覆盖前言 + 选中的节**原文逐字** → 正面 = §15 的 Layout JSON、负面 = 一段词
         任一段失败 → 记一行 COMPILE_* 日志，回退原始描述
    → #runProduction → generateImage({ prompt: compiled?.positive ?? job.prompt,
                                       negativePrompt: #negativeFor(job, config) })
@@ -485,6 +485,12 @@ store.promptContextMaxChars = 32000
 ```
 
 `select: false` 时跳过第 1 段，一次调用直接上**全文**（约 2.5 万 token 输入，规则一条不漏）。
+
+**正面提示词是 §15 的 Layout JSON，不是一段自然语言**（2026-10-20 定）。规则集 §15 定义了一套 Layout JSON schema（`summary.{meta,canvas,caption}` + `items[].{label,caption,text?,bbox}`，`bbox_coord_space: "abs_centralized"` 绝对像素、原点在画布中心，`bbox_format: "yxyx"`），而 §15 自己写着"The model supports combining natural language and structured input"。所以编译产物直接按它写、**原样发给百炼**，不经过任何转换 —— 百炼 qwen-image 收得下 JSON 文本，这是 §15 的用法而不是我们的发明。
+
+三条边界：① **`<<<PROMPT>>>` / `<<<NEGATIVE>>>` 那对信封留着** —— 它解决的是"从一次自由文本回答里切出两段"，与正面是不是 JSON 无关；② **§15 那一节被强制入选**（`LAYOUT_JSON_SECTION_ID`）：模型可以挑漏任何一节，唯独不能漏掉"正面该长什么样"这一节 —— 漏了它就会退回写自然语言，而回执上写着"按 §15 输出"；③ **bbox 的坐标系必须与真实画幅一致**，所以 user 段把 `canvasOf(size)` 算出的宽高与取值区间（`x∈[-w/2, w/2]`、`y∈[-h/2, h/2]`）念给模型 —— 配置里没填尺寸时回落 `DEFAULT_CANVAS`（1024×1024）并**如实标注这是回退值**（写"未指定"等于让模型自己发明一套坐标系，而结果里看不出来）。
+
+**JSON 的读取不许"猜"**（`readLayoutJson`）：剥掉可选的 Markdown 围栏后，从第一个 `{` 取到最后一个 `}`，每个候选都必须**真的过 `JSON.parse` 且是对象**才算数；都不成立时 `layout: false`，正面按纯文本照发。这与仓库里那条"不许加猜测式的 JSON 修复"是同一条规矩 —— 猜错配对会把**被改动过的文本真的发到群里**；这里不修，只识别。
 
 **为什么是两段**：这是 Agent Skills 的 progressive disclosure。它的三级是「① frontmatter 的 name/description 常驻 → ② 判定相关时读**整份** SKILL.md → ③ 目录里的附属文件按需读」，而第 ③ 级靠的是"模型有 `Read`/`Bash` 工具"。这里的编译调用是**单发、无工具**的，所以照它的形状把"先看索引、再取正文"拆成两次调用 —— 目录就是索引，选中的节就是正文。
 
@@ -498,24 +504,26 @@ store.promptContextMaxChars = 32000
 **怎么看"skill 到底注入进去了没有"**（出图照常成功、从结果上看不出区别，所以全看日志；而日志**只走 stdout** —— 没有应用日志文件，面板里那个 `/api/snowluma/logs` 是 SnowLuma 子进程的输出，绿色版双击 exe 看不到，得从终端跑）：
 
 - `compile=off` —— 配置没开，没注入。**关着也必须打这一行**：不打的话，"日志里什么都没有"同时对应"配置没开"与"开了但压根没走到"两种完全不同的情况，而排查"我的 skill 怎么没生效"第一步要回答的正是这个；
-- `compile=ok picked=7/19 sections=5,17 skillChars=12840` —— 注入成功。三格各答一件事：`picked` 看两段式有没有白跑（**总是 19/19 = 选节白跑了**，成本与全文一样）、`sections` 看它挑了谁（"为什么没选 §16"只能靠它）、**`skillChars` 是直接证据**（`select:false` 时它**恰好等于 `SKILL.md` 的字符数 51455**——注意不是字节数 81141，这个数数的是 JS 字符串长度；小于它就是没贴全）；
-- `code=COMPILE_NO_SKILL` —— 规则文件读不到（资产没进包 / 路径锚点坏了）；`code=COMPILE_NO_PORT` —— 配置开着但端口没接上；`code=COMPILE_REQUEST` / `FORMAT` / `EMPTY` / `TOO_LONG` —— 那次调用本身失败，**已回退原始描述**；`negative=SKIPPED_UNSUPPORTED` —— 2.1 系列不收负面词。
+- `compile=ok picked=7/19 sections=5,17 skillChars=12840 layout=json` —— 注入成功。四格各答一件事：`picked` 看两段式有没有白跑（**总是 19/19 = 选节白跑了**，成本与全文一样）、`sections` 看它挑了谁（"为什么没选 §16"只能靠它）、**`skillChars` 是直接证据**（`select:false` 时它**恰好等于 `SKILL.md` 的字符数 51455**——注意不是字节数 81141，这个数数的是 JS 字符串长度；小于它就是没贴全）、**`layout` 看模型有没有照 §15 写**（`json` = 正面是一个能 `JSON.parse` 的对象，`text` = 退回自然语言；它是"为什么画出来的东西没有分块/没有文字"这类问题的第一现场）；
+- `code=COMPILE_NO_SKILL` —— 规则文件读不到（资产没进包 / 路径锚点坏了）；`code=COMPILE_NO_PORT` —— 配置开着但端口没接上；`code=COMPILE_REQUEST` / `FORMAT` / `EMPTY` —— 那次调用本身失败，**已回退原始描述**；`negative=SKIPPED_UNSUPPORTED` —— 2.1 系列不收负面词。
 **四条写下来免得下一个人改错的取舍**：
 
 1. **挑不出来就退回全文**（空回答 / 认不出的节号 / 夹着解释的文字 → 全部 19 节）。这是刻意的 fail-open 方向：**漏选一节的代价是画错，多选一节的代价只是几百 token**。
-2. **fail-open，不 fail-closed**。编译是增强，原始描述就是没有这一层时的行为；判据是"**额度已经扣了**"。**非静默是底线**：固定码（`NO_SKILL` / `REQUEST` / `FORMAT` / `EMPTY` / `TOO_LONG` / `NEGATIVE_DROPPED` / `NO_PORT`）进日志。代价知情：编译一直失败时那行码是管理员**唯一**的线索。
+2. **fail-open，不 fail-closed**。编译是增强，原始描述就是没有这一层时的行为；判据是"**额度已经扣了**"。**非静默是底线**：固定码（`NO_SKILL` / `REQUEST` / `FORMAT` / `EMPTY` / `NO_PORT`）进日志。代价知情：编译一直失败时那行码是管理员**唯一**的线索。
 3. **它跑在 `#execute` 里、排在 `run` 之前，结果写在 `job.compiled` 上**（不是就地传给 `generateImage`）。理由是测试：注入了 `operations.runTask` 的套件整段替换了"出图"这一步，写在 job 上它们才看得见。`InternalJob.compiled` **不进对外读模型**。
 4. **超时归队列**（`config.compile.timeoutMs`，钳 5s~300s，**两段加起来**），端口只收 `signal`。死线**必须**与出图自己的 `timeoutMs`（最长 15 分钟）分开：队列是单并发的，一次挂住的编译会堵死全部出图（有一条真等 5 秒的用例守着）。
 
-**负面词 = 代码焊死的安全前排 + 编译产出 + 管理员配置那条**，按这个顺序连接；**关掉编译时返回 `undefined`**，`buildImageGenRequest` 回落到配置那条 —— 于是"关掉编译"与"没有这个功能"**逐字相同**（对照断言防的是"关掉了还偷偷加安全词"）。安全前排不经过模型，所以没有"模型没照做"这条失效路径。2.1 系列不认这个参数，写了也发不出去，所以**那一档直接不发**并记 `negative=SKIPPED_UNSUPPORTED`。
+**负面词 = 编译产出 + 管理员配置那条**，按这个顺序连接；**关掉编译时返回 `undefined`**，`buildImageGenRequest` 回落到配置那条 —— 于是"关掉编译"与"没有这个功能"**逐字相同**（对照断言防的是"关掉了还偷偷加安全词"）。⚠️ **2026-10-20 之前这里还有一段"代码焊死的安全前排"**（`SAFETY_NEGATIVE`），连同编译层的字数上限一起删了：内容边界交给配置项表达，代码层不再替部署方做判断。2.1 系列不认这个参数，写了也发不出去，所以**那一档直接不发**并记 `negative=SKIPPED_UNSUPPORTED`。管理员那条的 `slice(0, 500)` 留着 —— 那是**配置项自己的**长度保护，与"编译产物多长"是两件事。
 
-**覆盖前言是稳定前缀，别拆散**：两段调用的 system 都以它开头，前缀缓存的命中全靠它（`llm.ts` 本来就在统计 `cached_tokens` / `cacheHitRate`）。它里面有两件事：**门禁**（主体一律成年人 / 日常公共家居场景 / 日常着装）与**模型适配**（明说这套规则是给 MOSS-Image 写的，Steps/CFG/SLG 那类采样参数本部署用不到、遇到就跳过）。它是**我们自己的文本**，不是对 `SKILL.md` 的修改，所以不触 ND。
+**覆盖前言是稳定前缀，别拆散**：两段调用的 system 都以它开头，前缀缓存的命中全靠它（`llm.ts` 本来就在统计 `cached_tokens` / `cacheHitRate`）。它**只做一件事：模型适配** —— 明说这套规则是给 MOSS-Image 写的，Steps/CFG/SLG 那类采样参数本部署用不到、遇到就跳过。它是**我们自己的文本**，不是对 `SKILL.md` 的修改，所以不触 ND。
+
+⚠️ **它里面刻意不放门禁**（2026-10-20 删）。曾经有一段"成年主体 / 日常场景 / 日常着装"的附加约束，但它从收录那天起就是**注释掉的**（从未生效），而 `compileSystem` 里还留着一句"上面的【部署方附加约束】优先于下面全部规则" —— 一句指向不存在的东西的指令，且副本会**无条件生效**、把按配置分支的段落废掉（与内置人设那条"一条规则只有一个落点"是同一个病）。删掉之后，内容边界唯一的落点就是部署方自己的 `imageGen.negativePrompt` / `imageGen.stylePrompt`。
 
 **跨层边界**：`llm` 与 `media` 同属 T1、严格互斥（`T1_ALLOW` 是空集），所以 `compile.ts` **不 import `llm/`、也不自己 fetch** —— 它只读资产、切节、组装请求、调注入的 `ImagePromptAskPort`、解析返回。真端口是 `web/app.ts` 里一个内联函数（`chatCompletion` + `temperature: 0.2` + `sessions.addExtraUsage`），与 `deliverNote` / `sendPrivate` 那批宿主口子同形。规则文件路径从 `core/paths.ts` 的 `PROMPT_SKILL_FILE` 取，**不许自己拼字面量**（挪窝只会在运行期变成一个"功能静默失效"）。资产放在 `assets/` 下（它已经在打包白名单 `APP_ENTRIES` 里，不必新开目录）。
 
 **⚠️ 迁移过来的结论没有在本仓库复核过**：那套规则是在 MOSS-Image（Qwen3.5-9B 编码器 + 5B 单流 DiT，固定采样点 640×960 / Steps 25 / CFG 3.5 / SLG 置空）上实测的，而这里用的是百炼 qwen-image。照 skill §1 自己的证据分级，这属于 **⚪（机理沿用、未在该载体上重新对照）**。**它在 qwen-image 上到底有没有效，只能人工出图复核 —— 套件证明不了。** 覆盖前言里那段"模型不一样"就是为此写的。
 
-**门禁的已知边界**：它只存在于编译开启时 —— 关掉编译时 `/画 裸体女孩` 的行为与加这一层之前逐字相同，那个口子本来就在，本次改动不碰它。另外，全文模式下门禁那一段是**一段话对约 25k token 的实测指令**，模型听不听没有保证；真正没有"没照做"这条失效路径的是**代码焊死的安全负面词**。
+**内容门禁今天不在代码里**：编译层的覆盖前言只剩"模型适配"，代码里那份 `SAFETY_NEGATIVE` 与编译产物的字数上限都在 2026-10-20 删掉了。要约束画面，唯一的落点是部署方自己的 `imageGen.negativePrompt`（负面词）与 `imageGen.stylePrompt`（风格层）—— 它们是配置项，改完保存即生效。⚠️ 关掉编译时 `/画 裸体女孩` 的行为与加这一层之前**逐字相同**：那个口子本来就在，本次不碰，但**别以为它被管着**。
 
 **默认关**（`imageGen.compile.enabled: false`）：每张图多一到两次模型调用，而图按张计费，出厂打开等于给所有升级的人悄悄加一倍成本。与仓库里其余重能力默认关是同一条口径。
 
@@ -581,9 +589,13 @@ npm run dist:desktop    # 打包绿色版桌面应用（scripts/build-desktop.mj
 
 命令分发层另有 `t-commands.mjs`（50 条，2026-10-16 从 `t-slash-commands.mjs` 改名 —— 命令不再只有 `/` 一族）：认命令的边界（`/画xx`、`/转写啦`、`/漫画123`、展开后的转发正文都不算）、`/转写[视频]` 那条分支、每条命令的回执与"不入队"的边界（`/画` 没写描述时只回用法提示）、失败时把**真实原因**原样发回群里（解析层抛的本来就是中文用户文案）、**`/漫画` 要把请求者 QQ 递下去**（去重键是"请求者 + 漫画 ID"，漏了会退化成全群共用一个额度）、`/能力` 的用法与失败话术、**按会话取命令表**（接管会话只看得到接管者的命令 + 永远在的 `/能力`）、扩展命令走同一只 `runCommand` 外壳、扩展遮蔽不了内置，以及一条源级断言：**`ingest.ts` 里不许再出现命令正则**（判据只有一份，漂移时不会有任何报错）。
 
-图像生成另有 `t-image-gen.mjs`（203 条），起一个**本地假百炼端点**（`baseUrl` 是管理员配置、不是用户输入，所以指向 127.0.0.1 是正常用法；与「请求结构」那条同一条边界），覆盖：配置归一化与钳制（含 `x` → `*`、整条 endpoint 粘进来、`DASHSCOPE_API_KEY` 回退、编译层四档）、请求体形状（T2I 只有 `{text}`、I2I 参考图在前、`negative_prompt` **只在 3.0 系列出现**）、**两层提示词**（风格层留空时与模型给的描述逐字相同——这条对照必须有，否则"永远拼一层空串"看不出来）、错误映射（HTTP 400、**HTTP 200 但响应体带 `code`**、无图 URL、响应体超限、超时、abort 各一条）、队列（单并发、`stop()` 取消排队中的那一个并 abort 在途、视图不含 prompt、临时文件投递后即删）、成本闸门（每会话与全局两本账、被拒的不占额度、**两条入口共用**）、`/画` 解析与参考图定位、工具侧（不代发消息、不把任务号写进结果、messageId 取不到图时列出实际附件种类），以及端到端那一条：**命令路径与工具路径拼出来的请求体逐字节相同**（两层提示词只有一份实现）。
+图像生成另有 `t-image-gen.mjs`（219 条），起一个**本地假百炼端点**（`baseUrl` 是管理员配置、不是用户输入，所以指向 127.0.0.1 是正常用法；与「请求结构」那条同一条边界），覆盖：配置归一化与钳制（含 `x` → `*`、整条 endpoint 粘进来、`DASHSCOPE_API_KEY` 回退、编译层三档）、请求体形状（T2I 只有 `{text}`、I2I 参考图在前、`negative_prompt` **只在 3.0 系列出现**）、**两层提示词**（风格层留空时与模型给的描述逐字相同——这条对照必须有，否则"永远拼一层空串"看不出来）、错误映射（HTTP 400、**HTTP 200 但响应体带 `code`**、无图 URL、响应体超限、超时、abort 各一条）、队列（单并发、`stop()` 取消排队中的那一个并 abort 在途、视图不含 prompt、临时文件投递后即删）、成本闸门（每会话与全局两本账、被拒的不占额度、**两条入口共用**）、`/画` 解析与参考图定位、工具侧（不代发消息、不把任务号写进结果、messageId 取不到图时列出实际附件种类），以及端到端那一条：**命令路径与工具路径拼出来的请求体逐字节相同**（两层提示词只有一份实现）。
 
-**提示词编译层**（§8.3）另有一段（88 条），分三层：**分节与选择的纯函数**（前言自成 `preamble`、`### ` 不另开节、`## 9.1` 自成节、**全部节拼起来逐字节等于原文**、目录只含标题不含正文、数字列表 / `all` / 空回答 / 编造节号 / 夹在解释文字里的节号各一条）、**真文件与许可**（19 节 + 前言、拼回去逐字节等于文件、**sha256 与收录时一致**、NOTICE 里标题/作者/来源/协议四样、LICENSE 随包、`prompt-catalog.ts` 里**不许出现规则正文**）、**两段式的请求形状与队列端到端**（两段共用同一份 user、覆盖前言在**两段的最前面**、第 1 段只给目录、第 2 段逐字带选中的节且**没挑中的一个都没有**、前言恒定入选、`compile=ok picked=… sections=… skillChars=…` 进日志（含一条**只验日志**的：`select:false` 时 `skillChars` 恰好等于文件长度）、`compile=off` 也要打、**挑不出来退回全文**、`select:false` 只调一次且 **`includes(全文)`**——连续子串，没插东西也没少字节、**对照**关掉编译时端口一次都没被调且负面词回落成配置那条、fail-open 四条、2.1 不发负面且日志说明、端口没接上留 `COMPILE_NO_PORT`、文件读不到给 `NO_SKILL`、**死线到点才中止那一次调用**）。最后那条要真等 5 秒（`compile.timeoutMs` 的钳制下限就是 5000，没有更快的构造办法），它守的是"一次挂住的编译把单并发队列堵死"。另有十二条源级断言钉接线：`compile.ts` 不 import `llm/`、不自己 `fetch`、规则来自 catalog、**规则文件路径来自 `core/paths.js` 而不是就地拼字面量**、两段的 system 都以覆盖前言开头、切分只认 `## ` 且按原文字符下标、**拼装用空串连接**、编译排在 `run` 之前、出图回落原始描述、死线那行在、`app.ts` 递了端口且用 `temperature 0.2`、用量走 `addExtraUsage`。`t-paths.mjs` 另有 3 条：资产路径锚点在 `assets/` 下、规则文件真的在且够大、LICENSE 与 NOTICE 随包。
+**提示词编译层**（§8.3）另有一段（**84 条**，14a–14g），分三层：**分节与选择的纯函数**（前言自成 `preamble`、`### ` 不另开节、`## 9.1` 自成节、**全部节拼起来逐字节等于原文**、目录只含标题不含正文、数字列表 / `all` / 空回答 / 编造节号 / 夹在解释文字里的节号各一条）、**真文件与许可**（19 节 + 前言、拼回去逐字节等于文件、**sha256 与收录时一致**、NOTICE 里标题/作者/来源/协议四样、LICENSE 随包、`prompt-catalog.ts` 里**不许出现规则正文**）、**两段式的请求形状与队列端到端**（两段共用同一份 user、覆盖前言在**两段的最前面**、第 1 段只给目录、第 2 段逐字带选中的节且**没挑中的一个都没有**、前言恒定入选、`compile=ok picked=… sections=… skillChars=… layout=json|text` 进日志（含一条**只验日志**的：`select:false` 时 `skillChars` 恰好等于文件长度）、`compile=off` 也要打、**挑不出来退回全文**、`select:false` 只调一次且 **`includes(全文)`**——连续子串，没插东西也没少字节、**对照**关掉编译时端口一次都没被调且负面词回落成配置那条、fail-open 四条、2.1 不发负面且日志说明、端口没接上留 `COMPILE_NO_PORT`、文件读不到给 `NO_SKILL`、**死线到点才中止那一次调用**）。最后那条要真等 5 秒（`compile.timeoutMs` 的钳制下限就是 5000，没有更快的构造办法），它守的是"一次挂住的编译把单并发队列堵死"。
+
+**按 §15 Layout JSON 扩写后新增的那几条**（2026-10-20）：`readLayoutJson` 的四条（剥 Markdown 围栏 / 从第一个 `{` 取到最后一个 `}` / **必须过 `JSON.parse` 且是非 null 非数组的对象** / 都不成立时 `layout: false` 且正面按纯文本照发）；`canvasOf` 的三条（`768*1024` → `768/1024` 且 `assumed === false`、没填尺寸时回落 `DEFAULT_CANVAS` 并**如实标 `assumed`**）；**§15 真的在文件里**且含 `bbox_coord_space` / `abs_centralized`；user 段念出画布与两轴取值范围；**§15 恒定入选**（用例里模型只挑了 5 与 17，它照样在 system 里）；一段队列端到端：**正面真的是一段 Layout JSON 时逐字发给百炼**，日志里那格是 `layout=json`（这是"按 §15 输出"在链路上**唯一**的可观测面 —— 结果图上看不出来）；两条**反向断言**（`部署方附加约束` / `日常着装` 不在 Catalog **剥注释后的代码**里、`SAFETY_NEGATIVE` 不在 `compile.ts` 与 `queue.ts` 里）；以及一条"**代码层不许再给画面描述定长度上限**"（对 `buildCompileRequest(baseInput, '').system` 扫 `上限|不超过|字数` —— body 传空串才扫得准，否则规则原文里的字眼会干扰）。
+
+另有**十四条**源级断言钉接线：`compile.ts` 不 import `llm/`、不自己 `fetch`、规则来自 catalog、**规则文件路径来自 `core/paths.js` 而不是就地拼字面量**、**编译层里不许出现规则正文**、两段的 system 都以覆盖前言开头、切分只认 `## ` 且按原文字符下标、**拼装用空串连接**、编译排在 `run` 之前、出图回落原始描述、死线那行在、`app.ts` 递了端口且用 `temperature 0.2`、用量走 `addExtraUsage`。设置页那三处口径另有一小段（10 条）：`save.js` 读的每个 `cfg-imagegen-*` id 都在 `sections.js` 里真的存在（否则 `val()` 静默回退成当前值）、**编译层三档的上下限与后端 resolver 是同一组数**、`maxChars` 那一档在**后端配置 / save / 设置页**三处都不许留、`ImageCompileConfig` **恰好三个键**、`select` 的缺省判据前后端同一条。`t-paths.mjs` 另有 3 条：资产路径锚点在 `assets/` 下、规则文件真的在且够大、LICENSE 与 NOTICE 随包。
 
 搜图另有 `t-image-source.mjs`，七段：① 通用 provider 的薄适配——参数按**位次**原样转发（含 `engineOptions` 里的 `apiKey`）、错误码原样透传（`RATE_LIMIT` / `QUOTA_EXHAUSTED` / `TIMEOUT`）、`test()` 走 `ping()` 且**从不抛**（ping 返回 `false` 或直接抛异常都收敛成 `false`）；② **服务层的分发第一次有了直接断言**——用注入的假 provider（`PicImageSearchPort` 是编译期端口，测试用对象字面量顶替，没有 `instanceof`）实测 `intent` 决定的先后顺序（`anime` 先 `trace.moe`、`manga` / `illustration` 先 `saucenao`、**`unknown` 直接走一般向兜底**）、专属引擎答不上（低于门槛 / 抛错 / 超时）之后**兜底真的被调用**、每一发的超时被夹住给后面留位置（预算不够则跳过并记 `NO_BUDGET`、一次调用都不发）、逐引擎的 `timeoutMs`/`maxResults`/`mime`、`similarity < minSimilarity` 过滤（**无置信度的结果只对没有门槛的引擎算命中**——`baidu` 那条被采用，而带门槛的引擎照样丢弃它，两条互为对照）、关闭或空 `apiKey` 的引擎被跳过，以及 `failures` 标签仍是 `trace:` / `sauce:` / `baidu:`（这条字符串会进模型可见文本）。**`unknown` 这条是补上来的缺口**：它此前没有任何断言，而模型判不出类型时填的就是它 —— 于是"当初与 `anime` 同序（理由只是'与改动前一致'）"这个缺陷在四套件全绿的情况下活了一整轮；夹具让 trace.moe 也自称命中（0.99 > 它自己的门槛 0.87）才可判别（顺序错则 trace 的假命中赢并拦住兜底）。为了让 `loadSafeImage` 真的下载到字节，这一段用**回环 HTTP 服务**（`security.allowPrivateImageHosts` 临时打开，跑完复原——先例是 `t-sticker.mjs`），因此它必须排在"被 SSRF 挡下"那条断言**之后**；③ 同一段窗口内另有**缓存**用例（共用同一个 service 实例才有缓存可言）：同引擎同图第二次不发远端调用、**换 intent 不会被另一个引擎的缓存顶替**（旧实现按图片 hash 缓存整轮结论，这条在旧实现下会红）、失败不进缓存、`maxResults` 与引擎参数指纹都进键；④ `formatImageSourceResult` 的输出形状（此前一条断言都没有）——集数与时间点彼此独立、`time === 0` 是合法值、缺失字段兜底而不是印出 `undefined`、**没有置信度时整行让位**（判据是"字段在不在"，`pct(undefined)` 印出来的是 `NaN%`）；另有两条文本断言钉住 `SearchIntent` 的取值域在**三处**（`types.ts` 的联合类型、工具 schema 的 `enum`、`prompt-catalog` 的 intent 描述）逐字一致 —— 少一处模型就永远填不出那一档，且没有任何报错；⑤ 文本断言钉住原生 fetch 已绝迹：`src/media/image-source/` 下不再出现 `saucenao.com` / `api.trace.moe` / `TraceMoeProvider` / `SauceNaoProvider` / `fetchImpl`，两个按引擎的 provider 文件不存在，服务层源码里不出现 `anime_trace`（它是 trace.moe 的别名，不许加成第三个引擎）；⑥ 引擎名是**跨进程的手工镜像**：worker 的 `ENGINE_CLASS_CANDIDATES` 键集合 ⇄ Node 的 `PIC_IMAGE_SEARCH_ENGINES` 逐字比对（`.py` 不进 `tsc`，没有别的套件会读它），另加 `MEASURED_CLASS_NAMES`（2026-09-29 实测到的 7 个类名）钉住它们在候选链里**够得着**；⑦（源码段 ⑩）扫 `python-tools/pic_image_search_worker.py` 的**源码文本**，钉住第三次实测抓到的那两个真机 bug 的修法——时间取自大写 `From`、取不到时**不写** `time` 键（写 0 会让 formatter 的"字段在不在"判据失效）、标题按 `title_chinese` → `title_native` → `title_romaji` 取实测平铺字段、`origin` 当标题的兜底不存在。**两条射程不同，别当同一条用**：键集合那条看不见候选类名的拼写（把 `BaiDu` 改回 `Baidu`，实测该套件全绿），实测名那条挡不住"库改名"——它只挡得住"把已经实测对的名字又改回去"。⑦ 那段还有一条通用教训：**取函数体时只按行丢了 `#` 注释，docstring 不是注释、丢不掉**，所以断言必须**锚定到具体调用**（`_pick(raw_item, "title_chinese")`）而不是裸字段名——初版写的是 `/title_chinese[\s\S]*title_native/`，把代码里那次调用删掉后它**照样绿**（名字原样躺在 docstring 里），是证伪探针撞出来的假绿。
 

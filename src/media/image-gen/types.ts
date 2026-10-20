@@ -91,7 +91,7 @@ export interface EffectiveConfig {
   maxCallsPerDay: number;
 }
 
-/** 编译层的四档配置。四个都影响行为，没有"留着不用"的字段。 */
+/** 编译层的三档配置。三个都影响行为，没有"留着不用"的字段。 */
 export interface ImageCompileConfig {
   enabled: boolean;
   /**
@@ -103,8 +103,6 @@ export interface ImageCompileConfig {
   select: boolean;
   /** **两段加起来**的死线，与出图自己的 `timeoutMs` 各管各的。 */
   timeoutMs: number;
-  /** 编译产出的**正面提示词**上限（不是原始描述的上限 —— 那个是 `maxPromptChars`）。 */
-  maxChars: number;
 }
 
 /**

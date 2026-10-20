@@ -28,7 +28,7 @@ import { TaskQueue } from '../task-queue.js';
 import type { SetTaskStatus } from '../task-queue.js';
 import { resolveImageGenConfig, supportsNegativePrompt } from './config.js';
 import { generateImage } from './client.js';
-import { SAFETY_NEGATIVE, compileImagePrompt } from './compile.js';
+import { compileImagePrompt } from './compile.js';
 import type { CompileFailure, CompileSuccess } from './compile.js';
 import { ImageGenError, safeErrorCode, safeErrorDetail, userError } from './errors.js';
 import { downloadImageToFile, fetchReferenceImage } from './image-io.js';
@@ -300,7 +300,6 @@ export class ImageGenQueue {
         raw: job.prompt,
         hasReference: !!job.referenceUrl,
         size: config.size,
-        maxChars: config.compile.maxChars,
         // 当前模型不认 `negative_prompt` 就别让模型白写那一串（省下的 token 是实打实的）。
         wantsNegative: supportsNegativePrompt(config.model),
         // 两段式：先挑节、再编译。关掉就是一次调用直接上规则全文。
@@ -322,30 +321,32 @@ export class ImageGenQueue {
     job.compiled = outcome.value;
     // 这一行是"skill 有没有注入进去"的**唯一直接证据**（出图照常成功，从结果上看不出区别）：
     //   picked=7/19      挑中了几节 —— **总是 19/19 就说明两段式白跑了**，成本与全文一样；
-    //   sections=5,17    挑了谁 —— "为什么它没选§16" 时只能靠这一格；
+    //   sections=5,15,17 挑了谁（**恒定入选的 §15 也在里面**）—— "为什么它没选§16" 时只能靠这一格；
     //   skillChars=12840 实际注入的**规则原文**字符数 —— **`select:false` 时应恰好等于
-    //                    SKILL.md 的**字符**数 51455**，小于它就是没贴全。
+    //                    SKILL.md 的**字符**数 51455**，小于它就是没贴全；
+    //   layout=json      正面提示词**是不是一段能解析的 Layout JSON**（我们要的就是 §15 那份）。
+    //                    它是 `text` 时出图照常，但画的是一段散文 —— 而这件事在结果图上看不出来。
     this.#log(`[image-gen] task=${job.id} compile=ok picked=${outcome.picked}`
-      + ` sections=${outcome.sections} skillChars=${outcome.skillChars}`);
-    if (outcome.note === 'NEGATIVE_DROPPED') {
-      this.#log(`[image-gen] task=${job.id} code=COMPILE_NEGATIVE_DROPPED`);
-    }
+      + ` sections=${outcome.sections} skillChars=${outcome.skillChars}`
+      + ` layout=${outcome.layout ? 'json' : 'text'}`);
   }
 
   /**
-   * 这一次请求的负面词。**三条来源合成一条**，且只在编译开启时合成。
+   * 这一次请求的负面词。**两条来源合成一条**，且只在编译开启时合成。
    *
    * ⚠️ **关掉编译时返回 `undefined`**，`buildImageGenRequest` 于是回落到配置里那条 ——
    * 出图行为与加这一层之前**逐字相同**（这条对照必须有，"关掉之后还是偷偷加了安全词"
    * 是没人会去核对的那种漂移）。
    *
-   * 顺序是"**代码焊死的安全前排 → 编译产出 → 管理员配置那条**"：
-   * - 安全前排放最前是刻意的 —— 它不经过模型，没有"模型没照做"这条失效路径；
-   * - 管理员那条**保留**，因为它是"每张图都发"的既有语义，静默关掉是回归。
+   * 顺序是"**编译产出 → 管理员配置那条**"。⚠️ **代码层那份写死的安全负面词已经删掉**
+   * （2026-10-20）：它是一条**不受任何配置控制**的、模型看不见的隐藏约束，而"该避免什么"
+   * 本来就是规则集与部署方该表达的东西（编译层在 §15 的规则里写、部署方在
+   * `imageGen.negativePrompt` 里写）。**管理员那条保留** —— 它是"每张图都发"的既有语义，
+   * 静默关掉是回归。
    */
   #negativeFor(job: Readonly<InternalJob>, config: EffectiveConfig): string | undefined {
     if (!config.compile.enabled) return undefined;
-    const joined = [SAFETY_NEGATIVE, job.compiled?.negative ?? '', config.negativePrompt]
+    const joined = [job.compiled?.negative ?? '', config.negativePrompt]
       .map((part) => part.trim()).filter(Boolean).join(', ');
     // 2.1 系列根本不认这个参数，写了也发不出去 —— 记一行，免得管理员把"负面词没生效"
     // 当成配置写错了去查。

@@ -388,7 +388,7 @@ export const DEFAULT_CONFIG = {
     // "画一张写实照片"就永远画不对了。留空 = 不注入。
     stylePrompt: '高质量，细节丰富',
     // 「提示词编译层」：出图前先跑一次**独立**的模型调用，把原始描述编译成成品提示词
-    // （正/负两段，规则见 core/prompt-catalog.ts 的 imageCompile）。
+    // （正面按规则 §15 的 Layout JSON，负面另起一段；规则见 core/prompt-catalog.ts 的 imageCompile）。
     //
     // **默认关**：它让每张图多一次模型调用，而图本身按张计费 —— 开与不开是"成本翻倍"
     // 与"不翻倍"的差别，与仓库里其余重能力（搜图 / 转写 / 出图）默认关是同一条口径。
@@ -396,14 +396,15 @@ export const DEFAULT_CONFIG = {
     //
     // `timeoutMs` 是**两段调用加起来**的死线，与下面出图自己的 `timeoutMs` 各管各的
     // （那次最长 15 分钟，不能让它把编译也一起拖住）。
-    // `maxChars` 是编译产出的**正面提示词**上限，比 `maxPromptChars` 宽 —— 后者管的是
-    // 模型/群友给的原始描述，而编译的产出才是真正发给画图模型的那一段。
     // `select` = 两段式（先挑节、再编译）。关掉就是一次调用直接上规则全文（约 25k token 输入）。
+    //
+    // ⚠️ **这一层没有"产出多长"的档位**：合适的长度与结构是**规则集**的事（§15 那份 schema
+    // 自带字段与取值域），代码层再定一个字数上限只会把写得更细的结果整条扔掉。2026-10-20
+    // 删掉了 `maxChars`（与它同批删掉的还有 `compile.ts` 里那份写死的 `SAFETY_NEGATIVE`）。
     compile: {
       enabled: false,
       select: true,
-      timeoutMs: 60000,
-      maxChars: 2000
+      timeoutMs: 60000
     },
     timeoutMs: 300000,                       // 官方提示图像生成耗时较长，同步调用挂得住
     maxPromptChars: 1200,                    // 模型给的画面描述上限（官方推荐 ≤4500 token）
@@ -957,6 +958,26 @@ function normalizeConfigShape<T>(input: T): T {
       );
     }
     delete r.maxPerMinute;
+  }
+
+  // ── 出图编译层：删掉 `maxChars`（2026-10-20） ──
+  //
+  // 它管的是"编译产出的正面提示词不超过多少字"，而合适的长度是**规则集**的事（§15 那份
+  // Layout JSON 自带字段与取值域），代码层定上限只会把写得更细的结果整条扔掉。同批删掉的
+  // 还有 `compile.ts` 里那份写死的 `SAFETY_NEGATIVE`。
+  //
+  // **为什么这里只 `delete`、不做任何补偿**：它没有任何"旧值要搬到新字段"的语义 ——
+  // 删掉它就是"这个旋钮不存在了"，行为由规则集接管。而 `delete` 本身是**必须的**：
+  // `updateConfig` 走 `deepMerge(getConfig(), patch)`，它只加键不删键，不显式删的话
+  // 用户 config.json 里那个 `maxChars` 会一直留着，让下一个人以为它还在生效
+  // （同上面 `credentials` / 下面 `jmcomic.pythonPath` 那两处）。
+  const imageGen = root.imageGen;
+  if (imageGen && typeof imageGen === 'object' && !Array.isArray(imageGen)) {
+    const g = imageGen as Record<string, unknown>;
+    const compile = g.compile;
+    if (compile && typeof compile === 'object' && !Array.isArray(compile)) {
+      delete (compile as Record<string, unknown>).maxChars;
+    }
   }
 
   // ── Python 解释器：jmcomic.pythonPath → python.path（迁移，不是搬走） ──

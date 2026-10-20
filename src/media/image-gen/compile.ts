@@ -34,10 +34,17 @@
 // "真的去调模型"只能由宿主注入一个**最小端口**（`ImagePromptAskPort`），与跑团的 `AskPort`
 // 同形（`extra/trpg/scenario/extract/prompt.ts`）。**端口只交回原始字符串** —— 解析归这里。
 //
+// ── 产出是一段 Layout JSON（规则 §15）──
+//
+// 正面提示词按规则 §15 的 **Layout JSON schema** 输出，直接作为 `prompt` 发给画图模型。
+// 于是 §15 **恒定入选**（`LAYOUT_JSON_SECTION_ID`）：让模型按一份它没看过的 schema 写，
+// 等于让它编字段。解析只做两件事 —— 剥掉 ``` 围栏、认一下它是不是能 `JSON.parse` 的对象
+// （`layout` 那一格只进日志）。**解不出来不失败**：回退原始描述（fail-open）。
+//
 // ── fail-open（这条是刻意的，别改成 fail-closed）──
 //
 // 编译是**增强**：原始描述就是没有这一层时的行为。所以任何失败（规则文件读不到 / 端口抛错 /
-// 格式不对 / 正面为空 / 正面超长）都**不**让任务失败，而是回退原始描述 + 记一行固定码的日志。
+// 格式不对 / 正面为空）都**不**让任务失败，而是回退原始描述 + 记一行固定码的日志。
 // 判据是"**额度已经扣了**"：一次可选增强的失败，不该把一整张已经计过费的图搞失败。
 // **非静默**是底线 —— 那行码是管理员唯一能发现"编译一直在失败"的地方（同 `NO_DELIVER_SINK`）。
 import fs from 'node:fs';
@@ -53,27 +60,27 @@ import type { CompiledPrompt, ImagePromptAskOutcome, ImagePromptAskPort } from '
  *
  * ⚠️ **只进日志，不进群里的话** —— 出图会照常继续（fail-open），所以这不是任务失败，
  * 也就没有对应的 `FailureStage`。每个码各自指向一个不同的下一步：
- * `NO_SKILL` 看规则文件在不在、`REQUEST` 看网络与接口、`FORMAT`/`EMPTY` 看模型有没有照格式答、
- * `TOO_LONG` 看 `maxChars`。
+ * `NO_SKILL` 看规则文件在不在、`REQUEST` 看网络与接口、`FORMAT`/`EMPTY` 看模型有没有照格式答。
  */
-export type CompileFailureCode = 'NO_SKILL' | 'REQUEST' | 'FORMAT' | 'EMPTY' | 'TOO_LONG';
+export type CompileFailureCode = 'NO_SKILL' | 'REQUEST' | 'FORMAT' | 'EMPTY';
 
 export type CompileFailure = { ok: false; code: CompileFailureCode; detail?: string };
 
 /** `parseCompiledPrompt` 的返回 —— 只解析内容，不知道"挑了几节"（那是调用方的事）。 */
-export type CompileOutcome =
-  | { ok: true; value: CompiledPrompt; note?: 'NEGATIVE_DROPPED' }
-  | CompileFailure;
+export type CompileOutcome = { ok: true; value: CompiledPrompt; layout: boolean } | CompileFailure;
 
 /**
  * `compileImagePrompt` 成功时的返回值。
  *
- * 三个字段都**只给日志用**，不进任何模型可见的文本。它们是"skill 到底有没有注入进去"
+ * 四个字段都**只给日志用**，不进任何模型可见的文本。它们是"skill 到底有没有注入进去"
  * 这件事唯一能看见的地方（出图照常成功，所以从结果上看不出区别）：
  * - `picked`   —— 挑中了几节（`'7/19'`）。总是 19/19 就说明两段式白跑了、成本与全文一样；
  * - `sections` —— 挑中的节号（`'5,17'`）；全部选中时是 `'all'`；
  * - `skillChars` —— 实际注入的**规则原文**字符数。**这一格才是"注入成功"的直接证据**：
  *   `select: false` 时它应该恰好等于 `SKILL.md` 的**字符**数 51455，小于它就是没贴全。
+ * - `layout` —— 正面提示词**是不是一段能 `JSON.parse` 的对象**（我们要求的就是 §15 的
+ *   Layout JSON）。它是 `false` 时出图照常进行，但画的是一段散文 —— 而"模型没照 schema
+ *   写"这件事在结果图上看不出来，只能靠这一格。
  */
 export type CompileSuccess = {
   ok: true;
@@ -81,7 +88,7 @@ export type CompileSuccess = {
   picked: string;
   sections: string;
   skillChars: number;
-  note?: 'NEGATIVE_DROPPED';
+  layout: boolean;
 };
 
 /**
@@ -94,29 +101,37 @@ export type CompileSuccess = {
 export const PROMPT_MARK = '<<<PROMPT>>>';
 export const NEGATIVE_MARK = '<<<NEGATIVE>>>';
 
-/**
- * 负面词上限。
- *
- * 与 `imageGen.negativePrompt` 的 500 是**同一个数**（见 `config.ts` 的钳制）：两条负面词
- * 最终会拼成一条发给接口，各自按同一个量级兜住。是常量而不是配置项 —— 合适的值由接口那边
- * 的容忍度决定，不是管理员的口味。
- */
-export const MAX_NEGATIVE_CHARS = 500;
-
-/**
- * **代码焊死的负面前排**，不依赖模型。
- *
- * 门禁在覆盖前言里（那是给模型的指令，它有可能不听）；这一串是代码自己加的，
- * **没有"模型没照做"这条失效路径**。只在编译开启时前置 —— 关掉编译时出图行为与加这一层
- * 之前**逐字相同**（见 `queue.ts` 的 `#negativeFor`）。
- */
-export const SAFETY_NEGATIVE = [
-  'nudity', 'nude', 'topless', 'shirtless', 'underwear', 'lingerie', 'see-through clothing',
-  'child', 'toddler', 'loli', 'teen', 'underage', 'sexual content', 'nsfw'
-].join(', ');
-
 /** 前言那一节的 id。它**恒定入选**，不进目录、也不由模型挑。 */
 export const PREAMBLE_ID = 'preamble';
+
+/**
+ * Layout JSON schema 那一节的 id。它**同样恒定入选**，理由与前言不同：
+ *
+ * 编译的产出就是 §15 的 Layout JSON，而**模型没看过那份 schema 就只能编字段**。让它"自己
+ * 从目录里挑 §15"是不行的 —— 挑漏了不会有任何报错，只会得到一段长得像 JSON 的臆造。
+ * 所以这一条是**代码层的保证**，不是提示词里的请求（同前言的"恒定入选"）。
+ */
+export const LAYOUT_JSON_SECTION_ID = '15';
+
+/**
+ * 画布尺寸的回退值。
+ *
+ * 只有一件事要用它：§15 的 `bbox` 是**绝对像素**坐标（画布中心为原点），模型必须知道画布
+ * 多大才算得出来。`imageGen.size` 留空（= auto，由接口按内容决定）时我们**不知道**真实
+ * 尺寸，只能给一个常见档位 —— 比让模型自己发明一套坐标强，而 §15.4 明说编译产物里不写
+ * 画布尺寸字段、尺寸在生成参数里另设，所以这个数只影响坐标的绝对值。
+ */
+export const DEFAULT_CANVAS = { w: 1024, h: 1024 } as const;
+
+/**
+ * 从归一化后的画幅串（`1024*1024`，见 `config.ts` 的 `normalizeSize`）取画布尺寸。
+ * 认不出来（空串 = auto）就回退 `DEFAULT_CANVAS`，并如实标出"这是回退值"。
+ */
+export function canvasOf(size: unknown): { w: number; h: number; assumed: boolean } {
+  const match = /^(\d{1,4})\*(\d{1,4})$/.exec(String(size ?? '').trim());
+  if (!match) return { ...DEFAULT_CANVAS, assumed: true };
+  return { w: Number(match[1]), h: Number(match[2]), assumed: false };
+}
 
 /** 规则集里的一节。`text` 是**逐字原文**（见文件头）。 */
 export interface SkillSection {
@@ -211,10 +226,8 @@ export interface CompileInput {
   raw: string;
   /** 图生图（有参考图）。影响提示词里那句"只写要改的地方"。 */
   hasReference: boolean;
-  /** 归一化后的画幅（空串 = 自动）。 */
+  /** 归一化后的画幅（空串 = 自动）。它同时决定 `bbox` 用的画布尺寸，见 `canvasOf`。 */
   size: string;
-  /** 编译后正面提示词的上限（`imageGen.compile.maxChars`）。 */
-  maxChars: number;
   /** 当前模型认不认 `negative_prompt`。不认就别让模型白写那一串。 */
   wantsNegative: boolean;
   /** 两段式开关（`imageGen.compile.select`）。`false` = 跳过选节、一次调用上全文。 */
@@ -223,8 +236,10 @@ export interface CompileInput {
 
 /** 两段调用共用的 user 段。 */
 export function buildUserText(input: Pick<CompileInput, 'raw' | 'hasReference' | 'size'>): string {
+  const canvas = canvasOf(input.size);
   return PROMPT_CATALOG.imageCompile.user({
-    raw: input.raw, hasReference: input.hasReference, size: input.size
+    raw: input.raw, hasReference: input.hasReference, size: input.size,
+    canvasW: canvas.w, canvasH: canvas.h, canvasAssumed: canvas.assumed
   });
 }
 
@@ -255,23 +270,52 @@ export function buildSelectRequest(
 export function buildCompileRequest(input: CompileInput, body: string): { system: string; user: string } {
   return {
     system: withOverlay(PROMPT_CATALOG.imageCompile.compileSystem({
-      body, maxChars: input.maxChars, wantsNegative: input.wantsNegative
+      body, wantsNegative: input.wantsNegative
     })),
     user: buildUserText(input)
   };
 }
 
 /**
+ * 把模型回的正面提示词整理成"能直接发给画图模型的那段文本"，并回报它是不是一段合法 JSON。
+ *
+ * 三种形态都要收：裸 JSON、被 ``` 围栏包住的 JSON（模型最常见的写法）、以及前后夹了几句
+ * 说明的 JSON。⚠️ 这**不是**本仓库禁止的那种"猜测式 JSON 修复"（那里猜错会把被改动过的
+ * 文本真的发出去）—— 这里每一档候选都**必须先过 `JSON.parse`** 才会被采用，解不出来就
+ * 原样退回文本，不会把半截 JSON 当结果。
+ */
+function readLayoutJson(text: string): { text: string; layout: boolean } {
+  const fenced = /^```[A-Za-z]*\s*\n([\s\S]*?)\n?```$/.exec(text.trim());
+  const bare = (fenced ? fenced[1] : text).trim();
+  const first = bare.indexOf('{');
+  const last = bare.lastIndexOf('}');
+  const sliced = first >= 0 && last > first ? bare.slice(first, last + 1) : '';
+  for (const candidate of [bare, sliced]) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { text: candidate, layout: true };
+      }
+    } catch {
+      // 解不出来就试下一档；全都不成才退回文本。
+    }
+  }
+  return { text: bare, layout: false };
+}
+
+/**
  * 解析编译结果。**纯函数**。
  *
- * 三条判据，各自的理由不同：
+ * 两条判据：
  * - 缺 `<<<PROMPT>>>` / 正面为空 → **整条作废**（没有正面提示词，这一趟等于什么都没做）；
- * - 正面超长 → **整条作废**（**不截断**：截断是在人还能改的时候不说、跑起来才少半段，
- *   这是本仓库的既有纪律。上限在提示词里念过，模型该自己守住）；
- * - 负面超长 → **只丢负面、正面照用**：正面是这条路的全部价值，为一串负面词把编译结果
- *   整个扔掉不划算。丢掉这件事由 `note` 报出去，调用方记一行日志。
+ * - 其余一律**收下**。⚠️ **代码层没有字数上限**：合适的长度与结构是规则集的事（§15 的
+ *   Layout JSON 有自己的字段与取值域），"写得比我们预期的长"就把整条编译结果扔掉是本末倒置
+ *   —— 判据是"额度已经扣了"，一次可选增强不该白跑。正面**是不是**一段能解析的 Layout JSON
+ *   由 `layout` 报出去（**只进日志**）：出图照常进行，但"模型没照 schema 写"这件事在结果图
+ *   上看不出来，只能靠这一格。
  */
-export function parseCompiledPrompt(text: unknown, maxChars: number): CompileOutcome {
+export function parseCompiledPrompt(text: unknown): CompileOutcome {
   const body = String(text ?? '');
   const start = body.indexOf(PROMPT_MARK);
   if (start < 0) return { ok: false, code: 'FORMAT' };
@@ -284,11 +328,8 @@ export function parseCompiledPrompt(text: unknown, maxChars: number): CompileOut
   const negative = split < 0 ? '' : rest.slice(split + NEGATIVE_MARK.length).trim();
 
   if (!positive) return { ok: false, code: 'EMPTY' };
-  if (positive.length > maxChars) return { ok: false, code: 'TOO_LONG' };
-  if (negative.length > MAX_NEGATIVE_CHARS) {
-    return { ok: true, value: { positive, negative: '' }, note: 'NEGATIVE_DROPPED' };
-  }
-  return { ok: true, value: { positive, negative } };
+  const layout = readLayoutJson(positive);
+  return { ok: true, value: { positive: layout.text, negative }, layout: layout.layout };
 }
 
 /** 调一次端口，把两种失败形状（抛错 / 回 `ok:false`）归一成同一种。 */
@@ -340,22 +381,27 @@ export async function compileImagePrompt(
     picked = parseSectionSelection(selection.content, sections);
   }
 
+  // §15（Layout JSON schema）**恒定入选**：编译的产出就是按它写的 JSON，模型没看过 schema
+  // 只能编字段。它因此不在目录里（模型不必知道它存在），也不受"模型有没有挑中它"影响。
+  const injected = numbered.filter((s) => s.id === LAYOUT_JSON_SECTION_ID || picked.includes(s));
+
   // ⚠️ **逐字拼装**：前言恒定在首位（它就是原文的第一段），选中的节按原顺序接上，
   // 分隔符是空串 —— 于是这一串与原文里那几段**逐字节相同**。别改成 `join('\n\n')`：
   // 那会在节与节之间插入原文里没有的东西，就不再是"原样引用"了。
-  const keep = new Set([PREAMBLE_ID, ...picked.map((s) => s.id)]);
+  const keep = new Set([PREAMBLE_ID, ...injected.map((s) => s.id)]);
   const body = sections.filter((s) => keep.has(s.id)).map((s) => s.text).join('');
 
   const answer = await askOnce(buildCompileRequest(input, body), ask, signal);
   if (!answer.ok) return { ok: false, code: 'REQUEST', detail: answer.detail };
-  const parsed = parseCompiledPrompt(answer.content, input.maxChars);
+  const parsed = parseCompiledPrompt(answer.content);
   if (!parsed.ok) return parsed;
-  // 三格都进日志：`picked` 看两段式有没有白跑、`sections` 看它挑了谁、
-  // `skillChars` 看规则原文到底注入了多少（**`select: false` 时它应恰好等于 SKILL.md 的长度**）。
+  // 四格都进日志：`picked` 看两段式有没有白跑、`sections` 看它挑了谁（**含恒定入选的 §15**）、
+  // `skillChars` 看规则原文到底注入了多少（**`select: false` 时它应恰好等于 SKILL.md 的长度**）、
+  // `layout` 看模型有没有照 §15 的 schema 写（**只进日志**，出图照常）。
   return {
     ...parsed,
-    picked: `${picked.length}/${numbered.length}`,
-    sections: picked.length === numbered.length ? 'all' : picked.map((s) => s.id).join(','),
+    picked: `${injected.length}/${numbered.length}`,
+    sections: injected.length === numbered.length ? 'all' : injected.map((s) => s.id).join(','),
     skillChars: body.length
   };
 }
