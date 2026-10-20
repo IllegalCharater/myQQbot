@@ -1078,6 +1078,29 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
   ok('两段式：模型不认负面词时让它别写那一串（省下的 token 是实打实的）',
     buildCompileRequest({ ...baseInput, wantsNegative: false }, '').system.includes('内容留空'));
 
+  // 14d2 对照作者示例 JSON 之后补的五条（2026-10-20）。都住在"任务说明"那一段里，
+  // 所以只钉"这几句在不在 system 里" —— 模型照不照做只能人工出图复核。
+  // body 传空串，于是扫到的一定是我们自己的固定指令，不会被规则原文里的字眼蒙混过去
+  // （比如 §8 那句防克隆句的**原文**就在 body 里，传真 body 的话下一条会永远绿）。
+  {
+    const fixed = buildCompileRequest(baseInput, '').system;
+    ok('五条①：中文 caption 与英文固定句/tag 的分界写明了（§8 防克隆句、§17 的 <|…|> 正文要逐字照抄）',
+      fixed.includes('逐字照抄') && fixed.includes('Featuring exactly') && fixed.includes('<|tag|>'));
+    ok('五条②：`summary.caption` 末尾要附 §2.1 那批逗号分隔的主体 tag',
+      fixed.includes('末尾再附') && fixed.includes('1girl, 1boy'));
+    ok('五条③：`caption` 里的方位必须与同一项的 `bbox` 一致（撞到过"说右上角、bbox 在上方中间"）',
+      fixed.includes('必须与同一项的 `bbox` 一致') && fixed.includes('拿不准就别写方位'));
+    ok('五条④：分格画面里每处文字单独成一项',
+      fixed.includes('每处文字单独成一项') && fixed.includes('label:"text"'));
+    ok('五条⑤：通用画质词**要自己写全**（§11 的负面底座），只有部署方配的那一条由系统另加',
+      fixed.includes('要自己写全') && fixed.includes('blurry') && fixed.includes('只有那一条'));
+    // ⚠️ 反向断言：原话"部署方配的通用负面词由系统另加，你不用重复"是**空头承诺** ——
+    // `imageGen.negativePrompt` 的出厂值是 `''`（core/config.ts），模型信了它就会一条画质词
+    // 都不写。这句话写回来不会有任何报错，只有这一条拦得住。
+    ok('⚠️ 反向：那句"通用负面词由系统另加"的空头承诺不许回来',
+      !fixed.includes('通用负面词由系统另加') && !fixed.includes('你不用重复'));
+  }
+
   // 14e 覆盖前言与署名
   const overlay = PROMPT_CATALOG.imageCompile.overlay;
   ok('**年龄控制那一节没有被引进来**（它是被覆盖的，不是被搬运的）',

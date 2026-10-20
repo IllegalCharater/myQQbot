@@ -340,12 +340,9 @@ export class ImageGenQueue {
     //   journald 按行拆多行条目，散开就没人看得懂了（群聊那条多行消息实测被拆成两行）。
     // - **走 `#log` 而不是 `console.warn`**：与其余 image-gen 日志同一个通道，套件才捕获得到
     //   （`QueueDeps.log` 可注入）。
-    // 打开方式：启动前设 `QQ_AGENT_DEBUG_IMAGE_JSON=1`（与 `QQ_AGENT_DEBUG_COMPACT` /
-    // `QQ_AGENT_DEBUG_MEMORY` 同一写法）。
-    // if (process.env.QQ_AGENT_DEBUG_IMAGE_JSON) {
-      this.#log(`[image-gen][debug] task=${job.id} json=${JSON.stringify(outcome.value.positive)}`
-        + ` negative=${JSON.stringify(outcome.value.negative)}`);
-    // }
+    this.#log(`[image-gen][debug] task=${job.id} json=${JSON.stringify(outcome.value.positive)}`
+      + ` negative=${JSON.stringify(outcome.value.negative)}`);
+    
   }
 
   /**
