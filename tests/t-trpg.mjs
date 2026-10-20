@@ -1164,7 +1164,22 @@ const status = (key) => store.read(key);
       // P7-a 之后 `usedModel` 那条路**先走抽取管线**，`format` 是它的后备。下面三条验的正是
       // 后备那条路，所以注入一个"必定失败"的管线 —— 于是它们逐字照旧（一次调用、同样的文案）。
       // **不注入的话它们会变成假绿**：管线会真的去调那个假端点，而它的脚本是消耗式的。
-      const noPipeline = async () => ({ ok: false, message: '（本用例验的是后备那条路）' });
+      // ⚠️ `kind` **不能省**：回执那句"下一步"是按它分岔的（`extractFailureAdvice`），
+      // 而 `request` 这一档正是"重发有用"的那一档 —— 省掉它回执会走兜底那句
+      // "类别没认出来"，下面那条 `/重新发一次/` 当场变红。真管线永远带 `kind`，
+      // 这里是**注入的假实现**，所以它得自己把契约补齐。
+      // ⚠️ `salvage` **同样不能省**（2026-10-19）：降级路径要把"已经到手的原文切片"交出去，
+      // 否则磁盘上只剩一份被重排过的正文（实测 7345 → 2687 字）。真管线永远带这个字段，
+      // 假实现得自己补齐 —— 少了它，下面那条"降级也写 raw/"会因为**注入物缺字段**而假红，
+      // 而那种红指向的是套件自己，不是被测的那段代码。
+      const salvageOf = (struct) => ({
+        struct,
+        chunks: [{ index: 0, heading: '灯塔', chars: PLAIN.length, text: PLAIN }],
+        totalChars: PLAIN.length, droppedChars: 0, calls: 0
+      });
+      const noPipeline = async () => ({
+        ok: false, kind: 'request', message: '（本用例验的是后备那条路）', salvage: salvageOf(null)
+      });
 
       model.requests = [];
       model.script = [{ content: '这条不该被用到' }];
@@ -1185,14 +1200,88 @@ const status = (key) => store.read(key);
         { extract: extract(PLAIN), analyze: noPipeline });
       ok('格式不对 + 管线没成 → 退回让模型整理一次，落库的是**模型给的版本**（不是原文）',
         model.requests.length === 1 && saves.read('整理过的').scenario.title === '灯塔', viaModel);
-      ok('回执里点明"让模型整理过"（它同时解释了两件事：回执为什么慢、内容为什么被重排过）',
-        /已让模型整理/.test(viaModel) && /原文 20 字/.test(viaModel), viaModel);
-      ok('退回整理时**明说抽取没成**（只说"整理过"，管理员会以为那份剧本有剧情结构）',
-        /剧情抽取没成/.test(viaModel) && /没有剧情结构/.test(viaModel), viaModel);
+      // ── 回执**分阶段**（2026-10-19）──
+      //
+      // 起因是一次实测：《回声公寓》的回执里"带 8 条旗标、4 张人物卡"与"没有剧情结构"并排出现，
+      // 读起来像"抽了、但抽了个空的" —— 而真相是两个阶段**各给了一半**：格式整理那一步重排
+      // 正文、顺手交出骨架里的旗标与人物卡；剧情抽取那一步才是场景 / NPC / 线索 / 道具 / 机制的
+      // 来源，而它这次没成。两个标签并排，管理员才读得出来"哪一半是谁给的"。
+      ok('降级回执**分阶段**：`[剧情抽取] 没成` 与 `[格式整理] 原文不是剧本格式（N 字）` 各说各的',
+        /\[剧情抽取\] 没成/.test(viaModel) && /\[格式整理\] 原文不是剧本格式（20 字）/.test(viaModel),
+        viaModel);
+      ok('分阶段之后**不再有那句含混的"已让模型整理过"**（它把两件事糊成一句，正是矛盾的来源）',
+        !/已让模型整理/.test(viaModel), viaModel);
+      // ⚠️ 只印「文本」两个字时，同一批上传里对不上是哪一份（`文本` 既可能是这份 `.md`、
+      // 也可能是随手贴的一段设定），而回执是管理员唯一的凭据 —— 所以来源那一栏要带**文件名**。
+      ok('来源那一栏带上**文件名**（光印格式名的话，管理员对不上自己刚发的是哪一份）',
+        /（来源 文本「f\.md」）/.test(viaModel), viaModel);
+      // 对照：没有名字时**不硬凑** —— 否则回执上会印出「（没有名字的文件）」这种把兜底话术
+      // 当文件名的东西，而那是 `openScenario` 给"下载失败"那句话用的词。
+      model.requests = [];
+      const unnamed = await saveScenario(
+        { media: [{ kind: 'file', name: '', file: '', url }] }, '无名的', saves, { extract: extract(FORM) });
+      ok('（对照）文件没有名字时不硬凑 —— 来源那一栏退回裸的格式名',
+        /（来源 文本）/.test(unnamed) && !/没有名字的文件/.test(unnamed), unnamed);
+      ok('退回整理时**明说抽取没成**，并逐类点明"一条都没有"（只说"整理过"，管理员会以为那份剧本有剧情结构）',
+        /\[剧情抽取\] 没成/.test(viaModel)
+        && /场景、NPC、线索、道具、机制一条都没有/.test(viaModel), viaModel);
+      // 降级路径上 `raw/` 是这份文件**唯一**的完整副本：后备那条路只把原文重排一遍，
+      // 实测 7345 字进去、2687 字出来。原先这一档一个伴生文件都不写，于是管理员手里
+      // 只剩一份被砍掉 63% 的正文，连回去对照原文都做不到。
+      ok('降级路径**也写 `raw/`**（那是这份文件唯一的完整副本 —— 后备整理是有损的）',
+        saves.read('整理过的').scenario.rawParts === 1,
+        JSON.stringify(saves.list().find((item) => item.id === '整理过的')));
+      ok('而且回执**指向 `.trpg check`**（零模型调用、零写入）—— 那是"这次到底留下了什么"的唯一出口',
+        /这次留下的东西：敲 `\.trpg check 整理过的` 看（零模型调用）/.test(viaModel)
+        && /原文切片 1 片/.test(viaModel), viaModel);
+      // 对照：**没有切片时不许指路** —— 指过去只会让人敲一条什么都不报的命令，
+      // 比不指路更坏（他会以为是自己敲错了）。
+      const noSalvage = async () => ({
+        ok: false, kind: 'request', message: '（本用例验的是"连切片都没有"那一档）'
+      });
+      const bareFallback = await saveScenario({ media }, '没切片的', saves,
+        { extract: extract(PLAIN), analyze: noSalvage, format: async () => ({ ok: true, text: FORM }) });
+      ok('（对照）注入物连 `salvage` 都没有时**不印 `undefined`、也不指路**（防御性读取，'
+        + '与 `kind` 那条同源 —— 假实现是普通对象字面量）',
+        !/undefined/.test(bareFallback) && !/这次留下的东西/.test(bareFallback)
+        // ⚠️ 判据是 `=== 0` 而不是 `=== undefined`：`read()` 里 `rawParts` 恒是一个**数字**
+        // （`#rawCount(id)`，一片都没有时是 0）。拿 `undefined` 去比会永远成立，那条断言就是假的。
+        && saves.read('没切片的').scenario?.rawParts === 0, bareFallback);
       // 降级**不产生 `.rule.json`**，所以这一局一条机制都没有 —— 只说"没有剧情结构"
       // 会被读成"叙事少点细节"，而真相是"整本模组的规矩都不算数"。
       ok('而且**明说特殊规则不生效**，并给出重试的路',
         /不会应用剧本里的特殊规则/.test(viaModel) && /重新发一次/.test(viaModel), viaModel);
+
+      // ── 那句"下一步"**按失败档位分岔**（2026-10-19）──
+      //
+      // 起因是一次实测：7345 字的《回声公寓》两片各吃掉 44 秒，L3 只分到 2 秒就超时，
+      // 而回执说的是"偶发超时，建议重试" —— 管理员拿着一次**配置性的必然失败**去撞同一堵墙，
+      // 而回执没给他任何别的线索。分档的判据只有一条：**重发一次有没有用**。
+      const { extractFailureAdvice } = await load('extra/trpg/commands/scenario.js');
+      // ⚠️ 判据取的是"**有没有给出那条可执行的路**"，不是"有没有出现『重发』两个字"：
+      // `timeout` 那句里就有"重发一次多半还是不够"（那正是要说的事），拿词去卡会把它判成反的。
+      ok('`timeout` 档**不劝人重发**（同一份文件、同样的片数、同样的死线，重发必然再撞一次），改为劝他拆小或自己写',
+        /时间不够/.test(extractFailureAdvice('timeout'))
+        && /多半还是不够/.test(extractFailureAdvice('timeout'))
+        && /拆成几份|自己按剧本格式写/.test(extractFailureAdvice('timeout'))
+        && !/重新发一次/.test(extractFailureAdvice('timeout')), extractFailureAdvice('timeout'));
+      ok('`empty` 档同理**不劝人重发**（文件里没有文字，重发结果逐字相同），改为劝他换一份',
+        /没有能抽的正文/.test(extractFailureAdvice('empty'))
+        && /换成带文字的版本/.test(extractFailureAdvice('empty'))
+        && !/重新发一次/.test(extractFailureAdvice('empty')), extractFailureAdvice('empty'));
+      // 对照必须存在：另外两档**仍然**要说"重发" —— 一刀切删掉那句的话，真正的偶发故障
+      // 就没有下一步了，而这一条正是"分档"与"换个说法"的分界。
+      ok('（对照）`format` 与 `request` 两档照旧给出"重新发一次"这条可执行的路',
+        /重新发一次/.test(extractFailureAdvice('format')) && /重新发一次/.test(extractFailureAdvice('request')),
+        extractFailureAdvice('request'));
+      // 注入的假管线可能压根没给 `kind`（套件里那些就是普通对象字面量），少了这层兜底
+      // 群里会出现一句 `undefined` —— 正是本仓库反复踩过的那类静默失败。
+      ok('没给 `kind` 时**不印 `undefined`**，而是给一句"先看日志"（注入的假实现可能没带这个字段）',
+        !/undefined/.test(extractFailureAdvice(undefined))
+        && /日志/.test(extractFailureAdvice(undefined)), extractFailureAdvice(undefined));
+      ok('四档的文案**互不相同**（认错档等于给错建议，而它们都是"看着像对的"那种句子）',
+        new Set(['timeout', 'request', 'format', 'empty'].map(extractFailureAdvice)).size === 4,
+        JSON.stringify(['timeout', 'request', 'format', 'empty'].map(extractFailureAdvice)));
 
       model.requests = [];
       model.script = [{ content: '我做不到' }];
@@ -1202,13 +1291,17 @@ const status = (key) => store.read(key);
         /不是剧本格式/.test(failed) && saves.read('失败了的').ok === false, failed);
       // 两条原因**都要在**：管线那句说的是"哪一片、哪一步没成"，后备那句说的是"连整理都没成"。
       // 只说一句会把一半事实丢掉，而排查的人正是靠这一半去分辨"模型不行"还是"文件不行"。
-      ok('管线与后备**都**没成时，两条原因都在回执里',
-        /本用例验的是后备那条路/.test(failed) && /退一步只做格式整理也没成/.test(failed), failed);
+      ok('管线与后备**都**没成时，两条原因都在回执里（两条都带阶段标签，读得出是哪一步的锅）',
+        // ⚠️ 中间用 `[\s\S]*` 而不是写死整句：`outcome.message` 自己常常是**带括号的**一句话
+        // （真管线的文案就是 `（第 2 片没有返回可解析的 JSON）`），拼出来是双括号。卡死字面量
+        // 会把"文案换了"误判成"这一条坏了"。
+        /\[剧情抽取\] 没成（[\s\S]*本用例验的是后备那条路/.test(failed)
+        && /\[格式整理\] 也没成（/.test(failed), failed);
 
       // ── 拆成"前半就地 / 后半交出去"之后的那条路（2026-10-19）──
       //
-      // 抽取最多 90 秒，而命令是被 `ingest.ts` 的**按会话串行**链 await 的 —— 就地跑完的
-      // 代价是"传完剧本之后的一分钟里，这个群说什么都没反应"。判据因此是**命令立刻返回**
+      // 抽取最多 5 分钟，而命令是被 `ingest.ts` 的**按会话串行**链 await 的 —— 就地跑完的
+      // 代价是"传完剧本之后的几分钟里，这个群说什么都没反应"。判据因此是**命令立刻返回**
       // 且回执由 `sendText` 事后补上，而不是"最后拿到了什么"（后者就地跑也拿得到）。
       const { createScenarioCommand } = await load('extra/trpg/commands/scenario.js');
       const sent = [];
@@ -1221,7 +1314,7 @@ const status = (key) => store.read(key);
       const immediate = String(await asyncCmd({
         chatKey: 'group:async', senderId: '10001', text: '.trpg scenario 异步的', media, replyToMessageId: null
       }));
-      ok('需要模型时命令**立刻**回一句"正在收"，而不是等抽取跑完（那 90 秒不再堵住这个群）',
+      ok('需要模型时命令**立刻**回一句"正在收"，而不是等抽取跑完（那几分钟不再堵住这个群）',
         /正在收「f.md」/.test(immediate) && !/已存剧本/.test(immediate), immediate);
       ok('夹具：那一刻回执还没发出去（补发是后台那条路的事）', sent.length === 0, JSON.stringify(sent));
       // 后台是 `void` 出去的，所以这里**轮询等它落地**（不是 `sleep(80)` 那种定值等待 ——
@@ -1279,8 +1372,8 @@ const status = (key) => store.read(key);
         saves.read('抽过的').scenario.struct !== undefined
         && saves.read('抽过的').scenario.rawParts === 1,
         JSON.stringify(saves.list().find((item) => item.id === '抽过的')));
-      ok('回执把抽取的账说清楚：几类各几条、切了几片、用了几次调用',
-        /抽出了 1 个场景、1 个 NPC、1 条线索、1 件道具、1 条机制/.test(drawn)
+      ok('回执把抽取的账说清楚：几类各几条、切了几片、用了几次调用（并带 `[剧情抽取]` 阶段标签）',
+        /\[剧情抽取\] 抽出了 1 个场景、1 个 NPC、1 条线索、1 件道具、1 条机制/.test(drawn)
         && new RegExp(`原文 ${PLAIN.length} 字切成 1 片，用了 2 次调用`).test(drawn), drawn);
       ok('**"没进抽取的字数"单独说**：它是管理员判断"要不要手工再传一次"的唯一依据',
         /还有 300 字超出片数上限没进抽取/.test(drawn), drawn);
@@ -1291,6 +1384,36 @@ const status = (key) => store.read(key);
         !/已让模型整理/.test(drawn), drawn);
       ok('抽取成功的回执照旧以"开局怎么敲"收尾（回执的形状不因为走了管线而变）',
         typeof drawn === 'string' && /开局：\.trpg new 抽过的/.test(drawn), drawn);
+
+      // ── 抢救**半份结构**（2026-10-19）──
+      //
+      // 抽取"抽到一半才失败"（第 2 片超时、或者归并没成）时，前几片的结果**已经在手上**了。
+      // 丢掉它等于让管理员从头再来一遍，而 `.struct.json` 是一份**可以手改**的文件 ——
+      // 半份结构比没有结构有用得多。⚠️ 它**不带 `ruleExt`**：降级路径绝不写 `.rule.json`
+      // （那会让"这一局不会应用特殊规则"变成谎话）。
+      model.requests = [];
+      const halfStruct = await saveScenario({ media }, '半份的', saves, {
+        extract: extract(PLAIN),
+        analyze: async () => ({
+          ok: false, kind: 'timeout', message: '抽取调用超时（60 秒）',
+          salvage: salvageOf(STRUCT)
+        }),
+        format: async () => ({ ok: true, text: FORM })
+      });
+      ok('抽取失败时**把半份结构交出去**（`.struct.json` 真的写下去了，管理员可以照着改）',
+        saves.read('半份的').scenario.struct !== undefined
+        && saves.read('半份的').scenario.rawParts === 1, JSON.stringify(saves.list().find((i) => i.id === '半份的')));
+      // ⚠️ 这里**验不了**"第一条待核项是那句『这次抽取没成』"：那句是**管线**的 `salvageOf()`
+      // 加上去的（`warnings.unshift`），而本段注入的假 `analyze` 交出来的是一份手搓的 salvage
+      // —— 真管线的那个函数压根没跑。断言写在这儿只能验到本段自己的夹具，那是假的绿。
+      // 它的落点在 `tests/t-trpg-extract.mjs`（那里跑的是真管线）。
+      ok('抢救路径**绝不写 `.rule.json`**（写了就等于那一局真的会应用特殊规则，而回执说不会）',
+        saves.read('半份的').scenario.ruleExt === undefined,
+        JSON.stringify(saves.read('半份的').scenario.ruleExt));
+      ok('抢救时的回执说得出"抽到一半的剧情结构也在那里"（只说"原文切片"会让人以为结构全丢了）',
+        /抽到一半的剧情结构/.test(halfStruct), halfStruct);
+      ok('`timeout` 那一档的下一步照旧**不劝人重发**（抢救成功也不改变"重发没用"这个事实）',
+        /多半还是不够/.test(halfStruct) && !/重新发一次/.test(halfStruct), halfStruct);
 
       // 管线合成出来的正文**仍然要过 `parseScenario`** —— 抽取不是"绕过正文上限"的后门。
       // 一份 30 页模组被"压缩"成 5 万字（模型没照提示词做）时，这条路必须**如实拒绝**：
@@ -1354,6 +1477,51 @@ const status = (key) => store.read(key);
       server.close();
       server.closeAllConnections?.();
     }
+  }
+
+  // ── 调用方设的死线 vs 请求自己失败：`chatCompletion` 必须分得开（2026-10-19）──
+  //
+  // 这是那"2 秒超时"的另一半。管线中止一发时带的理由是**它自己那句话**（`抽取调用超时（60 秒）`），
+  // 而 `chatCompletion` 原先把它洗成 `模型请求失败：…` —— 那个前缀的约定含义是"fetch 抛的、
+  // 网络层失败、可以重试"（`isRetryableError` 第 100 行就是靠它判的），于是**"预算已经用光"**
+  // 这件事被说成了"再试一次可能就好"。群里看到的正是那句"偶发超时，建议重试"。
+  //
+  // ⚠️ 夹具是一个**接了连接就不回话**的端点。换成"立刻返回 500"之类的话，请求会在死线之前
+  // 就结束，测到的就是"请求失败"而不是"我们中止了它" —— 断言照样能绿，但绿的是别的东西。
+  {
+    const { chatCompletion, isRetryableError } = await load('llm/llm.js');
+    const { updateConfig, getConfig } = await load('core/config.js');
+    const stall = http.createServer(() => { /* 故意不响应：让死线成为唯一的出口 */ });
+    await new Promise((resolve) => stall.listen(0, '127.0.0.1', resolve));
+    const apiBackup = getConfig().api;
+    updateConfig({ api: { baseUrl: `http://127.0.0.1:${stall.address().port}`, model: 'stall', apiKey: 'x' } });
+    let message = '';
+    try {
+      const controller = new AbortController();
+      const killer = setTimeout(() => controller.abort(new Error('抽取调用超时（60 秒）')), 50);
+      try {
+        await chatCompletion({ messages: [{ role: 'user', content: 'x' }], signal: controller.signal });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      } finally {
+        clearTimeout(killer);
+      }
+    } finally {
+      updateConfig({ api: apiBackup });
+      stall.closeAllConnections?.();
+      stall.close();
+    }
+    ok('调用方中止时**如实说"是被调用方中止的"**，不套 `模型请求失败：` 那个"可以重试"的前缀',
+      /已被调用方中止/.test(message) && !/模型请求失败/.test(message), message);
+    ok('而且把调用方给的理由**原样带出来**（回执要能说清是**哪一种**中止）',
+      /抽取调用超时（60 秒）/.test(message), message);
+    ok('这一条**被判成不可重试** —— 预算已经用光，再试一次只会以同样的方式再撞一堵同样的墙',
+      isRetryableError(new Error(message)) === false, message);
+    // 对照必须存在：少了这两条，"恒返回 false"也能让上面那条绿。
+    ok('（对照）网络层失败**仍然**可重试（`模型请求失败` 那个前缀的既有含义没被改掉）',
+      isRetryableError(new Error('模型请求失败：connect ECONNREFUSED')) === true);
+    ok('（对照）请求**自己**超时（不是调用方中止）**仍然**可重试',
+      isRetryableError(new Error('模型请求超时（180000ms）')) === true);
   }
 }
 
@@ -1780,6 +1948,37 @@ const status = (key) => store.read(key);
   ok('伴生文件是半截 JSON → 说"没有可用的"并指向「伴生文件」那一段（成因与上一条不同，两条都得说清）',
     halfJson.includes('剧情结构：没有可用的') && halfJson.includes('伴生文件：') && /解不开/.test(halfJson),
     halfJson);
+
+  // ── "原文切片在、结构不在"是一档**独立**的状态（2026-10-19）──
+  //
+  // 抽取**跑过**、只是没成（超时 / 模型没按格式答），管线把切好的原文交了出来。说"没有抽取产物"
+  // 会让管理员以为得从头再来一遍 —— 而他手里已经有一份完整的原文副本（后备整理实测有损 63%）。
+  // 两种成因（一片都没抽成 / 结构文件坏了）共用这一段：上面那行"剧情结构：…"已经把它们分开了。
+  scenarios.write('切片团', `---\ntitle: 切片团\n---\n${BODY}`);
+  scenarios.writeExtras('切片团', {
+    raw: [{ heading: '一', text: '原文第一片' }, { heading: '二', text: '原文第二片' }]
+  });
+  scenarios.write('坏结构带切片团', `---\ntitle: 坏结构带切片团\n---\n${BODY}`);
+  scenarios.writeExtras('坏结构带切片团', { raw: [{ heading: '一', text: '原文第一片' }] });
+  fs.writeFileSync(scenarios.structFile('坏结构带切片团'), '{ "summary": ', 'utf8');
+
+  const sliced = String(await tell('.trpg check 切片团'));
+  ok('切片在、结构不在 → 说**"抽取产物不全"**（说"没有抽取产物"会让人以为得从头再来一遍），'
+    + '并点明切片还在磁盘上、有几片',
+    sliced.includes('抽取产物不全') && sliced.includes('原文切片还在（2 片')
+    && sliced.includes('data/trpg/scenarios/切片团.raw/'), sliced);
+  ok('而且给出**两条**可执行的路：照着切片手写 struct.json（这条命令只读不写，随便改随便验），或者重抽一遍',
+    sliced.includes('data/trpg/scenarios/切片团.struct.json')
+    && sliced.includes('只读不写') && sliced.includes('.trpg scenario 切片团'), sliced);
+  ok('重抽那条**带上"太长的那份重发多半还是不够"的提醒**（否则这一档又在劝人撞同一堵墙）',
+    /太长的那份重发一次多半还是不够/.test(sliced), sliced);
+  ok('（对照）**没有切片**时仍然说"没有抽取产物" —— 两档不能混（`半截团` 有坏结构但没切片）',
+    halfJson.includes('没有抽取产物') && !halfJson.includes('抽取产物不全'), halfJson);
+  const brokenWithRaw = String(await tell('.trpg check 坏结构带切片团'));
+  ok('（对照）**结构文件坏了、但切片在** → 也走这一档（两种成因共用一段，判据是磁盘上真有几片，'
+    + '不是"回执上说抽过"）',
+    brokenWithRaw.includes('抽取产物不全') && brokenWithRaw.includes('原文切片还在（1 片')
+    && brokenWithRaw.includes('剧情结构：没有可用的'), brokenWithRaw);
 
   const many = String(await tell('.trpg check 多警告团'));
   ok('待核项超过 8 条时**截断并说还有几条**（回执不该长到刷屏；全量都在 struct.json 里）',
@@ -3998,6 +4197,140 @@ const status = (key) => store.read(key);
     takeNarrationBudget(undefined, 'group:first-ever') === true);
 }
 
+// ── 7a2. 抽取的两个时间预算是**配置项**（2026-10-19 加）────────────────────────
+//
+// 这一段钉三件事，缺任何一件，"设置页填了 5 分钟"都可能只生效一半：
+//
+//   ① 解析本身（`resolveExtractBudget`）：两个数各自的钳制区间，以及那条**不变量** ——
+//      `totalMs - callMs >= EXTRACT_MIN_CALL_MS`（= L2 至少还发得出一发、L3 分得到一整次调用）。
+//   ② 默认值与 `DEFAULT_CONFIG.trpg` **逐字相同**。`core → extra` 是反向依赖（闸门会拦），
+//      所以那份默认值只能是**字面量副本** —— 副本就会漂移，而漂移的表现是"没配过的人拿到的
+//      预算与常量对不上"，没有人会去比两处源码。
+//   ③ 接线：宿主那个 getter 是**每次敲命令现读**（不是构造时读一次），且值真的透到管线的
+//      `deps.budget` 上 —— 少任何一半都是"填了、看着生效、实际按旧值走"。
+//
+// ⚠️ **钳制只有两份**（`resolveExtractBudget` 与设置页 `save.js`），`normalizeConfigShape` 里
+// **刻意没有**第三份分支 —— 那会是同一组边界的第三次抄写。这一段的断言就是那份取舍的凭据。
+{
+  const {
+    resolveExtractBudget, DEFAULT_EXTRACT_BUDGET,
+    EXTRACT_TOTAL_BUDGET_MS, EXTRACT_CALL_TIMEOUT_MS, EXTRACT_MIN_CALL_MS,
+    EXTRACT_TOTAL_MIN_MS, EXTRACT_TOTAL_MAX_MS, EXTRACT_CALL_MAX_MS
+  } = await load('extra/trpg/model/limits.js');
+  const { DEFAULT_CONFIG } = await load('core/config.js');
+  const { SlidingWindowBudget } = await load('media/call-budget.js');
+  const { createScenarioCommand, finishScenario } = await load('extra/trpg/commands/scenario.js');
+
+  // ── ① 解析 ──
+  ok('没配过任何东西时给的就是那两个默认常量（`undefined` 与 `{}` 两档都算）',
+    JSON.stringify(resolveExtractBudget(undefined)) === JSON.stringify(DEFAULT_EXTRACT_BUDGET)
+    && resolveExtractBudget({}).totalMs === EXTRACT_TOTAL_BUDGET_MS
+    && resolveExtractBudget({}).callMs === EXTRACT_CALL_TIMEOUT_MS,
+    JSON.stringify(resolveExtractBudget({})));
+
+  ok('整轮预算夹进 [60 秒, 30 分钟]（下界是"短到 L3 一定死"，上界是"多半是笔误"）',
+    resolveExtractBudget({ extractTotalBudgetMs: 1 }).totalMs === EXTRACT_TOTAL_MIN_MS
+    && resolveExtractBudget({ extractTotalBudgetMs: 9_999_999 }).totalMs === EXTRACT_TOTAL_MAX_MS,
+    JSON.stringify([resolveExtractBudget({ extractTotalBudgetMs: 1 }),
+      resolveExtractBudget({ extractTotalBudgetMs: 9_999_999 })]));
+
+  ok('单次上限夹进 [5 秒, 120 秒]',
+    resolveExtractBudget({ extractCallTimeoutMs: 1 }).callMs === EXTRACT_MIN_CALL_MS
+    && resolveExtractBudget({ extractCallTimeoutMs: 9_999_999 }).callMs === EXTRACT_CALL_MAX_MS,
+    JSON.stringify([resolveExtractBudget({ extractCallTimeoutMs: 1 }),
+      resolveExtractBudget({ extractCallTimeoutMs: 9_999_999 })]));
+
+  ok('⚠️ 单次上限的**上界跟着整轮预算走**：整轮填 1 分钟时单次最多 55 秒（`min(120, 整轮 - 5)`）',
+    resolveExtractBudget({ extractTotalBudgetMs: 60_000, extractCallTimeoutMs: 120_000 }).callMs === 55_000,
+    JSON.stringify(resolveExtractBudget({ extractTotalBudgetMs: 60_000, extractCallTimeoutMs: 120_000 })));
+
+  // ⚠️ 这一条单独拎出来：`clampInt` 在原始值不是有限数时**原样返回 fallback、不再夹**，
+  // 所以"用户只填了整轮预算"那一档必须由调用方先把 fallback 夹好。少了这一步，上面那条
+  // 不变量只对"两个键都填了"成立 —— 而设置页上留空第二个框是最常见的用法。
+  ok('（边界）整轮填 1 分钟、单次**没填**时回落值 60 秒也要被夹到 55 秒',
+    resolveExtractBudget({ extractTotalBudgetMs: 60_000 }).callMs === 55_000,
+    JSON.stringify(resolveExtractBudget({ extractTotalBudgetMs: 60_000 })));
+
+  const pairs = [];
+  for (const total of [1, 60_000, 90_000, 300_000, 600_000, 9_999_999]) {
+    for (const call of [undefined, 1, 5_000, 60_000, 120_000, 9_999_999]) {
+      pairs.push({
+        total,
+        call,
+        got: resolveExtractBudget({
+          extractTotalBudgetMs: total, ...(call === undefined ? {} : { extractCallTimeoutMs: call })
+        })
+      });
+    }
+  }
+  ok('（不变量）任何一组输入下，L2 的子预算都还剩至少 `EXTRACT_MIN_CALL_MS`',
+    pairs.every(({ got }) => got.totalMs - got.callMs >= EXTRACT_MIN_CALL_MS),
+    JSON.stringify(pairs.filter(({ got }) => got.totalMs - got.callMs < EXTRACT_MIN_CALL_MS)));
+
+  // ── ② 默认值与配置默认值逐字相同 ──
+  ok('`DEFAULT_CONFIG.trpg` 的两个默认值与常量逐字相同（反向依赖逼出来的副本，只能靠这条钉住）',
+    DEFAULT_CONFIG.trpg.extractTotalBudgetMs === EXTRACT_TOTAL_BUDGET_MS
+    && DEFAULT_CONFIG.trpg.extractCallTimeoutMs === EXTRACT_CALL_TIMEOUT_MS,
+    JSON.stringify(DEFAULT_CONFIG.trpg));
+
+  // ── ③ 接线：现读 ──
+  //
+  // `deps` 是在 `openScenario` **之前**组装的，所以"没有下载地址"那条早退也能证明 getter 被读过 ——
+  // 这条夹具因此不碰网络、也不碰磁盘。
+  let reads = 0;
+  const cmd = createScenarioCommand({
+    scenarios: new ScenarioStore(),
+    budget: new SlidingWindowBudget({ getLimits: () => ({ perChatPerHour: 5, perDay: 100 }) }),
+    extractBudget: () => {
+      reads += 1;
+      return { totalMs: 1000 * reads, callMs: 500 };
+    },
+    command: '.trpg scenario'
+  });
+  const file = [{ kind: 'file', name: '灯塔.md' }];
+  const send = (chatKey) => cmd({
+    chatKey, senderId: '10001', text: '.trpg scenario 灯塔', media: file, replyToMessageId: null
+  });
+  const firstRead = String(await send('group:budget-now'));
+  await send('group:budget-now');
+  ok('夹具：这一路走到"没有下载地址"那句早退（它排在 `deps` 组装之后，所以上面那两次读真的发生过）',
+    /协议端没给下载地址/.test(firstRead), firstRead);
+  ok('宿主那份预算是**每次敲命令现读**的（构造时读一次的话，设置页改完要重启才生效）',
+    reads === 2, String(reads));
+
+  // ── ③b 接线：透到管线 ──
+  //
+  // `finishScenario` 收下 `extractBudget` 之后必须原样递给 `extractScenario` 的第三个参数。
+  // ⚠️ 假管线**必须返回失败**：成功分支会走到 `saveScenarioText`（真写盘），而这一段只想验传参。
+  const captured = [];
+  const fakeDoc = { format: 'text', text: '这不是剧本格式', chars: 7, truncated: false };
+  const run = (deps) => finishScenario(fakeDoc, '灯塔.md', '灯塔', new ScenarioStore(), {
+    analyze: async (_text, _meta, options) => {
+      captured.push(options.budget);
+      return { ok: false, message: '（假管线）', kind: 'format' };
+    },
+    format: async () => ({ ok: false, message: '（假整理）' }),
+    ...deps
+  });
+  await run({ extractBudget: { totalMs: 123_456, callMs: 7_890 } });
+  await run({});
+  ok('配置里那份预算真的透到了管线的 `deps.budget`（透不到的话，用户拧的两个旋钮一个都不生效）',
+    captured[0]?.totalMs === 123_456 && captured[0]?.callMs === 7_890, JSON.stringify(captured[0]));
+  ok('（对照）没配时**不传**，而不是传一份自造的默认值 —— 两处各写一份默认值必然漂移',
+    captured[1] === undefined, JSON.stringify(captured[1]));
+
+  // ── ③c 源级接线 ──
+  const implSrc = fs.readFileSync(path.join(ROOT, 'src/extra/trpg/impl.ts'), 'utf8');
+  ok('宿主把配置读成预算、并以 getter 的形式递下去（`getConfig().trpg` → `resolveExtractBudget`）',
+    /extractBudget:\s*\(\)\s*=>\s*resolveExtractBudget\(getConfig\(\)\.trpg\)/.test(implSrc));
+  const cmdIndexSrc = fs.readFileSync(path.join(ROOT, 'src/extra/trpg/commands/index.ts'), 'utf8');
+  ok('装配清单把那个 getter 传给 `.trpg scenario`（漏了它，命令层拿到的永远是 `undefined`）',
+    /extractBudget:\s*deps\.extractBudget/.test(cmdIndexSrc));
+  const scenarioSrc = fs.readFileSync(path.join(ROOT, 'src/extra/trpg/commands/scenario.ts'), 'utf8');
+  ok('命令层**调一次** getter 再传值（把 getter 原样递给管线的话，管线拿到的是个函数）',
+    /extractBudget\s*\?\s*\{\s*extractBudget:\s*extractBudget\(\)\s*\}\s*:\s*\{\}/.test(scenarioSrc));
+}
+
 // ── 7c. 战报的**跨局分界**与模式的 mtime 缓存（2026-10-19 加）──────────────────
 //
 // 两件都是"运维层"的毛病，各自的成因不同：
@@ -4181,12 +4514,14 @@ const status = (key) => store.read(key);
   ok('`.trpg scenario` 把宿主的 `recordUsage` 透下去（否则抽取最多 6 次调用的成本没人记账）',
     // ⚠️ `[\s\S]` 而不是 `[^\n]`：那一行 2026-10-19 换成了多行写法（多了 `sendText`），
     // 用 `[^\n]` 的话它会以"找不到"的形式假红 —— 而它想守的接线其实完好。
+    // ⚠️ 那个对象后来又多了两行（`extractBudget` / `save`），所以判据从"`recordUsage }` 收尾"
+    // 改成"它是对象里的一个键" —— 盯着收尾的花括号，下一次插一行就会再假红一次。
     /'\.trpg scenario'[\s\S]{0,200}?recordUsage: deps\.recordUsage/.test(body('src/extra/trpg/commands/index.ts'))
-    && /recordUsage \}/.test(scenarioSrc)
+    && /^\s*recordUsage,?\s*$/m.test(scenarioSrc)
     && /openScenario\(input, deps\)/.test(scenarioSrc)
     && /finishScenario\(doc, shown, name, scenarios, deps\)/.test(scenarioSrc));
-  // 抽取最多 90 秒，而命令是被 `ingest.ts` 的按会话串行链 await 的 —— 没有这个口子就只能
-  // 就地跑完，那 90 秒里整个群的消息都排在后面。三条缺一不可：接口上有、组装根接了、
+  // 抽取最多 5 分钟，而命令是被 `ingest.ts` 的按会话串行链 await 的 —— 没有这个口子就只能
+  // 就地跑完，那几分钟里整个群的消息都排在后面。三条缺一不可：接口上有、组装根接了、
   // 命令层真的往下递了。
   ok('`sendText` 是宿主的口子，`web/app.ts` 接上了，命令层也真的递了下去（抽取不再堵住入站链）',
     /sendText\?\(/.test(body('src/extra/types.ts'))

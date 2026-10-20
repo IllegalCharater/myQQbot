@@ -20,22 +20,35 @@
 //
 // ── 预算：每一发都从同一条死线倒推 ──
 //
-// 同 `image-source` 那条"给兜底留位置"的纪律：`EXTRACT_TOTAL_BUDGET_MS` 是**整条管线**的
-// 死线，每一发的超时是 `min(EXTRACT_CALL_TIMEOUT_MS, 剩余)`；剩余低于 `EXTRACT_MIN_CALL_MS`
-// 就**不发**那一发，并把"少抽了几片"如实说出来（原文还在 `raw/` 里，没有丢）。
+// 同 `image-source` 那条"给兜底留位置"的纪律：`budget.totalMs` 是**整条管线**的死线，
+// 每一发的超时是 `min(budget.callMs, 剩余)`；剩余低于 `EXTRACT_MIN_CALL_MS` 就**不发**
+// 那一发，并把"少抽了几片"如实说出来（原文还在 `raw/` 里，没有丢）。
+//
+// ⚠️ **L2 与 L3 用的是两条死线，差一整次调用**（2026-10-19 加）：
+// 分片是可选的，L3 是**唯一的交付物** —— 它失败就等于整轮白跑。所以 L2 只准用到
+// `budget.totalMs - budget.callMs`，把最后那整整一次调用原样留给 L3。合成一条死线的后果
+// 实测过：两片各 44 秒吃光 90 秒，L3 分到 2 秒、当场超时，而群里看到的是"抽取没成"。
+//
+// ⚠️ **这两个数 2026-10-19 起是配置项**（`trpg.extractTotalBudgetMs` / `trpg.extractCallTimeoutMs`，
+// 经 `deps.budget` 递进来，缺省是 `DEFAULT_EXTRACT_BUDGET`）—— 所以上面那两句话里的数
+// **一律从 `budget` 读，不许再写回常量**。常量只是缺省值：写回常量的话，设置页改了不生效，
+// 而症状是"填了 300 秒却按 60 秒走"，没人会去比源码。
+//
+// ⚠️ **L2 的子预算永远是 `budget.totalMs - budget.callMs`，不是第三个配置项**：
+// 它一旦不等于这条减法，"L3 永远分得到一整次调用"就不成立了（见 `model/limits.ts`）。
 //
 // ⚠️ **本目录（`scenario/extract/`）不许出现 `node:fs` / `node:path`**（`check-layers.mjs`
 // 有一条闸门，与 `model/` 同形）：落盘是 `store/` 的事，这一层要能脱离磁盘被测。
 import {
-  EXTRACT_CALL_TIMEOUT_MS, EXTRACT_MIN_CALL_MS, EXTRACT_TOTAL_BUDGET_MS,
-  MAX_ACT_GOAL_CHARS, MAX_ACT_KEEPER_CHARS, MAX_ACT_SCENES, MAX_ACTS, MAX_CHARACTERS,
-  MAX_ENDING_KEEPER_CHARS, MAX_ENDING_READ_ALOUD_CHARS, MAX_ENDING_REWARDS_CHARS, MAX_ENDINGS, MAX_FLAGS,
-  MAX_STRUCT_ITEMS, MAX_STRUCT_TEXT_CHARS, MAX_STRUCT_QUOTE_CHARS
+  DEFAULT_EXTRACT_BUDGET, EXTRACT_MIN_CALL_MS, MAX_ACT_GOAL_CHARS, MAX_ACT_KEEPER_CHARS,
+  MAX_ACT_SCENES, MAX_ACTS, MAX_CHARACTERS, MAX_ENDING_KEEPER_CHARS, MAX_ENDING_READ_ALOUD_CHARS,
+  MAX_ENDING_REWARDS_CHARS, MAX_ENDINGS, MAX_FLAGS, MAX_STRUCT_ITEMS, MAX_STRUCT_TEXT_CHARS,
+  MAX_STRUCT_QUOTE_CHARS, type ExtractBudget
 } from '../../model/limits.js';
 import { isFormattedScenario } from '../parse.js';
 import { BODY_BUDGET, stripFence } from '../format.js';
 import { MECHANIC_TYPES, EFFECT_HANDLERS, TRIGGER_OPS, compileRuleSet, type RuleExtensionDraft } from '../../rules/rule-set.js';
-import { outlineDocument, type DocChunk } from './outline.js';
+import { outlineDocument, type DocChunk, type DocOutline } from './outline.js';
 import { coerceStruct, type ScenarioStruct } from './schema.js';
 import { buildRuleExtension } from './mechanics.js';
 import type { AskPort, AskRequest, ChunkPayload } from './prompt.js';
@@ -45,6 +58,15 @@ export interface ExtractDeps {
   ask: AskPort;
   /** 现在几点（毫秒）。测试可以给一个自己控制的钟。 */
   now?: () => number;
+  /**
+   * 这一次抽取的两个时间预算。**缺省是 `DEFAULT_EXTRACT_BUDGET`**，于是既有的调用点与
+   * 全部套件逐字不变 —— 只有生产路径（经 `commands/scenario.ts` 从配置读）会传它。
+   *
+   * ⚠️ 它是**整份**（`{totalMs, callMs}`）而不是两个可选数：拆成两个的话，"只传了其中一个"
+   * 就得在这里现编另一半，而那个编出来的值与配置里那份会不一致 —— 症状是"改了一个旋钮、
+   * 另一个跟着变"，比不生效难查得多。
+   */
+  budget?: ExtractBudget;
 }
 
 export interface ExtractResult {
@@ -77,23 +99,86 @@ export interface ExtractResult {
   ms: number;
 }
 
-export type ExtractOutcome = { ok: true; result: ExtractResult } | { ok: false; message: string };
+export type ExtractOutcome =
+  | { ok: true; result: ExtractResult }
+  | { ok: false; kind: ExtractFailureKind; message: string; salvage: ExtractSalvage };
+
+/**
+ * 抽取**没成**时抢救下来的东西（2026-10-19 加）。
+ *
+ * ── 为什么要有它 ──
+ *
+ * 抽取失败之后调用方会退回 `formatScenarioText`（只让模型把原文重排成规定格式）。那条路
+ * **是有损的**：实测一份 7345 字的模组进去、2687 字出来（少了 63%），而它的产物只有一份
+ * `.md` —— 于是**原文在磁盘上再也没有第二份副本**，管理员连"回去对着原文补结构"都做不到。
+ *
+ * 所以失败路径也要把已经到手的东西交出去：`chunks` 落成 `raw/`（原文切片是这份文件唯一的
+ * 完整副本），`struct` 落成 `.struct.json`（抽到一半的结构比没有强，但它必须**标明不全**，
+ * 见 `salvageOf`）。
+ *
+ * ⚠️ **没有 `ruleExt`**：降级路径不交付 `.rule.json` —— 那是 `ruleSetFor` 在开局时读的东西，
+ * 写了它就等于那一局**真的会应用特殊规则**，而回执上明明写着"不会"。宁可少一样产物，
+ * 也不要让回执里那句话变成谎话（详见 `commands/scenario.ts` 里 `writeExtras` 那一段）。
+ */
+export interface ExtractSalvage {
+  /** 抽到一半的结构。**`null` = 一片都没抽成**（那时 `raw/` 是唯一的产物）。 */
+  struct: ScenarioStruct | null;
+  /** L1 切出来的原文切片（与成功路径同源，只是没能变成交付物）。 */
+  chunks: DocChunk[];
+  totalChars: number;
+  droppedChars: number;
+  /** 真的发出去的模型调用次数 —— **失败也是花了钱的**，回执与账本都要说得出这个数。 */
+  calls: number;
+}
+
+/**
+ * 失败**分档**（2026-10-19 加）。取值只有四种，判据是"下一步该做什么不一样"：
+ *
+ * - `timeout` —— 我们自己的死线到了（某一发超时、或者整条预算用光）。**重发一次多半还是不够**：
+ *   同一份文件、同样的片数、同样的死线。要给它一个"拆小一点"的建议。
+ * - `empty`   —— 这份文件里压根没有可抽取的正文（扫描件、整页图片）。重发结果一样。
+ * - `format`  —— 模型这次没按格式答。**这一档才是真的偶发**，重发通常就好。
+ * - `request` —— 请求本身失败（网络、接口、5xx）。与这份文件无关，也是偶发。
+ *
+ * ⚠️ **它存在的唯一理由是回执里那句"下一步"**（`commands/scenario.ts` 的
+ * `extractFailureAdvice`）：原先无论哪种失败都说"要重试就把原文件重新发一次"，于是
+ * 配置性的必然失败被说成"偶发，建议重试" —— 管理员拿着一次真实的失败去撞同一堵墙，
+ * 而回执本身没给他任何别的线索。**别把它降级成一个字符串前缀**：分档是要给分支用的。
+ */
+export type ExtractFailureKind = 'timeout' | 'request' | 'format' | 'empty';
+
+/** 一次调用的失败。`timedOut` 区分"我们自己的死线到了"与"这次请求真的失败了"。 */
+type AskFailure = { ok: false; message: string; timedOut: boolean };
 
 /** 一次调用的结果：成功给内容，失败给一句可读的原因。 */
 async function askWithTimeout(
   ask: AskPort, request: AskRequest, timeoutMs: number
-): Promise<{ ok: true; content: string } | { ok: false; message: string }> {
+): Promise<{ ok: true; content: string } | AskFailure> {
   const controller = new AbortController();
+  const seconds = Math.round(timeoutMs / 1000);
+  let timedOut = false;
   // `timer` 刻意**不 unref**：这里的超时是唯一的兜底，而"卡住不退出的假端点"不持有任何句柄，
   // unref 掉的计时器会被无视 —— 那正是 `core/python-probe.ts` 那条踩过的坑（套件会静默中止）。
-  const timer = setTimeout(() => controller.abort(new Error(`抽取调用超时（${Math.round(timeoutMs / 1000)} 秒）`)), timeoutMs);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error(`抽取调用超时（${seconds} 秒）`));
+  }, timeoutMs);
+  // 死线到了就**用我们自己这句话**，不转述端口的报错。理由有两条，都不是洁癖：
+  // ① `chatCompletion` 会把调用方中止洗成 `模型请求失败：…`，而那个前缀的含义是"网络层失败、
+  //    可以重试" —— 恰恰是这条路上最错的建议（预算已经用光）；`llm.ts` 那边也已改（外部
+  //    signal 上的中止不再走那个前缀），但这一层不该指望它：端口是**注入的**，假的实现
+  //    完全可能给一句别的话。
+  // ② 回执那句"下一步"要按档给，而档来自这里 —— 没有这个标记就只能去猜字符串。
+  const timedOutFailure = (): AskFailure => ({ ok: false, message: `抽取调用超时（${seconds} 秒）`, timedOut: true });
   try {
     const outcome = await ask(request, controller.signal);
-    return outcome.ok ? { ok: true, content: outcome.content } : { ok: false, message: outcome.message };
+    if (outcome.ok) return { ok: true, content: outcome.content };
+    return timedOut ? timedOutFailure() : { ok: false, message: outcome.message, timedOut: false };
   } catch (error) {
     // 端口自己吞了异常是它的约定（`askModel` 就是这么写的），但假的实现可能不吞 ——
     // 在这里兜一层，免得一个抛异常的端口把整条命令变成一次未捕获异常。
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    if (timedOut) return timedOutFailure();
+    return { ok: false, message: error instanceof Error ? error.message : String(error), timedOut: false };
   } finally {
     clearTimeout(timer);
   }
@@ -374,20 +459,70 @@ function forPrompt(struct: ScenarioStruct): string {
 // ── 编排 ─────────────────────────────────────────────────────────────────────
 
 /**
+ * 把"已经到手、但没能交出去"的那部分留下来（2026-10-19 加，见 `ExtractSalvage`）。
+ *
+ * ⚠️ **只跑三个只记待核项的校验**（引文 / 幕 / 结局），**刻意不跑 `verifyMechanics`**：
+ * 它返回的是那份规则扩展草稿，而降级路径**不交付 `.rule.json`** —— 跑了只会把"机制编译过了"
+ * 的账记进 `warnings`，读起来像那些机制会生效。回执上那句"这一局不会应用剧本里的特殊规则"
+ * 必须是**真的**。
+ *
+ * ⚠️ 待核项的**第一条是我们的账**："下面是抽到一半的结果"。少了它，这份结构落盘之后与一次
+ * **成功**的抽取长得一模一样 —— 而"看着完整、其实少了一半"正是这一轮在修的那类故障
+ * （DM 会拿着半份结构照常开团，没人知道场景少了一半）。
+ */
+function salvageOf(
+  struct: ScenarioStruct | null, outline: DocOutline, calls: number, source: string
+): ExtractSalvage {
+  if (struct) {
+    // `unshift` 而不是 `push`：这一条要说在**所有**待核项之前 —— 它改变的是后面每一条的读法
+    // （"引文找不到"在"结果只有一半"的背景下是另一件事）。
+    struct.warnings.unshift('这次抽取没成，下面是抽到一半的结果 —— 场景 / NPC / 线索 / 道具都可能不全');
+    verifyQuotes(struct, source);
+    verifyActs(struct);
+    verifyEndings(struct);
+  }
+  return {
+    struct,
+    chunks: outline.chunks,
+    totalChars: outline.totalChars,
+    droppedChars: outline.droppedChars,
+    calls
+  };
+}
+
+/**
  * L2 + L3 + L4。
  *
  * 失败一律是**如实失败**（调用方拿这条消息去回报，或退回 `formatScenarioText`）—— 这里
  * 绝不返回一份"抽了一半但看着像成功了"的结果。
+ *
+ * 失败时**必带 `kind`**（见 `ExtractFailureKind`）：调用方靠它决定回执里那句"下一步"。
+ * 判据是"重发有没有用"，而不是那句报错长什么样 —— 别让调用方去匹配消息文本。
+ *
+ * 失败时**必带 `salvage`**（见 `ExtractSalvage`）：已经到手的原文切片与半份结构要交出去，
+ * 否则降级之后磁盘上连原文的第二份副本都没有（后备那条路是有损的）。
  */
 export async function extractScenario(
   text: string, { name, source }: { name: string; source: string }, deps: ExtractDeps
 ): Promise<ExtractOutcome> {
   const now = deps.now ?? Date.now;
+  // ⚠️ **两个预算一律从 `budget` 读，不许写回常量**（2026-10-19 起它们是配置项）：
+  // 写回常量的话设置页改了不生效，而症状是"填了 300 秒却按 60 秒走"。
+  const budget = deps.budget ?? DEFAULT_EXTRACT_BUDGET;
   const started = now();
-  const deadline = started + EXTRACT_TOTAL_BUDGET_MS;
+  // 两条死线，差一整次调用：L2 只准用到 `l2Deadline`，好让 L3（唯一的交付物）无论如何都
+  // 分得到一整次调用。见文件头「L2 与 L3 用的是两条死线」那段。
+  // ⚠️ 子预算**在这里现算**（`totalMs - callMs`），不读 `EXTRACT_L2_BUDGET_MS` —— 那个常量
+  // 是"默认预算下"的那一份，用户拧了旋钮之后它就不对了。
+  const deadline = started + budget.totalMs;
+  const l2Deadline = deadline - budget.callMs;
 
   const outline = outlineDocument(text);
-  if (!outline.chunks.length) return { ok: false, message: '这份文件里没有可抽取的正文' };
+  // `empty` 这一档与别的三档不同：它不是"这次不巧"，而是"这份文件里没有可抽的东西"。
+  // 回执因此不能建议重发 —— 重发一次结果逐字相同。
+  if (!outline.chunks.length) {
+    return { ok: false, kind: 'empty', message: '这份文件里没有可抽取的正文', salvage: salvageOf(null, outline, 0, text) };
+  }
 
   const warnings: string[] = [];
   if (outline.droppedChars > 0) {
@@ -399,9 +534,14 @@ export async function extractScenario(
   let calls = 0;
   let skipped = 0;
   let firstFailure = '';
+  // 与 `firstFailure` 并行的那条线：**第一片为什么失败**。回执那句"下一步"按它分岔，
+  // 而分岔的判据是"重发有没有用"，与那句报错本身无关 —— 所以不能靠去匹配报错文本。
+  let firstFailureKind: ExtractFailureKind | null = null;
 
   for (const chunk of outline.chunks) {
-    const remaining = deadline - now();
+    // ⚠️ 这里读的是 `l2Deadline` 而**不是** `deadline`：分片是可选的，L3 是唯一的交付物。
+    // 用整条管线的死线的话，几片慢调用就能把 L3 挤到零秒（实测过，见文件头）。
+    const remaining = l2Deadline - now();
     if (remaining < EXTRACT_MIN_CALL_MS) {
       skipped = outline.chunks.length - chunk.index;
       break;
@@ -429,23 +569,23 @@ export async function extractScenario(
       effectHandlers: EFFECT_HANDLERS
     };
     calls += 1;
-    const answered = await askWithTimeout(deps.ask, { job: 'chunk', payload }, Math.min(EXTRACT_CALL_TIMEOUT_MS, remaining));
+    const answered = await askWithTimeout(deps.ask, { job: 'chunk', payload }, Math.min(budget.callMs, remaining));
     if (!answered.ok) {
       // 一片抽不出来**不中断整条管线**：别的片、以及原文切片都还在。
       // 但也不装作没发生 —— 记下来，回执里会说"少抽了几片"。
-      if (!firstFailure) firstFailure = answered.message;
+      if (!firstFailure) { firstFailure = answered.message; firstFailureKind = answered.timedOut ? 'timeout' : 'request'; }
       warnings.push(`第 ${chunk.index + 1} 片没抽出来：${answered.message}`);
       continue;
     }
     const parsed = parseJsonObject(answered.content);
     if (!parsed.ok) {
-      if (!firstFailure) firstFailure = parsed.message;
+      if (!firstFailure) { firstFailure = parsed.message; firstFailureKind = 'format'; }
       warnings.push(`第 ${chunk.index + 1} 片没抽出来：${parsed.message}`);
       continue;
     }
     const part = coerceStruct(parsed.value, []);
     if (!part) {
-      if (!firstFailure) firstFailure = '模型给的不是一个对象';
+      if (!firstFailure) { firstFailure = '模型给的不是一个对象'; firstFailureKind = 'format'; }
       warnings.push(`第 ${chunk.index + 1} 片没抽出来：模型给的不是一个对象`);
       continue;
     }
@@ -454,7 +594,18 @@ export async function extractScenario(
 
   if (!parts.length) {
     // 一片都没成 —— 没有任何可交出去的东西。如实失败，让调用方退回后备那条路。
-    return { ok: false, message: `抽取没成：${firstFailure || '模型一片都没答上来'}` };
+    // ⚠️ "一片都没成"的成因不止一种，而回执那句建议完全不同：一片都没答上来**且**有片被
+    // 跳过（`skipped > 0`）时，真凶是预算 —— 那是**配置性的必然**，重发一次还是撞同一堵墙；
+    // 而模型答得不对是偶发的。原先两者共用一句"模型一片都没答上来"，把前者也说成了后者。
+    const nothing = skipped > 0 ? '时间不够，一片都没抽成' : '模型一片都没答上来';
+    return {
+      ok: false,
+      kind: firstFailureKind ?? (skipped > 0 ? 'timeout' : 'format'),
+      message: `抽取没成：${firstFailure || nothing}`,
+      // 一片都没成 → 没有结构可抢救，但**原文切片照交**：它是这份文件唯一的完整副本，
+      // 而后备那条路会把原文重排一遍（有损）。
+      salvage: salvageOf(null, outline, calls, text)
+    };
   }
   if (skipped > 0) warnings.push(`时间预算用完，最后 ${skipped} 片没抽（原文已另存）`);
 
@@ -467,11 +618,18 @@ export async function extractScenario(
   // 不同：L2 那几发是**尽力而为**（少一片还有别的片），而 L3 是**唯一的交付物** —— 前面抽到
   // 的东西全靠它才出得去。用同一个阈值卡它的话，"有片被跳过"与"能合成"就**永远不可能同时
   // 成立**（两处读的是同一个时钟，而时钟只往前走），于是上面那条「最后 N 片没抽」的警告
-  // **一次也到不了回执** —— 那不是一条降级路径，是死代码。剩下多少时间就给它多少，最坏
-  // 情况是把残余预算花在一次注定超时的调用上（几秒），换来的是"抽到多少就交多少"。
+  // **一次也到不了回执** —— 那不是一条降级路径，是死代码。剩下多少时间就给它多少。
+  //
+  // ⚠️ 而且它读的是**整条管线的死线**（`deadline`），不是 L2 那条子死线 —— L2 已经在
+  // `deadline - budget.callMs` 处收手了，所以这里算出来的剩余**至少是 `budget.callMs`**
+  // （一整次调用）。那个 `remaining <= 0` 分支因此只在注入的钟被拨到终点时才走得到，留着是
+  // 兜底而不是主路径。改 L2 的死线时**两处要一起看**：把它们并回一条，L3 就又会被挤空。
   const remaining = deadline - now();
   if (remaining <= 0) {
-    return { ok: false, message: '抽取没成：时间预算用完了，没来得及合成剧本文件' };
+    return {
+      ok: false, kind: 'timeout', message: '抽取没成：时间预算用完了，没来得及合成剧本文件',
+      salvage: salvageOf(struct, outline, calls, text)
+    };
   }
   calls += 1;
   const merged = await askWithTimeout(deps.ask, {
@@ -481,16 +639,29 @@ export async function extractScenario(
       maxChars: BODY_BUDGET, maxFlags: MAX_FLAGS, maxCharacters: MAX_CHARACTERS,
       extracted: forPrompt(struct)
     }
-  }, Math.min(EXTRACT_CALL_TIMEOUT_MS, remaining));
-  if (!merged.ok) return { ok: false, message: `合成剧本文件时出错：${merged.message}` };
+  }, Math.min(budget.callMs, remaining));
+  // ⚠️ 这一发是**唯一的交付物**，所以它超时与它"请求失败"要分开：前者说明预算给少了
+  // （重发无用，得拆小），后者才是网络/接口的偶发问题。合并成一档的话，最需要那句
+  // "别再重发了"的场景恰好拿到"建议重发"。
+  if (!merged.ok) {
+    return {
+      ok: false, kind: merged.timedOut ? 'timeout' : 'request', message: `合成剧本文件时出错：${merged.message}`,
+      salvage: salvageOf(struct, outline, calls, text)
+    };
+  }
 
   const body = stripFence(merged.content);
-  if (!body) return { ok: false, message: '模型没有给出剧本内容，稍后再试' };
+  if (!body) {
+    return { ok: false, kind: 'format', message: '模型没有给出剧本内容，稍后再试', salvage: salvageOf(struct, outline, calls, text) };
+  }
 
   // **后置条件**：合成的必须是规定格式。不满足就如实失败 —— 把一份解析不了的文件写进
   // 剧本库的表现是"开局了但什么都没注入"，而群里没人知道为什么（同 `format.ts` 那条）。
   if (!isFormattedScenario(body, name)) {
-    return { ok: false, message: '模型合成出来的东西不是剧本格式（没有骨架）—— 稍后再试一次' };
+    return {
+      ok: false, kind: 'format', message: '模型合成出来的东西不是剧本格式（没有骨架）—— 稍后再试一次',
+      salvage: salvageOf(struct, outline, calls, text)
+    };
   }
 
   // ── L4：校验（在正文过关之后做，于是待核项一定跟着一份可用的文件一起交出去）──

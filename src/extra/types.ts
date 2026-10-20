@@ -115,7 +115,7 @@ export interface ExtraRuntimeDeps {
    *
    * ⚠️ **它是"命令的回执可以不只一条"这条路的唯一出口**：`CommandHandler` 的返回值只够
    * 回一句，而 `.trpg scenario` 要在**开始做**和**做完了**各说一句 —— 中间那段（抽取管线）
-   * 最长 90 秒，占住的是整个会话的入站处理链（`ingest.ts` 的 `enqueueIngest` 按会话串行）。
+   * 最长 5 分钟，占住的是整个会话的入站处理链（`ingest.ts` 的 `enqueueIngest` 按会话串行）。
    *
    * ⚠️ **缺省时调用方必须退回同步路径**（`.trpg scenario` 就是先看它在不在）：没有它就没法
    * 事后补一句话，异步化只会让群友永远等不到回执。
