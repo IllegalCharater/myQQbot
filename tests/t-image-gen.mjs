@@ -110,6 +110,22 @@ cfg = resolveImageGenConfig(getConfig());
 ok('风格层被钳到 maxStyleChars（这句每张图都带上，长度必须由我们兜住）',
   [...cfg.stylePrompt].length === 50, String([...cfg.stylePrompt].length));
 
+// 编译层：默认必须是**关**的。它让每张图多一次模型调用，而图按张计费 ——
+// 出厂就打开等于给所有升级的人悄悄加一倍成本。
+ok('出厂默认：提示词编译**关闭**（多一次模型调用是要花钱的）',
+  factory.compile?.enabled === false, JSON.stringify(factory.compile));
+
+withImageGen({ compile: { enabled: true, timeoutMs: 1, maxChars: 999999 } });
+{
+  const c = resolveImageGenConfig(getConfig());
+  ok('编译层钳制：超时被夹回 5000～300000，结果上限被夹回 200～8000',
+    c.compile.timeoutMs === 5000 && c.compile.maxChars === 8000,
+    `${c.compile.timeoutMs}/${c.compile.maxChars}`);
+}
+withImageGen({ compile: { enabled: false, timeoutMs: 60000, maxChars: 2000 } });
+ok('编译层：`enabled` 用 === true 判（"false" 这种畸形值不该把它打开）',
+  resolveImageGenConfig(getConfig()).compile.enabled === false);
+
 withImageGen({ apiKey: '' });
 delete process.env.DASHSCOPE_API_KEY;
 ok('没配 Key 且没有环境变量时 apiKey 为空（enqueue 才能据此拒绝）',
@@ -264,7 +280,7 @@ async function callGenerate(overrides = {}, input = { prompt: '一只猫' }) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const workFiles = [];
 
-function makeQueue({ operations = {}, deliver, senderOverrides = {} } = {}) {
+function makeQueue({ operations = {}, deliver, senderOverrides = {}, compilePrompt = null } = {}) {
   const sentText = [];
   const sentImages = [];
   const queue = new ImageGenQueue({
@@ -276,7 +292,8 @@ function makeQueue({ operations = {}, deliver, senderOverrides = {} } = {}) {
     },
     log: () => {},
     operations,
-    deliverImageResult: deliver ?? null
+    deliverImageResult: deliver ?? null,
+    compilePrompt
   });
   return { queue, sentText, sentImages };
 }
@@ -884,6 +901,327 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     buildTriggerBlock([unsent], {}).includes('【图片发送失败】'));
 }
 
+// ── 14. 提示词编译层（两段式：先挑节、再原样贴入编译）───────────────
+//
+// 这一段的判据围绕**三件"删掉不会报错、只会静默变坏"**的事：
+//   · **规则是逐字原样的**（切分与拼接不许改动任何一个字节）—— 那是 CC BY-NC-ND 的边界，
+//     也是一旦漂了就没人会发现的那种错；
+//   · **关掉编译时端口一次都不许被调**（对照，防"顺手多跑一次"）；
+//   · **任何失败都必须 fail-open 且留日志**（防静默降级成"开了编译却没生效"）。
+{
+  const {
+    parseCompiledPrompt, buildCompileRequest, buildSelectRequest, buildUserText, compileImagePrompt,
+    splitSkillSections, buildSkillToc, parseSectionSelection, readSkillText,
+    SAFETY_NEGATIVE, MAX_NEGATIVE_CHARS, PREAMBLE_ID, PROMPT_MARK, NEGATIVE_MARK
+  } = ig;
+  const { PROMPT_CATALOG } = await load('core/prompt-catalog.js');
+
+  // 14a 解析（纯函数）—— 输出格式没变，判据照旧
+  const wrap = (p, n) => `${PROMPT_MARK}\n${p}\n${NEGATIVE_MARK}\n${n}`;
+  const parsed = parseCompiledPrompt(wrap('一只猫', 'blurry, watermark'), 2000);
+  ok('编译解析：正常两段各自取出',
+    parsed.ok && parsed.value.positive === '一只猫' && parsed.value.negative === 'blurry, watermark',
+    JSON.stringify(parsed));
+  ok('编译解析：缺 <<<NEGATIVE>>> 是**宽容**的（2.1 那一档本来就不产负面词）',
+    parseCompiledPrompt(`${PROMPT_MARK}\n一只猫`, 2000).value?.negative === '');
+  ok('编译解析：缺 <<<PROMPT>>> → FORMAT（模型没照格式答）',
+    parseCompiledPrompt('好的，这是提示词：一只猫', 2000).code === 'FORMAT');
+  ok('编译解析：正面为空 → EMPTY', parseCompiledPrompt(wrap('   ', ''), 2000).code === 'EMPTY');
+  ok('编译解析：正面超长 → TOO_LONG，且**不截断**（截断是在人还能改的时候不说、跑起来才少半段）',
+    parseCompiledPrompt(wrap('猫'.repeat(201), ''), 200).code === 'TOO_LONG');
+  ok('编译解析：负面超长**只丢负面**、正面照用（正面才是这条路的全部价值）',
+    (() => {
+      const r = parseCompiledPrompt(wrap('一只猫', 'x'.repeat(MAX_NEGATIVE_CHARS + 1)), 2000);
+      return r.ok && r.value.positive === '一只猫' && r.value.negative === '' && r.note === 'NEGATIVE_DROPPED';
+    })());
+  ok('编译解析：标记**之前**的寒暄被丢掉（模型爱写"好的，这是提示词："）',
+    parseCompiledPrompt(`好的！\n${wrap('一只猫', 'blurry')}`, 2000).value?.positive === '一只猫');
+
+  // 14b 分节（纯函数）—— 这是"逐字原样"的机器判据，也是整个两段式的地基
+  {
+    const doc = [
+      '---', 'name: x', '---', '', '# 标题', '> 总闸', '',
+      '## 0. 甲', '甲的内容', '### 0.1 子标题', '子内容', '',
+      '## 1. 乙', '乙的内容', '',
+      '## 9.1 丙', '丙的内容', ''
+    ].join('\n');
+    const secs = splitSkillSections(doc);
+    ok('分节：前言自成 `preamble` 节（frontmatter + 标题 + 总闸都在里面）',
+      secs[0].id === PREAMBLE_ID && secs[0].text.includes('> 总闸') && secs[0].text.startsWith('---'),
+      JSON.stringify(secs.map((s) => s.id)));
+    ok('分节：`## ` 边界切出 3 节，节号取自标题行',
+      secs.length === 4 && secs.map((s) => s.id).join(',') === 'preamble,0,1,9.1',
+      secs.map((s) => s.id).join(','));
+    ok('分节：`### ` 是节内子标题，**不另开一节**（它跟着父节走）',
+      secs[1].text.includes('### 0.1 子标题'), secs[1].text);
+    ok('⚠️ 分节：全部节拼起来**逐字节等于原文**（切分不许改动任何一个字节 —— CC 的边界就在这）',
+      secs.map((s) => s.text).join('') === doc,
+      `${secs.map((s) => s.text).join('').length} vs ${doc.length}`);
+    ok('分节：空文本返回空数组（不是"一节空的"）', splitSkillSections('').length === 0);
+    ok('分节：一个 `## ` 都没有时整份当前言（格式不像预期也不该整条失效）',
+      (() => { const r = splitSkillSections('只有一段话'); return r.length === 1 && r[0].id === PREAMBLE_ID; })());
+
+    const toc = buildSkillToc(secs);
+    ok('目录：**只有节标题**，一行一节，且前言不进目录（它恒定入选）',
+      toc === '## 0. 甲\n## 1. 乙\n## 9.1 丙', JSON.stringify(toc));
+    ok('目录：不含任何规则正文（选节那一次必须便宜，否则两段式白跑）',
+      !toc.includes('甲的内容') && !toc.includes('子内容'));
+
+    const pick = (t) => parseSectionSelection(t, secs).map((s) => s.id).join(',');
+    ok('选择：数字列表按原顺序取出', pick('1,0') === '0,1', pick('1,0'));
+    ok('选择：`all` / 中文"全部"都取全部', pick('all') === '0,1,9.1' && pick('全部') === '0,1,9.1');
+    ok('选择：空回答 → **全部**（fail-open：漏选一节的代价是画错，多选一节只是几百 token）',
+      pick('') === '0,1,9.1' && pick('我看不太懂') === '0,1,9.1');
+    ok('选择：编造的节号一个都不匹配 → 退回全部（不返回空，那等于没有规则）',
+      pick('42,99') === '0,1,9.1');
+    ok('选择：夹在解释文字里的节号照样认得出', pick('需要的节：9.1 就够了。') === '9.1', pick('需要的节：9.1 就够了。'));
+  }
+
+  // 14c 真文件：它必须**在包里**，而且我们没改过它一个字
+  const skillText = readSkillText();
+  ok('规则文件读得到（它在 assets/ 下，已在打包白名单 APP_ENTRIES 里）',
+    typeof skillText === 'string' && skillText.length > 50000, String(skillText?.length));
+  const sections = splitSkillSections(skillText);
+  const numbered = sections.filter((s) => s.id !== PREAMBLE_ID);
+  const sec = (id) => (sections.find((s) => s.id === id) || {}).text || '';
+  ok('真文件：切出 19 个编号节 + 1 个前言',
+    numbered.length === 19 && sections.length === 20, `${numbered.length}/${sections.length}`);
+  ok('⚠️ 真文件：全部节拼起来**逐字节等于文件原文**（运行期只切分与拼接，绝不改写）',
+    sections.map((s) => s.text).join('') === skillText);
+  ok('真文件：`## 9.1` 是独立的 `##` 节（作者把它写在了与 9 同级的位置，切分要跟着原文走）',
+    numbered.some((s) => s.id === '9.1'));
+  ok('真文件：frontmatter 与总闸都在前言节里（总闸是全文优先级最高的一段，恒定入选）',
+    sec(PREAMBLE_ID).includes('name: moss-image-prompt-skill')
+    && sec(PREAMBLE_ID).includes('总闸'));
+
+  // 逐字节收录的**锚点**：哈希一变就说明有人动过这份第三方文件。
+  // 那时候要做的是去读 assets/moss-image-prompt-skill/NOTICE.md 并同步版本与日期，
+  // **不是**把这条断言改掉。
+  {
+    const crypto = await import('node:crypto');
+    const { PROMPT_SKILL_FILE } = await load('core/paths.js');
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(PROMPT_SKILL_FILE), 'utf8').digest('hex');
+    ok('⚠️ 真文件：sha256 与收录时一致（对不上 = 有人改过这份第三方文件，先读 NOTICE.md）',
+      hash === '75097225dfd2e8723a430a51fcb859fe9ae6b9a0ac68658eb8824bc9d701dead', hash);
+  }
+
+  // 14d 两段式的请求形状（纯函数）
+  const baseInput = {
+    raw: '画个猫', hasReference: false, size: '1024*1024',
+    maxChars: 1234, wantsNegative: true, select: true
+  };
+  const selectReq = buildSelectRequest(baseInput, buildSkillToc(sections));
+  const compileReq = buildCompileRequest(baseInput, sec(PREAMBLE_ID) + sec('5'));
+  ok('两段式：覆盖前言在两段的**最前面**（它是跨调用稳定的前缀，缓存的命中全靠它）',
+    selectReq.system.startsWith(PROMPT_CATALOG.imageCompile.overlay)
+    && compileReq.system.startsWith(PROMPT_CATALOG.imageCompile.overlay));
+  ok('两段式：第 1 段给目录、不给规则正文',
+    selectReq.system.includes('## 5. Step 3 结构布局分流') && !selectReq.system.includes(sec('5')));
+  ok('两段式：第 2 段把选中的节**原文**贴进去', compileReq.system.includes(sec('5')));
+  ok('两段式：两段共用同一份 user 段（原始描述逐字在里面）',
+    selectReq.user === compileReq.user && selectReq.user === buildUserText(baseInput)
+    && selectReq.user.includes('画个猫'));
+  ok('两段式：上限念进了第 2 段（模型才知道该写多长）', compileReq.system.includes('1234'));
+  ok('两段式：模型不认负面词时让它别写那一串（省下的 token 是实打实的）',
+    buildCompileRequest({ ...baseInput, wantsNegative: false }, '').system.includes('内容留空'));
+
+  // 14e 门禁与署名
+  const overlay = PROMPT_CATALOG.imageCompile.overlay;
+  ok('门禁：三条（成年主体 / 日常场景 / 日常着装）都在，且**自己声明优先级高于全部规则**',
+    overlay.includes('成年人') && overlay.includes('场景限于日常') && overlay.includes('日常着装')
+    && overlay.includes('优先级高于本提示词里的其余全部规则'));
+  ok('门禁：在，而**年龄控制那一节没有被引进来**（它是被覆盖的，不是被搬运的）',
+    !overlay.includes('15-year-old') && !overlay.includes('14-year-old'));
+  ok('模型适配：明说规则集是给别的模型写的、采样参数那一类条款要跳过（否则模型会写 SLG/Steps）',
+    overlay.includes('MOSS-Image') && overlay.includes('qwen-image') && overlay.includes('采样参数'));
+
+  // 署名与许可：CC BY-NC-ND 4.0 的**硬要求**，四样（标题/作者/来源/协议）一个都不能少。
+  // 读原文而不是 stripComments —— 署名就住在注释与 NOTICE 里。
+  const noticeSrc = fs.readFileSync(path.join(ROOT, 'assets/moss-image-prompt-skill/NOTICE.md'), 'utf8');
+  ok('署名：NOTICE.md 里标题 / 作者 / 来源 / 协议四样都在（CC BY-NC-ND 的署名要求）',
+    /moss-image-prompt-skill/.test(noticeSrc) && /Moeblack/.test(noticeSrc)
+    && /github\.com\/Moeblack\/moss-image-prompt-skill/.test(noticeSrc)
+    && /CC BY-NC-ND 4\.0/.test(noticeSrc));
+  ok('署名：LICENSE 全文随包（"去掉协议声明"是明确不允许的）',
+    fs.existsSync(path.join(ROOT, 'assets/moss-image-prompt-skill/LICENSE')));
+  ok('许可边界：NOTICE 里写明了"逐字节原样、不许手工编辑 SKILL.md"',
+    noticeSrc.includes('逐字节') && noticeSrc.includes('不要在这里手工编辑'));
+  const catalogSrc = readSource('core/prompt-catalog.ts');
+  ok('许可边界：**规则正文一个字都不在 prompt-catalog 里**（它运行期从文件读，这里只放我们自己的文本）',
+    !catalogSrc.includes('Magic Blocks') && !catalogSrc.includes('单向因果染色定律'));
+
+  // 14f 缺文件 → NO_SKILL + fail-open（注入一个"读不到"的 reader，不必真的动仓库里的文件）
+  {
+    const r = await compileImagePrompt(baseInput, async () => ({ ok: true, content: '' }), new AbortController().signal, () => null);
+    ok('规则文件读不到 → `NO_SKILL`（不是一个含糊的 REQUEST），调用方据此记日志并回退原始描述',
+      r.ok === false && r.code === 'NO_SKILL', JSON.stringify(r));
+  }
+
+  // 14g 队列集成：真 fetch 出图，看假百炼端点到底收到了什么
+  const ds = await fakeDashscope();
+  const img = await fakeImageServer();
+  updateConfig({ security: { allowPrivateImageHosts: true } });
+  const textOf = (r) => r?.body?.input?.messages?.[0]?.content?.at(-1)?.text ?? '';
+  // ⚠️ 取法**必须容忍 `undefined`**：这些用例的前提（"请求真的发出去了"）一旦不成立，
+  // 一个裸的 `seen.body.…` 会抛 `TypeError` 把**整个套件**中止掉 —— 后面的断言不是变红，
+  // 是**从未运行**（AGENTS.md「测试约定」那条）。取成空值，红的才是对应的那一条。
+  const paramsOf = (r) => r?.body?.parameters ?? {};
+
+  let asked = [];
+  let compilePromptForThis = null;
+  /** 一个会**按段数**回答的假端口：看到目录就回节号，否则回编译结果。 */
+  const twoStagePort = (picked = '5,17', compiled = '编译后的猫') => async (request) => {
+    asked.push(request);
+    if (request.system.includes('【规则目录】')) return { ok: true, content: picked };
+    return { ok: true, content: `${PROMPT_MARK}\n${compiled}\n${NEGATIVE_MARK}\nblurry, watermark` };
+  };
+  const make = (log) => new ImageGenQueue({
+    getConfig,
+    sender: { sendTextBatch: async () => ({ sent: [], failed: [] }), sendImage: async () => ({ message_id: 1 }) },
+    log: log || (() => {}),
+    deliverImageResult: () => {},
+    compilePrompt: compilePromptForThis
+  });
+  /** 跑一个任务并等它落地（这些用例都只发一张图）。 */
+  const runOnce = async (prompt, log) => {
+    ds.seen.length = 0;
+    ds.script = [{ status: 200, body: okBody(`${img.base}/ok.png`) }];
+    const queue = make(log);
+    await queue.start();
+    queue.enqueue({ chatKey: 'group:70', prompt });
+    await sleep(200);
+    await queue.stop();
+    return ds.seen[0];
+  };
+  const base = { baseUrl: ds.base, model: 'qwen-image-3.0', negativePrompt: '管理员那条' };
+
+  // ① 两段式（默认）：两次调用，第二次只带挑中的节
+  withImageGen({ ...base, compile: { enabled: true, select: true, timeoutMs: 60000, maxChars: 2000 } });
+  asked = [];
+  compilePromptForThis = twoStagePort();
+  const logsTwo = [];
+  let seen = await runOnce('画个猫', (...a) => logsTwo.push(a.join(' ')));
+  ok('两段式：端口被调了**两次**（先挑节、再编译）', asked.length === 2, String(asked.length));
+  ok('两段式：第 1 段给的是目录（含节标题、不含规则正文）',
+    asked[0].system.includes('【规则目录】') && asked[0].system.includes('## 5. Step 3 结构布局分流')
+    && !asked[0].system.includes(sec('5')));
+  ok('两段式：第 2 段**逐字**带着挑中的那两节', asked[1].system.includes(sec('5')) && asked[1].system.includes(sec('17')));
+  ok('两段式：**没挑中的节一个都没有**（这是两段式省下来的全部东西）',
+    !asked[1].system.includes(sec('16')) && !asked[1].system.includes(sec('0')));
+  ok('两段式：前言恒定入选（总闸不进目录、也不由模型挑）', asked[1].system.includes(sec(PREAMBLE_ID)));
+  ok('两段式：日志记下"挑了几节"（两段式的全部收益都在这个数上，没有它看不出选节白跑了）',
+    logsTwo.some((l) => /compiled picked=2\/19/.test(l)), logsTwo.join(' | '));
+  ok('两段式：发给画图模型的是编译结果，不是原始描述',
+    textOf(seen).includes('编译后的猫') && !textOf(seen).includes('画个猫'), textOf(seen));
+  ok('两段式：负面词 = 安全前排 + 编译产出 + 管理员那条，顺序就是这个（安全词不经过模型）',
+    paramsOf(seen).negative_prompt === `${SAFETY_NEGATIVE}, blurry, watermark, 管理员那条`,
+    paramsOf(seen).negative_prompt);
+
+  // ② 挑不出来 → 退回全文（fail-open 到"最保险的那一档"，不会因为挑错而少给规则）
+  asked = [];
+  compilePromptForThis = twoStagePort('胡说八道');
+  seen = await runOnce('画个猫');
+  ok('挑不出来时退回**全文**（19/19）—— 宁可多花 token，也不要因为挑错而少给规则',
+    asked.length === 2 && asked[1].system.includes(sec('16')) && asked[1].system.includes(sec('0')));
+
+  // ③ `select: false` → 一次调用、直接上全文
+  withImageGen({ ...base, compile: { enabled: true, select: false, timeoutMs: 60000, maxChars: 2000 } });
+  asked = [];
+  compilePromptForThis = twoStagePort();
+  const logsFull = [];
+  seen = await runOnce('画个猫', (...a) => logsFull.push(a.join(' ')));
+  ok('单段全文：**只调一次**，system 里是整份规则原文（harness 里"判定相关就读整份"的那一档）',
+    asked.length === 1 && asked[0].system.includes(sec('5')) && asked[0].system.includes(sec('16'))
+    && asked[0].system.includes(sec(PREAMBLE_ID)), String(asked.length));
+  // 上面那条只证明"某几节在里面"。这一条才是**整份原样**：文件全文作为一个连续子串出现在
+  // system 里 —— 中间没被插进任何东西，也没少任何一个字节。
+  ok('⚠️ 单段全文：**整份原文逐字**都在 system 里（`includes(全文)` —— 连续子串，没插东西也没少字节）',
+    asked[0].system.includes(skillText),
+    `文件 ${skillText.length} 字符，system ${asked[0].system.length} 字符`);
+  ok('单段全文：日志里记的是 19/19（没有选节那一次，全部节都进了）',
+    logsFull.some((l) => /compiled picked=19\/19/.test(l)), logsFull.join(' | '));
+
+  // ④ 对照：编译关掉 —— 端口一次都不许被调，且行为与加这一层之前逐字相同
+  withImageGen({ ...base, compile: { enabled: false, select: true, timeoutMs: 60000, maxChars: 2000 } });
+  asked = [];
+  compilePromptForThis = twoStagePort();
+  seen = await runOnce('画个猫');
+  ok('对照：编译关掉时端口**一次都没被调**（不是"调了但不用"）', asked.length === 0, String(asked.length));
+  ok('对照：关掉编译时正面提示词就是原始描述', textOf(seen).startsWith('画个猫'), textOf(seen));
+  ok('对照：关掉编译时负面词回落成管理员配置那条（**不偷偷加安全前排**）',
+    paramsOf(seen).negative_prompt === '管理员那条', paramsOf(seen).negative_prompt);
+
+  // ⑤ fail-open：端口抛错 → 图照样出，用原始描述，且日志留下固定码
+  withImageGen({ ...base, negativePrompt: '', compile: { enabled: true, select: true, timeoutMs: 60000, maxChars: 2000 } });
+  const logsFail = [];
+  compilePromptForThis = async () => { throw new Error('连不上 https://example.com/x 或 C:\\secret\\a.json'); };
+  seen = await runOnce('画个猫', (...a) => logsFail.push(a.join(' ')));
+  ok('fail-open：编译抛错时图**照样出来了**，用的是原始描述（额度已经扣了，不能白扣）',
+    !!seen && textOf(seen).startsWith('画个猫'), textOf(seen));
+  ok('fail-open：日志里留下固定码 COMPILE_REQUEST（这是管理员唯一能发现"编译一直失败"的地方）',
+    logsFail.some((l) => l.includes('COMPILE_REQUEST')), logsFail.join(' | '));
+  ok('fail-open：日志里的细节**洗过**了（URL 与本机路径不许进日志）',
+    !logsFail.some((l) => l.includes('https://example.com') || l.includes('C:\\secret')),
+    logsFail.join(' | '));
+  ok('fail-open：**挑节那一次失败也算失败**（不拿一个空选择继续往下编译）',
+    logsFail.filter((l) => l.includes('COMPILE_REQUEST')).length >= 1);
+
+  // ⑥ 2.1：负面词不发（发了会被判 400），且日志说明是模型不支持
+  withImageGen({ ...base, model: 'qwen-image-2.1-turbo', compile: { enabled: true, select: true, timeoutMs: 60000, maxChars: 2000 } });
+  const logs21 = [];
+  compilePromptForThis = twoStagePort();
+  seen = await runOnce('画个猫', (...a) => logs21.push(a.join(' ')));
+  ok('2.1 系列：negative_prompt **不发**（发了会被接口判 400）',
+    paramsOf(seen).negative_prompt === undefined, JSON.stringify(paramsOf(seen)));
+  ok('2.1 系列：日志说明是模型不支持（否则"负面词没生效"会被当成配置写错了去查）',
+    logs21.some((l) => l.includes('SKIPPED_UNSUPPORTED')), logs21.join(' | '));
+  ok('2.1 系列：正面提示词照样是编译结果（负面那一半被丢，正面不受影响）',
+    textOf(seen).includes('编译后的猫'), textOf(seen));
+
+  // ⑦ 端口没接上（配置开着但没注入）——必须留线索，否则"开了编译、一个字没变"无从查起
+  withImageGen({ ...base, compile: { enabled: true, select: true, timeoutMs: 60000, maxChars: 2000 } });
+  const logsNoPort = [];
+  compilePromptForThis = null;
+  seen = await runOnce('画个猫', (...a) => logsNoPort.push(a.join(' ')));
+  ok('端口没接上：照常按原始描述出图，且日志里有 COMPILE_NO_PORT',
+    textOf(seen).startsWith('画个猫') && logsNoPort.some((l) => l.includes('COMPILE_NO_PORT')),
+    logsNoPort.join(' | '));
+
+  // ⑧ 超时：一次挂住的编译不能把单并发队列堵死。
+  // ⚠️ 这一条要真等 5 秒 —— `compile.timeoutMs` 的钳制下限就是 5000（见 config.ts），
+  // 没有更快的办法从配置侧构造出这条死线。慢归慢，它守的是"队列被整个堵死"这件事。
+  // **不能用 `runOnce`**：它在 200ms 时就 `stop()`，那会先一步 abort 掉在途的编译，
+  // 于是这条用例测的就成了"stop 会不会中止编译"，而不是"死线到点会不会中止它"。
+  withImageGen({ ...base, compile: { enabled: true, select: true, timeoutMs: 5000, maxChars: 2000 } });
+  const logsTimeout = [];
+  let abortedAt = 0;
+  const t0 = Date.now();
+  compilePromptForThis = (request, signal) => new Promise((resolve) => {
+    signal.addEventListener('abort', () => {
+      abortedAt = Date.now() - t0;
+      resolve({ ok: false, message: 'aborted' });
+    }, { once: true });
+  });
+  ds.seen.length = 0;
+  ds.script = [{ status: 200, body: okBody(`${img.base}/ok.png`) }];
+  const queueTimeout = make((...a) => logsTimeout.push(a.join(' ')));
+  await queueTimeout.start();
+  queueTimeout.enqueue({ chatKey: 'group:70', prompt: '画个猫' });
+  await sleep(6500);
+  await queueTimeout.stop();
+  const seenTimeout = ds.seen[0];
+  ok('编译超时：死线**到点才**中止那一次调用（约 5 秒，不是立刻、也不是永不）',
+    abortedAt >= 4900 && abortedAt < 8000, `abortedAt=${abortedAt}ms`);
+  ok('编译超时：中止之后图照常出、用的是原始描述（单并发队列不会被一次挂住的编译堵死）',
+    !!seenTimeout && textOf(seenTimeout).startsWith('画个猫'), textOf(seenTimeout));
+  ok('编译超时：日志里有 COMPILE_REQUEST（超时走的是端口回 ok:false 那条路）',
+    logsTimeout.some((l) => l.includes('COMPILE_REQUEST')), logsTimeout.join(' | '));
+
+  updateConfig({ security: { allowPrivateImageHosts: false } });
+  ds.close();
+  img.close();
+}
+
 // ── 13. 源级接线（几条"删掉不会报错、只会静默变坏"的）────────────
 const clientSrc = stripComments(readSource('media/image-gen/client.ts'));
 ok('client.ts 里没有任何日志调用（Key 在 Authorization 头里，那里是唯一可能出现它的地方）',
@@ -900,6 +1238,52 @@ ok('队列的 0ms 唤醒句柄被存进 #wake（有句柄 stop 才取消得掉�
 const toolSrc = stripComments(readSource('agent/tools/image-gen.ts'));
 ok('工具自己一次都不发消息（不出现 sendTextBatch / sendImage 调用）',
   !/\.sendTextBatch\(|\.sendImage\(/.test(toolSrc));
+
+// 编译层的跨层边界：`llm` 与 `media` 同属 T1、严格互斥（T1_ALLOW 是空集），
+// 所以它**只能**走注入的端口。删掉这一条的话，一次"顺手 import chatCompletion"
+// 不会有任何报错 —— 只有 check-layers 会红，而那条闸门说的是"依赖方向"、
+// 不说"这一层该不该自己调模型"。
+const compileSrc = stripComments(readSource('media/image-gen/compile.ts'));
+ok('编译层不 import llm/，也不 import qq|chat|agent（跨层只走注入的端口）',
+  !/from '\.\.\/\.\.\/(llm|qq|chat|agent)\//.test(compileSrc), '');
+ok('编译层不自己调 fetch（它只组装请求 + 解析，网络归宿主注入的端口）',
+  !/\bfetch\(/.test(compileSrc));
+ok('编译层的规则来自 catalog，不是就地写死（模型可见的固定指令只许有一个落点）',
+  /PROMPT_CATALOG\.imageCompile/.test(compileSrc));
+// 规则文件路径**必须**从 core/paths.ts 取。写死在 compile.ts 里的话，文件挪窝只会在运行期
+// 变成一次 `readFileSync` 失败 —— 而它的表现是"编译静默失效、退回原始描述"，与"没开编译"一样。
+ok('编译层：规则文件路径来自 core/paths.js（不自己拼字面量 —— 那种错只在运行期炸）',
+  /from '\.\.\/\.\.\/core\/paths\.js'/.test(compileSrc)
+  && /PROMPT_SKILL_FILE/.test(compileSrc)
+  && !/assets\/moss|assets'/.test(compileSrc));
+ok('编译层：两段调用的 system 都以覆盖前言开头（它是跨调用稳定的前缀，缓存的命中全靠它）',
+  /const withOverlay = \(rest: string\) => `\$\{PROMPT_CATALOG\.imageCompile\.overlay\}/.test(compileSrc));
+ok('编译层：切分只认 `## `（`### ` 是节内子标题），且切片按**原文字符下标**（逐字节的关键）',
+  /\/\^## \(\?!#\)\/gm/.test(compileSrc) && /body\.slice\(starts\[i\]/.test(compileSrc));
+ok('编译层：拼装用**空串**连接（换行连接会在节之间插入原文没有的东西，那就不是"原样引用"了）',
+  /\.map\(\(s\) => s\.text\)\.join\(''\)/.test(compileSrc));
+ok('⚠️ 编译层里**不许出现规则正文**（它只负责切分与拼接；正文从文件读，我们不许改）',
+  !compileSrc.includes('Magic Blocks') && !compileSrc.includes('单向因果染色'));
+
+// `#compile` 必须排在 `run` **之前**：编译结果写在 job 上，出图那一步读它。
+// 顺序反了不会有任何编译错误 —— 表现只是"编译开了但提示词没变"。
+ok('队列：编译排在出图之前（`await this.#compile(` 出现在 `const run =` 之前）',
+  queueSrc.indexOf('await this.#compile(') > -1
+  && queueSrc.indexOf('await this.#compile(') < queueSrc.indexOf('const run = this.#operations.runTask'));
+ok('队列：出图用的是编译产物、回落原始描述（`job.compiled?.positive ?? job.prompt`）',
+  /job\.compiled\?\.positive \?\? job\.prompt/.test(queueSrc));
+ok('队列：编译那一次调用有自己的死线（出图那条最长 15 分钟，不能让它把编译一起拖住）',
+  /setTimeout\(\(\) => controller\.abort\(\), config\.compile\.timeoutMs\)/.test(queueSrc));
+
+// 端口的真实现只在组装根。**删掉 app.ts 那一行不会有任何报错** ——
+// 表现是"编译开着却什么都没发生"，而日志里只有一行 COMPILE_NO_PORT。
+const appSrc = readSource('web/app.ts');
+ok('接线：app.ts 真的把编译端口递给队列了',
+  /compilePrompt: compileImagePrompt/.test(appSrc));
+ok('接线：那个端口用 temperature 0.2（这是转换不是创作，同一个需求该编译出同一个结果）',
+  /temperature: 0\.2/.test(stripComments(appSrc)));
+ok('接线：那次调用的用量走 addExtraUsage（它多半发生在会话 finish() 之后，不能走整份累加那条路）',
+  /sessions\.addExtraUsage\(addUsage\(emptyUsage\(\), result\.usage\)\)/.test(appSrc));
 
 // 图片段的超时必须比 `call()` 的默认值大得多 —— 真机实测的假失败就是这 15 秒造成的。
 {
@@ -929,6 +1313,27 @@ ok('工具自己一次都不发消息（不出现 sendTextBatch / sendImage 调�
   ok('设置页：API Key 用密码框回显掩码（留空不修改），照 sauceNao 那条',
     /id="cfg-imagegen-apikey"[\s\S]{0,80}type="password"/.test(sectionsSrc)
     || /type="password"[\s\S]{0,80}id="cfg-imagegen-apikey"/.test(sectionsSrc));
+
+  // 编译层三档的钳制有**两份实现**（后端 resolver 与设置页 save），它们必须逐项一致。
+  // 漂移的表现是"我填了 5000 却按别的数走"，而没人会去比两边源码（同 webSearch 那条）。
+  const configSrc = stripComments(readSource('media/image-gen/config.ts'));
+  ok('编译层钳制：后端 resolver 与设置页 save 是**同一组数**（漂移 = 填了却不按它走）',
+    /boundedInt\(raw\.compile\?\.timeoutMs, 60_000, 5_000, 300_000\)/.test(configSrc)
+    && /boundedInt\(raw\.compile\?\.maxChars, 2_000, 200, 8_000\)/.test(configSrc)
+    && /clampInt\(val\('#cfg-imagegen-compile-timeout'[\s\S]{0,40}?5000, 300000, 60000\)/.test(saveSrc)
+    && /clampInt\(val\('#cfg-imagegen-compile-maxchars'[\s\S]{0,40}?200, 8000, 2000\)/.test(saveSrc));
+  ok('编译层：设置页的 input 上下限与那组数一致（min/max 写错时浏览器只拦一半）',
+    /id="cfg-imagegen-compile-timeout"[^>]*min="5000"[^>]*max="300000"/.test(sectionsSrc)
+    && /id="cfg-imagegen-compile-maxchars"[^>]*min="200"[^>]*max="8000"/.test(sectionsSrc));
+  ok('编译层：默认值是**关**（设置页的 checkbox 不勾），且文案说清"多一次模型调用"',
+    /id="cfg-imagegen-compile-enabled"[^>]*\$\{g\.compile\?\.enabled === true \? 'checked' : ''\}/.test(sectionsSrc)
+    && sectionsSrc.includes('每张图会多一到两次模型调用'));
+  // `select` 这一栏的判据与后端 `raw.compile?.select !== false`（缺省真）是**同一条**：
+  // 写反了不会报任何错，表现只是"勾了没反应 / 取消勾选反而变两次调用"。
+  ok('编译层：`select` 那一栏的缺省也是**开**，且 save 与后端同一条判据',
+    /id="cfg-imagegen-compile-select"[^>]*\$\{g\.compile\?\.select !== false \? 'checked' : ''\}/.test(sectionsSrc)
+    && /chk\('#cfg-imagegen-compile-select', g\.compile\?\.select !== false\)/.test(saveSrc)
+    && /select: raw\.compile\?\.select !== false/.test(configSrc));
 }
 
 process.exit(done() ? 0 : 1);

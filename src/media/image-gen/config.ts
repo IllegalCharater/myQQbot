@@ -89,8 +89,21 @@ export function resolveImageGenConfig(config: AppConfig): EffectiveConfig {
     // 两个布尔都是"默认开/默认关"的显式表达，不用真值判断（`"false"` 这种畸形值不该把水印打开）。
     promptExtend: raw.promptExtend !== false,
     watermark: raw.watermark === true,
+    // ⚠️ 这个 500 与 `compile.ts` 的 `MAX_NEGATIVE_CHARS` 是**同一个数**：编译开启时两条
+    // 负面词会拼成一条发给接口，各自按同一个量级兜住。改一处要同时改另一处
+    // （没做成 import 是因为那会把整个 prompt-catalog 拖进这个纯配置解析器，不划算）。
     negativePrompt: String(raw.negativePrompt ?? '').trim().slice(0, 500),
     stylePrompt,
+    // 编译层三档。`enabled` 用 `=== true` 而不是真值判断（`"false"` 这种畸形值不该把编译打开）。
+    // `timeoutMs` 的下限 5000 是"再短就没意义"（一次模型调用本来就慢），
+    // `maxChars` 的下限 200 是"再短就写不出一段画面描述"。
+    compile: {
+      enabled: raw.compile?.enabled === true,
+      // `select` 缺省取**真**（两段式）—— 它是更省的那一档，且选不出来时会 fail-open 到全文。
+      select: raw.compile?.select !== false,
+      timeoutMs: boundedInt(raw.compile?.timeoutMs, 60_000, 5_000, 300_000),
+      maxChars: boundedInt(raw.compile?.maxChars, 2_000, 200, 8_000)
+    },
     timeoutMs: boundedInt(raw.timeoutMs, 300_000, 30_000, 900_000),
     maxPromptChars: boundedInt(raw.maxPromptChars, 1200, 50, 4000),
     maxStyleChars,

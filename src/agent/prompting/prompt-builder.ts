@@ -91,7 +91,6 @@ export function buildSystemPrompt({ config, persona, capabilities = {}, bookmark
     memoryRules: PROMPT_CATALOG.system.memoryRules(),
     stickerRules: PROMPT_CATALOG.system.stickerRules(buildStickerStrategyHint(stickerLevel)),
     qqSceneRules: PROMPT_CATALOG.system.qqSceneRules({ vision, search, bookmarkSites }),
-    reportBan: PROMPT_CATALOG.system.reportBan(),
     customRules: customRules ? `${PROMPT_CATALOG.system.customRulesHeading}\n${customRules}` : ''
   };
 

@@ -45,6 +45,16 @@ export interface ImageGenInput {
   prompt: string;
   /** 图生图参考图，`data:<mime>;base64,…`；空串 = 文生图。 */
   imageDataUrl?: string;
+  /**
+   * 负面词（第三层）。
+   *
+   * **缺省（`undefined`）= 用配置里那条** —— 编译关掉时就是这条路，行为与加编译层之前逐字相同。
+   * 编译开着时，队列已经把成品拼好了递进来（安全前排 + 编译产出 + 配置那条，见
+   * `queue.ts` 的 `#negativeFor`），所以这里**不再自己拼一次**：拼两份必然漂移。
+   *
+   * 显式传空串的含义是"这张图不要负面词"（与 `undefined` 是两件事）。
+   */
+  negativePrompt?: string;
 }
 
 /**
@@ -53,7 +63,10 @@ export interface ImageGenInput {
  * 参数名与嵌套照官方文档：`input.messages[].content[]` 里图片在前、文字在后，
  * 其余全在 `parameters` 里平铺（这与 OpenAI 兼容模式"全平铺在顶层"不同，别混）。
  */
-export function buildImageGenRequest(config: EffectiveConfig, { prompt, imageDataUrl = '' }: ImageGenInput) {
+export function buildImageGenRequest(
+  config: EffectiveConfig,
+  { prompt, imageDataUrl = '', negativePrompt }: ImageGenInput
+) {
   const content: Array<Record<string, string>> = [];
   if (imageDataUrl) content.push({ image: imageDataUrl });
   content.push({ text: withStyleLayer(prompt, config.stylePrompt) });
@@ -65,8 +78,11 @@ export function buildImageGenRequest(config: EffectiveConfig, { prompt, imageDat
     watermark: config.watermark
   };
   if (config.size) parameters.size = config.size;
-  if (config.negativePrompt && supportsNegativePrompt(config.model)) {
-    parameters.negative_prompt = config.negativePrompt;
+  // ⚠️ 这一道闸门**只在这里**（`supportsNegativePrompt`）：多传一个 2.1 系列不认的参数
+  // 会被判 400，于是"一条与模型无关的配置项能让 2.1 直接出不了图"。
+  const negative = negativePrompt ?? config.negativePrompt;
+  if (negative && supportsNegativePrompt(config.model)) {
+    parameters.negative_prompt = negative;
   }
   return { model: config.model, input: { messages: [{ role: 'user', content }] }, parameters };
 }

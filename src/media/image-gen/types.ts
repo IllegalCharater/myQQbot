@@ -5,8 +5,8 @@
 // `media/transcription/types.ts` 同一条规矩。
 import type { AppConfig } from '../../core/config.js';
 
-/** 任务的对外状态。`fetching` 指"正在取参考图"，不是"在出图"。 */
-export type ImageGenStatus = 'queued' | 'fetching' | 'generating' | 'downloading' | 'uploading' | 'done' | 'failed';
+/** 任务的对外状态。`fetching` 指"正在取参考图"，不是"在出图"。`compiling` 是编译层那一次模型调用。 */
+export type ImageGenStatus = 'queued' | 'compiling' | 'fetching' | 'generating' | 'downloading' | 'uploading' | 'done' | 'failed';
 
 /**
  * 失败阶段，决定失败文案写的是哪一段。
@@ -80,6 +80,8 @@ export interface EffectiveConfig {
   watermark: boolean;
   negativePrompt: string;
   stylePrompt: string;
+  /** 提示词编译层（见 `compile.ts`）。`enabled` 为假时**一次模型调用都不发**。 */
+  compile: ImageCompileConfig;
   timeoutMs: number;
   maxPromptChars: number;
   maxStyleChars: number;
@@ -88,6 +90,45 @@ export interface EffectiveConfig {
   maxCallsPerChatPerHour: number;
   maxCallsPerDay: number;
 }
+
+/** 编译层的四档配置。四个都影响行为，没有"留着不用"的字段。 */
+export interface ImageCompileConfig {
+  enabled: boolean;
+  /**
+   * **两段式**：先让模型看一遍规则目录挑节，再把挑中的节原文贴进去编译。
+   *
+   * `false` = 跳过选节那一次，直接一次调用上**全文**（harness 里"判定相关就读整份 SKILL.md"
+   * 的那一档）。代价是一次多约 25k token 的输入，好处是规则一条不漏。
+   */
+  select: boolean;
+  /** **两段加起来**的死线，与出图自己的 `timeoutMs` 各管各的。 */
+  timeoutMs: number;
+  /** 编译产出的**正面提示词**上限（不是原始描述的上限 —— 那个是 `maxPromptChars`）。 */
+  maxChars: number;
+}
+
+/**
+ * 编译产物。
+ *
+ * `negative` 为空串 = 这张图没有负面词（2.1 系列压根不支持这个参数，或模型没写）。
+ */
+export interface CompiledPrompt { positive: string; negative: string }
+
+/** 编译调用的端口返回值。`ok:false` 时 `message` 只进日志（洗过 URL 与本机路径）。 */
+export type ImagePromptAskOutcome = { ok: true; content: string } | { ok: false; message: string };
+
+/**
+ * 编译调用的端口。
+ *
+ * 为什么是**注入的函数**而不是让队列直接调模型：`llm` 与 `media` 同属 T1、严格互斥
+ * （`check-layers.mjs` 的 `T1_ALLOW` 是空集），队列不能 import `llm/llm.js`。装配根
+ * （`web/app.ts`）把"真的去调一次模型"接过去，形态与跑团的 `AskPort` 完全一致。
+ *
+ * ⚠️ **端口只交回原始字符串**，解析归 `compile.ts` —— 假端口才不必模拟一套解析。
+ */
+export type ImagePromptAskPort = (
+  request: { system: string; user: string }, signal: AbortSignal
+) => Promise<ImagePromptAskOutcome>;
 
 export interface InternalJob {
   id: string;
@@ -113,6 +154,17 @@ export interface InternalJob {
    * 归一化只发生在 `enqueue` 一处，投递侧保证拿到的是确定值。
    */
   mode: DeliveryMode;
+  /**
+   * 编译层的产物，**由 `#execute` 在出图之前写上**（见 `queue.ts` 的 `#compile`）。
+   *
+   * 写在这条任务上而不是就地传给 `generateImage`，是为了让**注入了 `operations.runTask`
+   * 的套件也看得见它** —— 那批用例整段替换了"出图"这一步，编译如果只活在 `#runProduction`
+   * 里，套件就只能靠假百炼端点收到的 prompt 反推，断言会绕一大圈。
+   *
+   * 缺省（`undefined`）= 编译没开或没成，出图用原始的 `prompt`。
+   * ⚠️ **不进对外读模型**（同 `prompt` / `referenceUrl`，见 `ImageGenJobView`）。
+   */
+  compiled?: CompiledPrompt;
   status: ImageGenStatus;
   failedStage?: FailureStage;
   createdAt: number;
@@ -177,4 +229,11 @@ export interface QueueDeps {
   operations?: QueueOperations;
   /** 见 `ImageResultSink`。**成功与失败都走它**；缺省时 assisted 任务退回"队列自己往群里贴一句"（否则群友什么都等不到），并记一条日志。 */
   deliverImageResult?: ImageResultSink | null;
+  /**
+   * 编译调用的端口（见 `ImagePromptAskPort`）。
+   *
+   * **缺省 = 编译不可用**，于是 `compile.enabled` 开着也只会记一行日志、照常按原始描述出图 ——
+   * 与"编译失败"走同一条退路（fail-open）。没有它在生产里跑不到：`web/app.ts` 一定会传。
+   */
+  compilePrompt?: ImagePromptAskPort | null;
 }

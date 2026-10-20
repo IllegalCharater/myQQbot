@@ -101,8 +101,7 @@ ok('系统提示点名拍一拍就是这类', /拍一拍/.test(sp) && /根本没
     ['quoteAndAt', '【引用与点名'],
     ['memoryRules', '【轻量记忆'],
     ['stickerRules', '【表情包策略'],
-    ['qqSceneRules', '【QQ 场景规则】'],
-    ['reportBan', '【发送与汇报禁令']
+    ['qqSceneRules', '【QQ 场景规则】']
   ];
   const positions = markers.map(([, marker]) => sp.indexOf(marker));
   ok('system prompt 的段序与 SYSTEM_SECTION_IDS 一致（各段特征串的下标递增）',
@@ -113,7 +112,7 @@ ok('系统提示点名拍一拍就是这类', /拍一拍/.test(sp) && /根本没
   // `indexOf` 照样递增（实测：那一改之下本文件 59 条断言全绿）。所以分隔符必须单独钉：
   // 它是提示词的形状本身，改掉之后所有段挤成一坨，而**没有任何行为断言会红**。
   ok('段与段之间是**空行**分隔（改掉分隔符会让所有段挤成一坨，且不报任何错）',
-    ['【角色设定', '【安全规则', '【工作方式', '【QQ 场景规则】', '【发送与汇报禁令']
+    ['【角色设定', '【安全规则', '【工作方式', '【该说/不该说】', '【QQ 场景规则】']
       .every((marker) => sp.includes(`\n\n${marker}`)),
     '分隔符不是空行了 —— 段序断言用的是 indexOf 递增，单换行照样通过');
   ok('框架契约两段（安全规则 / 工具协议）都在段名表里',
@@ -125,9 +124,13 @@ ok('系统提示点名拍一拍就是这类', /拍一拍/.test(sp) && /根本没
     appended.endsWith('【尾巴】就这一句。') && appended.startsWith(sp), String(appended.slice(-40)));
 
   // 附加模式：按段名覆盖。
-  const overridden = buildSystemPrompt({ extraPrompt: { mode: 'attach', override: { reportBan: '【换掉了】' } } });
+  // ⚠️ 这里原先覆盖的是 `reportBan`，判据写的是 `!overridden.includes('举报')` —— 那个字**不在**
+  // 提示词里（原文是"汇报"），所以那条断言是**空的**（改成"汇报"会红：工具协议第 5 条本来就
+  // 含这两个字）。2026-10-20 `reportBan` 段并入工具协议后换成 `memoryRules`，判据改成
+  // 该段自己的标题 —— 覆盖真的生效时它必须消失。
+  const overridden = buildSystemPrompt({ extraPrompt: { mode: 'attach', override: { memoryRules: '【换掉了】' } } });
   ok('按段名覆盖：那一段被换掉，其余一字不动',
-    overridden.includes('【换掉了】') && !overridden.includes('举报') && overridden.startsWith('你是「'),
+    overridden.includes('【换掉了】') && !overridden.includes('【轻量记忆') && overridden.startsWith('你是「'),
     String(overridden.slice(-60)));
 
   // 框架契约段**不许**被覆盖（装载时已经拒过一次，这里是第二道 —— 万一计划是别处拼出来的）。

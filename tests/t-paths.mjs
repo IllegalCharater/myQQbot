@@ -88,6 +88,25 @@ ok('依赖清单与脚本同目录，且只此一份',
   fs.existsSync(path.join(paths.PYTHON_TOOLS_DIR, 'requirements.txt')),
   `缺少 ${path.join(paths.PYTHON_TOOLS_DIR, 'requirements.txt')}`);
 
+// ── 5b. 出图编译层用的第三方规则资产：路径锚点与"文件真的在" ──
+//
+// 与上面那条同一条理由，但**后果更隐蔽**：规则文件读不到时，出图链路会 fail-open 成
+// "退回原始描述继续画"，群里照常有图 —— 只是编译静默失效了，日志里一行 `COMPILE_NO_SKILL`
+// 是唯一的线索。文件挪窝/改名不会有任何编译错误，所以锚点必须有守卫。
+const { PROMPT_SKILL_DIR, PROMPT_SKILL_FILE } = paths;
+ok('规则资产落在 ROOT 下的 assets/ 里（`assets` 已在打包白名单 APP_ENTRIES，不必新开目录）',
+  PROMPT_SKILL_DIR === path.join(REPO_DIR, 'assets', 'moss-image-prompt-skill'),
+  `拿到 ${PROMPT_SKILL_DIR}`);
+ok('规则文件真的在（改名/搬家在这里红，而不是运行期静默失效）',
+  fs.existsSync(PROMPT_SKILL_FILE) && fs.statSync(PROMPT_SKILL_FILE).size > 50000,
+  `拿到 ${PROMPT_SKILL_FILE}`);
+// CC BY-NC-ND 要求带着协议声明分发；NOTICE 是署名与"逐字节原样"的凭据。
+// 这两个文件少一个，分发就变成"去掉署名与协议声明"—— 那是协议明确不允许的。
+ok('第三方许可文件与署名随包（CC BY-NC-ND 的署名与协议声明要求）',
+  fs.existsSync(path.join(PROMPT_SKILL_DIR, 'LICENSE'))
+  && fs.existsSync(path.join(PROMPT_SKILL_DIR, 'NOTICE.md')),
+  `目录内容：${fs.readdirSync(PROMPT_SKILL_DIR).join(', ')}`);
+
 // ── 6. 桌面打包脚本的白名单与仓库实际目录对得上 ──
 //
 // `scripts/build-desktop.mjs` 是**白名单**打包：只搬 APP_ENTRIES 里点名的目录。白名单的

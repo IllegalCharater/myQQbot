@@ -381,6 +381,15 @@ export async function saveConfig({ quiet = false } = {}) {
       maxDownloadBytes: clampInt(val('#cfg-imagegen-max-download-mib', Math.round(Number(g.maxDownloadBytes || 20 * mib) / mib)), 1, 64, 20) * mib,
       maxCallsPerChatPerHour: clampInt(val('#cfg-imagegen-chat-hourly', g.maxCallsPerChatPerHour), 1, 60, 3),
       maxCallsPerDay: clampInt(val('#cfg-imagegen-daily', g.maxCallsPerDay), 1, 1000, 20),
+      // 提示词编译层四档。钳制范围与 `media/image-gen/config.ts` 的 resolveImageGenConfig()
+      // **逐项一致**（同本函数开头那条注释：漂移的表现是"我填了 5000 却按别的数走"）。
+      compile: {
+        enabled: chk('#cfg-imagegen-compile-enabled', g.compile?.enabled === true),
+        // 缺省取**真**（两段式），与后端 `raw.compile?.select !== false` 同一条判据。
+        select: chk('#cfg-imagegen-compile-select', g.compile?.select !== false),
+        timeoutMs: clampInt(val('#cfg-imagegen-compile-timeout', g.compile?.timeoutMs), 5000, 300000, 60000),
+        maxChars: clampInt(val('#cfg-imagegen-compile-maxchars', g.compile?.maxChars), 200, 8000, 2000)
+      },
       // 密钥只有真的输入了新值才写回；'******' 是服务端脱敏后的回显掩码（照 sauceNao.apiKey）。
       // 回传掩码会让真 Key 被覆盖成六个星号，而且**下次保存还会再覆盖一次**。
       ...(key && key !== '******' ? { apiKey: key } : {})

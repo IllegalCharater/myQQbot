@@ -7,6 +7,7 @@
 //   · `commands.ts`  `/画` 解析 + 参考图定位（**只读、无副作用**）
 //   · `image-io.ts`  两条取图路径：进来的参考图、出去的结果图（SSRF 校验 + 大小上限）
 //   · `client.ts`    百炼同步接口（请求体拼装是纯函数，**两层提示词就在这里合并**）
+//   · `compile.ts`   提示词编译层（可选的一次独立模型调用；规则与署名在 core/prompt-catalog.ts）
 //   · `queue.ts`     单并发状态机、成本闸门与两条投递路径
 export * from './types.js';
 export * from './errors.js';
@@ -14,4 +15,5 @@ export * from './config.js';
 export * from './commands.js';
 export * from './image-io.js';
 export * from './client.js';
+export * from './compile.js';
 export * from './queue.js';

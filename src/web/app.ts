@@ -13,6 +13,7 @@ import { SendQueue } from '../qq/sender.js';
 import { SessionRegistry } from '../chat/sessions.js';
 import { Orchestrator } from '../agent/runtime/orchestrator.js';
 import { initPriceFeed, stopPriceFeed } from '../llm/price-feed.js';
+import { addUsage, chatCompletion, emptyUsage } from '../llm/llm.js';
 import { initJmcomicQueue, stopJmcomicQueue, enqueueJmcomicDownload } from '../media/jmcomic/index.js';
 import type { JmcomicCompletion } from '../media/jmcomic/index.js';
 import { VideoTranscriptionQueue } from '../media/transcription/index.js';
@@ -151,6 +152,37 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
     deliverAsyncResult(chatKey, store.appendImageResult(chatKey, { prompt, status, reason }));
   }
 
+  // 出图的**提示词编译端口**（可选，见 `media/image-gen/compile.ts`）。
+  //
+  // 为什么在组装根建：`llm` 与 `media` 同属 T1、严格互斥（`check-layers.mjs` 的
+  // `T1_ALLOW` 是空集），队列 import 不了 `llm/`。所以"真的去调一次模型"只能由这里接过去，
+  // 与扩展那几个口子（`deliverNote` / `sendPrivate` / `sendFile`）是同一条分工。
+  //
+  // 三条边界：
+  // ① **温度 0.2**：这是**转换**不是创作 —— 同一个需求编译两次该得到同一个结果
+  //    （同跑团抽取管线与剧本格式整理那条）；
+  // ② **用量走 `sessions.addExtraUsage`**（只叠增量）：编译跑在后台队列里，多半已经在那次
+  //    会话 `finish()` 之后，而 `#persist` 对已结束的会话会整份重复累加（同跑团的兜底建议
+  //    与暗骰叙事那两次独立调用）；
+  // ③ **这里只交回原始字符串**，正/负两段的解析归 `compile.ts` —— 假端口才不必模拟一套解析。
+  async function compileImagePrompt(
+    { system, user }: { system: string; user: string }, signal: AbortSignal
+  ) {
+    try {
+      const result = await chatCompletion({
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        temperature: 0.2,
+        signal
+      });
+      if (result.usage) sessions.addExtraUsage(addUsage(emptyUsage(), result.usage));
+      return { ok: true as const, content: String(result.message?.content ?? '') };
+    } catch (error) {
+      // 交回原始 message：`compile.ts` 会过一道 `safeErrorDetail`（去 URL 与本机路径）
+      // 再进日志。这里自己洗一遍就等于有两份洗法，必然漂移。
+      return { ok: false as const, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   // 扩展递进来的机器条目（跑团的【跑团笔记】/【行动建议】）。与上面三条**走同一条路** ——
   // 落存档 → 入窗 → 通知面板，因为它要的正是同一件事：让模型看到并自己开口。
   //
@@ -199,7 +231,9 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   const BUILTIN_TOOLS = buildToolDefs();
 
   const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log, deliverTranscript });
-  const imageGen = new ImageGenQueue({ sender, getConfig, log, deliverImageResult });
+  const imageGen = new ImageGenQueue({
+    sender, getConfig, log, deliverImageResult, compilePrompt: compileImagePrompt
+  });
   const hotSearchScheduler = new HotSearchScheduler({ getConfig, updateConfig, sender, log });
   // 这三个能力对象先建、再交给 Orchestrator：模型的三个工具（transcribe_video /
   // generate_image / get_hot_search）需要它们，而依赖是从 Orchestrator → WakeScheduler

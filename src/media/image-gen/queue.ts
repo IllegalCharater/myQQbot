@@ -26,13 +26,16 @@ import type { AppConfig } from '../../core/config.js';
 import { SlidingWindowBudget } from '../call-budget.js';
 import { TaskQueue } from '../task-queue.js';
 import type { SetTaskStatus } from '../task-queue.js';
-import { resolveImageGenConfig } from './config.js';
+import { resolveImageGenConfig, supportsNegativePrompt } from './config.js';
 import { generateImage } from './client.js';
+import { SAFETY_NEGATIVE, compileImagePrompt } from './compile.js';
+import type { CompileFailure, CompileSuccess } from './compile.js';
 import { ImageGenError, safeErrorCode, safeErrorDetail, userError } from './errors.js';
 import { downloadImageToFile, fetchReferenceImage } from './image-io.js';
 import type {
   DeliveryMode, EffectiveConfig, FailureStage, ImageArtifact, ImageGenJobView, ImageGenSender,
-  ImageGenStatus, ImageResultSink, ImageResultStatus, InternalJob, QueueDeps, QueueOperations
+  ImageGenStatus, ImagePromptAskPort, ImageResultSink, ImageResultStatus, InternalJob, QueueDeps,
+  QueueOperations
 } from './types.js';
 
 /** 失败阶段 → 群里那句话里的中文标签。阶段码本身仍然单独进日志（`errorCode`）。 */
@@ -50,18 +53,25 @@ export class ImageGenQueue {
   #log: (...args: unknown[]) => void;
   #operations: QueueOperations;
   #deliverImageResult: ImageResultSink | null;
+  #compilePrompt: ImagePromptAskPort | null;
   #budget: SlidingWindowBudget;
   #queue: TaskQueue<InternalJob, EffectiveConfig>;
   #wake: ReturnType<typeof setTimeout> | null = null;
   #started = false;
   #stopping = false;
 
-  constructor({ sender, getConfig, log = console.log, operations = {}, deliverImageResult = null }: QueueDeps) {
+  constructor({
+    sender, getConfig, log = console.log, operations = {},
+    deliverImageResult = null, compilePrompt = null
+  }: QueueDeps) {
     this.#sender = sender;
     this.#getConfig = getConfig;
     this.#log = log;
     this.#operations = operations;
     this.#deliverImageResult = deliverImageResult;
+    // 编译层的端口（见 `ImagePromptAskPort`）。缺省 = 编译不可用，`compile.enabled` 开着
+    // 也只会记一行日志、照常按原始描述出图 —— 与"编译失败"走同一条退路。
+    this.#compilePrompt = compilePrompt;
     // 成本闸门。**两条入口共用**（`generate_image` 工具与 `/画` 命令都走 enqueue），
     // 所以它挂在这里而不是工具层 —— 这与 `/转写` 的取舍刻意不同：出图按张计费，
     // 而 `/画` 是群里任何人都能敲的，命令路径不设闸门等于开一个可被刷的开支口子。
@@ -212,7 +222,7 @@ export class ImageGenQueue {
   }
 
   /**
-   * 一个任务的**整件事**：临时目录 → 取参考图 → 出图 → 下载 → 投递。
+   * 一个任务的**整件事**：编译提示词（可选）→ 临时目录 → 取参考图 → 出图 → 下载 → 投递。
    *
    * 临时目录归这里（`finally` 删）：`runTask` 返回的是**文件**，它必须活到投递之后 ——
    * 转写那条返回文本，可以在自己的 `finally` 里删，两点不同别混。
@@ -224,6 +234,10 @@ export class ImageGenQueue {
     const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qq-agent-image-gen-')).catch(() => '');
     try {
       if (!workDir) throw new ImageGenError('validation', 'TEMP_DIR_FAILED', '临时目录创建失败');
+      // 编译层排在**最前面**：它是出图的输入，而结果写在 `job.compiled` 上，
+      // 所以下面那个被套件整段替换掉的 `run` 也看得见它（见 `InternalJob.compiled`）。
+      // ⚠️ **fail-open** —— 它不抛错，失败只让 `job.compiled` 留空（见 `compile.ts` 顶部）。
+      await this.#compile(job, config, signal, setStatus);
       // 两个操作的注入点**逐字保留**（套件靠它们假造一次完整的出图/投递）。
       const run = this.#operations.runTask
         || ((target, sig, status, current, dir) => this.#runProduction(target, sig, status, current, dir));
@@ -244,6 +258,93 @@ export class ImageGenQueue {
     }
   }
 
+  /**
+   * 编译层（可选）：把原始描述交给一次**独立**的模型调用，产出成品正/负提示词。
+   *
+   * 三条不变量：
+   * - **fail-open**：任何失败都只是 `job.compiled` 留空、记一行固定码的日志，任务照常往下走。
+   *   判据是"**额度已经扣了**" —— 一次可选增强的失败，不该把一整张已经计过费的图搞失败。
+   * - **超时归这里**：端口只收 `signal`（同跑团抽取管线那条分工），死线由本方法从
+   *   `config.compile.timeoutMs` 派生，与出图自己的 `timeoutMs` **各管各的** —— 出图那条
+   *   最长 15 分钟，不能让它把编译也一起拖住，而队列是单并发的，一次挂住的编译会堵死全部出图。
+   * - **结果写在 `job.compiled` 上**，不就地传给 `generateImage`（理由见 `InternalJob.compiled`）。
+   */
+  async #compile(
+    job: InternalJob, config: EffectiveConfig, signal: AbortSignal,
+    setStatus: SetTaskStatus<InternalJob>
+  ): Promise<void> {
+    if (!config.compile.enabled) return;
+    const ask = this.#compilePrompt;
+    if (!ask) {
+      // 端口没接上。生产里跑不到（`web/app.ts` 一定会传），但"配置开着、端口却没有"时
+      // **必须留下线索** —— 否则表现就是"开了编译、提示词一个字没变"，且不报任何错。
+      this.#log(`[image-gen] task=${job.id} code=COMPILE_NO_PORT`);
+      return;
+    }
+    setStatus('compiling');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.compile.timeoutMs);
+    const relay = () => controller.abort();
+    signal.addEventListener('abort', relay, { once: true });
+    if (signal.aborted) controller.abort();
+
+    let outcome: CompileSuccess | CompileFailure;
+    try {
+      outcome = await compileImagePrompt({
+        raw: job.prompt,
+        hasReference: !!job.referenceUrl,
+        size: config.size,
+        maxChars: config.compile.maxChars,
+        // 当前模型不认 `negative_prompt` 就别让模型白写那一串（省下的 token 是实打实的）。
+        wantsNegative: supportsNegativePrompt(config.model),
+        // 两段式：先挑节、再编译。关掉就是一次调用直接上规则全文。
+        select: config.compile.select
+      }, ask, controller.signal);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', relay);
+    }
+
+    if (!outcome.ok) {
+      // 固定码 + **已经洗过的**细节（`compile.ts` 里过了一道 `safeErrorDetail`，
+      // URL 与本机路径不会进日志）。**这一行是管理员唯一能发现"编译一直在失败"的地方** ——
+      // fail-open 的代价就在这儿，没有它这一层就是静默降级。
+      this.#log(`[image-gen] task=${job.id} code=COMPILE_${outcome.code}`
+        + (outcome.detail ? ` detail=${outcome.detail}` : ''));
+      return;
+    }
+    job.compiled = outcome.value;
+    // `picked` 是"这一次挑中了几节"（`7/19`）。**必须记**：两段式的全部收益都在这个数上，
+    // 而"每次都是 19/19"意味着选节那一次白跑了、成本与单段全文一样 —— 那是唯一能看出来的地方。
+    this.#log(`[image-gen] task=${job.id} compiled picked=${outcome.picked}`);
+    if (outcome.note === 'NEGATIVE_DROPPED') {
+      this.#log(`[image-gen] task=${job.id} code=COMPILE_NEGATIVE_DROPPED`);
+    }
+  }
+
+  /**
+   * 这一次请求的负面词。**三条来源合成一条**，且只在编译开启时合成。
+   *
+   * ⚠️ **关掉编译时返回 `undefined`**，`buildImageGenRequest` 于是回落到配置里那条 ——
+   * 出图行为与加这一层之前**逐字相同**（这条对照必须有，"关掉之后还是偷偷加了安全词"
+   * 是没人会去核对的那种漂移）。
+   *
+   * 顺序是"**代码焊死的安全前排 → 编译产出 → 管理员配置那条**"：
+   * - 安全前排放最前是刻意的 —— 它不经过模型，没有"模型没照做"这条失效路径；
+   * - 管理员那条**保留**，因为它是"每张图都发"的既有语义，静默关掉是回归。
+   */
+  #negativeFor(job: Readonly<InternalJob>, config: EffectiveConfig): string | undefined {
+    if (!config.compile.enabled) return undefined;
+    const joined = [SAFETY_NEGATIVE, job.compiled?.negative ?? '', config.negativePrompt]
+      .map((part) => part.trim()).filter(Boolean).join(', ');
+    // 2.1 系列根本不认这个参数，写了也发不出去 —— 记一行，免得管理员把"负面词没生效"
+    // 当成配置写错了去查。
+    if (joined && !supportsNegativePrompt(config.model)) {
+      this.#log(`[image-gen] task=${job.id} negative=SKIPPED_UNSUPPORTED`);
+    }
+    return joined;
+  }
+
   /** 默认的生产实现：取参考图（可选）→ 出图 → 下载到本机临时文件。 */
   async #runProduction(
     job: Readonly<InternalJob>, signal: AbortSignal,
@@ -257,7 +358,12 @@ export class ImageGenQueue {
       imageDataUrl = await fetchReferenceImage(job.referenceUrl, config.maxRefImageBytes, signal);
     }
     setStatus('generating');
-    const imageUrl = await generateImage(config, { prompt: job.prompt, imageDataUrl }, signal);
+    // 编译成了就用编译的产物，没成（关着 / 失败）就用原始描述 —— 后者就是加这一层之前的行为。
+    const imageUrl = await generateImage(config, {
+      prompt: job.compiled?.positive ?? job.prompt,
+      imageDataUrl,
+      negativePrompt: this.#negativeFor(job, config)
+    }, signal);
     setStatus('downloading');
     const bytes = await downloadImageToFile(imageUrl, config.maxDownloadBytes, signal, filePath);
     // `remoteUrl` 只在投递被明确拒绝时用作兜底（见 `#deliver`），不写进对外视图。

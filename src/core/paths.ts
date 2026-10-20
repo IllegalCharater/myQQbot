@@ -65,5 +65,23 @@ export const PYTHON_TOOLS_DIR: string = path.join(ROOT, 'python-tools');
  */
 export const PYTHON_RUNTIME_DIR: string = path.join(ROOT, 'python-runtime');
 
+/** 静态资源目录（图标，以及随包分发的第三方规则资产）。已在打包白名单 `APP_ENTRIES` 里。 */
+export const ASSETS_DIR: string = path.join(ROOT, 'assets');
+
+/**
+ * 出图提示词编译层用的第三方规则集（moss-image-prompt-skill）。
+ *
+ * ⚠️ **这两个文件是逐字节收录的第三方内容，协议是 CC BY-NC-ND 4.0（禁止演绎）** ——
+ * 运行期只许**整节切分**与**原样拼接**，不许摘要、改写、重排、删改正文。
+ * 出处、版本与许可边界见同目录的 `NOTICE.md`（那里是改动前必读的一段）。
+ *
+ * 与 `PYTHON_TOOLS_DIR` 同一条理由放在这里：路径一旦写死在调用方，文件挪窝只会在运行期
+ * 变成一个"功能静默失效"，而 `spawn`/`readFile` 一个不存在的路径不会在编译期报错。
+ */
+export const PROMPT_SKILL_DIR: string = path.join(ASSETS_DIR, 'moss-image-prompt-skill');
+
+/** 规则集正文（**逐字节**的第三方内容，见 `NOTICE.md`）。 */
+export const PROMPT_SKILL_FILE: string = path.join(PROMPT_SKILL_DIR, 'SKILL.md');
+
 /** 配置文件。 */
 export const CONFIG_FILE: string = path.join(DATA_DIR, 'config.json');
