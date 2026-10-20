@@ -329,6 +329,23 @@ export class ImageGenQueue {
     this.#log(`[image-gen] task=${job.id} compile=ok picked=${outcome.picked}`
       + ` sections=${outcome.sections} skillChars=${outcome.skillChars}`
       + ` layout=${outcome.layout ? 'json' : 'text'}`);
+    // 调试点（**默认关**）：把编译产物原样打一行 —— 正面就是那段 Layout JSON。
+    //
+    // 上面那行的 `layout=json` 只证明"这段正面能 `JSON.parse`"（一个 `{}` 也算），
+    // 看不出字段写没写对；而"画出来为什么是那样"这个问题的第一现场就是这段 JSON。
+    // 三条边界：
+    // - **必须默认关**：画面描述属于用户内容，而仓库的规矩是日志里不出现 prompt
+    //   （同 `#deliver` / `#fail` 那两处注释）。
+    // - **必须是一行**：`JSON.stringify` 会把换行转义成 `\n`，所以整段恒定一行 ——
+    //   journald 按行拆多行条目，散开就没人看得懂了（群聊那条多行消息实测被拆成两行）。
+    // - **走 `#log` 而不是 `console.warn`**：与其余 image-gen 日志同一个通道，套件才捕获得到
+    //   （`QueueDeps.log` 可注入）。
+    // 打开方式：启动前设 `QQ_AGENT_DEBUG_IMAGE_JSON=1`（与 `QQ_AGENT_DEBUG_COMPACT` /
+    // `QQ_AGENT_DEBUG_MEMORY` 同一写法）。
+    // if (process.env.QQ_AGENT_DEBUG_IMAGE_JSON) {
+      this.#log(`[image-gen][debug] task=${job.id} json=${JSON.stringify(outcome.value.positive)}`
+        + ` negative=${JSON.stringify(outcome.value.negative)}`);
+    // }
   }
 
   /**

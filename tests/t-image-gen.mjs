@@ -1209,6 +1209,54 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
       logsLayout.join(' | '));
   }
 
+  // ①c 调试点：`QQ_AGENT_DEBUG_IMAGE_JSON=1` 时把编译产物原样打一行（正面 = 那段 Layout JSON）
+  {
+    // ⚠️ 夹具刻意用**缩进过的** JSON（`null, 2`）：真实模型十有八九就是这么写的，而
+    // "整段在一行里"那条断言**只有夹具里带真换行时才有判别力** —— 单行 JSON 的话，
+    // 实现里用不用 `JSON.stringify` 都只有一行，那条断言是假的绿（本套件初版就踩了）。
+    const prettyLayout = JSON.stringify({
+      summary: { meta: ['single'], canvas: 'single', caption: '一只猫，居中' },
+      items: [{ label: 'object', caption: '一只猫', bbox: [-256, -256, 256, 256] }],
+      bbox_coord_space: 'abs_centralized',
+      bbox_format: 'yxyx'
+    }, null, 2);
+    const layoutPort2 = async (request) => {
+      asked.push(request);
+      if (request.system.includes('【规则目录】')) return { ok: true, content: '5,17' };
+      return { ok: true, content: `${PROMPT_MARK}\n${prettyLayout}\n${NEGATIVE_MARK}\nblurry, watermark` };
+    };
+    compilePromptForThis = layoutPort2;
+    // 默认关：日志里**一个字都不带画面描述**。这条是"这个开关真的在闸门上"的对照 ——
+    // 少了它，"打开时有"可能只是因为那行一直打着。
+    const logsQuiet = [];
+    seen = await runOnce('画个猫', (...a) => logsQuiet.push(a.join(' ')));
+    ok('调试点：默认关 —— 日志里既没有 `[image-gen][debug]` 那行，也不带任何画面描述',
+      !logsQuiet.some((l) => l.includes('[image-gen][debug]'))
+      && !logsQuiet.some((l) => l.includes('bbox_coord_space')),
+      logsQuiet.join(' | '));
+
+    process.env.QQ_AGENT_DEBUG_IMAGE_JSON = '1';
+    const logsDebug = [];
+    try {
+      compilePromptForThis = layoutPort2;
+      seen = await runOnce('画个猫', (...a) => logsDebug.push(a.join(' ')));
+    } finally {
+      // 被测模块是模块级单例、同进程后续用例共用，环境变量必须还原（同 `withFakeTimers` 那条纪律）。
+      delete process.env.QQ_AGENT_DEBUG_IMAGE_JSON;
+    }
+    const debugLine = logsDebug.find((l) => l.includes('[image-gen][debug]'));
+    ok('调试点：打开后那一行里是**编译产物的原文** —— 正面是那段 Layout JSON、负面另起一格',
+      !!debugLine && debugLine.includes('bbox_coord_space')
+      && debugLine.includes(JSON.stringify('blurry, watermark')),
+      debugLine || logsDebug.join(' | '));
+    // ⚠️ 判据是"捕获到的那一行里没有**真**换行"：journald 按行拆多行条目，散开就看不懂了。
+    // `JSON.stringify` 把换行转义成 `\n`（反斜杠 + n 两个字符）正是为此，这条断言钉住那个转义
+    // 没被去掉 —— 夹具里那份 JSON 是缩进过的，所以去掉转义这里当场会红（探针实测过）。
+    ok('⚠️ 调试点：整段 JSON 在**一行**里（换行被 `JSON.stringify` 转义，不是真换行）',
+      !!debugLine && !debugLine.includes('\n') && !debugLine.includes('\r'),
+      JSON.stringify(debugLine));
+  }
+
   // ② 挑不出来 → 退回全文（fail-open 到"最保险的那一档"，不会因为挑错而少给规则）
   asked = [];
   compilePromptForThis = twoStagePort('胡说八道');
