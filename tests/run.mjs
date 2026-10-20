@@ -47,6 +47,7 @@ const ASSERT = [
   't-image-gen.mjs',       // 图像生成（配置归一化、两层提示词、队列单并发、/画 命令与工具）
   't-ingest.mjs',          // 入站摄取过滤层（自己发的消息不入档、不唤醒；别人说的一条不少）
   't-command-record.mjs',  // 主流程命令的执行记录（会话页；只记四条、阶段与三种结局、不占 runs）
+  't-llm-error.mjs',       // 模型端错误翻译（data_inspection_failed 翻成人话；认不出的原样透传）
   't-commands.mjs',  // 斜杠命令分发层（判据唯一、回执与失败话术、wakeEligible 同源）
   't-web-search.mjs',      // 联网搜索：网页收藏夹（域名优先检索）与查询词清洗，起本地假搜索引擎
   't-jmcomic.mjs',         // 漫画队列去重（按请求者+漫画ID）与完成后记录留存

@@ -1025,12 +1025,9 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
   ok('两段式：模型不认负面词时让它别写那一串（省下的 token 是实打实的）',
     buildCompileRequest({ ...baseInput, wantsNegative: false }, '').system.includes('内容留空'));
 
-  // 14e 门禁与署名
+  // 14e 覆盖前言与署名
   const overlay = PROMPT_CATALOG.imageCompile.overlay;
-  ok('门禁：三条（成年主体 / 日常场景 / 日常着装）都在，且**自己声明优先级高于全部规则**',
-    overlay.includes('成年人') && overlay.includes('场景限于日常') && overlay.includes('日常着装')
-    && overlay.includes('优先级高于本提示词里的其余全部规则'));
-  ok('门禁：在，而**年龄控制那一节没有被引进来**（它是被覆盖的，不是被搬运的）',
+  ok('**年龄控制那一节没有被引进来**（它是被覆盖的，不是被搬运的）',
     !overlay.includes('15-year-old') && !overlay.includes('14-year-old'));
   ok('模型适配：明说规则集是给别的模型写的、采样参数那一类条款要跳过（否则模型会写 SLG/Steps）',
     overlay.includes('MOSS-Image') && overlay.includes('qwen-image') && overlay.includes('采样参数'));

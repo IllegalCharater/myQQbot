@@ -75,6 +75,50 @@ function effectiveApi() {
  *   - HTTP 4xx：401 密钥错、400 请求体错、403 无权限、404 模型不存在
  *   - 主动中止（abort）
  */
+/**
+ * 把模型端点的**错误响应**翻成人话（2026-10-20 加）。
+ *
+ * 只翻**认得出、且有明确下一步**的那几种；其余保持原样（原文截断 500 字）——
+ * 猜错比不翻更糟：用户会照着错的提示去改配置。
+ *
+ * ⚠️ **消息开头必须保留 `模型 API HTTP <状态码>`**：`isRetryableError` 靠那条正则判
+ * "客户端错误不重试"（400/401/403/…）。换掉前缀会让一次确定性的 400 变成"再试两次"，
+ * 白烧额度还把失败延后到更难看的时候。
+ *
+ * ⚠️ 文案里**不用 Markdown 的 `**`**：会话面板对 `error` 是原样转义显示的（`esc`），
+ * 星号只会原样出现，看起来像乱码。
+ */
+export function describeApiError(status: number, body: unknown): string {
+  const raw = String(body ?? '').slice(0, 500);
+  const detail = apiErrorDetail(body);
+  const head = `模型 API HTTP ${status}`;
+  // `data_inspection_failed`：阿里云百炼 / DashScope 的**输入**内容审核。它拒的是
+  // 整个请求体（不是输出），所以换提示词、换温度都没用 —— 要么把那段文本从上下文里去掉，
+  // 要么换一个不做输入审核的端点。
+  if (detail?.code === 'data_inspection_failed' || /data_inspection_failed/i.test(raw)) {
+    return `${head}：模型端点拒绝了这次请求 —— 输入审核未通过（data_inspection_failed）。\n`
+      + '这不是网络或配置问题：请求体里有一段文本命中了模型服务的内容审核。常见来源有两种：\n'
+      + '① 工具刚返回的内容（例如漫画搜索结果的标题 / 标签）—— 它只活在当次运行里，再发一次一般就过了；\n'
+      + '② 一直在上下文里的东西（群友原话、历史摘要、长期记忆、人设卡）—— 换多少话题都会再报。\n'
+      + `原始响应：${raw}`;
+  }
+  return `${head}：${raw}`;
+}
+
+/** 从 OpenAI 兼容端点的错误响应里取 `{ code, message }`；不是那个形状就返回 null。 */
+function apiErrorDetail(body: unknown): { code: string; message: string } | null {
+  try {
+    const parsed: unknown = JSON.parse(String(body ?? ''));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const error = (parsed as Record<string, unknown>).error;
+    if (!error || typeof error !== 'object' || Array.isArray(error)) return null;
+    const record = error as Record<string, unknown>;
+    return { code: String(record.code ?? ''), message: String(record.message ?? '') };
+  } catch {
+    return null;
+  }
+}
+
 export function isRetryableError(error: unknown) {
   const msg = String(error instanceof Error ? error.message : error ?? '');
 
@@ -196,7 +240,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`模型 API HTTP ${res.status}：${text.slice(0, 500)}`);
+    throw new Error(describeApiError(res.status, text));
   }
   const data = await res.json().catch(() => { throw new Error('模型 API 返回了无法解析的 JSON'); }) as OpenAiResponse;
   const choice = data?.choices?.[0];
