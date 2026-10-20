@@ -1107,7 +1107,7 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     !asked[1].system.includes(sec('16')) && !asked[1].system.includes(sec('0')));
   ok('两段式：前言恒定入选（总闸不进目录、也不由模型挑）', asked[1].system.includes(sec(PREAMBLE_ID)));
   ok('两段式：日志记下"挑了几节"（两段式的全部收益都在这个数上，没有它看不出选节白跑了）',
-    logsTwo.some((l) => /compiled picked=2\/19/.test(l)), logsTwo.join(' | '));
+    logsTwo.some((l) => /compile=ok picked=2\/19 sections=5,17 skillChars=\d+/.test(l)), logsTwo.join(' | '));
   ok('两段式：发给画图模型的是编译结果，不是原始描述',
     textOf(seen).includes('编译后的猫') && !textOf(seen).includes('画个猫'), textOf(seen));
   ok('两段式：负面词 = 安全前排 + 编译产出 + 管理员那条，顺序就是这个（安全词不经过模型）',
@@ -1135,15 +1135,26 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
   ok('⚠️ 单段全文：**整份原文逐字**都在 system 里（`includes(全文)` —— 连续子串，没插东西也没少字节）',
     asked[0].system.includes(skillText),
     `文件 ${skillText.length} 字符，system ${asked[0].system.length} 字符`);
-  ok('单段全文：日志里记的是 19/19（没有选节那一次，全部节都进了）',
-    logsFull.some((l) => /compiled picked=19\/19/.test(l)), logsFull.join(' | '));
+  ok('单段全文：日志里记的是 19/19 且 `sections=all`（没有选节那一次，全部节都进了）',
+    logsFull.some((l) => /compile=ok picked=19\/19 sections=all/.test(l)), logsFull.join(' | '));
+  // **这一条是整个"逐字节原样"最直接的证据**：`skillChars` 就是实际拼进 system 的规则原文
+  // 字符数，`select:false` 时它必须**恰好**等于文件长度 —— 少一个字都说明没贴全。
+  ok('⚠️ 单段全文：日志里的 `skillChars` 恰好等于 SKILL.md 的长度（少一个字节就是没贴全）',
+    logsFull.some((l) => l.includes(`skillChars=${skillText.length}`)),
+    `文件 ${skillText.length} 字符；日志：${logsFull.filter((l) => l.includes('compile=ok')).join(' | ')}`);
 
   // ④ 对照：编译关掉 —— 端口一次都不许被调，且行为与加这一层之前逐字相同
   withImageGen({ ...base, compile: { enabled: false, select: true, timeoutMs: 60000, maxChars: 2000 } });
   asked = [];
   compilePromptForThis = twoStagePort();
-  seen = await runOnce('画个猫');
+  const logsOff = [];
+  seen = await runOnce('画个猫', (...a) => logsOff.push(a.join(' ')));
   ok('对照：编译关掉时端口**一次都没被调**（不是"调了但不用"）', asked.length === 0, String(asked.length));
+  // 关着也必须留一行。否则日志里"什么都没有"同时对应两种完全不同的情况 ——
+  // 配置没开、与开了但压根没走到 —— 而排查"我的 skill 怎么没生效"第一步就是回答这个。
+  ok('对照：编译关掉时日志里有 `compile=off`（不是什么都不打）',
+    logsOff.some((l) => l.includes('compile=off')) && !logsOff.some((l) => l.includes('compile=ok')),
+    logsOff.join(' | '));
   ok('对照：关掉编译时正面提示词就是原始描述', textOf(seen).startsWith('画个猫'), textOf(seen));
   ok('对照：关掉编译时负面词回落成管理员配置那条（**不偷偷加安全前排**）',
     paramsOf(seen).negative_prompt === '管理员那条', paramsOf(seen).negative_prompt);

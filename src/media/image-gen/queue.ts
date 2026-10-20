@@ -273,7 +273,13 @@ export class ImageGenQueue {
     job: InternalJob, config: EffectiveConfig, signal: AbortSignal,
     setStatus: SetTaskStatus<InternalJob>
   ): Promise<void> {
-    if (!config.compile.enabled) return;
+    if (!config.compile.enabled) {
+      // **关着也要打一行**。不打的话，日志里"什么都没有"同时对应两种完全不同的情况 ——
+      // 配置没开、与开了但这一层压根没走到 —— 而排查"我的 skill 怎么没生效"时，
+      // 第一步要回答的正是这个。
+      this.#log(`[image-gen] task=${job.id} compile=off`);
+      return;
+    }
     const ask = this.#compilePrompt;
     if (!ask) {
       // 端口没接上。生产里跑不到（`web/app.ts` 一定会传），但"配置开着、端口却没有"时
@@ -314,9 +320,13 @@ export class ImageGenQueue {
       return;
     }
     job.compiled = outcome.value;
-    // `picked` 是"这一次挑中了几节"（`7/19`）。**必须记**：两段式的全部收益都在这个数上，
-    // 而"每次都是 19/19"意味着选节那一次白跑了、成本与单段全文一样 —— 那是唯一能看出来的地方。
-    this.#log(`[image-gen] task=${job.id} compiled picked=${outcome.picked}`);
+    // 这一行是"skill 有没有注入进去"的**唯一直接证据**（出图照常成功，从结果上看不出区别）：
+    //   picked=7/19      挑中了几节 —— **总是 19/19 就说明两段式白跑了**，成本与全文一样；
+    //   sections=5,17    挑了谁 —— "为什么它没选§16" 时只能靠这一格；
+    //   skillChars=12840 实际注入的**规则原文**字符数 —— **`select:false` 时应恰好等于
+    //                    SKILL.md 的**字符**数 51455**，小于它就是没贴全。
+    this.#log(`[image-gen] task=${job.id} compile=ok picked=${outcome.picked}`
+      + ` sections=${outcome.sections} skillChars=${outcome.skillChars}`);
     if (outcome.note === 'NEGATIVE_DROPPED') {
       this.#log(`[image-gen] task=${job.id} code=COMPILE_NEGATIVE_DROPPED`);
     }

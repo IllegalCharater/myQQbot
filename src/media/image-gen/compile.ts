@@ -68,11 +68,20 @@ export type CompileOutcome =
 /**
  * `compileImagePrompt` 成功时的返回值。
  *
- * `picked` 是"这一次挑中了几节"（如 `'7/19'`）—— **只给日志用**，不进任何模型可见的文本。
- * 排查"编译是不是每次都挑了全部"（= 两段式白跑了）时，它是唯一的凭据。
+ * 三个字段都**只给日志用**，不进任何模型可见的文本。它们是"skill 到底有没有注入进去"
+ * 这件事唯一能看见的地方（出图照常成功，所以从结果上看不出区别）：
+ * - `picked`   —— 挑中了几节（`'7/19'`）。总是 19/19 就说明两段式白跑了、成本与全文一样；
+ * - `sections` —— 挑中的节号（`'5,17'`）；全部选中时是 `'all'`；
+ * - `skillChars` —— 实际注入的**规则原文**字符数。**这一格才是"注入成功"的直接证据**：
+ *   `select: false` 时它应该恰好等于 `SKILL.md` 的**字符**数 51455，小于它就是没贴全。
  */
 export type CompileSuccess = {
-  ok: true; value: CompiledPrompt; picked: string; note?: 'NEGATIVE_DROPPED';
+  ok: true;
+  value: CompiledPrompt;
+  picked: string;
+  sections: string;
+  skillChars: number;
+  note?: 'NEGATIVE_DROPPED';
 };
 
 /**
@@ -341,6 +350,12 @@ export async function compileImagePrompt(
   if (!answer.ok) return { ok: false, code: 'REQUEST', detail: answer.detail };
   const parsed = parseCompiledPrompt(answer.content, input.maxChars);
   if (!parsed.ok) return parsed;
-  // `picked` 进日志：它是"这一次编译挑了几节"的唯一凭据，排查成本与效果时第一个要看的就是它。
-  return { ...parsed, picked: `${picked.length}/${numbered.length}` };
+  // 三格都进日志：`picked` 看两段式有没有白跑、`sections` 看它挑了谁、
+  // `skillChars` 看规则原文到底注入了多少（**`select: false` 时它应恰好等于 SKILL.md 的长度**）。
+  return {
+    ...parsed,
+    picked: `${picked.length}/${numbered.length}`,
+    sections: picked.length === numbered.length ? 'all' : picked.map((s) => s.id).join(','),
+    skillChars: body.length
+  };
 }

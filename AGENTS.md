@@ -1161,7 +1161,14 @@ StructAct = { id, name, order, goal, keeperNotes, entryCondition, exitCondition,
   - **消费方一律 import `media/jmcomic/index.js`**（写全路径，别依赖目录/index 的隐式解析——陈产物会让它看起来"能跑"）。
 - **出图的提示词编译层**（`media/image-gen/compile.ts` + `core/prompt-catalog.ts` 的 `imageCompile` + `assets/moss-image-prompt-skill/`，2026-10-20 加）：出图前跑**独立的模型调用**，把原始描述编译成成品正/负提示词。`/画` 与 `generate_image` 都走 `enqueue` → 队列，所以两条入口自动统一，**工具层与命令层零改动**。
   - **两段式**（`imageGen.compile.select`，默认开）：第 1 段给模型**规则目录**（只有节标题，很便宜）让它挑节；第 2 段把挑中的节**原文逐字**贴进 system 编译。`select: false` = 一次调用直接上全文（约 2.5 万 token 输入，规则一条不漏）。这是 harness 里 progressive disclosure 的形状——Agent Skills 是"① 元数据常驻 → ② 判定相关时读**整份** SKILL.md → ③ 附属文件按需读"，而第 ③ 级靠的是"模型有 Read/Bash"，我们这里是**单发、无工具**的调用，所以把"先看索引、再取正文"拆成两次调用。
-  - **挑不出来就退回全文**（空回答 / 认不出的节号 / 解释文字 → 全部 19 节）。这是刻意的 fail-open 方向：**漏选一节的代价是画错，多选一节的代价只是几百 token**。日志里那行 `compiled picked=N/19` 是"两段式有没有白跑"的唯一凭据（总是 19/19 就等于没省）。
+  - **挑不出来就退回全文**（空回答 / 认不出的节号 / 解释文字 → 全部 19 节）。这是刻意的 fail-open 方向：**漏选一节的代价是画错，多选一节的代价只是几百 token**。
+  - **怎么看"skill 到底注入进去了没有"**（出图照常成功，从结果上看不出区别，所以全看日志 —— 而日志**只走 stdout**，没有应用日志文件、面板里也没有，绿色版双击 exe 看不到，得从终端跑）：
+    - `compile=off` —— 配置没开，**没注入**；
+    - `compile=ok picked=7/19 sections=5,17 skillChars=12840` —— 注入成功。三格各答一件事：`picked` 看两段式有没有白跑（**总是 19/19 = 选节白跑了**）、`sections` 看它挑了谁（"为什么没选 §16"只能靠它）、**`skillChars` 是直接证据**（`select:false` 时它**恰好等于 `SKILL.md` 的字符数 51455**——注意不是字节数 81141，这个数数的是 JS 字符串长度；小于它就是没贴全）；
+    - `code=COMPILE_NO_SKILL` —— 规则文件读不到（资产没进包 / 路径锚点坏了）；
+    - `code=COMPILE_REQUEST detail=…` / `COMPILE_FORMAT` / `COMPILE_EMPTY` / `COMPILE_TOO_LONG` —— 那次调用本身失败，**已回退原始描述**；
+    - `code=COMPILE_NO_PORT` —— 配置开着但端口没接上；`negative=SKIPPED_UNSUPPORTED` —— 2.1 系列不收负面词。
+    ⚠️ **关着也必须打 `compile=off`**：不打的话，日志里"什么都没有"同时对应"配置没开"与"开了但压根没走到"两种完全不同的情况，而排查"我的 skill 怎么没生效"第一步要回答的正是这个。
   - **fail-open**：任何失败（规则文件读不到 `NO_SKILL` / 端口抛错 / 格式不对 / 正面超长）都回退原始描述 + 记一行 `COMPILE_*` 日志。判据是"**额度已经扣了**" —— 一次可选增强的失败不该把一整张已计过费的图搞失败。**代价知情**：编译一直失败时，那行码是管理员**唯一**的线索。
   - **超时归队列**（`config.compile.timeoutMs`，钳 5s~300s，**两段加起来**），**必须**与出图自己的 `timeoutMs`（最长 15 分钟）分开 —— 队列是**单并发**的，一次挂住的编译会堵死全部出图。守护是一条真等 5 秒的用例。
   - **负面词 = 代码焊死的安全前排 + 编译产出 + 管理员配置那条**，按这个顺序连接；**关掉编译时返回 `undefined`**，于是"关掉"与"没有这个功能"**逐字相同**（对照断言防的是"关掉了还偷偷加安全词"）。2.1 系列不认这个参数 ⇒ 那一档**不发**并记 `negative=SKIPPED_UNSUPPORTED`。
