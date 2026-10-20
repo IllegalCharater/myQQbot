@@ -13,6 +13,7 @@
 - 当前架构、对话链路、上下文和提示词：`docs/ts-migration-plan.md`
 - 模型价格来源与表格：`docs/model-prices.md`
 - 跑团（TRPG）的对话预期：`docs/trpg-dialogue-expectations.md`（逐幕记录"敲下去、说出去，群里到底会看到什么"，并把**代码逐字产出的文案**与**模型生成的文案**分开标 —— 改跑团的用户可见文案时对照它）
+- 模型输入审核（`data_inspection_failed`）与降敏：`docs/input-moderation.md`（模型端点以"内容审核"为由**整包拒收**请求时先看这份：怎么定位到具体哪一条、三条杠杆、以及哪些做法不要用。⚠️ 它不是"模型敏感度"，是**服务商在请求入口的合规过滤**，客户端调不了阈值）
 - 事件、方法接线与长期任务的设计与清点：`docs/global-registry-design.md`（**"注册层仍未实现"这句话自 S11c 起作废**，注册层 = 四件产物的合称，见该文档 §0.1；S0–S9 已落地，**S10+ 已全部落地**——S10a 收下 `price.feed`、S10b 收下两个 jmcomic、S10c 收下 `onebot.reconnect`、S10d 删掉兜底事件总线；**S11a–c 已落地**：S11a 补齐 `SIGTERM` 与幂等关停、S11b 让端点变更经配置保存触发重连并删掉死常量 `RECONNECT_MAX_MS`、S11c 补上第四条腿 `src/web/runtime/lifecycle.ts` 装配清单、S11d 收掉死代码与空转事件（`scheduleConfigSave`/`AgentEventMap`/`MemoryConsolidatorDependencies.emit`/`vision-scan` 事件）、S11e 让 electron 的 `before-quit` 真正等 `stop()` 落地；**S11 全部落地**；改动事件、端口或后台任务前先查它）
 
 如果代码与文档不一致，以代码和测试为当前事实，并在同一次改动中更新文档。
