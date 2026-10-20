@@ -914,7 +914,7 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
 {
   const {
     parseCompiledPrompt, buildCompileRequest, buildSelectRequest, buildUserText, compileImagePrompt,
-    splitSkillSections, buildSkillToc, parseSectionSelection, readSkillText,
+    splitSkillSections, buildSkillToc, parseSectionSelection, readSkillText, hasSubjectTagBlock,
     PREAMBLE_ID, LAYOUT_JSON_SECTION_ID, DEFAULT_CANVAS, canvasOf, PROMPT_MARK, NEGATIVE_MARK
   } = ig;
   const { PROMPT_CATALOG } = await load('core/prompt-catalog.js');
@@ -963,6 +963,41 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     })());
   ok('编译解析：标记**之前**的寒暄被丢掉（模型爱写"好的，这是提示词："）',
     parseCompiledPrompt(`好的！\n${wrap('一只猫', 'blurry')}`).value?.positive === '一只猫');
+
+  // 14a3 `tags=` 那一格（`hasSubjectTagBlock`，纯函数）。它存在的理由是一条真机实测：
+  // 补上"末尾要附主体 tag"那条指令之后，模型**照旧没写** tag 块，而这件事在结果图上
+  // 看不出来（图照常画出来，只是画面里的细节被静默丢掉）。所以需要一个**形状判据**
+  // 把它变成日志里看得见的一格。
+  ok('tag 块：末尾一段逗号分隔的英文 tag → 有（这是我们要的形状）',
+    hasSubjectTagBlock('雨夜的教室，暖光。1girl, 1boy, school uniform, holding hands, classroom'));
+  ok('tag 块：中文逗号分隔**照样算过**（判据收两种逗号 —— 模型混用时不该报 missing）',
+    hasSubjectTagBlock('雨夜的教室，暖光。1girl，1boy，school uniform'));
+  ok('tag 块：正文里全是中文 → 没有（这是实测那一轮的样子：`一只猫，居中`）',
+    !hasSubjectTagBlock('一只猫，居中'));
+  ok('tag 块：光秃秃的 caption（没有句末标点）时整串都算末尾那一段 → 短词列表照样认得出',
+    hasSubjectTagBlock('1girl, 1boy, classroom'));
+  // ⚠️ 假阳的那一档：全英文、词都很短的散文尾巴。判据里"每个词不超过 4 个单词"就是为它写的。
+  ok('⚠️ tag 块：英文**散文**尾巴不算（`A girl stands in a classroom` 词太长，它是一句话不是一个 tag）',
+    !hasSubjectTagBlock('教室一角。A girl stands in a classroom, holding a key, looking at the door'));
+  ok('tag 块：两个词不算（`1girl, 1boy` 是人数声明，不是那段主体 tag）',
+    !hasSubjectTagBlock('一只猫。1girl, 1boy'));
+  // 已知的假阴（写在 `hasSubjectTagBlock` 的注释里）：tag 段后面又补了一句中文说明时会被判成"没有"。
+  ok('⚠️ tag 块：tag 段**后面又补了中文说明**时判成"没有"（已知假阴，注释里写明）',
+    !hasSubjectTagBlock('一只猫。1girl, 1boy, school uniform。整体偏暖'));
+  ok('tag 块：空串 / 非字符串不炸（模型可能不给 `summary.caption`）',
+    !hasSubjectTagBlock('') && !hasSubjectTagBlock(undefined) && !hasSubjectTagBlock(null));
+  ok('tag 块：`layout: false`（正面不是 JSON）时没有 caption 可判 → `tags: false`',
+    parseCompiledPrompt(wrap('一只猫', '')).tags === false);
+  ok('tag 块：Layout JSON 的 `summary.caption` 末尾有 tag 段 → `tags: true`',
+    (() => {
+      const r = parseCompiledPrompt(wrap(JSON.stringify({
+        summary: { canvas: 'single', caption: '雨夜的教室。1girl, 1boy, school uniform, classroom' },
+        items: []
+      }), ''));
+      return r.ok && r.layout === true && r.tags === true;
+    })());
+  ok('tag 块：上面那个 `layoutJson` 夹具的 caption 是中文散文 → `tags: false`（判据分得开）',
+    parsed.ok && parsed.tags === false);
 
   // 14a2 画布（纯函数）—— §15 的 bbox 是**绝对像素**，不知道画布多大就编不出坐标
   ok('画布：`size` 解析得出来就用它（bbox 的坐标系必须与真实画幅一致）',
@@ -1086,8 +1121,22 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     const fixed = buildCompileRequest(baseInput, '').system;
     ok('五条①：中文 caption 与英文固定句/tag 的分界写明了（§8 防克隆句、§17 的 <|…|> 正文要逐字照抄）',
       fixed.includes('逐字照抄') && fixed.includes('Featuring exactly') && fixed.includes('<|tag|>'));
-    ok('五条②：`summary.caption` 末尾要附 §2.1 那批逗号分隔的主体 tag',
-      fixed.includes('末尾再附') && fixed.includes('1girl, 1boy'));
+    ok('五条②：`summary.caption` 末尾要附 §2.1 那批逗号分隔的主体 tag，并给一个可照抄的成品形状',
+      fixed.includes('逗号分隔的主体 tag') && fixed.includes('1girl, 1boy, school uniform')
+      && fixed.includes('光秃秃的 tag 列表'));
+    // ⚠️ 这一条是 2026-10-21 加的，起因是真机实测：② 原本是 §15.5 那句话的**并列分句**，
+    // 夹在"风格句在开头"与"bbox 说了算"之间，模型直接跳过了。现在它独占一个编号项。
+    // 判据取"它在块标题**之后**"而不是"整段里有没有这几个字" —— 后者在别处也提 tag，
+    // 把这段散文改回去照样绿（同 `t-trpg.mjs` 那条「收团：」开头的判据，同一个坑）。
+    const checkAt = fixed.indexOf('【交付前自查');
+    const tagAt = fixed.indexOf('逗号分隔的主体 tag');
+    ok('五条②：tag 要求住在编号的【交付前自查】块**里面**（散回散文里模型就不做 —— 实测踩过）',
+      checkAt >= 0 && tagAt > checkAt);
+    ok('五条②：那一项自己带编号、并明说"最容易漏"（三条里唯一要求**补出东西**的一条）',
+      fixed.includes('这一项最容易漏') && /1\. `summary\.caption` 的\*\*结构\*\*/.test(fixed));
+    ok('五条②③④：三项是**同一个块里依次编号**的（散开写就会各自被读成别处的补充说明）',
+      fixed.includes('1. `summary.caption`') && fixed.includes('2. 每一项 `caption`')
+      && fixed.includes('3. 分格画面里'));
     ok('五条③：`caption` 里的方位必须与同一项的 `bbox` 一致（撞到过"说右上角、bbox 在上方中间"）',
       fixed.includes('必须与同一项的 `bbox` 一致') && fixed.includes('拿不准就别写方位'));
     ok('五条④：分格画面里每处文字单独成一项',
@@ -1230,6 +1279,41 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     ok('⚠️ Layout JSON：日志里 `layout=json`（模型没照 schema 写时这里会是 `text`，那是唯一的线索）',
       logsLayout.some((l) => /compile=ok picked=3\/19 sections=5,15,17 skillChars=\d+ layout=json/.test(l)),
       logsLayout.join(' | '));
+    // 上面那个夹具的 caption 是中文散文（`一只猫，居中`），所以这一格必须是 `missing` ——
+    // 它同时是下面 ①b2 那条 `present` 的**对照**：少了它，`tags=present` 可能只是恒真。
+    ok('⚠️ tag 块：caption 里没有 tag 段时日志报 `tags=missing`（这一格不是恒绿）',
+      logsLayout.some((l) => /layout=json tags=missing$/.test(l)), logsLayout.join(' | '));
+  }
+
+  // ①b2 `tags=` 那一格。它存在的理由是一条真机实测：②（"末尾要附主体 tag"）写进 system
+  // 之后模型**照旧没写** tag 块，而这件事在结果图上看不出来 —— 图照常画出来，只是画面里的
+  // 细节被静默丢掉（§2.1：顶部缺词 = 该细节直接丢失）。所以要有一个形状判据把它变成
+  // 日志里看得见的一格，否则"改提示词有没有用"只能靠人盯着一张张图猜。
+  {
+    const taggedJson = JSON.stringify({
+      summary: { canvas: 'single', caption: '雨夜的教室，暖光。1girl, 1boy, school uniform, holding hands, classroom' },
+      items: [{ label: 'character', caption: '一个女孩', bbox: [-256, -256, 256, 256] }],
+      bbox_coord_space: 'abs_centralized',
+      bbox_format: 'yxyx'
+    });
+    const portFor = (json) => async (request) => {
+      asked.push(request);
+      if (request.system.includes('【规则目录】')) return { ok: true, content: '5,17' };
+      return { ok: true, content: `${PROMPT_MARK}\n${json}\n${NEGATIVE_MARK}\nblurry` };
+    };
+    const logsTagged = [];
+    compilePromptForThis = portFor(taggedJson);
+    await runOnce('画个猫', (...a) => logsTagged.push(a.join(' ')));
+    ok('⚠️ tag 块：caption 末尾有 tag 段 → 日志里 `tags=present`（这一格是"改提示词有没有用"的唯一观测点）',
+      logsTagged.some((l) => /compile=ok .* layout=json tags=present$/.test(l)),
+      logsTagged.join(' | '));
+    // 同一个端口、只换 caption：两格必须跟着变 —— 否则 `tags=` 只是把某个常量印了出来。
+    const logsPlain = [];
+    compilePromptForThis = portFor(layoutJson);
+    await runOnce('画个猫', (...a) => logsPlain.push(a.join(' ')));
+    ok('⚠️ tag 块：只换 caption（tag 段去掉）→ 同一格变成 `missing`（两格跟着内容走，不是印常量）',
+      logsPlain.some((l) => /compile=ok .* layout=json tags=missing$/.test(l)),
+      logsPlain.join(' | '));
   }
 
   // ①c 调试点：`QQ_AGENT_DEBUG_IMAGE_JSON=1` 时把编译产物原样打一行（正面 = 那段 Layout JSON）
@@ -1514,6 +1598,8 @@ ok('接线：那次调用的用量走 addExtraUsage（它多半发生在会话 f
   // 实现改成 JSON、文案还写着"一段描述"的话，管理员永远不会知道要去看 `layout=` 那一格。
   ok('编译层：设置页写明了产出是 §15 的 Layout JSON，并给出 `layout=json|text` 这个观测点',
     sectionsSrc.includes('Layout JSON') && sectionsSrc.includes('layout=json|text'));
+  ok('编译层：设置页也给出了 `tags=present|missing`（tag 块缺了图照画，只有这一格看得出来）',
+    sectionsSrc.includes('tags=present|missing') && sectionsSrc.includes('主体 tag'));
   // `select` 这一栏的判据与后端 `raw.compile?.select !== false`（缺省真）是**同一条**：
   // 写反了不会报任何错，表现只是"勾了没反应 / 取消勾选反而变两次调用"。
   ok('编译层：`select` 那一栏的缺省也是**开**，且 save 与后端同一条判据',

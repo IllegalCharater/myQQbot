@@ -326,9 +326,15 @@ export class ImageGenQueue {
     //                    SKILL.md 的**字符**数 51455**，小于它就是没贴全；
     //   layout=json      正面提示词**是不是一段能解析的 Layout JSON**（我们要的就是 §15 那份）。
     //                    它是 `text` 时出图照常，但画的是一段散文 —— 而这件事在结果图上看不出来。
+    //   tags=present     `summary.caption` 末尾**有没有那段主体 tag**（§2.1 的顶部 tag 区）。
+    //                    它是 `missing` 时图照常画出来，但画面里的细节会**被静默丢掉**
+    //                    （§2.1：顶部缺词 = 该细节直接丢失）—— 这一格就是那件事唯一的信号。
+    //                    ⚠️ 判据是 `hasSubjectTagBlock`，一个**形状启发式**（纯函数，见那里）；
+    //                    `present` 不等于 tag 写全了，只等于"末尾那段长得像 tag 列表"。
     this.#log(`[image-gen] task=${job.id} compile=ok picked=${outcome.picked}`
       + ` sections=${outcome.sections} skillChars=${outcome.skillChars}`
-      + ` layout=${outcome.layout ? 'json' : 'text'}`);
+      + ` layout=${outcome.layout ? 'json' : 'text'}`
+      + ` tags=${outcome.tags ? 'present' : 'missing'}`);
     // 调试点（**默认关**）：把编译产物原样打一行 —— 正面就是那段 Layout JSON。
     //
     // 上面那行的 `layout=json` 只证明"这段正面能 `JSON.parse`"（一个 `{}` 也算），
@@ -340,9 +346,10 @@ export class ImageGenQueue {
     //   journald 按行拆多行条目，散开就没人看得懂了（群聊那条多行消息实测被拆成两行）。
     // - **走 `#log` 而不是 `console.warn`**：与其余 image-gen 日志同一个通道，套件才捕获得到
     //   （`QueueDeps.log` 可注入）。
-    this.#log(`[image-gen][debug] task=${job.id} json=${JSON.stringify(outcome.value.positive)}`
-      + ` negative=${JSON.stringify(outcome.value.negative)}`);
-    
+    if (process.env.QQ_AGENT_DEBUG_IMAGE_JSON) {
+      this.#log(`[image-gen][debug] task=${job.id} json=${JSON.stringify(outcome.value.positive)}`
+        + ` negative=${JSON.stringify(outcome.value.negative)}`);
+    }
   }
 
   /**

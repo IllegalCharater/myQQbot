@@ -67,12 +67,14 @@ export type CompileFailureCode = 'NO_SKILL' | 'REQUEST' | 'FORMAT' | 'EMPTY';
 export type CompileFailure = { ok: false; code: CompileFailureCode; detail?: string };
 
 /** `parseCompiledPrompt` 的返回 —— 只解析内容，不知道"挑了几节"（那是调用方的事）。 */
-export type CompileOutcome = { ok: true; value: CompiledPrompt; layout: boolean } | CompileFailure;
+export type CompileOutcome =
+  | { ok: true; value: CompiledPrompt; layout: boolean; tags: boolean }
+  | CompileFailure;
 
 /**
  * `compileImagePrompt` 成功时的返回值。
  *
- * 四个字段都**只给日志用**，不进任何模型可见的文本。它们是"skill 到底有没有注入进去"
+ * 五个字段都**只给日志用**，不进任何模型可见的文本。它们是"skill 到底有没有注入进去"
  * 这件事唯一能看见的地方（出图照常成功，所以从结果上看不出区别）：
  * - `picked`   —— 挑中了几节（`'7/19'`）。总是 19/19 就说明两段式白跑了、成本与全文一样；
  * - `sections` —— 挑中的节号（`'5,17'`）；全部选中时是 `'all'`；
@@ -81,6 +83,9 @@ export type CompileOutcome = { ok: true; value: CompiledPrompt; layout: boolean 
  * - `layout` —— 正面提示词**是不是一段能 `JSON.parse` 的对象**（我们要求的就是 §15 的
  *   Layout JSON）。它是 `false` 时出图照常进行，但画的是一段散文 —— 而"模型没照 schema
  *   写"这件事在结果图上看不出来，只能靠这一格。
+ * - `tags` —— `summary.caption` 末尾**有没有那段主体 tag**（`hasSubjectTagBlock`）。
+ *   它缺了的表现是**画面里的细节被丢掉**（§2.1：顶部缺词 = 该细节直接丢失），而这件事
+ *   在结果图上看不出来 —— 只能靠这一格，别指望真机出图时发现。
  */
 export type CompileSuccess = {
   ok: true;
@@ -89,6 +94,7 @@ export type CompileSuccess = {
   sections: string;
   skillChars: number;
   layout: boolean;
+  tags: boolean;
 };
 
 /**
@@ -277,14 +283,60 @@ export function buildCompileRequest(input: CompileInput, body: string): { system
 }
 
 /**
+ * 从模型给的 Layout JSON 里取 `summary.caption`。**防御性读取**（这是模型输出，不可信）：
+ * 任何一层不是对象、或 `caption` 不是字符串，都当"没有"。
+ */
+function captionOf(value: unknown): string {
+  if (!value || typeof value !== 'object') return '';
+  const summary = (value as { summary?: unknown }).summary;
+  if (!summary || typeof summary !== 'object') return '';
+  const caption = (summary as { caption?: unknown }).caption;
+  return typeof caption === 'string' ? caption : '';
+}
+
+/**
+ * 中日文字符（表意文字 / 平假名 / 片假名）。用 **Unicode 属性转义**而不是字符范围字面量 ——
+ * 后者在源文件里是一串看不出边界的汉字，改错一个字符不会有任何报错。
+ */
+const CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+
+/**
+ * `summary.caption` 末尾**有没有那段逗号分隔的主体 tag**。**纯函数、只看形状**。
+ *
+ * ⚠️ **它是启发式，不是判据** —— 只进日志（`tags=` 那一格），不参与任何决策：
+ * 判错的代价是那一格说谎，不是画错图。三档同时成立才算"有"：
+ * ① 取**最后一个句末标点之后**的那一段（tag 段排在 caption 末尾，§15.5 要求风格句在开头；
+ * 句末标点含英文句号 —— §8 那句防克隆句是英文的，它后面接的正是 tag 段）；
+ * ② 那一段至少 **3 个**逗号分隔的词；③ 那段里**没有中日文字符**（tag 是英文的，
+ * 而正文用中文写）且**每个词不超过 4 个单词**（"A girl stands in a classroom" 那种散文
+ * 恰好会被这一条挡掉 —— 它是"一串英文词"与"一句英文话"最容易分开的地方）。
+ *
+ * 已知的假阴/假阳（写在这里免得下一个人拿它当准的）：模型用中文逗号 `，` 分隔**照样算过**
+ * （判据收两种逗号）；一段"全英文、无句号、词都很短"的散文尾巴会被当成 tag；
+ * tag 段后面又补了一句中文说明时会被判成"没有"。
+ */
+export function hasSubjectTagBlock(caption: string): boolean {
+  const tail = String(caption ?? '').trim().split(/[。！？!?.\n]/).pop()?.trim() ?? '';
+  if (!tail) return false;
+  const parts = tail.split(/[,，]/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 3) return false;
+  // 中日文字符（表意文字与假名）一律判否。用 **Unicode 属性转义**写，别写成字符范围字面量：
+  // 字面量在源文件里是一串看不出边界的汉字，改错一个字符不会有任何报错。
+  if (CJK_RE.test(tail)) return false;
+  return parts.every((part) => part.split(/\s+/).length <= 4);
+}
+
+/**
  * 把模型回的正面提示词整理成"能直接发给画图模型的那段文本"，并回报它是不是一段合法 JSON。
  *
  * 三种形态都要收：裸 JSON、被 ``` 围栏包住的 JSON（模型最常见的写法）、以及前后夹了几句
  * 说明的 JSON。⚠️ 这**不是**本仓库禁止的那种"猜测式 JSON 修复"（那里猜错会把被改动过的
  * 文本真的发出去）—— 这里每一档候选都**必须先过 `JSON.parse`** 才会被采用，解不出来就
  * 原样退回文本，不会把半截 JSON 当结果。
+ *
+ * `caption` 只有解析成功时才有值（`layout: false` 时是空串）—— 它喂给 `hasSubjectTagBlock`。
  */
-function readLayoutJson(text: string): { text: string; layout: boolean } {
+function readLayoutJson(text: string): { text: string; layout: boolean; caption: string } {
   const fenced = /^```[A-Za-z]*\s*\n([\s\S]*?)\n?```$/.exec(text.trim());
   const bare = (fenced ? fenced[1] : text).trim();
   const first = bare.indexOf('{');
@@ -295,13 +347,13 @@ function readLayoutJson(text: string): { text: string; layout: boolean } {
     try {
       const parsed = JSON.parse(candidate) as unknown;
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return { text: candidate, layout: true };
+        return { text: candidate, layout: true, caption: captionOf(parsed) };
       }
     } catch {
       // 解不出来就试下一档；全都不成才退回文本。
     }
   }
-  return { text: bare, layout: false };
+  return { text: bare, layout: false, caption: '' };
 }
 
 /**
@@ -313,7 +365,7 @@ function readLayoutJson(text: string): { text: string; layout: boolean } {
  *   Layout JSON 有自己的字段与取值域），"写得比我们预期的长"就把整条编译结果扔掉是本末倒置
  *   —— 判据是"额度已经扣了"，一次可选增强不该白跑。正面**是不是**一段能解析的 Layout JSON
  *   由 `layout` 报出去（**只进日志**）：出图照常进行，但"模型没照 schema 写"这件事在结果图
- *   上看不出来，只能靠这一格。
+ *   上看不出来，只能靠这一格。`tags` 同理（见 `hasSubjectTagBlock`）。
  */
 export function parseCompiledPrompt(text: unknown): CompileOutcome {
   const body = String(text ?? '');
@@ -329,7 +381,12 @@ export function parseCompiledPrompt(text: unknown): CompileOutcome {
 
   if (!positive) return { ok: false, code: 'EMPTY' };
   const layout = readLayoutJson(positive);
-  return { ok: true, value: { positive: layout.text, negative }, layout: layout.layout };
+  return {
+    ok: true,
+    value: { positive: layout.text, negative },
+    layout: layout.layout,
+    tags: hasSubjectTagBlock(layout.caption)
+  };
 }
 
 /** 调一次端口，把两种失败形状（抛错 / 回 `ok:false`）归一成同一种。 */
@@ -395,9 +452,10 @@ export async function compileImagePrompt(
   if (!answer.ok) return { ok: false, code: 'REQUEST', detail: answer.detail };
   const parsed = parseCompiledPrompt(answer.content);
   if (!parsed.ok) return parsed;
-  // 四格都进日志：`picked` 看两段式有没有白跑、`sections` 看它挑了谁（**含恒定入选的 §15**）、
+  // 五格都进日志：`picked` 看两段式有没有白跑、`sections` 看它挑了谁（**含恒定入选的 §15**）、
   // `skillChars` 看规则原文到底注入了多少（**`select: false` 时它应恰好等于 SKILL.md 的长度**）、
-  // `layout` 看模型有没有照 §15 的 schema 写（**只进日志**，出图照常）。
+  // `layout` 看模型有没有照 §15 的 schema 写、`tags` 看 `summary.caption` 末尾那段主体 tag
+  // 有没有写（**后两格都只进日志**，出图照常）。
   return {
     ...parsed,
     picked: `${injected.length}/${numbered.length}`,
