@@ -79,7 +79,9 @@
 ```ts
 // 设计期摘录：src/web/app.ts:603-617（现状，仅摘录判断分支）
 if (event.post_type === 'message' || event.post_type === 'message_sent') {
-  if (String(event.user_id ?? sender.user_id ?? '') === onebot.selfId) return;   // 自己发的
+  // ⚠️ 2026-10-20 修正过这一行（见下）：message_sent 整条跳过，判据看 sender.user_id
+  if (event.post_type === 'message_sent') return;                                // 自己发的
+  if (String(sender.user_id ?? event.user_id ?? '') === onebot.selfId) return;   // 自消息走 message 通道时
   if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', ...);
   if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', ...);
   return;
@@ -90,7 +92,13 @@ if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_
 // meta/心跳等事件忽略
 ```
 
-覆盖情况：**群消息、私聊消息、自己发的消息（`message_sent`）、戳一戳**。以下今天**静默丢弃**：
+⚠️ **「自己发的」那一行 2026-10-20 修过一次**：原写法是 `event.user_id ?? sender.user_id === selfId`，
+而 OneBot v11 里**私聊 `message_sent` 的 `user_id` 是对方**、只有 `sender.user_id` 才是自己 ——
+于是群聊挡得住、私聊一条都挡不住（bot 的每条私聊消息都入库两次，且重复那条 `wakeEligible: true`、
+会再唤起一轮运行）。现在 `message_sent` **整条跳过**（它按定义就是自己发的，`SendQueue.appendSelf`
+已经记过账），`message` 通道那一档改看 `sender.user_id`。守护是 `tests/t-ingest.mjs`。
+
+覆盖情况：**群消息、私聊消息、戳一戳**；**自己发的消息（`message_sent`）显式跳过**（发送时已记账）。以下今天**静默丢弃**：
 
 | 丢弃对象 | 位置 | 后果 |
 |---|---|---|

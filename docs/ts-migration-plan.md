@@ -476,6 +476,24 @@ store.promptContextMaxChars = 32000
 
 这些记录用于排查提示词膨胀、渠道计费、读图失败和工具循环，不作为下一次模型请求的对话历史。
 
+### 9.1 主流程命令的执行记录（2026-10-20）
+
+命令走**确定性快路径**（不进模型），所以它原本在「会话」页上是空的 —— 用户敲了 `/转写`，
+存档页看得到、会话页什么都没有。现在四条主流程命令（`/转写` `/画` `/漫画` `/能力`）各留一条
+`trigger: 'command'` 的会话记录：
+
+- **判据是 `CommandEntry.recordSession`**（内置四条 `true`，扩展命令 `false`）：扩展命令不记，
+  因为 `.r 3d6` 那种一局几百条会把真会话挤出 `keepSessionFiles` 的额度。
+- **生命周期**：`runCommand` 进入时 `beginCommand`（记 `command` 与**用户敲的原文**）→ 命令体用
+  `stage(name, detail)` 上报每一步 → 回执发出后 `finishCommand`。**回执发出即闭合，不跟后台队列**：
+  转写/出图/漫画的活儿由各自的异步结果回流承载，它们完成时会另行触发一轮运行（那是另一条记录）。
+- **三种结局**：发了回执 `done` / 不吭声 `noreply` / 抛错（错误文案已发进群）`error`。
+- **两个必须的例外**：`#persist` **不累加 `runs`**（命令没有模型调用，否则用量页的"今日运行次数"
+  虚高）；`finish()` **不触发 `onFinish`**（那是扩展的 `runEnded`，跑团拿它判"DM 整轮沉默"，
+  命令记录混进去只会制造幽灵触发）。
+- 面板：列表用 `kind: 'command'` 区分"运行"与"命令"（不显示 token/轮数），详情页渲染 `stages`
+  时间线与回执，JSON 模式带 `command` / `commandText` / `stages`。守护是 `tests/t-command-record.mjs`。
+
 会话面板的 JSON 模式以 `llmRequests` 为输入侧唯一真相，不再同时重复展示顶层 `systemPrompt/userPrompt`，也不再用首次输入伪造缺失的逐轮请求。
 面板元数据按 `current / response / history` 三块展示，只读取新结构字段。
 

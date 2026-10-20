@@ -474,6 +474,31 @@ ok('会话面板按当前窗口 / 响应决策 / 历史注入分开展示',
   && newContextPanel.includes('响应决策 档 2 · 关键词命中')
   && newContextPanel.includes('原始历史实际注入 31 / 上限 40 条'));
 
+// ── 命令记录（`trigger:'command'`）：没有模型那一整块，只有流程与回执 ──
+// 命令不进模型，硬套"模型 / 调用次数 / 轮数 / 窗口"会显示成一排 0 —— 那看起来像
+// "跑了一轮但什么都没用"，比不显示更糟。所以这一段两头都要钉：该有的在，不该有的不在。
+const now = Date.now();
+const cmdPanel = detailHtml({
+  id: 'sess-cmd-1', chatKey: 'group:123', status: 'done', kind: 'command', trigger: 'command',
+  command: '/转写', commandText: '/转写 https://example.com/a.mp4',
+  startedAt: now, endedAt: now, rounds: 0, model: '', activity: '',
+  stages: [
+    { at: now, name: '解析链接', detail: 'https://example.com/a.mp4' },
+    { at: now, name: '已入队', detail: '任务 abcdef12' },
+    { at: now, name: '回执已发送' }
+  ],
+  sent: [{ text: '已开始处理（任务 abcdef12）' }]
+});
+ok('命令记录：详情页给出执行流程（按发生顺序）与回执',
+  cmdPanel.includes('执行流程（3 步）') && cmdPanel.includes('解析链接')
+  && cmdPanel.includes('已入队') && cmdPanel.includes('任务 abcdef12')
+  && cmdPanel.includes('回执：已开始处理（任务 abcdef12）'),
+  cmdPanel.slice(0, 400));
+ok('命令记录：显示命令词与用户敲的原文',
+  cmdPanel.includes('命令 /转写') && cmdPanel.includes('/转写 https://example.com/a.mp4'));
+ok('命令记录：**不**显示模型 / 调用次数 / 轮数 / 窗口那几行',
+  !cmdPanel.includes('轮工具') && !cmdPanel.includes('当前窗口') && !cmdPanel.includes('联网搜索'));
+
 const readTurn = detailHtml({
   id: 'sess-read-1', chatKey: 'group:123', status: 'done', rounds: 3, model: 'm', activity: '',
   messages: [

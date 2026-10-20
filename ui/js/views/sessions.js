@@ -208,7 +208,11 @@ export function renderSessionList() {  const box = $('#session-items');
           <span class="status-badge status-${s.status}">${STATUS_LABEL[s.status] || s.status}</span>
           ${waitHtml}
           ${activityHtml}
-          ${s.status !== 'waiting' ? `<span>${s.usage ? fmtTokens(s.usage.totalTokens) : '-'}</span><span>${s.rounds || 0} 轮</span>${searchHtml}</span>` : ''}
+          ${s.status !== 'waiting' ? (s.kind === 'command'
+            // 命令记录没有模型调用，token/轮数恒为 0 —— 显示成 `0 / 0 轮` 会让人以为
+            // "跑了一轮但什么都没用"。它上面那行 `命令 /转写` 已经说明这是什么了。
+            ? ''
+            : `<span>${s.usage ? fmtTokens(s.usage.totalTokens) : '-'}</span><span>${s.rounds || 0} 轮</span>${searchHtml}</span>`) : ''}
         </div>
       </div>`;
   }).join('');
@@ -357,6 +361,9 @@ export function renderSessionDetail(s) {
   const statusBadge = `<span class="status-badge status-${s.status}">${STATUS_LABEL[s.status] || s.status}</span>`;
   const usage = s.usage || {};
   const context = sessionContextView(s);
+  // 命令记录（`trigger:'command'`）没有模型侧的一切：模型名、调用次数、轮数、窗口三项
+  // 对它全是 0/空。硬显示会让人以为"跑了一轮但什么都没发生"，所以整块换掉。
+  const isCommand = s.kind === 'command' || s.trigger === 'command';
   const countText = (value) => value === null ? '-' : String(value);
 
   const html = [];
@@ -368,17 +375,36 @@ export function renderSessionDetail(s) {
       <div class="sub">
         <span>触发：${esc(s.triggerSummary || (s.trigger === 'proactive' ? '主动机会' : '-'))}</span>
         <span>开始 ${fmtClock(s.startedAt)}${s.endedAt ? ` · 结束 ${fmtClock(s.endedAt)}` : ' · 进行中'}</span>
+        ${isCommand ? `<span>命令 ${esc(s.command || '')}</span>` : `
         <span>模型 ${esc(s.model || '-')}</span>
         <span>${usage.calls || 0} 次调用 · ${fmtTokens(usage.promptTokens)} 入 / ${fmtTokens(usage.completionTokens)} 出 / ${fmtTokens(usage.totalTokens)} 总</span>
         <span>${s.rounds || 0} 轮工具</span>
-        <span>联网搜索 ${Number(s.webSearchCount) || 0} 次</span>
+        <span>联网搜索 ${Number(s.webSearchCount) || 0} 次</span>`}
       </div>
-      <div class="sub">
+      ${isCommand ? '' : `<div class="sub">
         <span>当前窗口 ${countText(context.current.count)} 条${context.current.foldedAway ? ` · 折叠 ${context.current.foldedAway} 条` : ''}</span>
         <span>响应决策 ${context.response.tier === null ? '-' : `档 ${context.response.tier}`}${context.response.reason ? ` · ${esc(context.response.reason)}` : ''}</span>
         <span title="窗口之前的原始聊天记录；不包含历史摘要和当前窗口">原始历史实际注入 ${countText(context.history.injected)} / 上限 ${countText(context.history.limit)} 条</span>
-      </div>
+      </div>`}
     </div>`);
+
+  // ── 命令记录的执行流程 ──
+  //
+  // 一条命令**不进模型**，所以它值得看的只有两件事：走了哪几步、回了什么。
+  // 步骤由命令体自己上报（`runCommand` 的 `stage`），顺序即发生顺序。
+  if (isCommand) {
+    const stages = Array.isArray(s.stages) ? s.stages : [];
+    const receipt = (Array.isArray(s.sent) ? s.sent : [])[0] || {};
+    html.push(`
+      <details class="collapsible" open>
+        <summary>执行流程（${stages.length} 步）</summary>
+        <div class="hint">原文：${esc(s.commandText || '（没记下来）')}</div>
+        ${stages.length
+          ? stages.map((x) => `<div class="hint"><span class="muted">${fmtClock(x.at)}</span> ${esc(x.name)}${x.detail ? ` <span class="muted">${esc(x.detail)}</span>` : ''}</div>`).join('')
+          : '<div class="hint">（没有记到步骤）</div>'}
+        ${receipt.text ? `<div class="hint">回执：${esc(String(receipt.text))}</div>` : ''}
+      </details>`);
+  }
 
   const jsonMode = state.sessionJsonMode === s.id;
   if (jsonMode) {
@@ -403,7 +429,9 @@ export function renderSessionDetail(s) {
       sent: s.sent || [],
       usage: s.usage || null,
       status: s.status,
-      error: s.error ?? null
+      error: s.error ?? null,
+      // 命令记录专属：不带上这几项，JSON 模式看到的是一份"什么都没发生的运行"。
+      ...(isCommand ? { command: s.command || '', commandText: s.commandText || '', stages: s.stages || [] } : {})
     };
     html.push(`
       <details class="collapsible" open>

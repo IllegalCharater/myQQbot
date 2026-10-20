@@ -463,9 +463,21 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
   async function dispatch(event: OneBotEvent) {
     if (!event || typeof event !== 'object') return;
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
-      // 自己发的消息（message_sent / self_id 相同）不触发处理（发送时已自行记录）
+      // **`message_sent` 按定义就是机器人自己发的**（OneBot v11 里它镜像 `message` 事件）：
+      // 发送那一刻 `SendQueue.sendTextBatch` 已经用 `appendSelf` 记过账了，这里再入库就是第二条。
+      //
+      // ⚠️ **不能靠 `event.user_id === selfId` 认它** —— 这是这条曾经漏掉的根因：
+      //   · **群聊**的 message_sent：`user_id` 就是 self_id，挡得住；
+      //   · **私聊**的 message_sent：`user_id` 是**对方**，只有 `sender.user_id` 才是自己
+      //     —— 于是 `event.user_id ?? sender.user_id` 永远取到对方，**一条也挡不住**。
+      // 实测（2026-10-20 真机反馈）：私聊里 bot 的每条消息都入库两次，而且重复那条
+      // `wakeEligible: true`，会**再唤起一轮运行**（跑团开跑前 = DM 自己接自己的话）。
+      if (event.post_type === 'message_sent') return;
       const sender = isRecord(event.sender) ? event.sender : {};
-      if (String(event.user_id ?? sender.user_id ?? '') === onebot.selfId) return;
+      // 留 `message` 这一档的判据：有些协议端会把自消息也发成 `message`。
+      // **先看 `sender.user_id`**（那才是"谁发的"），`event.user_id` 只作兜底 ——
+      // 与上面同一条理由：私聊里 `event.user_id` 可能是对方，而 `sender` 一定是发送者。
+      if (String(sender.user_id ?? event.user_id ?? '') === onebot.selfId) return;
       if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event);
       if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event);
       return;

@@ -157,6 +157,17 @@ export interface SessionRecord extends Record<string, unknown> {
   trigger?: unknown;
   triggerSummary?: string;
   triggerText?: string;
+  /**
+   * **主流程斜杠命令**的记录（`trigger: 'command'`）：主命令词与收到的那句话。
+   *
+   * 命令走的是确定性快路径（不进模型），所以它没有 `messages`/`llmRequests` ——
+   * 这一条记录回答的是"这条命令什么时候被谁敲了、走了哪几步、结果如何"，
+   * 而不是"模型这一轮看到了什么"。见 `chat/sessions.ts` 的 `beginCommand`。
+   */
+  command?: string;
+  commandText?: string;
+  /** 命令的执行流程（时间顺序）。只在 `trigger: 'command'` 的记录上有。 */
+  stages?: Array<{ at: number; name: string; detail?: string }>;
   promptChars?: number;
   pastStateCount?: number;
   /** 当前消息窗口在本次运行中实际注入的消息数。 */

@@ -247,6 +247,13 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       list: () => extras.list(),
       load: (id, reason, chatKey) => extras.load(id, reason ?? 'command', chatKey ?? ''),
       unload: (id, chatKey) => extras.unload(id, chatKey ?? '')
+    },
+    // 主流程命令的执行记录（会话页）。只有 `/转写` `/画` `/漫画` `/能力` 会走到它，
+    // 判据在 `CommandEntry.recordSession` —— 扩展命令不进会话页。
+    {
+      begin: (input) => sessions.beginCommand(input),
+      stage: (id, name, detail) => sessions.stageCommand(id, name, detail),
+      end: (id, status, receipt) => sessions.finishCommand(id, status, receipt)
     }
   );
 

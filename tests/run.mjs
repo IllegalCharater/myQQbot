@@ -45,6 +45,8 @@ const ASSERT = [
   't-image-source.mjs',    // 图片来源识别（Provider、队列、缓存、脱敏与 UI 接线）
   't-media-tools.mjs',     // 模型自主调用的两个能力工具（取榜单 / 转写、配额闸门与按配置过滤）
   't-image-gen.mjs',       // 图像生成（配置归一化、两层提示词、队列单并发、/画 命令与工具）
+  't-ingest.mjs',          // 入站摄取过滤层（自己发的消息不入档、不唤醒；别人说的一条不少）
+  't-command-record.mjs',  // 主流程命令的执行记录（会话页；只记四条、阶段与三种结局、不占 runs）
   't-commands.mjs',  // 斜杠命令分发层（判据唯一、回执与失败话术、wakeEligible 同源）
   't-web-search.mjs',      // 联网搜索：网页收藏夹（域名优先检索）与查询词清洗，起本地假搜索引擎
   't-jmcomic.mjs',         // 漫画队列去重（按请求者+漫画ID）与完成后记录留存

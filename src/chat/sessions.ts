@@ -16,6 +16,15 @@ export function sessionFile(id: string) {
   return path.join(SESSIONS_DIR, `${id}.json`);
 }
 
+/**
+ * 命令记录的几个上限。**都是成本与防御，不是洁癖**：
+ * 命令原文要落盘（`/画` 的 prompt 是用户文本，可能很长），stage 条数要防"哪天有人
+ * 在循环里调 stage"把一份 JSON 撑爆。会话页不显示完整原文，截断不影响可读性。
+ */
+const COMMAND_TEXT_MAX = 200;
+const COMMAND_DETAIL_MAX = 200;
+const MAX_COMMAND_STAGES = 40;
+
 export class SessionRegistry {
   keepFiles: number;
   index: Array<Record<string, unknown>>;
@@ -74,12 +83,20 @@ export class SessionRegistry {
       usage: s.usage ?? null,
       model: s.model ?? '',
       trigger: s.triggerSummary ?? '',
+      // 会话页要分清"一次模型运行"与"一条命令的记录"：前者有 round/token，
+      // 后者那些列全是 0，显示成 0 会让人以为"跑了一轮但什么都没用"。
+      kind: s.trigger === 'command' ? 'command' : 'run',
+      command: s.command ?? '',
       promptChars: s.promptChars ?? 0,
       rounds: s.rounds ?? 0
     };
   }
 
-  create({ chatKey, trigger, triggerSummary, status = 'running', waitUntil = null }: { chatKey: string; trigger: unknown; triggerSummary?: unknown; status?: string; waitUntil?: number | null }) {
+  create({ chatKey, trigger, triggerSummary, status = 'running', waitUntil = null, command, commandText }: {
+    chatKey: string; trigger: unknown; triggerSummary?: unknown; status?: string; waitUntil?: number | null;
+    /** 只有 `trigger:'command'` 的记录给：主命令词与收到的那句话（见 `beginCommand`）。 */
+    command?: string; commandText?: string;
+  }) {
     const session: SessionRecord = {
       id: newSessionId(),
       chatKey,
@@ -87,9 +104,12 @@ export class SessionRegistry {
       endedAt: null,
       status,
       waitUntil,
-      trigger,                                 // 'message' | 'proactive'
+      trigger,                                 // 'message' | 'proactive' | 'command'
       triggerSummary: String(triggerSummary ?? '').slice(0, 120),
       triggerText: String(triggerEntriesToText(trigger) ?? ''),
+      ...(command ? { command } : {}),
+      ...(commandText !== undefined ? { commandText: String(commandText).slice(0, COMMAND_TEXT_MAX) } : {}),
+      ...(command ? { stages: [] } : {}),
       systemPrompt: '',
       userPrompt: '',
       llmRequests: [],                         // 每轮真正发送给模型的 messages/tools 快照
@@ -108,6 +128,63 @@ export class SessionRegistry {
     this.index.unshift(this.#summary(session));
     if (this.keepFiles > 0) this.index = this.index.slice(0, this.keepFiles);
     return session;
+  }
+
+  // ── 主流程命令的记录（2026-10-20 加）──────────────────────────────────────
+  //
+  // 命令是**确定性快路径**：它不调模型，所以既没有一整轮 messages/llmRequests，也不该
+  // 占用 `runs`、不该触发 `onFinish`（两条都在 `#persist` / `finish` 里按 `trigger` 跳过）。
+  // 但它同样是"用户敲了一句话、系统做了一串动作"，会话页该看得到 —— 于是复用同一个存储与
+  // 同一套列表/详情/删除/裁剪，只多三件事：`trigger:'command'`、`command`、`stages`。
+  //
+  // ⚠️ **只记主流程那四条**（`/转写` `/画` `/漫画` `/能力`）：判据在
+  // `web/onebot/commands.ts` 的 `CommandEntry.recordSession`。扩展命令不记 ——
+  // `.r 3d6` 那种一局几百条，记了只会把真会话挤出 `keepSessionFiles` 的额度。
+  //
+  // ⚠️ **记录在回执发出时闭合**，不跟随后台队列（转写/出图/漫画的活儿由它们自己的异步结果
+  // 回流条目承载，存档页看得到）。用户明确选了这一档：后台任务结束会另行触发一轮运行，
+  // 那是一条独立的会话记录，不该被塞进命令的流程里。
+
+  /** 开一条命令记录，返回 id（后两步用它）。 */
+  beginCommand({ chatKey, command, text }: { chatKey: string; command: string; text: string }): string {
+    const session = this.create({
+      chatKey,
+      // 字符串而不是数组：`triggerEntriesToText` 只认数组，于是 `triggerText` 天然为空 ——
+      // 命令记录没有"触发消息批"，这是对的，不是漏填。
+      trigger: 'command',
+      triggerSummary: `命令 ${command}`,
+      command,
+      commandText: text
+    });
+    return session.id;
+  }
+
+  /** 追加一行执行流程。记录已经收尾/被删时静默忽略（那是旁路，不该抛）。 */
+  stageCommand(id: string, name: string, detail?: string): void {
+    const s = this.current.get(String(id ?? ''));
+    if (!s || s.trigger !== 'command') return;
+    const stages = Array.isArray(s.stages) ? s.stages : (s.stages = []);
+    if (stages.length >= MAX_COMMAND_STAGES) return;
+    stages.push({
+      at: Date.now(),
+      name: String(name ?? '').slice(0, COMMAND_DETAIL_MAX),
+      ...(detail == null || detail === '' ? {} : { detail: String(detail).slice(0, COMMAND_DETAIL_MAX) })
+    });
+    this.update(s.id);
+  }
+
+  /**
+   * 收尾。`receipt` 是发进群的那句话（有就进 `sent`，详情页照着它显示"回了什么"）。
+   *
+   * 状态三档与 `runCommand` 的三个出口一一对应：发了回执 `done`、不吭声 `noreply`、
+   * 抛错（错误文案已经发进群）`error`。
+   */
+  finishCommand(id: string, status: 'done' | 'noreply' | 'error', receipt?: string): void {
+    const s = this.current.get(String(id ?? ''));
+    if (!s || s.trigger !== 'command') return;
+    if (receipt) s.sent = [{ text: String(receipt), at: Date.now() }];
+    s.outcome = { sent: (s.sent || []).length, finishReason: status };
+    this.finish(s.id, status);
   }
 
   get(id: string): SessionRecord | null {
@@ -181,10 +258,16 @@ export class SessionRegistry {
     } catch { /* ignore */ }
     // 通知放在**最后**：此刻会话已经落盘、索引已经更新，回调里读到的是一个稳定的收尾快照。
     // 抛错只记日志 —— 它是旁路，不该有能力影响这次收尾。
-    try {
-      this.onFinish?.(s);
-    } catch (error: unknown) {
-      console.error('[sessions] onFinish 回调失败:', error instanceof Error ? error.message : error);
+    //
+    // ⚠️ **命令记录不通知**：`onFinish` 的订阅者是扩展的 `runEnded`（跑团拿它判"DM 整轮
+    // 沉默"）。一条命令不是一轮运行 —— 让跑团看见"`/能力 加载 trpg` 结束了"只会制造
+    // 幽灵触发，而它的触发批是空的，症状极难归因。判据与用量那条同源（`trigger === 'command'`）。
+    if (s.trigger !== 'command') {
+      try {
+        this.onFinish?.(s);
+      } catch (error: unknown) {
+        console.error('[sessions] onFinish 回调失败:', error instanceof Error ? error.message : error);
+      }
     }
     return s;
   }
@@ -390,7 +473,10 @@ export class SessionRegistry {
       const tmp = `${sessionFile(s.id)}.${process.pid}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(s, null, 1), 'utf8');
       fs.renameSync(tmp, sessionFile(s.id));
-      if (s.status !== 'running' && s.status !== 'waiting') this.#bumpTodayUsage(s);
+      // ⚠️ **命令记录不是一次 agent 运行**：`#bumpTodayUsage` 会把 `runs` 加一，
+      // 让用量页的"今日运行次数"虚高（命令根本没有模型调用）。`totalTokens` 那几项本来就是 0，
+      // 跳过整次累加不会有任何信息丢失。
+      if (s.trigger !== 'command' && s.status !== 'running' && s.status !== 'waiting') this.#bumpTodayUsage(s);
     } catch (error: unknown) {
       console.error('[sessions] 持久化失败:', error instanceof Error ? error.message : error);
     }

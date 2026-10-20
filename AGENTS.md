@@ -17,6 +17,32 @@
 
 如果代码与文档不一致，以代码和测试为当前事实，并在同一次改动中更新文档。
 
+**自己发的消息绝不入站**：`ingest.ts` 的 `dispatch()` 里，`message_sent` **整条跳过** ——
+它按定义就是机器人自己发的（OneBot v11 里它镜像 `message` 事件），而发送那一刻
+`SendQueue.sendTextBatch` 已经用 `appendSelf` 记过账，再入库就是第二条。`message` 通道里
+`sender.user_id === selfId` 的也跳过（有些不规范协议端会把自消息发成 `message`）。
+⚠️ **不能靠 `event.user_id === selfId` 认它**：群聊 message_sent 的 `user_id` 是 self_id，而
+**私聊的是对方**（只有 `sender.user_id` 才是自己）—— 2026-10-20 真机反馈的正是这个：旧写法在
+群聊挡得住、**私聊一条也挡不住**，bot 的每条私聊消息都入库两次（`我：…` + `小鲸鱼：…`），
+而且重复那条 `wakeEligible: true`、**会再唤起一轮运行**（跑团开跑前 = DM 自己接自己的话）。
+守护是 `tests/t-ingest.mjs`（私聊/群聊 message_sent 不入档不唤醒、`message` 通道的自消息同样挡、
+**两条对照**说别人说的消息一条不少、以及一条"一回合正好两条"的端到端）。**探针实测**：还原旧过滤 → 红 4 条。
+
+**主流程命令在「会话」页留执行记录**（2026-10-20 加）：命令是确定性快路径、不进模型，所以
+`/转写` `/画` `/漫画` `/能力` 原本在会话页上**什么都看不到**（存档页看得到）。现在四条各留一条
+`trigger:'command'` 的会话记录（复用 `SessionRegistry`，`command` 是主命令词、`commandText` 是
+**用户敲的原文**、`stages` 是执行流程）。四条边界：① **只记主流程那四条**（判据
+`CommandEntry.recordSession`，扩展命令 `false`）—— `.r 3d6` 那种一局几百条，记了会把真会话
+挤出 `keepSessionFiles`；② **回执发出即闭合，不跟后台队列**（转写/出图/漫画的活儿由各自的
+异步结果回流承载，它们完成时会另行触发一轮运行 = 另一条会话记录）；③ **不占 `runs`**
+（`#persist` 按 `trigger==='command'` 跳过 —— 否则用量页的"今日运行次数"虚高）；④ **不触发
+`onFinish`**（`finish()` 同样按 `trigger` 跳过 —— 那是扩展的 `runEnded`，跑团拿它判"DM 整轮
+沉默"，命令记录混进去只会制造幽灵触发，而症状极难归因）。三种结局：发了回执 `done`、
+不吭声 `noreply`、抛错 `error`。守护是 `tests/t-command-record.mjs`（17 条：四条命令各自的
+阶段与命令词、原文照记、三种结局、扩展命令**一条都不记**、不占 `runs`、不触发 `onFinish`、
+落盘换实例也读得回来、没装端口时命令照常跑）。**探针实测**：去掉 `/转写` 的 `recordSession`、
+去掉两处跳过、把扩展命令的 `recordSession` 改成 `true` —— 各自红在对应的那一条上。
+
 ## 构建与运行事实
 
 - 后端源码只改 `src/**/*.ts`，不要直接修改 `dist/`。

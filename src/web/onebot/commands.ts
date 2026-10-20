@@ -104,7 +104,36 @@ export interface CommandDeps {
   };
   sender: Pick<SendQueue, 'sendTextBatch'>;
   log: (...args: unknown[]) => void;
+  /**
+   * 这一次分发的**记录句柄**，由 `handleCommandEntry` 现填（不是装配期给的）。
+   * 每个命令体把它原样交给 `runCommand`，自己只在关键步骤上调 `stage`。
+   *
+   * 为什么只有句柄、没有端口：端口（`CommandRecordPort`）是**装配期**递给分发器的那一份，
+   * 与 `extras` 的 list/load/unload 同级；而句柄是**每次调度**现建的（一条命令一条记录）。
+   * 合成一个字段的话，两者要么都变成装配期的（记不了每条命令），要么都要在 deps 里传两次。
+   */
+  recorder?: CommandRecorder;
 }
+
+/**
+ * 命令记录的三个口子，与 `chat/sessions.ts` 的 `beginCommand` / `stageCommand` / `finishCommand`
+ * **同形**（由组装根绑过去）。分开定义而不是 import 那个类：接入层只需要"能记什么"，
+ * 不需要认识 `SessionRegistry` 的其余成员（同 `/漫画` 只拿 `enqueue`）。
+ */
+export interface CommandRecordPort {
+  begin(input: { chatKey: string; command: string; text: string }): string | null;
+  stage(id: string, name: string, detail?: string): void;
+  end(id: string, status: 'done' | 'noreply' | 'error', receipt?: string): void;
+}
+
+/** 一次命令执行的记录句柄（`runCommand` 收尾，命令体只调 `stage`）。 */
+interface CommandRecorder {
+  stage: (name: string, detail?: string) => void;
+  end: (status: 'done' | 'noreply' | 'error', receipt?: string) => void;
+}
+
+/** 命令体上报执行流程用的回调。没有记录时是 `undefined`，所以调用一律写成 `stage?.(…)`。 */
+type CommandStage = (name: string, detail?: string) => void;
 
 interface CommandEntry {
   /**
@@ -129,6 +158,14 @@ interface CommandEntry {
    * 扩展那几条由各自的 `spec.ts` 声明（`ExtraCommandSpec.requiresMention`，缺省 `true`）。
    */
   requiresMention: boolean;
+  /**
+   * **要不要在会话页留一条执行记录**（2026-10-20 加）。
+   *
+   * 主流程四条一律 `true`（用户要求：只记主流程）；扩展命令一律 `false` ——
+   * 判据是**频次**：`.r 3d6` 一局几百条，记了会把真会话挤出 `keepSessionFiles` 的额度，
+   * 而它本身没有"几步走完"的过程可看。
+   */
+  recordSession: boolean;
   run(input: CommandInput, deps: CommandDeps): Promise<void>;
 }
 
@@ -155,15 +192,18 @@ const NO_EXTRAS: CommandExtraSource = { override: false, commands: [] };
 
 const transcribeCommand: CommandEntry = {
   requiresMention: true,
+  recordSession: true,
   // "发一个视频 + 打一句 `/转写`"送来的文本是 `'/转写[视频]'`（占位符紧贴着，没有空格）。
   // 这里**不需要**为它单开一个词形：`[` 算边界（见 `startsWithWord`），所以 `/转写` 本身就认得出，
   // 而 `parseTranscriptionCommand` 拿到原样的 `'/转写[视频]'` 会从 media 里取到那个视频。
   names: ['/转写'],
-  async run({ chatKey, text, media, replyToMessageId }, { transcription, sender, log }) {
-    await runCommand('/转写', { sender, log }, chatKey, replyToMessageId, async () => {
+  async run({ chatKey, text, media, replyToMessageId }, { transcription, sender, log, recorder }) {
+    await runCommand('/转写', { sender, log, recorder }, chatKey, replyToMessageId, async (stage) => {
       const url = parseTranscriptionCommand(text, media);
+      stage?.('解析链接', url || '没找到可转写的链接');
       if (!url) return null;
       const job = transcription.enqueue({ chatKey, url, replyToMessageId });
+      stage?.('已入队', `任务 ${job.id.slice(0, 8)}`);
       return `已开始处理（任务 ${job.id.slice(0, 8)}）`;
     });
   }
@@ -171,16 +211,20 @@ const transcribeCommand: CommandEntry = {
 
 const drawCommand: CommandEntry = {
   requiresMention: true,
+  recordSession: true,
   names: ['/画'],
-  async run({ chatKey, text, media, replyToMessageId }, { imageGen, sender, log }) {
-    await runCommand('/画', { sender, log }, chatKey, replyToMessageId, async () => {
+  async run({ chatKey, text, media, replyToMessageId }, { imageGen, sender, log, recorder }) {
+    await runCommand('/画', { sender, log, recorder }, chatKey, replyToMessageId, async (stage) => {
       const prompt = parseDrawCommand(text);
       if (!prompt) return null;
+      stage?.('解析描述', prompt);
+      // 本条消息或它引用的那条里的第一张图 → 图生图；没有就是纯文字画图。
+      const imageUrl = findReferenceImage(media);
+      stage?.('参考图', imageUrl ? '图生图' : '纯文字');
       imageGen.enqueue({
         chatKey,
         prompt,
-        // 本条消息或它引用的那条里的第一张图 → 图生图；没有就是纯文字画图。
-        imageUrl: findReferenceImage(media),
+        imageUrl,
         replyToMessageId,
         // **与工具路径同一个 mode**（用户明确要求"两边行为统一"）：群友敲 `/画` 与让模型画
         // 出来的是同一件事，图发出去之后总得有人知道 —— 模型补一句「喏」也好、静默也好，
@@ -188,6 +232,7 @@ const drawCommand: CommandEntry = {
         // 与 `/转写` 那个"命令路径零 LLM 成本"的取舍**刻意不同**。
         mode: 'assisted'
       });
+      stage?.('已入队');
       // 回执里**不带任务号**：`/转写` 那句带它是因为那个任务是给敲命令的人看的进度凭据，
       // 而这里群友等的是一张图，一串 uuid 只会让人以为需要记住什么。
       return '在画了，稍等';
@@ -197,14 +242,16 @@ const drawCommand: CommandEntry = {
 
 const jmcomicCommand: CommandEntry = {
   requiresMention: true,
+  recordSession: true,
   names: ['/漫画'],
   // `/漫画 12345`：只做"下载"这一件事 —— **搜索仍只由模型用 search_jmcomic 做**
   // （那是刻意的两条路：搜索廉价可反复，下载要拉全本、导出 PDF、传群文件且不可撤销）。
   // 敲命令的人已经明确给出了 ID，等于自己走完了"先搜、再挑、再确认"那道人工闸门。
-  async run({ chatKey, text, senderId, replyToMessageId }, { jmcomic, sender, log }) {
-    await runCommand('/漫画', { sender, log }, chatKey, replyToMessageId, async () => {
+  async run({ chatKey, text, senderId, replyToMessageId }, { jmcomic, sender, log, recorder }) {
+    await runCommand('/漫画', { sender, log, recorder }, chatKey, replyToMessageId, async (stage) => {
       const comicId = parseJmcomicCommand(text);
       if (!comicId) return null;
+      stage?.('解析漫画 ID', comicId);
       const [kind, chatId] = String(chatKey).split(':');
       // 去重键是**请求者 + 漫画 ID**，所以 senderId 必须一路传下去。
       // 回执同样不带队列位置/任务号：那些数字对敲命令的人没有任何用处。
@@ -215,6 +262,7 @@ const jmcomicCommand: CommandEntry = {
         requesterId: senderId,
         comicId
       });
+      stage?.('已入队');
       return '在下了，等下把 PDF 发上来';
     });
   }
@@ -237,8 +285,9 @@ const capabilitiesCommand: CommandEntry = {
   names: ['/能力', '/扩展'],
   // 用户要求"主流程命令群里都要 @" —— 看列表也一并要（它是同一条命令，拆一半只会让人困惑）。
   requiresMention: true,
-  async run({ chatKey, text, replyToMessageId }, { extras, sender, log }) {
-    await runCommand('/能力', { sender, log }, chatKey, replyToMessageId, async () => {
+  recordSession: true,
+  async run({ chatKey, text, replyToMessageId }, { extras, sender, log, recorder }) {
+    await runCommand('/能力', { sender, log, recorder }, chatKey, replyToMessageId, async (stage) => {
       if (!extras) return '扩展能力不可用（这一侧没有装上扩展运行时）';
       // `inGroup` 决定两件事：@ 闸门要不要生效，以及列表里要不要写那句"先 @ 我一下"。
       // 它**不**拼进命令里 —— 见 `renderCapabilityList` 上面那条注释。
@@ -246,7 +295,11 @@ const capabilitiesCommand: CommandEntry = {
       const match = /^\/能力(?:\s+(\S+))?(?:\s+(\S+))?/u.exec(text.trim());
       const action = match?.[1] ?? '';
       const id = match?.[2] ?? '';
-      if (!action) return renderCapabilityList(extras.list(), inGroup);
+      if (!action) {
+        const rows = extras.list();
+        stage?.('列出扩展', `${rows.length} 个`);
+        return renderCapabilityList(rows, inGroup);
+      }
       if (action !== '加载' && action !== '卸载') {
         return '用法：/能力（看列表）、/能力 加载 <id>、/能力 卸载 <id>';
       }
@@ -254,6 +307,7 @@ const capabilitiesCommand: CommandEntry = {
       // `/能力` 根本不是一个命令（用户选的是"完全不管"，不是"认出但拒绝"）。写在这里的话
       // 就是一段到不了的死代码。
       if (!id) return `用法：/能力 ${action} <扩展 id>（id 见 /能力 列表）`;
+      stage?.(action, id);
       // **把敲命令的这个会话传下去**：接管模式按会话隔离，所以 `/能力 加载 <接管扩展>`
       // 只接管当前会话；附加模式用不到它。
       const result = action === '加载' ? await extras.load(id, 'command', chatKey) : await extras.unload(id, chatKey);
@@ -351,6 +405,29 @@ function canonicalize(command: CommandEntry, text: string): string {
 }
 
 /**
+ * 为这一次调度建一个记录句柄（**只有主流程那四条会建**：`recordSession` 为真且装了端口）。
+ *
+ * 三件事都返回 null / 空操作时**命令照常执行** —— 记录是旁路，不该有能力影响命令本身
+ * （同 `SessionRegistry.addExtraUsage` 那条"旁路不该掀翻主流程"）。
+ */
+function beginRecorder(command: CommandEntry, port: CommandRecordPort | undefined, chatKey: string, text: string): CommandRecorder | null {
+  if (!command.recordSession || !port) return null;
+  let id: string | null = null;
+  try {
+    id = port.begin({ chatKey, command: command.names[0] ?? '', text });
+  } catch {
+    // 建记录失败不该让一条命令发不出去。静默降级成"这条不记"。
+    return null;
+  }
+  if (!id) return null;
+  const recordId = id;
+  return {
+    stage: (name, detail) => { try { port.stage(recordId, name, detail); } catch { /* 旁路 */ } },
+    end: (status, receipt) => { try { port.end(recordId, status, receipt); } catch { /* 旁路 */ } }
+  };
+}
+
+/**
  * 把扩展贡献的命令套上**与内置命令同一只外壳**（`runCommand`）：回执发送、"抛出的中文原样进群"、
  * 发送失败不抛 —— 那三条是三条内置命令共用的一份，扩展不必再写一遍，行为也就不会漂移。
  *
@@ -362,6 +439,8 @@ function adaptExtraCommand(command: ExtraCommand): CommandEntry {
     names: command.names,
     // 扩展自己决定（`ExtraCommandSpec.requiresMention`，缺省要 @）—— 见那个字段的注释。
     requiresMention: command.requiresMention !== false,
+    // **扩展命令不进会话页**（用户要求：只记主流程）。理由见 `CommandEntry.recordSession`。
+    recordSession: false,
     run: (input, deps) => runCommand(
       command.names[0] ?? '', deps, input.chatKey, input.replyToMessageId, () => command.run(input)
     )
@@ -381,7 +460,12 @@ function adaptExtraCommand(command: ExtraCommand): CommandEntry {
  */
 export function createCommandDispatcher(
   source: (chatKey: string) => CommandExtraSource = () => NO_EXTRAS,
-  extras?: CommandDeps['extras']
+  extras?: CommandDeps['extras'],
+  /**
+   * 主流程命令的执行记录端口（2026-10-20 加，会话页用）。可选 —— 测试里的字面量不必跟着补，
+   * 缺了就是"不记录"，命令本身照常跑。只有 `CommandEntry.recordSession` 为真的那四条会用到它。
+   */
+  record?: CommandRecordPort
 ): CommandDispatcher {
   const tableFor = (chatKey: string): ReadonlyArray<CommandEntry> => {
     const current = source(chatKey);
@@ -406,7 +490,13 @@ export function createCommandDispatcher(
       const command = tableFor(input.chatKey).find((item) => matchesCommand(item, text, ctx));
       if (!command) return false;
       // 走的是**别名**的话，把开头那个词规范回主命令词：解析器只认识一个词。
-      await command.run({ ...input, text: canonicalize(command, text) }, { ...deps, extras });
+      // 记录里存的是**用户敲的原文**（`/扩展 卸载 x` 就是它自己），命令词存主词 ——
+      // 用户要的是"我敲了什么"，不是"它被规范化成了什么"。
+      const recorder = beginRecorder(command, record, input.chatKey, text);
+      await command.run(
+        { ...input, text: canonicalize(command, text) },
+        recorder ? { ...deps, extras, recorder } : { ...deps, extras }
+      );
       return true;
     }
   };
@@ -457,16 +547,26 @@ function renderCapabilityList(rows: ExtraListRow[], inGroup: boolean): string {
  */
 async function runCommand(
   tag: string,
-  { sender, log }: Pick<CommandDeps, 'sender' | 'log'>,
+  { sender, log, recorder }: Pick<CommandDeps, 'sender' | 'log' | 'recorder'>,
   chatKey: string,
   replyToMessageId: string | number | null,
-  body: () => Promise<string | null>
+  body: (stage: CommandStage | undefined) => Promise<string | null>
 ): Promise<void> {
+  // 命令体每走一步自己 `stage?.(…)`；这两个是外壳**自己**知道的步骤（回执、失败）。
+  const stage = recorder?.stage;
   try {
-    const receipt = await body();
-    if (receipt) await sender.sendTextBatch(chatKey, receipt, { replyToMessageId });
+    const receipt = await body(stage);
+    if (receipt) {
+      await sender.sendTextBatch(chatKey, receipt, { replyToMessageId });
+      stage?.('回执已发送');
+    }
+    // **三种结局与状态一一对应**：发了回执 `done`、什么都不说 `noreply`、抛错 `error`。
+    recorder?.end(receipt ? 'done' : 'noreply', receipt ?? undefined);
   } catch (error) {
-    await sender.sendTextBatch(chatKey, errorMessage(error) || '命令执行失败', { replyToMessageId })
+    const message = errorMessage(error) || '命令执行失败';
+    stage?.('失败', message);
+    await sender.sendTextBatch(chatKey, message, { replyToMessageId })
       .catch(() => log(`[${tag}] task=unassigned code=ONEBOT_SEND_FAILED`));
+    recorder?.end('error', message);
   }
 }
