@@ -115,14 +115,17 @@ ok('风格层被钳到 maxStyleChars（这句每张图都带上，长度必须�
 ok('出厂默认：提示词编译**关闭**（多一次模型调用是要花钱的）',
   factory.compile?.enabled === false, JSON.stringify(factory.compile));
 
-withImageGen({ compile: { enabled: true, timeoutMs: 1, maxChars: 999999 } });
+withImageGen({ compile: { enabled: true, timeoutMs: 1 } });
 {
   const c = resolveImageGenConfig(getConfig());
-  ok('编译层钳制：超时被夹回 5000～300000，结果上限被夹回 200～8000',
-    c.compile.timeoutMs === 5000 && c.compile.maxChars === 8000,
-    `${c.compile.timeoutMs}/${c.compile.maxChars}`);
+  ok('编译层钳制：超时被夹回 5000～300000',
+    c.compile.timeoutMs === 5000, String(c.compile.timeoutMs));
+  // 反向断言：那一档字数上限（`compile.maxChars`）**已经删掉**。留着它不会有任何报错，
+  // 只会让"编译产物多长"重新变成代码层的判断 —— 而那是规则集（§15）的事。
+  ok('编译层：`maxChars` 这一档已经删掉（代码层不再给画面描述定长度）',
+    c.compile.maxChars === undefined, JSON.stringify(c.compile));
 }
-withImageGen({ compile: { enabled: false, timeoutMs: 60000, maxChars: 2000 } });
+withImageGen({ compile: { enabled: false, timeoutMs: 60000 } });
 ok('编译层：`enabled` 用 === true 判（"false" 这种畸形值不该把它打开）',
   resolveImageGenConfig(getConfig()).compile.enabled === false);
 
@@ -911,31 +914,102 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
 {
   const {
     parseCompiledPrompt, buildCompileRequest, buildSelectRequest, buildUserText, compileImagePrompt,
-    splitSkillSections, buildSkillToc, parseSectionSelection, readSkillText,
-    SAFETY_NEGATIVE, MAX_NEGATIVE_CHARS, PREAMBLE_ID, PROMPT_MARK, NEGATIVE_MARK
+    splitSkillSections, buildSkillToc, parseSectionSelection, readSkillText, hasSubjectTagBlock,
+    PREAMBLE_ID, LAYOUT_JSON_SECTION_ID, DEFAULT_CANVAS, canvasOf, PROMPT_MARK, NEGATIVE_MARK
   } = ig;
   const { PROMPT_CATALOG } = await load('core/prompt-catalog.js');
 
-  // 14a 解析（纯函数）—— 输出格式没变，判据照旧
+  // 14a 解析（纯函数）—— 正面是一段 **Layout JSON**（规则 §15），这里判的是"认不认得出来"
   const wrap = (p, n) => `${PROMPT_MARK}\n${p}\n${NEGATIVE_MARK}\n${n}`;
-  const parsed = parseCompiledPrompt(wrap('一只猫', 'blurry, watermark'), 2000);
+  /** 一份最小的 §15 产物（字段照 §15.1 的示例，画布尺寸字段按 §15.4 不写）。 */
+  const layoutJson = JSON.stringify({
+    summary: { meta: ['single'], canvas: 'single', caption: '一只猫，居中' },
+    items: [{ label: 'object', caption: '一只猫', bbox: [-256, -256, 256, 256] }],
+    bbox_coord_space: 'abs_centralized',
+    bbox_format: 'yxyx'
+  });
+  const parsed = parseCompiledPrompt(wrap(layoutJson, 'blurry, watermark'));
   ok('编译解析：正常两段各自取出',
-    parsed.ok && parsed.value.positive === '一只猫' && parsed.value.negative === 'blurry, watermark',
+    parsed.ok && parsed.value.positive === layoutJson && parsed.value.negative === 'blurry, watermark',
     JSON.stringify(parsed));
+  ok('⚠️ 编译解析：正面是能 `JSON.parse` 的对象 → `layout: true`（§15 那一路走通了）',
+    parsed.layout === true);
   ok('编译解析：缺 <<<NEGATIVE>>> 是**宽容**的（2.1 那一档本来就不产负面词）',
-    parseCompiledPrompt(`${PROMPT_MARK}\n一只猫`, 2000).value?.negative === '');
+    parseCompiledPrompt(`${PROMPT_MARK}\n一只猫`).value?.negative === '');
   ok('编译解析：缺 <<<PROMPT>>> → FORMAT（模型没照格式答）',
-    parseCompiledPrompt('好的，这是提示词：一只猫', 2000).code === 'FORMAT');
-  ok('编译解析：正面为空 → EMPTY', parseCompiledPrompt(wrap('   ', ''), 2000).code === 'EMPTY');
-  ok('编译解析：正面超长 → TOO_LONG，且**不截断**（截断是在人还能改的时候不说、跑起来才少半段）',
-    parseCompiledPrompt(wrap('猫'.repeat(201), ''), 200).code === 'TOO_LONG');
-  ok('编译解析：负面超长**只丢负面**、正面照用（正面才是这条路的全部价值）',
+    parseCompiledPrompt('好的，这是提示词：一只猫').code === 'FORMAT');
+  ok('编译解析：正面为空 → EMPTY', parseCompiledPrompt(wrap('   ', '')).code === 'EMPTY');
+  ok('编译解析：剥掉 ``` 围栏之后照样认得出来（模型最爱把 JSON 包进代码块）',
     (() => {
-      const r = parseCompiledPrompt(wrap('一只猫', 'x'.repeat(MAX_NEGATIVE_CHARS + 1)), 2000);
-      return r.ok && r.value.positive === '一只猫' && r.value.negative === '' && r.note === 'NEGATIVE_DROPPED';
+      const r = parseCompiledPrompt(wrap('```json\n' + layoutJson + '\n```', ''));
+      return r.ok && r.layout === true && r.value.positive === layoutJson;
+    })());
+  ok('编译解析：围栏之外还夹了话时，取**第一个 `{` 到最后一个 `}`** 那一段',
+    (() => {
+      const r = parseCompiledPrompt(wrap(`好的，这是 Layout JSON：\n${layoutJson}\n希望满意`, ''));
+      return r.ok && r.layout === true && r.value.positive === layoutJson;
+    })());
+  // ⚠️ **解不出来不失败**：出图照常、用原文，只是 `layout: false`。这条与"编译失败一律
+  // fail-open"是同一条纪律 —— 一次可选增强的格式没照做，不该把一张已经扣过额度的图搞失败。
+  ok('⚠️ 编译解析：解不出 JSON **不失败** —— 原样当文本发出（`layout: false`）',
+    (() => {
+      const r = parseCompiledPrompt(wrap('一只猫', ''));
+      return r.ok && r.layout === false && r.value.positive === '一只猫';
+    })());
+  ok('⚠️ 编译解析：**数组不算** Layout JSON（schema 是对象，收下数组等于给画图模型一段无字段的东西）',
+    (() => {
+      const r = parseCompiledPrompt(wrap('[1,2,3]', ''));
+      return r.ok && r.layout === false && r.value.positive === '[1,2,3]';
     })());
   ok('编译解析：标记**之前**的寒暄被丢掉（模型爱写"好的，这是提示词："）',
-    parseCompiledPrompt(`好的！\n${wrap('一只猫', 'blurry')}`, 2000).value?.positive === '一只猫');
+    parseCompiledPrompt(`好的！\n${wrap('一只猫', 'blurry')}`).value?.positive === '一只猫');
+
+  // 14a3 `tags=` 那一格（`hasSubjectTagBlock`，纯函数）。它存在的理由是一条真机实测：
+  // 补上"末尾要附主体 tag"那条指令之后，模型**照旧没写** tag 块，而这件事在结果图上
+  // 看不出来（图照常画出来，只是画面里的细节被静默丢掉）。所以需要一个**形状判据**
+  // 把它变成日志里看得见的一格。
+  ok('tag 块：末尾一段逗号分隔的英文 tag → 有（这是我们要的形状）',
+    hasSubjectTagBlock('雨夜的教室，暖光。1girl, 1boy, school uniform, holding hands, classroom'));
+  ok('tag 块：中文逗号分隔**照样算过**（判据收两种逗号 —— 模型混用时不该报 missing）',
+    hasSubjectTagBlock('雨夜的教室，暖光。1girl，1boy，school uniform'));
+  ok('tag 块：正文里全是中文 → 没有（这是实测那一轮的样子：`一只猫，居中`）',
+    !hasSubjectTagBlock('一只猫，居中'));
+  ok('tag 块：光秃秃的 caption（没有句末标点）时整串都算末尾那一段 → 短词列表照样认得出',
+    hasSubjectTagBlock('1girl, 1boy, classroom'));
+  // ⚠️ 假阳的那一档：全英文、词都很短的散文尾巴。判据里"每个词不超过 4 个单词"就是为它写的。
+  ok('⚠️ tag 块：英文**散文**尾巴不算（`A girl stands in a classroom` 词太长，它是一句话不是一个 tag）',
+    !hasSubjectTagBlock('教室一角。A girl stands in a classroom, holding a key, looking at the door'));
+  ok('tag 块：两个词不算（`1girl, 1boy` 是人数声明，不是那段主体 tag）',
+    !hasSubjectTagBlock('一只猫。1girl, 1boy'));
+  // 已知的假阴（写在 `hasSubjectTagBlock` 的注释里）：tag 段后面又补了一句中文说明时会被判成"没有"。
+  ok('⚠️ tag 块：tag 段**后面又补了中文说明**时判成"没有"（已知假阴，注释里写明）',
+    !hasSubjectTagBlock('一只猫。1girl, 1boy, school uniform。整体偏暖'));
+  ok('tag 块：空串 / 非字符串不炸（模型可能不给 `summary.caption`）',
+    !hasSubjectTagBlock('') && !hasSubjectTagBlock(undefined) && !hasSubjectTagBlock(null));
+  ok('tag 块：`layout: false`（正面不是 JSON）时没有 caption 可判 → `tags: false`',
+    parseCompiledPrompt(wrap('一只猫', '')).tags === false);
+  ok('tag 块：Layout JSON 的 `summary.caption` 末尾有 tag 段 → `tags: true`',
+    (() => {
+      const r = parseCompiledPrompt(wrap(JSON.stringify({
+        summary: { canvas: 'single', caption: '雨夜的教室。1girl, 1boy, school uniform, classroom' },
+        items: []
+      }), ''));
+      return r.ok && r.layout === true && r.tags === true;
+    })());
+  ok('tag 块：上面那个 `layoutJson` 夹具的 caption 是中文散文 → `tags: false`（判据分得开）',
+    parsed.ok && parsed.tags === false);
+
+  // 14a2 画布（纯函数）—— §15 的 bbox 是**绝对像素**，不知道画布多大就编不出坐标
+  ok('画布：`size` 解析得出来就用它（bbox 的坐标系必须与真实画幅一致）',
+    canvasOf('768*1024').w === 768 && canvasOf('768*1024').h === 1024
+    && canvasOf('768*1024').assumed === false);
+  ok('画布：`size` 空（自动）或认不出时回落默认值，并**如实标记**是假定的（不能写"未指定"）',
+    (() => {
+      const auto = canvasOf('');
+      const bogus = canvasOf('大一点');
+      return auto.w === DEFAULT_CANVAS.w && auto.h === DEFAULT_CANVAS.h && auto.assumed === true
+        && bogus.assumed === true;
+    })());
 
   // 14b 分节（纯函数）—— 这是"逐字原样"的机器判据，也是整个两段式的地基
   {
@@ -990,6 +1064,12 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     sections.map((s) => s.text).join('') === skillText);
   ok('真文件：`## 9.1` 是独立的 `##` 节（作者把它写在了与 9 同级的位置，切分要跟着原文走）',
     numbered.some((s) => s.id === '9.1'));
+  // §15 **恒定入选**（`LAYOUT_JSON_SECTION_ID`），所以它必须真的在文件里 —— 一个拼错的 id
+  // 不会报任何错，表现只是"模型没看过 schema 却要按它写 JSON"，而那件事从结果图上看不出来。
+  ok('⚠️ 真文件：§15（Layout JSON schema）真的存在，且就是讲 bbox 坐标的那一节',
+    numbered.some((s) => s.id === LAYOUT_JSON_SECTION_ID)
+    && sec(LAYOUT_JSON_SECTION_ID).includes('bbox_coord_space')
+    && sec(LAYOUT_JSON_SECTION_ID).includes('abs_centralized'));
   ok('真文件：frontmatter 与总闸都在前言节里（总闸是全文优先级最高的一段，恒定入选）',
     sec(PREAMBLE_ID).includes('name: moss-image-prompt-skill')
     && sec(PREAMBLE_ID).includes('总闸'));
@@ -1008,7 +1088,7 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
   // 14d 两段式的请求形状（纯函数）
   const baseInput = {
     raw: '画个猫', hasReference: false, size: '1024*1024',
-    maxChars: 1234, wantsNegative: true, select: true
+    wantsNegative: true, select: true
   };
   const selectReq = buildSelectRequest(baseInput, buildSkillToc(sections));
   const compileReq = buildCompileRequest(baseInput, sec(PREAMBLE_ID) + sec('5'));
@@ -1021,9 +1101,54 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
   ok('两段式：两段共用同一份 user 段（原始描述逐字在里面）',
     selectReq.user === compileReq.user && selectReq.user === buildUserText(baseInput)
     && selectReq.user.includes('画个猫'));
-  ok('两段式：上限念进了第 2 段（模型才知道该写多长）', compileReq.system.includes('1234'));
+  ok('两段式：user 段把**画布尺寸**念给模型（§15 的 bbox 是绝对像素，不知道画布多大就编不出坐标）',
+    compileReq.user.includes('1024×1024') && compileReq.user.includes('bbox')
+    && compileReq.user.includes('x∈[-512, 512]'), compileReq.user);
+  // ⚠️ 反向断言：**代码层不许再给画面描述定长度上限**。合适的长度是规则集的事（§15 有自己的
+  // 字段与取值域），而"写得比我们预期的长"就把整条编译结果扔掉是本末倒置。body 传空串，
+  // 于是 system 里只有我们自己的固定指令，不会被规则原文里的字眼干扰。
+  ok('两段式：固定指令里**没有**任何字数上限（那一档 2026-10-20 删掉了）',
+    !/上限|不超过|字数/.test(buildCompileRequest(baseInput, '').system),
+    buildCompileRequest(baseInput, '').system);
   ok('两段式：模型不认负面词时让它别写那一串（省下的 token 是实打实的）',
     buildCompileRequest({ ...baseInput, wantsNegative: false }, '').system.includes('内容留空'));
+
+  // 14d2 对照作者示例 JSON 之后补的五条（2026-10-20）。都住在"任务说明"那一段里，
+  // 所以只钉"这几句在不在 system 里" —— 模型照不照做只能人工出图复核。
+  // body 传空串，于是扫到的一定是我们自己的固定指令，不会被规则原文里的字眼蒙混过去
+  // （比如 §8 那句防克隆句的**原文**就在 body 里，传真 body 的话下一条会永远绿）。
+  {
+    const fixed = buildCompileRequest(baseInput, '').system;
+    ok('五条①：中文 caption 与英文固定句/tag 的分界写明了（§8 防克隆句、§17 的 <|…|> 正文要逐字照抄）',
+      fixed.includes('逐字照抄') && fixed.includes('Featuring exactly') && fixed.includes('<|tag|>'));
+    ok('五条②：`summary.caption` 末尾要附 §2.1 那批逗号分隔的主体 tag，并给一个可照抄的成品形状',
+      fixed.includes('逗号分隔的主体 tag') && fixed.includes('1girl, 1boy, school uniform')
+      && fixed.includes('光秃秃的 tag 列表'));
+    // ⚠️ 这一条是 2026-10-21 加的，起因是真机实测：② 原本是 §15.5 那句话的**并列分句**，
+    // 夹在"风格句在开头"与"bbox 说了算"之间，模型直接跳过了。现在它独占一个编号项。
+    // 判据取"它在块标题**之后**"而不是"整段里有没有这几个字" —— 后者在别处也提 tag，
+    // 把这段散文改回去照样绿（同 `t-trpg.mjs` 那条「收团：」开头的判据，同一个坑）。
+    const checkAt = fixed.indexOf('【交付前自查');
+    const tagAt = fixed.indexOf('逗号分隔的主体 tag');
+    ok('五条②：tag 要求住在编号的【交付前自查】块**里面**（散回散文里模型就不做 —— 实测踩过）',
+      checkAt >= 0 && tagAt > checkAt);
+    ok('五条②：那一项自己带编号、并明说"最容易漏"（三条里唯一要求**补出东西**的一条）',
+      fixed.includes('这一项最容易漏') && /1\. `summary\.caption` 的\*\*结构\*\*/.test(fixed));
+    ok('五条②③④：三项是**同一个块里依次编号**的（散开写就会各自被读成别处的补充说明）',
+      fixed.includes('1. `summary.caption`') && fixed.includes('2. 每一项 `caption`')
+      && fixed.includes('3. 分格画面里'));
+    ok('五条③：`caption` 里的方位必须与同一项的 `bbox` 一致（撞到过"说右上角、bbox 在上方中间"）',
+      fixed.includes('必须与同一项的 `bbox` 一致') && fixed.includes('拿不准就别写方位'));
+    ok('五条④：分格画面里每处文字单独成一项',
+      fixed.includes('每处文字单独成一项') && fixed.includes('label:"text"'));
+    ok('五条⑤：通用画质词**要自己写全**（§11 的负面底座），只有部署方配的那一条由系统另加',
+      fixed.includes('要自己写全') && fixed.includes('blurry') && fixed.includes('只有那一条'));
+    // ⚠️ 反向断言：原话"部署方配的通用负面词由系统另加，你不用重复"是**空头承诺** ——
+    // `imageGen.negativePrompt` 的出厂值是 `''`（core/config.ts），模型信了它就会一条画质词
+    // 都不写。这句话写回来不会有任何报错，只有这一条拦得住。
+    ok('⚠️ 反向：那句"通用负面词由系统另加"的空头承诺不许回来',
+      !fixed.includes('通用负面词由系统另加') && !fixed.includes('你不用重复'));
+  }
 
   // 14e 覆盖前言与署名
   const overlay = PROMPT_CATALOG.imageCompile.overlay;
@@ -1046,6 +1171,20 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
   const catalogSrc = readSource('core/prompt-catalog.ts');
   ok('许可边界：**规则正文一个字都不在 prompt-catalog 里**（它运行期从文件读，这里只放我们自己的文本）',
     !catalogSrc.includes('Magic Blocks') && !catalogSrc.includes('单向因果染色定律'));
+
+  // ⚠️ 门禁**已经删掉**（2026-10-20）。它从收录那天起就一直是注释掉的，却在 `compileSystem`
+  // 里留着一句"上面的【部署方附加约束】优先于下面全部规则"—— 一句指向不存在的东西的指令。
+  // 这是**反向断言**：那两句都不许回来（写回来不会有任何报错，模型只会照它执行一段约束）。
+  // ⚠️ **必须剥注释再扫**：`overlay` 上面那段 doc comment 正记着"删了什么、为什么删"，
+  // 原样扫会把那段文档本身打红（同 `core/events.ts` 注释里写着 `AgentEventMap` 那条先例）。
+  const catalogCode = stripComments(catalogSrc);
+  ok('⚠️ 门禁已删：附加约束那一段与那句"优先于下面全部规则"都不在 Catalog 的代码里',
+    !catalogCode.includes('部署方附加约束') && !catalogCode.includes('日常着装'));
+  // 同批删掉的还有代码层那份写死的安全负面词。它与门禁是同一类东西（"限制写在代码里"），
+  // 删掉之后边界由 `imageGen.negativePrompt` / `stylePrompt` 两个**配置项**表达。
+  ok('⚠️ 代码层那份写死的安全负面词已经删掉（`SAFETY_NEGATIVE` 不许回来）',
+    !stripComments(readSource('media/image-gen/compile.ts')).includes('SAFETY_NEGATIVE')
+    && !stripComments(readSource('media/image-gen/queue.ts')).includes('SAFETY_NEGATIVE'));
 
   // 14f 缺文件 → NO_SKILL + fail-open（注入一个"读不到"的 reader，不必真的动仓库里的文件）
   {
@@ -1093,7 +1232,7 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
   const base = { baseUrl: ds.base, model: 'qwen-image-3.0', negativePrompt: '管理员那条' };
 
   // ① 两段式（默认）：两次调用，第二次只带挑中的节
-  withImageGen({ ...base, compile: { enabled: true, select: true, timeoutMs: 60000, maxChars: 2000 } });
+  withImageGen({ ...base, compile: { enabled: true, select: true, timeoutMs: 60000 } });
   asked = [];
   compilePromptForThis = twoStagePort();
   const logsTwo = [];
@@ -1106,13 +1245,124 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
   ok('两段式：**没挑中的节一个都没有**（这是两段式省下来的全部东西）',
     !asked[1].system.includes(sec('16')) && !asked[1].system.includes(sec('0')));
   ok('两段式：前言恒定入选（总闸不进目录、也不由模型挑）', asked[1].system.includes(sec(PREAMBLE_ID)));
+  // ⚠️ §15 **恒定入选**：编译的产出就是按它写的 Layout JSON，而模型**没看过 schema 就只能编
+  // 字段**。所以它不受"模型挑没挑中它"影响 —— 上面那条用例里模型只挑了 5 和 17。
+  ok('⚠️ 两段式：§15（Layout JSON schema）恒定入选，模型没挑它也在里面',
+    asked[1].system.includes(sec(LAYOUT_JSON_SECTION_ID))
+    && !asked[0].system.includes(sec(LAYOUT_JSON_SECTION_ID)));
   ok('两段式：日志记下"挑了几节"（两段式的全部收益都在这个数上，没有它看不出选节白跑了）',
-    logsTwo.some((l) => /compile=ok picked=2\/19 sections=5,17 skillChars=\d+/.test(l)), logsTwo.join(' | '));
+    logsTwo.some((l) => /compile=ok picked=3\/19 sections=5,15,17 skillChars=\d+ layout=text/.test(l)),
+    logsTwo.join(' | '));
   ok('两段式：发给画图模型的是编译结果，不是原始描述',
     textOf(seen).includes('编译后的猫') && !textOf(seen).includes('画个猫'), textOf(seen));
-  ok('两段式：负面词 = 安全前排 + 编译产出 + 管理员那条，顺序就是这个（安全词不经过模型）',
-    paramsOf(seen).negative_prompt === `${SAFETY_NEGATIVE}, blurry, watermark, 管理员那条`,
+  // ⚠️ 负面词的来源**只剩两条**：编译产出 + 管理员配置那条。代码层那份写死的安全前排
+  // 2026-10-20 删掉了 —— 边界现在由 `imageGen.negativePrompt` 这个配置项表达。
+  ok('两段式：负面词 = 编译产出 + 管理员那条，顺序就是这个（代码层不再偷偷加安全前排）',
+    paramsOf(seen).negative_prompt === 'blurry, watermark, 管理员那条',
     paramsOf(seen).negative_prompt);
+
+  // ①b 正面**真的是一段 Layout JSON** 时：原样发给画图模型，日志里 `layout=json`
+  // （这是"按 §15 输出"这条要求在链路上唯一的可观测面 —— 结果图上看不出来）
+  {
+    const layoutPort = async (request) => {
+      asked.push(request);
+      if (request.system.includes('【规则目录】')) return { ok: true, content: '5,17' };
+      return { ok: true, content: `${PROMPT_MARK}\n${layoutJson}\n${NEGATIVE_MARK}\nblurry` };
+    };
+    asked = [];
+    compilePromptForThis = layoutPort;
+    const logsLayout = [];
+    const seenLayout = await runOnce('画个猫', (...a) => logsLayout.push(a.join(' ')));
+    ok('⚠️ Layout JSON：正面原样发给画图模型（不做任何改写 —— §15 允许自然语言与结构化输入混用）',
+      textOf(seenLayout).includes('"bbox_coord_space":"abs_centralized"')
+      && textOf(seenLayout).includes('"bbox_format":"yxyx"'), textOf(seenLayout));
+    ok('⚠️ Layout JSON：日志里 `layout=json`（模型没照 schema 写时这里会是 `text`，那是唯一的线索）',
+      logsLayout.some((l) => /compile=ok picked=3\/19 sections=5,15,17 skillChars=\d+ layout=json/.test(l)),
+      logsLayout.join(' | '));
+    // 上面那个夹具的 caption 是中文散文（`一只猫，居中`），所以这一格必须是 `missing` ——
+    // 它同时是下面 ①b2 那条 `present` 的**对照**：少了它，`tags=present` 可能只是恒真。
+    ok('⚠️ tag 块：caption 里没有 tag 段时日志报 `tags=missing`（这一格不是恒绿）',
+      logsLayout.some((l) => /layout=json tags=missing$/.test(l)), logsLayout.join(' | '));
+  }
+
+  // ①b2 `tags=` 那一格。它存在的理由是一条真机实测：②（"末尾要附主体 tag"）写进 system
+  // 之后模型**照旧没写** tag 块，而这件事在结果图上看不出来 —— 图照常画出来，只是画面里的
+  // 细节被静默丢掉（§2.1：顶部缺词 = 该细节直接丢失）。所以要有一个形状判据把它变成
+  // 日志里看得见的一格，否则"改提示词有没有用"只能靠人盯着一张张图猜。
+  {
+    const taggedJson = JSON.stringify({
+      summary: { canvas: 'single', caption: '雨夜的教室，暖光。1girl, 1boy, school uniform, holding hands, classroom' },
+      items: [{ label: 'character', caption: '一个女孩', bbox: [-256, -256, 256, 256] }],
+      bbox_coord_space: 'abs_centralized',
+      bbox_format: 'yxyx'
+    });
+    const portFor = (json) => async (request) => {
+      asked.push(request);
+      if (request.system.includes('【规则目录】')) return { ok: true, content: '5,17' };
+      return { ok: true, content: `${PROMPT_MARK}\n${json}\n${NEGATIVE_MARK}\nblurry` };
+    };
+    const logsTagged = [];
+    compilePromptForThis = portFor(taggedJson);
+    await runOnce('画个猫', (...a) => logsTagged.push(a.join(' ')));
+    ok('⚠️ tag 块：caption 末尾有 tag 段 → 日志里 `tags=present`（这一格是"改提示词有没有用"的唯一观测点）',
+      logsTagged.some((l) => /compile=ok .* layout=json tags=present$/.test(l)),
+      logsTagged.join(' | '));
+    // 同一个端口、只换 caption：两格必须跟着变 —— 否则 `tags=` 只是把某个常量印了出来。
+    const logsPlain = [];
+    compilePromptForThis = portFor(layoutJson);
+    await runOnce('画个猫', (...a) => logsPlain.push(a.join(' ')));
+    ok('⚠️ tag 块：只换 caption（tag 段去掉）→ 同一格变成 `missing`（两格跟着内容走，不是印常量）',
+      logsPlain.some((l) => /compile=ok .* layout=json tags=missing$/.test(l)),
+      logsPlain.join(' | '));
+  }
+
+  // ①c 调试点：`QQ_AGENT_DEBUG_IMAGE_JSON=1` 时把编译产物原样打一行（正面 = 那段 Layout JSON）
+  {
+    // ⚠️ 夹具刻意用**缩进过的** JSON（`null, 2`）：真实模型十有八九就是这么写的，而
+    // "整段在一行里"那条断言**只有夹具里带真换行时才有判别力** —— 单行 JSON 的话，
+    // 实现里用不用 `JSON.stringify` 都只有一行，那条断言是假的绿（本套件初版就踩了）。
+    const prettyLayout = JSON.stringify({
+      summary: { meta: ['single'], canvas: 'single', caption: '一只猫，居中' },
+      items: [{ label: 'object', caption: '一只猫', bbox: [-256, -256, 256, 256] }],
+      bbox_coord_space: 'abs_centralized',
+      bbox_format: 'yxyx'
+    }, null, 2);
+    const layoutPort2 = async (request) => {
+      asked.push(request);
+      if (request.system.includes('【规则目录】')) return { ok: true, content: '5,17' };
+      return { ok: true, content: `${PROMPT_MARK}\n${prettyLayout}\n${NEGATIVE_MARK}\nblurry, watermark` };
+    };
+    compilePromptForThis = layoutPort2;
+    // 默认关：日志里**一个字都不带画面描述**。这条是"这个开关真的在闸门上"的对照 ——
+    // 少了它，"打开时有"可能只是因为那行一直打着。
+    const logsQuiet = [];
+    seen = await runOnce('画个猫', (...a) => logsQuiet.push(a.join(' ')));
+    ok('调试点：默认关 —— 日志里既没有 `[image-gen][debug]` 那行，也不带任何画面描述',
+      !logsQuiet.some((l) => l.includes('[image-gen][debug]'))
+      && !logsQuiet.some((l) => l.includes('bbox_coord_space')),
+      logsQuiet.join(' | '));
+
+    process.env.QQ_AGENT_DEBUG_IMAGE_JSON = '1';
+    const logsDebug = [];
+    try {
+      compilePromptForThis = layoutPort2;
+      seen = await runOnce('画个猫', (...a) => logsDebug.push(a.join(' ')));
+    } finally {
+      // 被测模块是模块级单例、同进程后续用例共用，环境变量必须还原（同 `withFakeTimers` 那条纪律）。
+      delete process.env.QQ_AGENT_DEBUG_IMAGE_JSON;
+    }
+    const debugLine = logsDebug.find((l) => l.includes('[image-gen][debug]'));
+    ok('调试点：打开后那一行里是**编译产物的原文** —— 正面是那段 Layout JSON、负面另起一格',
+      !!debugLine && debugLine.includes('bbox_coord_space')
+      && debugLine.includes(JSON.stringify('blurry, watermark')),
+      debugLine || logsDebug.join(' | '));
+    // ⚠️ 判据是"捕获到的那一行里没有**真**换行"：journald 按行拆多行条目，散开就看不懂了。
+    // `JSON.stringify` 把换行转义成 `\n`（反斜杠 + n 两个字符）正是为此，这条断言钉住那个转义
+    // 没被去掉 —— 夹具里那份 JSON 是缩进过的，所以去掉转义这里当场会红（探针实测过）。
+    ok('⚠️ 调试点：整段 JSON 在**一行**里（换行被 `JSON.stringify` 转义，不是真换行）',
+      !!debugLine && !debugLine.includes('\n') && !debugLine.includes('\r'),
+      JSON.stringify(debugLine));
+  }
 
   // ② 挑不出来 → 退回全文（fail-open 到"最保险的那一档"，不会因为挑错而少给规则）
   asked = [];
@@ -1122,7 +1372,7 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     asked.length === 2 && asked[1].system.includes(sec('16')) && asked[1].system.includes(sec('0')));
 
   // ③ `select: false` → 一次调用、直接上全文
-  withImageGen({ ...base, compile: { enabled: true, select: false, timeoutMs: 60000, maxChars: 2000 } });
+  withImageGen({ ...base, compile: { enabled: true, select: false, timeoutMs: 60000 } });
   asked = [];
   compilePromptForThis = twoStagePort();
   const logsFull = [];
@@ -1144,7 +1394,7 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     `文件 ${skillText.length} 字符；日志：${logsFull.filter((l) => l.includes('compile=ok')).join(' | ')}`);
 
   // ④ 对照：编译关掉 —— 端口一次都不许被调，且行为与加这一层之前逐字相同
-  withImageGen({ ...base, compile: { enabled: false, select: true, timeoutMs: 60000, maxChars: 2000 } });
+  withImageGen({ ...base, compile: { enabled: false, select: true, timeoutMs: 60000 } });
   asked = [];
   compilePromptForThis = twoStagePort();
   const logsOff = [];
@@ -1160,7 +1410,7 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     paramsOf(seen).negative_prompt === '管理员那条', paramsOf(seen).negative_prompt);
 
   // ⑤ fail-open：端口抛错 → 图照样出，用原始描述，且日志留下固定码
-  withImageGen({ ...base, negativePrompt: '', compile: { enabled: true, select: true, timeoutMs: 60000, maxChars: 2000 } });
+  withImageGen({ ...base, negativePrompt: '', compile: { enabled: true, select: true, timeoutMs: 60000 } });
   const logsFail = [];
   compilePromptForThis = async () => { throw new Error('连不上 https://example.com/x 或 C:\\secret\\a.json'); };
   seen = await runOnce('画个猫', (...a) => logsFail.push(a.join(' ')));
@@ -1175,7 +1425,7 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     logsFail.filter((l) => l.includes('COMPILE_REQUEST')).length >= 1);
 
   // ⑥ 2.1：负面词不发（发了会被判 400），且日志说明是模型不支持
-  withImageGen({ ...base, model: 'qwen-image-2.1-turbo', compile: { enabled: true, select: true, timeoutMs: 60000, maxChars: 2000 } });
+  withImageGen({ ...base, model: 'qwen-image-2.1-turbo', compile: { enabled: true, select: true, timeoutMs: 60000 } });
   const logs21 = [];
   compilePromptForThis = twoStagePort();
   seen = await runOnce('画个猫', (...a) => logs21.push(a.join(' ')));
@@ -1187,7 +1437,7 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
     textOf(seen).includes('编译后的猫'), textOf(seen));
 
   // ⑦ 端口没接上（配置开着但没注入）——必须留线索，否则"开了编译、一个字没变"无从查起
-  withImageGen({ ...base, compile: { enabled: true, select: true, timeoutMs: 60000, maxChars: 2000 } });
+  withImageGen({ ...base, compile: { enabled: true, select: true, timeoutMs: 60000 } });
   const logsNoPort = [];
   compilePromptForThis = null;
   seen = await runOnce('画个猫', (...a) => logsNoPort.push(a.join(' ')));
@@ -1200,7 +1450,7 @@ ok('工具表里有 generate_image，且描述来自 Catalog', defs.some((d) => 
   // 没有更快的办法从配置侧构造出这条死线。慢归慢，它守的是"队列被整个堵死"这件事。
   // **不能用 `runOnce`**：它在 200ms 时就 `stop()`，那会先一步 abort 掉在途的编译，
   // 于是这条用例测的就成了"stop 会不会中止编译"，而不是"死线到点会不会中止它"。
-  withImageGen({ ...base, compile: { enabled: true, select: true, timeoutMs: 5000, maxChars: 2000 } });
+  withImageGen({ ...base, compile: { enabled: true, select: true, timeoutMs: 5000 } });
   const logsTimeout = [];
   let abortedAt = 0;
   const t0 = Date.now();
@@ -1322,20 +1572,34 @@ ok('接线：那次调用的用量走 addExtraUsage（它多半发生在会话 f
     /id="cfg-imagegen-apikey"[\s\S]{0,80}type="password"/.test(sectionsSrc)
     || /type="password"[\s\S]{0,80}id="cfg-imagegen-apikey"/.test(sectionsSrc));
 
-  // 编译层三档的钳制有**两份实现**（后端 resolver 与设置页 save），它们必须逐项一致。
+  // 编译层各档的钳制有**两份实现**（后端 resolver 与设置页 save），它们必须逐项一致。
   // 漂移的表现是"我填了 5000 却按别的数走"，而没人会去比两边源码（同 webSearch 那条）。
   const configSrc = stripComments(readSource('media/image-gen/config.ts'));
   ok('编译层钳制：后端 resolver 与设置页 save 是**同一组数**（漂移 = 填了却不按它走）',
     /boundedInt\(raw\.compile\?\.timeoutMs, 60_000, 5_000, 300_000\)/.test(configSrc)
-    && /boundedInt\(raw\.compile\?\.maxChars, 2_000, 200, 8_000\)/.test(configSrc)
-    && /clampInt\(val\('#cfg-imagegen-compile-timeout'[\s\S]{0,40}?5000, 300000, 60000\)/.test(saveSrc)
-    && /clampInt\(val\('#cfg-imagegen-compile-maxchars'[\s\S]{0,40}?200, 8000, 2000\)/.test(saveSrc));
+    && /clampInt\(val\('#cfg-imagegen-compile-timeout'[\s\S]{0,40}?5000, 300000, 60000\)/.test(saveSrc));
   ok('编译层：设置页的 input 上下限与那组数一致（min/max 写错时浏览器只拦一半）',
-    /id="cfg-imagegen-compile-timeout"[^>]*min="5000"[^>]*max="300000"/.test(sectionsSrc)
-    && /id="cfg-imagegen-compile-maxchars"[^>]*min="200"[^>]*max="8000"/.test(sectionsSrc));
+    /id="cfg-imagegen-compile-timeout"[^>]*min="5000"[^>]*max="300000"/.test(sectionsSrc));
+  // ⚠️ 反向断言：那一档字数上限**三处都不许留**（后端配置项 / save 的读取 / 设置页的输入框）。
+  // 留一处不会有任何报错，只会让"编译产物多长"重新变成代码层的判断 —— 而那是规则集（§15）的事。
+  ok('⚠️ 编译层：`maxChars` 那一档在后端配置、save 与设置页三处都不存在了',
+    !/maxChars/.test(configSrc) && !/cfg-imagegen-compile-maxchars/.test(saveSrc)
+    && !/cfg-imagegen-compile-maxchars/.test(sectionsSrc)
+    && !/maxChars/.test(stripComments(readSource('media/image-gen/compile.ts'))));
+  // 编译层的三档配置**没有"留着不用"的字段**：多一个键就多一处"配了没反应"。
+  ok('⚠️ 编译层：`ImageCompileConfig` 恰好三个键（多一个键 = 多一处"配了没反应"）',
+    /interface ImageCompileConfig \{[\s\S]*?\n\}/.test(stripComments(readSource('media/image-gen/types.ts')))
+    && (stripComments(readSource('media/image-gen/types.ts'))
+      .match(/interface ImageCompileConfig \{[\s\S]*?\n\}/)[0].match(/^\s{2}\w+[?]?:/gm) || []).length === 3);
   ok('编译层：默认值是**关**（设置页的 checkbox 不勾），且文案说清"多一次模型调用"',
     /id="cfg-imagegen-compile-enabled"[^>]*\$\{g\.compile\?\.enabled === true \? 'checked' : ''\}/.test(sectionsSrc)
     && sectionsSrc.includes('每张图会多一到两次模型调用'));
+  // 设置页那句"正面按 §15 的 Layout JSON 输出"是**对用户的承诺**，必须与实现一致 ——
+  // 实现改成 JSON、文案还写着"一段描述"的话，管理员永远不会知道要去看 `layout=` 那一格。
+  ok('编译层：设置页写明了产出是 §15 的 Layout JSON，并给出 `layout=json|text` 这个观测点',
+    sectionsSrc.includes('Layout JSON') && sectionsSrc.includes('layout=json|text'));
+  ok('编译层：设置页也给出了 `tags=present|missing`（tag 块缺了图照画，只有这一格看得出来）',
+    sectionsSrc.includes('tags=present|missing') && sectionsSrc.includes('主体 tag'));
   // `select` 这一栏的判据与后端 `raw.compile?.select !== false`（缺省真）是**同一条**：
   // 写反了不会报任何错，表现只是"勾了没反应 / 取消勾选反而变两次调用"。
   ok('编译层：`select` 那一栏的缺省也是**开**，且 save 与后端同一条判据',

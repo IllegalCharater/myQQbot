@@ -32,6 +32,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * 风格层对模型**完全不可见**：它一旦出现在给模型看的指令里，模型就会自己把那句话
  * 也写进 prompt，同一句出现两遍（见 core/config.ts 的 imageGen.stylePrompt）。
+ *
+ * ⚠️ **拼在 JSON 之后是合法的**：编译开启时 `prompt` 是一段 Layout JSON（规则 §15），
+ * 而 §15 自己就写着"允许自然语言与结构化输入混用"，画图模型也照收。**刻意不走
+ * "塞进 `summary.caption`"那条路** —— 那要在客户端解析 JSON、改字段、再序列化回去，
+ * 而 JSON 解不出来时还得有第三条路；拼一行没有这些分支。
  */
 export function withStyleLayer(prompt: unknown, stylePrompt: unknown): string {
   const body = String(prompt ?? '').trim();

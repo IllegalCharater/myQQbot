@@ -647,9 +647,12 @@ export function renderImageGenSection(c) {
     <div class="checkbox-row"><input type="checkbox" id="cfg-imagegen-compile-enabled" ${g.compile?.enabled === true ? 'checked' : ''} />
       <label for="cfg-imagegen-compile-enabled">出图前先用模型把描述编译成成品提示词</label></div>
     <div class="hint">开启后，出图前会先用<strong>当前对话模型</strong>按一套成套的规则把描述编译成成品提示词
-      （结构、语序、负面词）。<strong>每张图会多一到两次模型调用</strong>，而图本身按张计费 ——
-      这就是它默认关闭的原因。<strong>关掉时出图行为与没有这个功能时完全一样</strong>。
-      编译<strong>失败不会让出图失败</strong>：会退回原始描述继续画，并在服务端日志里留一行 <code>COMPILE_*</code> 的码。</div>
+      （正面按规则 §15 的 <strong>Layout JSON</strong> 输出，负面另起一段）。<strong>每张图会多一到两次模型调用</strong>，
+      而图本身按张计费 —— 这就是它默认关闭的原因。<strong>关掉时出图行为与没有这个功能时完全一样</strong>。
+      编译<strong>失败不会让出图失败</strong>：会退回原始描述继续画，并在服务端日志里留一行 <code>COMPILE_*</code> 的码。
+      编译<strong>没有字数上限</strong>：多长算合适由规则集自己定，写长了不会被丢弃（服务端日志里那行 <code>compile=ok</code>
+      会带 <code>layout=json|text</code> 与 <code>tags=present|missing</code>：前者看模型有没有照 schema 写，
+      后者看 <code>summary.caption</code> 末尾那段主体 tag 有没有写 —— 缺了画面里的细节会被静默丢掉，只能靠这一格发现）。</div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-imagegen-compile-select" ${g.compile?.select !== false ? 'checked' : ''} />
       <label for="cfg-imagegen-compile-select">先挑节再编译（两次调用，省 token）</label></div>
     <div class="hint">规则集有十几节。勾上时先用一次<strong>很便宜</strong>的调用让它挑出这次画面用得上的那几节，
@@ -657,7 +660,6 @@ export function renderImageGenSection(c) {
       （约 2.5 万 token 输入，但规则一条不漏）。挑不出来时会自动退回全文，不会因为挑错而少给规则。</div>
     <div class="field-row">
       <div class="field"><label>编译超时（毫秒，5000～300000）</label><input type="number" id="cfg-imagegen-compile-timeout" min="5000" max="300000" step="1000" value="${esc(g.compile?.timeoutMs ?? 60000)}" /></div>
-      <div class="field"><label>编译结果上限（字符）</label><input type="number" id="cfg-imagegen-compile-maxchars" min="200" max="8000" value="${esc(g.compile?.maxChars ?? 2000)}" /></div>
     </div>
     <div class="hint">超时是<strong>两次调用加起来</strong>的死线。负面提示词那一半只有 <strong>3.0 系列</strong>收得到；
       换回 2.1 时它会被丢弃（服务端日志里有说明），正面提示词不受影响。</div>
