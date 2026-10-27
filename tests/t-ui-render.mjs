@@ -487,13 +487,16 @@ const cmdPanel = detailHtml({
     { at: now, name: '已入队', detail: '任务 abcdef12' },
     { at: now, name: '回执已发送' }
   ],
-  sent: [{ text: '已开始处理（任务 abcdef12）' }]
+  sent: [{ text: '已开始处理（任务 abcdef12）', at: now }]
 });
 ok('命令记录：详情页给出执行流程（按发生顺序）与回执',
   cmdPanel.includes('执行流程（3 步）') && cmdPanel.includes('解析链接')
   && cmdPanel.includes('已入队') && cmdPanel.includes('任务 abcdef12')
   && cmdPanel.includes('回执：已开始处理（任务 abcdef12）'),
   cmdPanel.slice(0, 400));
+ok('命令记录：回执时间按 HH:MM:SS 显示，不是毫秒时间戳',
+  /已发送到 QQ · \d{2}:\d{2}:\d{2}/.test(cmdPanel) && !cmdPanel.includes(String(now)),
+  cmdPanel.match(/已发送到 QQ[^<]*/)?.[0]);
 ok('命令记录：显示命令词与用户敲的原文',
   cmdPanel.includes('命令 /转写') && cmdPanel.includes('/转写 https://example.com/a.mp4'));
 ok('命令记录：**不**显示模型 / 调用次数 / 轮数 / 窗口那几行',
@@ -563,6 +566,42 @@ const longSay = detailHtml({
   sent: []
 });
 ok('参数摘要太长时截断（不让一行工具摘要把卡片撑爆）', longSay.includes('…') && !longSay.includes('啊'.repeat(120)));
+
+// 「模型输出了文本、但没发到 QQ」有两种成因，面板必须分开说 —— 混成一句「思考（不发送）」
+// 会让人以为机器人坏了或消息被吞了（实测反馈的正是这个）。
+const preambleTurn = detailHtml({
+  id: 'sess-text-a', chatKey: 'group:123', status: 'done', rounds: 2, model: 'm', activity: '',
+  messages: [
+    { role: 'assistant', content: '让我看看。', tool_calls: [{ function: { name: 'get_recent_messages', arguments: '{}' } }] },
+    { toolCall: { name: 'get_recent_messages', args: {}, result: '…', isError: false } }
+  ],
+  sent: [{ type: 'text', text: '没事', at: '12:00:00' }]
+});
+ok('同轮调用了工具的正文标成开场白/按协议不发送',
+  preambleTurn.includes('同一轮调用了工具') && preambleTurn.includes('让我看看')
+  && !preambleTurn.includes('这条没有发到 QQ'));
+
+const droppedTurn = detailHtml({
+  id: 'sess-text-b', chatKey: 'group:123', status: 'noreply', rounds: 1, model: 'm', activity: '',
+  messages: [{ role: 'assistant', content: '我觉得可以这样回。', droppedText: true }], sent: []
+});
+ok('纯文本结束的正文明确说"这条没有发到 QQ"',
+  droppedTurn.includes('这条没有发到 QQ') && droppedTurn.includes('我觉得可以这样回'));
+
+// 老记录没有 droppedText：没有工具调用、但有正文，同样按"没发出去"显示。
+const droppedLegacy = detailHtml({
+  id: 'sess-text-c', chatKey: 'group:123', status: 'noreply', rounds: 1, model: 'm', activity: '',
+  messages: [{ role: 'assistant', content: '老记录里的这段话。' }], sent: []
+});
+ok('升级前的老记录也能按"没有调用发送工具"判',
+  droppedLegacy.includes('这条没有发到 QQ') && droppedLegacy.includes('老记录里的这段话'));
+
+const emptyTurn = detailHtml({
+  id: 'sess-text-d', chatKey: 'group:123', status: 'noreply', rounds: 1, model: 'm', activity: '',
+  messages: [{ role: 'assistant', content: null }], sent: []
+});
+ok('空正文且没调工具时不再谎称"仅调用工具"',
+  emptyTurn.includes('模型没有输出内容') && !emptyTurn.includes('仅调用工具'));
 
 console.log('\n  ── JSON 模式：逐轮原始模型请求 ──');
 state.sessionJsonMode = 'sess-json';

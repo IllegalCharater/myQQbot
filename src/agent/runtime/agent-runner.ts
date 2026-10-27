@@ -275,14 +275,18 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
       const finalContent = typeof msg.content === 'string' ? msg.content : (msg.content ?? null);
       const finalText = assistantText(finalContent);
       const finalToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length ? msg.tool_calls : undefined;
+      // ⚠️ 两份形状**故意不同**：
+      //   • `messages` 是发回模型的请求体 —— 只许有 role/content/tool_calls。`raw` 是给
+      //     会话面板 JSON 模式看的整份原始响应，塞进请求里会让后面每一轮都多带上一轮的
+      //     完整响应（体积翻倍；严格的 OpenAI 兼容端点还可能因未知字段直接 400）。
+      //   • `session.messages` 是留档 —— 保留 `raw`，面板靠它还原模型输出。
       const assistantEntry = {
         role: 'assistant',
         content: finalContent,
-        tool_calls: finalToolCalls,
-        raw: response.raw ?? null
+        tool_calls: finalToolCalls
       };
       messages.push(assistantEntry);
-      session.messages.push(structuredClone(assistantEntry));
+      session.messages.push({ ...structuredClone(assistantEntry), raw: response.raw ?? null });
       // 上一轮刚注入过图片 → 这一轮模型的输出就是它的"读图结论"，回填到那条记录上。
       // 只挂最后一批：同一轮注入过多批时（多个读图工具）模型看的是同一个响应，
       // 同一句话挂两遍只会刷屏。标记 imageReply 让 ui 跳过这条 assistant 气泡 ——
@@ -337,6 +341,18 @@ export async function runAgent(host: AgentRunnerHost, session: SessionRecord, { 
         host.emit(EVENTS.sessionUpdate, { sessionId: session.id });
       }
       if (!toolCalls.length) {
+        // 这一轮模型只给了正文、没有任何工具调用 —— 正文**不会**发到 QQ（只有发送类工具能发）。
+        // 面板要能分清两种完全不同的成因：① 同轮还调了工具的开场白（正常）；② 模型以为这段
+        // 就是回复（群里其实什么都没收到）。所以在这里打个标记，并留一行日志 —— 后者是
+        // "机器人怎么没说话"最常见的成因，原先只能从面板上看出来，控制台一条线索都没有。
+        if (finalText.trim()) {
+          const uiEntry = session.messages[session.messages.length - 1];
+          if (uiEntry?.role === 'assistant') uiEntry.droppedText = true;
+          console.log(
+            `[agent] ${chatKey} 第 ${round + 1} 轮模型只输出文本、没有调用任何工具（本条不会发送）：`
+            + finalText.replace(/\s+/g, ' ').slice(0, 80)
+          );
+        }
         // 已经执行过工具后，模型常把普通 content 误当成“已经回复”。普通文本不能直接
         // 代发（里面可能是思考或内部说明），所以只追加一次目录里的协议纠正，再让模型
         // 自己决定调用发送工具还是保持沉默。额外加一轮额度，确保 maxRounds 边界上也能纠正。

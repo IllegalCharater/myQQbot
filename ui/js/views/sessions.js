@@ -495,20 +495,44 @@ export function renderSessionDetail(s) {
           </div>`);
       } else if (item.role === 'assistant') {
         const text = typeof item.content === 'string' ? item.content : '';
-        if (item.tool_calls && item.tool_calls.length && !text.trim()) continue; // 纯工具调用轮，卡片已展示
+        const hadTools = Array.isArray(item.tool_calls) && item.tool_calls.length > 0;
+        if (hadTools && !text.trim()) continue; // 纯工具调用轮，卡片已展示
         if (item.imageReply) continue;   // 读图那一轮的话已经显示在上面的读图卡片里了，不重复
-        html.push(`
-          <div class="bubble bubble-assistant">
-            <div class="asr-label">思考（不发送）</div>
-            ${esc(text || '（无文本输出，仅调用工具）')}
-          </div>`);
+        // 「模型输出了文本、但这段不会发到 QQ」有两种完全不同的成因，**必须分开说**：
+        //   • 同轮还调用了工具 → 它是模型的开场白/思考，按协议本来就不发送；
+        //   • 这轮没有任何工具调用 → 模型以为这段就是回复（或它只是想沉默），
+        //     系统不会代发，于是群里什么都没收到 —— 排查"机器人怎么没说话"时这条是关键。
+        // `droppedText` 由编排层打在新记录上；老记录没有这个字段，就按"有没有工具调用"判。
+        if (item.droppedText === true || (!hadTools && text.trim())) {
+          html.push(`
+            <div class="bubble bubble-assistant">
+              <div class="asr-label">模型只输出了文本、没有调用发送工具 —— 这条没有发到 QQ</div>
+              ${esc(text || '（空内容）')}
+            </div>`);
+        } else if (text.trim()) {
+          html.push(`
+            <div class="bubble bubble-assistant">
+              <div class="asr-label">模型的文本输出（同一轮调用了工具，按协议不发送）</div>
+              ${esc(text)}
+            </div>`);
+        } else {
+          html.push(`
+            <div class="bubble bubble-assistant">
+              <div class="asr-label">模型没有输出内容（安静结束）</div>
+            </div>`);
+        }
       }
     }
     // 发出的消息
     for (const sent of s.sent || []) {
+      // 普通运行的 `at` 已经是 HH:MM:SS 字符串（SendQueue 给的），而命令记录存的是
+      // 毫秒时间戳（`SessionRegistry.finishCommand`）—— 直接插值会显示成一串数字。
+      const at = sent.at == null || sent.at === ''
+        ? ''
+        : ` · ${typeof sent.at === 'number' ? fmtClock(sent.at) : sent.at}`;
       html.push(`
         <div class="sent-badge">
-          <div class="asr-label">已发送到 QQ${sent.at ? ` · ${sent.at}` : ''}</div>
+          <div class="asr-label">已发送到 QQ${at}</div>
           ${esc(sent.text)}
         </div>`);
     }

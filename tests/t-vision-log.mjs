@@ -99,6 +99,12 @@ console.log('=== 1. 读图后模型说了什么，记在会话记录里 ===');
       s.llmRequests?.[0]?.messages?.filter((m) => m.role === 'system').length === 1);
     ok('发给模型的消息里没有混进 imageReply 这个给 ui 看的字段',
       !JSON.stringify(model.requests).includes('imageReply'));
+    // `raw` 是整份原始响应，只该留在会话留档里给面板看；混进请求会让后面每一轮都多带一份
+    // 上一轮的完整响应（体积翻倍，严格端点还可能因未知字段报 400）。
+    ok('发给模型的消息里没有混进 raw 这个只给面板看的字段',
+      !model.requests.some((r) => (Array.isArray(r?.messages) ? r.messages : [])
+        .some((m) => m && typeof m === 'object' && 'raw' in m)),
+      JSON.stringify(model.requests.map((r) => (r?.messages || []).map((m) => Object.keys(m || {})))));
   }
   env.orc.abortAll();
 }

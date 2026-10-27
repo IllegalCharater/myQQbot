@@ -160,6 +160,11 @@ console.log('=== 1. 查询工具后只返回文本 → 纠正一次，再由模�
   ok('纠正后的发送工具正常执行，会话记为 done',
     session?.status === 'done' && session?.sent?.some((item) => item.text === '最近没啥'),
     JSON.stringify({ status: session?.status, sent: session?.sent }));
+  // 面板上的「这条没有发到 QQ」靠这个标记；没有它就只能靠"这一轮有没有工具调用"去猜。
+  const droppedAfterTool = (session?.messages || []).find((m) => m.role === 'assistant' && m.droppedText === true);
+  ok('工具后那段未发送的正文带 droppedText 标记',
+    !!droppedAfterTool && String(droppedAfterTool.content || '').includes('查完了'),
+    JSON.stringify(droppedAfterTool));
 }
 
 console.log('\n=== 2. 纠正后模型选择 finish → 允许保持沉默 ===');
@@ -200,6 +205,13 @@ console.log('\n=== 4. 从未调用工具的普通文本 → 保持既有行为 =
     `请求数=${requests.length}`);
   ok('既有普通文本沉默语义不变', session?.status === 'noreply' && session?.sent?.length === 0,
     JSON.stringify({ status: session?.status, sent: session?.sent }));
+  // 这一条正是"群里什么都没收到、面板上却有一段话"的情形：标记必须有，且**不能**回流给模型。
+  const droppedFirstRound = (session?.messages || []).filter((m) => m.role === 'assistant' && m.droppedText === true);
+  ok('首轮纯文本结束也带 droppedText 标记',
+    droppedFirstRound.length === 1 && String(droppedFirstRound[0].content || '').includes('普通思考文本'),
+    JSON.stringify(droppedFirstRound));
+  ok('droppedText 只给面板看，不会回到模型请求里',
+    !JSON.stringify(requests).includes('droppedText'));
 }
 
 model.close();

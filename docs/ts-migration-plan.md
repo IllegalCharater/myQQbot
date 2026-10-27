@@ -551,6 +551,26 @@ store.promptContextMaxChars = 32000
 - 面板：列表用 `kind: 'command'` 区分"运行"与"命令"（不显示 token/轮数），详情页渲染 `stages`
   时间线与回执，JSON 模式带 `command` / `commandText` / `stages`。守护是 `tests/t-command-record.mjs`。
 
+### 9.2 模型正文的去向与请求体的两份形状（2026-10-27）
+
+模型每一轮的 `content` **从不发送到 QQ** —— 只有发送类工具（`send_message` / `send_sticker` /
+`send_poke`）能产生外部动作。面板上这条记录有两种完全不同的成因，必须分开说：
+
+- **同轮还调用了工具** → 它是模型的开场白/思考，按协议本来就不发送（正常）；
+- **这一轮没有任何工具调用** → 模型以为这段就是回复（或它只是想沉默），群里其实什么都没收到。
+  这是"机器人怎么没说话"最常见的成因，编排层会在记录上打 `droppedText: true` 并留一行
+  `[agent]` 日志；面板据此显示「模型只输出了文本、没有调用发送工具 —— 这条没有发到 QQ」。
+  老记录没有这个字段，按"这一轮有没有工具调用"判。
+
+⚠️ **`messages`（发回模型的请求体）与 `session.messages`（留档）是两份形状**：前者只许有
+`role` / `content` / `tool_calls`；后者额外保留 `raw`（整份原始响应）供 JSON 模式还原。
+把 `raw` 塞进请求体会让后面每一轮都多带上一轮的完整响应（体积翻倍，严格的 OpenAI 兼容端点
+还可能因未知字段直接 400）。守护：`tests/t-vision-log.mjs`（请求里没有 `raw`）、
+`tests/t-tool-protocol.mjs`（`droppedText` 标记与"不回流"）、`tests/t-ui-render.mjs`（三种面板文案）。
+
+命令记录的回执时间存的是毫秒数（`finishCommand`），普通运行存的是 `HH:MM:SS` 字符串 ——
+面板按类型格式化，两者都不会显示成裸数字。
+
 会话面板的 JSON 模式以 `llmRequests` 为输入侧唯一真相，不再同时重复展示顶层 `systemPrompt/userPrompt`，也不再用首次输入伪造缺失的逐轮请求。
 面板元数据按 `current / response / history` 三块展示，只读取新结构字段。
 

@@ -162,7 +162,7 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
   function enqueueIngest(chatKey: string, task: () => Promise<void>): Promise<void> {
     const previous = ingestTails.get(chatKey) ?? Promise.resolve();
     // 前一条失败不能毒死整条链；它自己的 rejected promise 仍返回给调用方记录日志。
-    const current = previous.catch(() => {}).then(task);
+    const current = previous.catch(() => { }).then(task);
     ingestTails.set(chatKey, current);
     return current.finally(() => {
       // 旧任务完成时，不能误删后来已经接到 Map 末尾的新任务。
@@ -462,7 +462,10 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
 
   async function dispatch(event: OneBotEvent) {
     if (!event || typeof event !== 'object') return;
-    if (event.post_type === 'message' || event.post_type === 'message_sent') {
+    //机器人发送的消息
+    if (event.post_type === 'message_sent') return;
+    //普通消息
+    if (event.post_type === 'message') {
       // **`message_sent` 按定义就是机器人自己发的**（OneBot v11 里它镜像 `message` 事件）：
       // 发送那一刻 `SendQueue.sendTextBatch` 已经用 `appendSelf` 记过账了，这里再入库就是第二条。
       //
@@ -472,7 +475,6 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       //     —— 于是 `event.user_id ?? sender.user_id` 永远取到对方，**一条也挡不住**。
       // 实测（2026-10-20 真机反馈）：私聊里 bot 的每条消息都入库两次，而且重复那条
       // `wakeEligible: true`，会**再唤起一轮运行**（跑团开跑前 = DM 自己接自己的话）。
-      if (event.post_type === 'message_sent') return;
       const sender = isRecord(event.sender) ? event.sender : {};
       // 留 `message` 这一档的判据：有些协议端会把自消息也发成 `message`。
       // **先看 `sender.user_id`**（那才是"谁发的"），`event.user_id` 只作兜底 ——
