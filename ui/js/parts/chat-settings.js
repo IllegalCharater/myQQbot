@@ -296,7 +296,7 @@ export function renderChatSection(c) {
           不刹车就是无界增长。填一个上限后，<b>每次压缩成功</b>都会把最旧的纪要<b>整条</b>丢掉，
           直到总量降回上限以内（<b>永远保留最新的一条</b>，哪怕它自己就超上限 —— 否则把上限设小了会变成
           "纪要一生成就被删"，那比不设上限更糟）。<br />
-          丢之前会先备份存档（<code>.digestgc.bak</code>），不会动压缩回滚点 <code>.json.bak</code> 与
+          丢之前会先备份存档（<code>.digestgc.bak</code>），不会动压缩回滚点 <code>.jsonl.bak</code> 与
           面板的 <code>.panel.bak</code>。按会话各自计算，但对所有会话用同一个上限（它管磁盘占用，不参与下面的按群覆盖）。
         </div>
       </div>

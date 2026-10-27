@@ -67,7 +67,7 @@ console.log('返回:', JSON.stringify(res));
 console.log(`条数未变 (${before} → ${after}):`, before === after);
 console.log('无 digest 条目:', !m3.store.recent(key, { limit: 10000 }).some(m => m.kind === 'digest'));
 console.log('无归档文件:', !fs.existsSync(path.join(DIR, 'messages', 'archive', 'group_123.jsonl')));
-console.log('无备份文件:', !fs.existsSync(path.join(DIR, 'messages', 'group_123.json.bak')));
+console.log('无备份文件:', !fs.existsSync(path.join(DIR, 'messages', 'group_123.jsonl.bak')));
 console.log('lastCompactedAt 未写入:', m3.store.lastCompactedAt(key) === 0);
 console.log('compacting 已清空:', m3.orc.compacting.size === 0);
 fs.rmSync(DIR, { recursive: true, force: true });

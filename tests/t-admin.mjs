@@ -64,7 +64,7 @@ const del = store.deleteByLocalId(K, 3);
 ok('deleteByLocalId 返回被删条目', del?.removed?.id === 3);
 eq('剩余 id 原样（1,2,4,5）', store.recent(K, { limit: 100 }).map((m) => m.id), [1, 2, 4, 5]);
 ok('生成了 .panel.bak', !!del.backup && fs.existsSync(del.backup) && del.backup.endsWith('.panel.bak'), del.backup);
-ok('**没有**生成压缩用的 .json.bak（回滚点未被冲掉）', !fs.existsSync(path.join(DIR, 'messages', 'group_100.json.bak')));
+ok('**没有**生成压缩用的 .json.bak（回滚点未被冲掉）', !fs.existsSync(path.join(DIR, 'messages', 'group_100.jsonl.bak')));
 eq('删除不存在的 id 返回 null', store.deleteByLocalId(K, 999), null);
 
 // ── id 绝不回收 ──
@@ -477,8 +477,8 @@ eq('PATCH 请求体不是 JSON → 400', (await api2('/api/chats/group_200/messa
 const delMsg = await api2('/api/chats/group_200/messages/4', { method: 'DELETE' });
 eq('DELETE 消息 → 200', delMsg.status, 200);
 ok('返回值里带上备份文件名（UI 要告诉用户去哪找回）', String(delMsg.body.backup || '').includes('.panel.bak'), J(delMsg));
-ok('确实生成了 .panel.bak', fs.existsSync(path.join(DIR, 'messages', 'group_200.json.panel.bak')));
-ok('**没有**把压缩的 .json.bak 冲掉', !fs.existsSync(path.join(DIR, 'messages', 'group_200.json.bak')));
+ok('确实生成了 .panel.bak', fs.existsSync(path.join(DIR, 'messages', 'group_200.jsonl.panel.bak')));
+ok('**没有**把压缩的 .json.bak 冲掉', !fs.existsSync(path.join(DIR, 'messages', 'group_200.jsonl.bak')));
 eq('DELETE 不存在的 id → 404', (await api2('/api/chats/group_200/messages/999', { method: 'DELETE' })).status, 404);
 
 const got = await api2('/api/chats/group_200/messages?limit=100000');

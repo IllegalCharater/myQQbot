@@ -9,7 +9,7 @@ import { MAX_SCENARIO_ID_CHARS } from './limits.js';
  * 会话标识 → 文件名里能用的那截。
  *
  * 与 `chat/store.ts` 的 `safeName` **同形但各自一份**：两处落在**不同的目录**里，
- * 彼此不需要一致（`data/messages/group_123.json` 与 `data/trpg/group_123.json` 是两回事），
+ * 彼此不需要一致（`data/messages/group_123.jsonl` 与 `data/trpg/group_123.json` 是两回事），
  * 所以不值得为它去动 core 的路径锚点。判据是"两个东西需不需要互相读得到"，不是"长得像不像"。
  */
 export function safeName(chatKey: string): string {

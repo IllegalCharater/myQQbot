@@ -1,5 +1,19 @@
-// 每个会话（group:xxx / private:xxx）一个不断增长的 JSON 消息存储。
+// 每个会话（group:xxx / private:xxx）一个不断增长的消息存储。
 // 这是新架构的核心数据结构：模型不携带对话历史，每次运行都从这里拼接"过去状态"。
+//
+// **磁盘形态是追加日志（JSONL），不是整份 JSON**（2026-10-27 改）：
+//   `<会话>.jsonl` 一行一条记录 —— 第一行是 `{t:'snapshot', ...}`（当前完整状态），
+//   之后是 `{t:'add'|'insert'|'set'|'read'|'del', ...}` 这样的增量。
+//   这样"收到一条消息"就是**追加一行**，而不是把整份存档（含全部历史与媒体数组）
+//   重新序列化一遍 —— 那个写盘时间随存档长度线性增长，而它发生在 OneBot 的入站回调里。
+//   日志达到 `OP_COMPACT_THRESHOLD` 行（或字节数超限）时折叠回一行新快照，重放开销有上界。
+//
+//   代价（知情）：单行追加不像"临时文件 + rename"那样整份原子 —— 进程在写入中途被杀时
+//   最后一行可能是半截。加载时**跳过坏行**（前面的都还在），这是追加日志的标准取舍。
+//
+//   旧版的整份 JSON 存档（`<会话>.json`）在首次加载时自动迁移，原文件改名为
+//   `<会话>.json.migrated.bak` 保留 —— 不改名的话，用户从面板删掉会话后它会被
+//   重新当成新存档迁移回来。
 //
 // 条目格式：
 // {
@@ -31,7 +45,26 @@ interface ChatState {
   messages: ChatMessage[];
   lastCompactedAt?: number;
   archivedCount?: number;
+  /** 距最近一行 snapshot 之后追加了多少条 op（内存态，不落盘）。 */
+  opCount?: number;
+  /** 日志文件当前字节数（内存态，不落盘），用于字节阈值。 */
+  logBytes?: number;
 }
+
+/**
+ * 追加日志的一行（snapshot 之外的增量）。
+ *
+ * 每种 op 都必须是**可重放的纯数据**：加载时按顺序应用一遍，就能得到与写入时刻
+ * 完全一致的内存状态。任何"依赖当时的内存引用/下标"的写法都不行 —— 那会让重放
+ * 结果取决于日志怎么被切分。
+ */
+type ChatLogOp =
+  | { t: 'add'; msg: ChatMessage }
+  | { t: 'insert'; msg: ChatMessage }
+  | { t: 'set'; msg: ChatMessage }
+  | { t: 'read'; ids: number[] }
+  | { t: 'del'; ids: number[] };
+
 
 interface IncomingInput {
   mid?: string | number | null;
@@ -48,16 +81,44 @@ function errorText(error: unknown): unknown { return error instanceof Error ? er
 
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
 // 压缩后的原文冷归档。独立子目录 + .jsonl 后缀：listChats 的正则只认
-// group_*.json，天然扫不到这里，归档不会变成"新会话"。
+// group_*.json / group_*.jsonl，天然扫不到这里，归档不会变成"新会话"。
 const ARCHIVE_DIR = path.join(MESSAGES_DIR, 'archive');
+
+/**
+ * 追加日志的折叠阈值。
+ *
+ * 每条消息只追加一行，但**不能永远追加下去**：一次加载要把所有行重放一遍，而一条
+ * 十万行的日志会让面板第一次打开这个会话时卡住。达到阈值就把当前状态写成一行
+ * snapshot（原子替换），此后的 op 继续追加。
+ *
+ * 1000 行是"重放开销"与"重写频率"的折中：重写是 O(状态大小)，摊到 1000 条消息上
+ * 可以忽略；任何时候文件里最多 1000 条 op + 1 行快照。
+ */
+const OP_COMPACT_THRESHOLD = 1000;
+/** 单条消息可能很大（媒体数组、长文本），光按行数不够，再加一条字节数兜底。 */
+const OP_COMPACT_MAX_BYTES = 8 * 1024 * 1024;
 
 function safeName(chatKey: unknown) {
   // chatKey 形如 group:123 / private:456
   return String(chatKey).replace(/[^a-z0-9_]/gi, '_');
 }
 
+/** 主存档：追加日志（一行一条记录）。 */
 function chatFile(chatKey: string) {
+  return path.join(MESSAGES_DIR, `${safeName(chatKey)}.jsonl`);
+}
+
+/** 旧版整份 JSON 存档（2026-10-27 之前）。只为迁移而存在，新代码不再写它。 */
+function legacyChatFile(chatKey: string) {
   return path.join(MESSAGES_DIR, `${safeName(chatKey)}.json`);
+}
+
+/** 优先返回磁盘上真实存在的那一份（新存档或待迁移的旧存档）。 */
+function existingChatFile(chatKey: string): string {
+  const primary = chatFile(chatKey);
+  if (fs.existsSync(primary)) return primary;
+  const legacy = legacyChatFile(chatKey);
+  return fs.existsSync(legacy) ? legacy : '';
 }
 
 function archiveFile(chatKey: string) {
@@ -120,21 +181,152 @@ export function isWakeEligibleIncoming(m: ChatMessage | null | undefined): m is 
   return !!m && !m.self && !isSystemRecord(m) && m.wakeEligible !== false;
 }
 
+function stripBom(text: string) {
+  return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
+}
+
+/**
+ * 重放一份追加日志，得到内存状态。
+ *
+ * **坏行必须跳过，不能整份放弃**：追加写的代价就是最后一行可能是半截
+ * （进程在 write 中途被杀）。跳过它，前面的都还在 —— 这也是冷归档
+ * （`appendArchive`）的既定约定。
+ */
+function replayChatLog(chatKey: string, text: string): ChatState {
+  const state: ChatState = { chatKey, nextLocalId: 1, messages: [] };
+  let opCount = 0;
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let op: unknown;
+    try { op = JSON.parse(line); } catch { continue; }
+    if (!isRecord(op)) continue;
+    if (op.t === 'snapshot') {
+      const snapshot = normalizeState(chatKey, op);
+      state.nextLocalId = snapshot.nextLocalId;
+      state.messages = snapshot.messages;
+      state.lastCompactedAt = snapshot.lastCompactedAt;
+      state.archivedCount = snapshot.archivedCount;
+      opCount = 0;
+      continue;
+    }
+    opCount += 1;
+    applyChatOp(state, op);
+  }
+  // 正常文件的第一行一定是快照（建空存档 / 迁移 / 折叠都会写）。
+  // 没有快照 = 被手工截掉了头部：nextLocalId 只能由重放到的最大 id 推出来。
+  const maxId = state.messages.reduce((n, m) => Math.max(n, Number(m.id) || 0), 0);
+  state.nextLocalId = Math.max(state.nextLocalId, maxId + 1);
+  state.opCount = opCount;
+  return state;
+}
+
+function applyChatOp(st: ChatState, op: Record<string, unknown>) {
+  const t = String(op.t ?? '');
+  if (t === 'add' || t === 'insert' || t === 'set') {
+    const msg = normalizeMessage(op.msg);
+    if (!msg) return;
+    if (t === 'set') {
+      const at = st.messages.findIndex((m) => m.id === msg.id);
+      if (at >= 0) st.messages[at] = msg;
+    } else if (t === 'insert') {
+      // 与 insertNote 的插入规则逐字相同（按 ts 找位置）—— 两处必须一致，
+      // 否则"重放开出来的顺序"与"写入时的顺序"会不一样。
+      const at = st.messages.findIndex((m) => m.ts > msg.ts);
+      st.messages.splice(at < 0 ? st.messages.length : at, 0, msg);
+    } else {
+      st.messages.push(msg);
+    }
+    if (msg.id >= st.nextLocalId) st.nextLocalId = msg.id + 1;
+    return;
+  }
+  if (t === 'read') {
+    const ids = new Set((Array.isArray(op.ids) ? op.ids : []).map((x) => Number(x) || 0));
+    ids.delete(0);
+    if (!ids.size) return;
+    for (const m of st.messages) if (ids.has(m.id)) m.read = true;
+    return;
+  }
+  if (t === 'del') {
+    const ids = new Set((Array.isArray(op.ids) ? op.ids : []).map((x) => Number(x) || 0));
+    ids.delete(0);
+    if (!ids.size) return;
+    st.messages = st.messages.filter((m) => !ids.has(m.id));
+  }
+}
+
 function loadChat(chatKey: string): ChatState {
+  const primary = chatFile(chatKey);
+  const legacy = legacyChatFile(chatKey);
   try {
-    let text = fs.readFileSync(chatFile(chatKey), 'utf8');
-    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    const parsed: unknown = JSON.parse(text);
-    if (isRecord(parsed) && Array.isArray(parsed.messages)) return normalizeState(chatKey, parsed);
-  } catch { /* 新会话 */ }
+    if (fs.existsSync(primary)) {
+      const state = replayChatLog(chatKey, stripBom(fs.readFileSync(primary, 'utf8')));
+      state.logBytes = fs.statSync(primary).size;
+      // 迁移完成后遗留的旧文件不该再被读到（删除会话后它会把会话"复活"）。
+      retireLegacyChatFile(legacy);
+      return state;
+    }
+    if (fs.existsSync(legacy)) {
+      const state = loadLegacyChat(chatKey, legacy);
+      if (state) {
+        // 迁移失败也要把读到的数据交出去（旧文件还在，下次加载会再试一遍）。
+        // 先写新文件再挪走旧的：中途崩溃时新文件已经可用，不会丢数据。
+        try {
+          writeChatSnapshot(state);
+          retireLegacyChatFile(legacy);
+        } catch (error: unknown) {
+          console.warn(`[store] 旧存档迁移失败(${chatKey}):`, errorText(error));
+        }
+        return state;
+      }
+    }
+  } catch (error: unknown) {
+    console.warn(`[store] 读取存档失败(${chatKey}):`, errorText(error));
+  }
   return { chatKey, nextLocalId: 1, messages: [] };
 }
 
-function saveChat(state: ChatState) {
+function loadLegacyChat(chatKey: string, file: string): ChatState | null {
+  try {
+    const parsed: unknown = JSON.parse(stripBom(fs.readFileSync(file, 'utf8')));
+    if (!isRecord(parsed) || !Array.isArray(parsed.messages)) return null;
+    return normalizeState(chatKey, parsed);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 旧版整份 JSON 存档改名保留（**不删除**）：它是一份完整的历史快照，迁移出问题时还能找回。
+ *
+ * ⚠️ **必须改名**：留着原文件名的话，用户从面板删掉会话之后，下一次加载会把这个旧文件
+ * 当成"新存档"重新迁移回来 —— 与 `#dropIfEmpty` 那条"文件才是存在性权威"是同一个坑。
+ */
+function retireLegacyChatFile(legacy: string) {
+  try {
+    if (fs.existsSync(legacy)) fs.renameSync(legacy, `${legacy}.migrated.bak`);
+  } catch (error: unknown) {
+    console.warn('[store] 旧存档改名失败:', errorText(error));
+  }
+}
+
+/** 把整份状态写成一行 snapshot（临时文件 + rename，原子替换）。 */
+function writeChatSnapshot(state: ChatState) {
+  const file = chatFile(state.chatKey);
   fs.mkdirSync(MESSAGES_DIR, { recursive: true });
-  const tmp = `${chatFile(state.chatKey)}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 1), 'utf8');
-  fs.renameSync(tmp, chatFile(state.chatKey));
+  const tmp = `${file}.${process.pid}.tmp`;
+  const snapshot = {
+    t: 'snapshot',
+    chatKey: state.chatKey,
+    nextLocalId: state.nextLocalId,
+    messages: state.messages,
+    ...(Number(state.lastCompactedAt) ? { lastCompactedAt: Number(state.lastCompactedAt) } : {}),
+    ...(Number(state.archivedCount) ? { archivedCount: Number(state.archivedCount) } : {})
+  };
+  const payload = `${JSON.stringify(snapshot)}\n`;
+  fs.writeFileSync(tmp, payload, 'utf8');
+  fs.renameSync(tmp, file);
+  state.opCount = 0;
+  state.logBytes = Buffer.byteLength(payload);
 }
 
 export class ChatStore {
@@ -154,8 +346,48 @@ export class ChatStore {
     return this.chats.get(chatKey)!;
   }
 
+  /**
+   * 追加一批日志行（一条消息 = 一行）。
+   *
+   * 这是"每条消息 O(1)"的落点 —— 旧实现每次写入都把整份存档序列化一遍，
+   * 写盘时间随历史长度线性增长，而它就发生在 OneBot 的入站回调里。
+   *
+   * 写失败**照旧往上抛**（与旧的全量写法一致）：磁盘满/没权限是真事故，
+   * 静默吞掉会让用户以为消息存下来了。
+   */
+  #appendOps(st: ChatState, ops: ChatLogOp[]) {
+    if (!ops.length) return;
+    const file = chatFile(st.chatKey);
+    fs.mkdirSync(MESSAGES_DIR, { recursive: true });
+    // 新会话的第一笔写入直接落一行快照：让"文件第一行永远是快照"成为不变量
+    // （重放不必为"没有快照"单独分支），也省掉一次"追加到不存在的文件"。
+    if (!fs.existsSync(file)) {
+      writeChatSnapshot(st);
+      return;
+    }
+    const payload = `${ops.map((op) => JSON.stringify(op)).join('\n')}\n`;
+    fs.appendFileSync(file, payload, 'utf8');
+    st.opCount = (Number(st.opCount) || 0) + ops.length;
+    st.logBytes = (Number(st.logBytes) || 0) + Buffer.byteLength(payload);
+    if ((st.opCount || 0) >= OP_COMPACT_THRESHOLD || (st.logBytes || 0) >= OP_COMPACT_MAX_BYTES) {
+      this.#compactLog(st);
+    }
+  }
+
+  /**
+   * 把当前状态折叠成一行快照。**失败只记日志**：日志本身已经追加成功，
+   * 折叠只是让下一次加载快一点，不该把一条已经写进去的消息算成失败。
+   */
+  #compactLog(st: ChatState) {
+    try {
+      writeChatSnapshot(st);
+    } catch (error: unknown) {
+      console.warn('[store] 折叠存档日志失败:', errorText(error));
+    }
+  }
+
   listChats() {
-    // 从磁盘文件名还原（group_123.json -> group:123），已加载的直接带上。
+    // 从磁盘文件名还原（group_123.jsonl -> group:123），已加载的直接带上。
     //
     // **只列磁盘上有文件的会话**（`.filter(hasChat)`）。这不是多余的一步：
     // `#state()` 是"读不到就建个空对象放进缓存"的语义，所以任何人在删除之后碰一下这个
@@ -164,9 +396,10 @@ export class ChatStore {
     // 点开却是空的（实测踩到：删到最后一条后列表里那条始终在）。
     // 文件才是"这个会话存在"的唯一权威 —— 与 `DropIfEmpty` 是同一条判据。
     try {
-      const files = fs.readdirSync(MESSAGES_DIR).filter((f) => /^(group|private)_\d+\.json$/.test(f));
+      // `.jsonl?` 同时认新日志与待迁移的旧存档；`.migrated.bak` 不匹配，不会被当成会话。
+      const files = fs.readdirSync(MESSAGES_DIR).filter((f) => /^(group|private)_\d+\.jsonl?$/.test(f));
       for (const f of files) {
-        const m = /^(group|private)_(\d+)\.json$/.exec(f);
+        const m = /^(group|private)_(\d+)\.jsonl?$/.exec(f);
         if (m) this.#state(`${m[1]}:${m[2]}`);
       }
     } catch { /* 目录不存在 */ }
@@ -200,8 +433,10 @@ export class ChatStore {
       media: Array.isArray(media) ? media : []
     };
     st.messages.push(entry);
-    this.#trim(st);
-    saveChat(st);
+    const trimmed = this.#trim(st);
+    const ops: ChatLogOp[] = [{ t: 'add', msg: entry }];
+    if (trimmed.length) ops.push({ t: 'del', ids: trimmed });
+    this.#appendOps(st, ops);
     return entry;
   }
 
@@ -221,8 +456,10 @@ export class ChatStore {
       media: []
     };
     st.messages.push(entry);
-    this.#trim(st);
-    saveChat(st);
+    const trimmed = this.#trim(st);
+    const ops: ChatLogOp[] = [{ t: 'add', msg: entry }];
+    if (trimmed.length) ops.push({ t: 'del', ids: trimmed });
+    this.#appendOps(st, ops);
     return entry;
   }
 
@@ -236,8 +473,9 @@ export class ChatStore {
   drainUnread(chatKey: string) {
     const st = this.#state(chatKey);
     const unread = st.messages.filter((m) => !m.read && !m.self);
+    const changed = st.messages.filter((m) => !m.read).map((m) => m.id);
     for (const m of st.messages) m.read = true;
-    saveChat(st);
+    if (changed.length) this.#appendOps(st, [{ t: 'read', ids: changed }]);
     return unread;
   }
 
@@ -256,12 +494,12 @@ export class ChatStore {
    */
   markAllRead(chatKey: string) {
     const st = this.#state(chatKey);
-    let n = 0;
+    const changed: number[] = [];
     for (const m of st.messages) {
-      if (!m.read && !m.self) { m.read = true; n++; }
+      if (!m.read && !m.self) { m.read = true; changed.push(m.id); }
     }
-    if (n) saveChat(st);
-    return n;
+    if (changed.length) this.#appendOps(st, [{ t: 'read', ids: changed }]);
+    return changed.length;
   }
 
   unreadCount(chatKey: string) {
@@ -281,7 +519,7 @@ export class ChatStore {
    * 为什么按显式 id（而不是"再扫一遍未读"）：窗口的游标才是"看过没看过"的真相，
    * 存档只负责把它画出来。窗口给什么就写什么，存档不自己判断。
    *
-   * 与其它写方法同一套约束：按 id 找、绝不按下标、中间不夹 await、改完立刻 saveChat
+   * 与其它写方法同一套约束：按 id 找、绝不按下标、中间不夹 await、改完立刻追加日志
    * （Node 单线程下这就是原子的，一旦让出事件循环，bot 的追加就会挤进来）。
    *
    * @param {number[]} ids 要置为已读的本地 id
@@ -292,14 +530,14 @@ export class ChatStore {
     targets.delete(0);
     if (!targets.size) return 0;
     const st = this.#state(chatKey);
-    let n = 0;
+    const changed: number[] = [];
     for (const m of st.messages) {
       if (!targets.has(m.id) || m.read) continue;
       m.read = true;
-      n++;
+      changed.push(m.id);
     }
-    if (n) saveChat(st);
-    return n;
+    if (changed.length) this.#appendOps(st, [{ t: 'read', ids: changed }]);
+    return changed.length;
   }
 
   /**
@@ -392,10 +630,10 @@ export class ChatStore {
    *     就变成"纪要一生成就被删掉"的静默清空 —— 比不设上限更糟（用户会以为压缩坏了）。
    *  2. **整条删，不做半截截断**：半截的三周前纪要比没有更糟（与提示词侧同一取舍）。
    *  3. **先备份，且用独立后缀**（`.digestgc.bak`）：绝不能冲掉 `.panel.bak` 和
-   *     压缩回滚点 `.json.bak` —— 一次自动回收不该把用户的后悔药吃掉。
+   *     压缩回滚点 `.jsonl.bak` —— 一次自动回收不该把用户的后悔药吃掉。
    *
    * 与 commitCompaction 一脉相承：按显式 id 过滤，绝不按下标；绝不回退 nextLocalId
-   * （回收掉的 id 不重用，否则会与已归档条目撞车）；改完立刻 saveChat，中间不夹 await。
+   * （回收掉的 id 不重用，否则会与已归档条目撞车）；改完立刻追加一条 del 日志，中间不夹 await。
    *
    * 字数按**条目文本长度**算（不是渲染后的长度）：渲染只在注入时发生，而这里管的是
    * 存档里躺着多少字 —— 用它当尺子，用户在面板上看到的就是实际占据的量。
@@ -425,7 +663,7 @@ export class ChatStore {
     const backup = this.backupChatFileTo(chatKey, 'digestgc');
     const kill = new Set(dropped.map((m) => m.id));
     st.messages = st.messages.filter((m) => !kill.has(m.id));
-    saveChat(st);
+    this.#appendOps(st, [{ t: 'del', ids: [...kill] }]);
     return { dropped, keptChars: chars, totalChars, backup };
   }
 
@@ -455,7 +693,7 @@ export class ChatStore {
         if (x && x.url && !seen.has(x.url)) { m.media.push(x); seen.add(x.url); }
       }
     }
-    saveChat(st);
+    this.#appendOps(st, [{ t: 'set', msg: m }]);
     return true;
   }
 
@@ -471,7 +709,7 @@ export class ChatStore {
   //     面板拿到的下标一转眼就是错的。
   //  2. **绝不回退 nextLocalId** —— 它被持久化，回退会让 UI 的 data-midrow、
   //     findByLocalId 与已归档条目撞车。
-  //  3. **读改写之间不夹 await** —— 下面每个方法都是同步改完立刻 saveChat。
+  //  3. **读改写之间不夹 await** —— 下面每个方法都是同步改完立刻追加日志。
   //     Node 单线程下这就是原子的；一旦中间让出事件循环，bot 的追加就会挤进来。
 
   /**
@@ -483,8 +721,8 @@ export class ChatStore {
    */
   backupChatFileTo(chatKey: string, tag = 'panel') {
     try {
-      const src = chatFile(chatKey);
-      if (!fs.existsSync(src)) return '';
+      const src = existingChatFile(chatKey);
+      if (!src) return '';
       const dest = `${src}.${tag}.bak`;
       fs.copyFileSync(src, dest);
       return dest;
@@ -505,7 +743,7 @@ export class ChatStore {
     const m = st.messages.find((x) => x.id === Number(localId));
     if (!m) return null;
     if (text != null) m.text = String(text);
-    saveChat(st);
+    this.#appendOps(st, [{ t: 'set', msg: m }]);
     return m;
   }
 
@@ -513,11 +751,11 @@ export class ChatStore {
    * 删掉**整个会话的存档**（面板"清空这个群/私聊的存档"用）。
    *
    * 三件事都要做，缺一件就会留下"看着删了、其实还在"的残留：
-   *   1. 删主存档文件（`data/messages/group_123.json`）；
+   *   1. 删主存档文件（`data/messages/group_123.jsonl`）；
    *   2. 删**冷归档**（`data/messages/archive/group_123.jsonl`，历史压缩后的原文）——
    *      只删主文件的话，那些原文还在磁盘上，而这个页面上看不到它，用户会以为删干净了；
    *   3. 把内存里那份从 `chats` 拿掉。**留着的话下一次 `#state` 会把旧对象还给调用方、
-   *      并在任何一次写入时 `saveChat` 把刚删掉的文件原样写回磁盘** —— 于是"删除成功"
+   *      并在任何一次写入时把刚删掉的文件重新写出来** —— 于是"删除成功"
    *      在下一次有人说话时被静默撤销。
    *
    * 删之前备份一份（沿用 `backupChatFileTo` 的"只保留最近一次"约定），因为这是面板上
@@ -540,18 +778,21 @@ export class ChatStore {
     } catch (error: unknown) {
       console.warn(`[store] 冷归档删除失败(${chatKey}):`, errorText(error));
     }
-    try {
-      fs.rmSync(chatFile(chatKey), { force: true });
-    } catch (error: unknown) {
-      console.warn(`[store] 存档删除失败(${chatKey}):`, errorText(error));
+    // 新旧两份都删（`.migrated.bak` 是备份，按既有约定保留）。
+    for (const file of [chatFile(chatKey), legacyChatFile(chatKey)]) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch (error: unknown) {
+        console.warn(`[store] 存档删除失败(${chatKey}):`, errorText(error));
+      }
     }
     return { removed: wasCached || archiveRemoved || !!backup, removedMessages: count, backup, archiveRemoved };
   }
 
-  /** 这个会话在磁盘上有没有存档（面板"新建会话"要先判重）。 */
+  /** 这个会话在磁盘上有没有存档（面板"新建会话"要先判重）。旧格式同样算"有"。 */
   hasChat(chatKey: string) {
     try {
-      return fs.existsSync(chatFile(chatKey));
+      return fs.existsSync(chatFile(chatKey)) || fs.existsSync(legacyChatFile(chatKey));
     } catch {
       return false;
     }
@@ -569,7 +810,7 @@ export class ChatStore {
     if (!/^(group|private):\d+$/.test(chatKey)) throw new Error('会话必须是 group:<群号> 或 private:<QQ号>');
     if (this.hasChat(chatKey)) return { created: false, chatKey };
     const state = this.#state(chatKey);
-    saveChat(state);
+    writeChatSnapshot(state);
     return { created: true, chatKey };
   }
 
@@ -587,10 +828,13 @@ export class ChatStore {
     const st = this.chats.get(chatKey);
     if (!st || st.messages.length > 0) return false;
     this.chats.delete(chatKey);
-    try {
-      fs.rmSync(chatFile(chatKey), { force: true });
-    } catch (error: unknown) {
-      console.warn(`[store] 空存档删除失败(${chatKey}):`, errorText(error));
+    // 新旧两份都删：旧格式没迁移到一半就删空时，留着它会让会话下一次加载又活过来。
+    for (const file of [chatFile(chatKey), legacyChatFile(chatKey)]) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch (error: unknown) {
+        console.warn(`[store] 空存档删除失败(${chatKey}):`, errorText(error));
+      }
     }
     return true;
   }
@@ -614,7 +858,7 @@ export class ChatStore {
     const remaining = st.messages.length;
     // 删到一条不剩时整份删掉：留个空文件会让存档列表里多一个"点开全空"的条目。
     const chatDropped = this.#dropIfEmpty(chatKey);
-    if (!chatDropped) saveChat(st);
+    if (!chatDropped) this.#appendOps(st, [{ t: 'del', ids: [removed.id] }]);
     return { removed, backup, chatDropped, remaining };
   }
 
@@ -644,7 +888,7 @@ export class ChatStore {
     };
     const at = st.messages.findIndex((m) => m.ts > entry.ts);
     st.messages.splice(at < 0 ? st.messages.length : at, 0, entry);
-    saveChat(st);
+    this.#appendOps(st, [{ t: 'insert', msg: entry }]);
     return entry;
   }
 
@@ -685,8 +929,10 @@ export class ChatStore {
       ...(extra || {})
     };
     st.messages.push(entry);
-    this.#trim(st);
-    saveChat(st);
+    const trimmed = this.#trim(st);
+    const ops: ChatLogOp[] = [{ t: 'add', msg: entry }];
+    if (trimmed.length) ops.push({ t: 'del', ids: trimmed });
+    this.#appendOps(st, ops);
     return entry;
   }
 
@@ -930,8 +1176,8 @@ export class ChatStore {
    */
   backupChatFile(chatKey: string) {
     try {
-      const src = chatFile(chatKey);
-      if (!fs.existsSync(src)) return '';
+      const src = existingChatFile(chatKey);
+      if (!src) return '';
       const dest = `${src}.bak`;
       fs.copyFileSync(src, dest);
       return dest;
@@ -975,10 +1221,11 @@ export class ChatStore {
     const at = st.messages.findIndex((m) => m.ts > digestEntry.ts);
     st.messages.splice(at < 0 ? st.messages.length : at, 0, digestEntry);
 
-    // 冷却状态顺带记在主文件里（随 saveChat 免费持久化，无需新文件）
+    // 冷却状态顺带记在主文件里（随快照免费持久化，无需新文件）
     st.lastCompactedAt = Date.now();
     st.archivedCount = (Number(st.archivedCount) || 0) + removed;
-    saveChat(st);
+    // 压缩既删除又重排（摘要按 ts 插回中间），日志增量表达不了 —— 直接写一行新快照。
+    writeChatSnapshot(st);
     return { removed, remaining: st.messages.length, backup, archive: digestEntry?.digest?.archivedFile || '' };
   }
 
@@ -989,8 +1236,9 @@ export class ChatStore {
 
   #trim(st: ChatState) {
     if (this.maxPerChat > 0 && st.messages.length > this.maxPerChat) {
-      st.messages.splice(0, st.messages.length - this.maxPerChat);
+      return st.messages.splice(0, st.messages.length - this.maxPerChat).map((m) => m.id);
     }
+    return [] as number[];
   }
 }
 

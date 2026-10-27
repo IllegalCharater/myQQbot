@@ -385,9 +385,9 @@ ok('totalChars 报的是回收前的量（回执里要说清丢了多少）', gc
 ok('普通消息一条没动', store.recent(GC, { limit: 100 }).some((m) => m.text === '普通消息' && m.id === 4));
 ok('回收掉的 id 不重用（下一条新消息拿到的是 5）', store.appendIncoming(GC, { mid: 'x', senderName: '甲', text: '新的一条' }).id === 5);
 ok('备份用的是独立后缀，没冲掉 .panel.bak / 压缩回滚点',
-  fs.existsSync(path.join(DIR, 'messages', 'group_555.json.digestgc.bak'))
-  && !fs.existsSync(path.join(DIR, 'messages', 'group_555.json.panel.bak'))
-  && !fs.existsSync(path.join(DIR, 'messages', 'group_555.json.bak')));
+  fs.existsSync(path.join(DIR, 'messages', 'group_555.jsonl.digestgc.bak'))
+  && !fs.existsSync(path.join(DIR, 'messages', 'group_555.jsonl.panel.bak'))
+  && !fs.existsSync(path.join(DIR, 'messages', 'group_555.jsonl.bak')));
 
 // 规则 1：剩最后一条就收手，哪怕它自己远超上限
 const gcTiny = store.dropOldestDigests(GC, { maxChars: 1 });

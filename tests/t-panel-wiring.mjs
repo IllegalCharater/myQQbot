@@ -564,7 +564,7 @@ ok('存档上限的钳位兜底是 0（跟 maxChars 的 8000 相反：那个不�
 ok('hint 说清这一项管的是存档、不是提示词（两笔账）',
   js.includes('这一项管的不是提示词') && js.includes('永远保留最新的一条'));
 ok('hint 点名了备份后缀，让用户知道后悔药在不在这儿',
-  js.includes('.digestgc.bak') && js.includes('.json.bak'));
+  js.includes('.digestgc.bak') && js.includes('.jsonl.bak'));
 ok('分群表里不带这个字段（全局限定：它管磁盘占用，不是"这个群怎么说话"）',
   !/m\[gid\] = \{[\s\S]{0,300}?maxKeepChars/.test(js) && js.includes('不参与下面的按群覆盖'));
 ok('分群表用 __replace__（普通深合并删不掉键，「清除该群」就永远清不掉）',

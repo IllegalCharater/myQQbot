@@ -299,8 +299,12 @@ const cardIngest = createIngest({
   getConfig: () => commandConfig,
   log: () => {}
 });
+// ⚠️ 独立群号：引用解析现在**先查本地存档**，而上面 group:123 里已经有一条
+// message_id=789 的记录（那句 `/转写` 自己）。同一个群号复用 mid 会让这条用例
+// 命中本地那条、不再去 getMsg 取卡片 —— QQ 里 mid 在同群是唯一的，这是夹具撞车，
+// 不是实现问题。
 await cardIngest.handle({
-  post_type: 'message', message_type: 'group', group_id: 123, user_id: 456,
+  post_type: 'message', message_type: 'group', group_id: 137, user_id: 456,
   message_id: 790, sender: { user_id: 456, nickname: '测试者' },
   message: [
     { type: 'reply', data: { id: '789' } },
@@ -320,8 +324,9 @@ ok('回复 B 站视频卡片发送 /转写，会从被引用卡片提取链接�
 // ⚠️ 每个用例一个**独立的群号**：`new ChatStore()` 会从磁盘 `group_<id>.json` 重新载入，
 // 同一个群号在同一个临时数据目录里是共享的 —— 存档里于是有多条 mid=800，而 `findByMid`
 // 返回**最早**那条，后面的用例会拿到前面用例留下的条目（实测：断言读到的是 `[图片]`）。
-async function replyIngestFor(groupId, { replyId = '789', getMsg, segments }) {
+async function replyIngestFor(groupId, { replyId = '789', getMsg, segments, prepare } = {}) {
   const store = new ChatStore();
+  if (typeof prepare === 'function') prepare(store);
   const forwarded = [];
   const ingest = createIngest({
     commands,
@@ -371,6 +376,48 @@ const longPreview = quotedOf(await replyIngestFor(133, {
 ok('引用预览按上限截断，不把整段正文搬进每一条引用它的消息',
   String(longPreview?.reply?.text).length === 300,
   String(longPreview?.reply?.text).length);
+
+// ── 本地优先（2026-10-27） ───────────────────────────────────────────────
+// 被引用的消息绝大多数就在本进程刚存下来的历史里，而 getMsg 是一次网络往返 ——
+// 入站链按会话串行 await，省掉的每一次往返都直接变成这个群后续消息的延迟。
+let localReplyCalls = 0;
+const localReply = quotedOf(await replyIngestFor(134, {
+  prepare: (store) => store.appendIncoming('group:134', {
+    mid: 789, ts: Date.now() - 1000, senderId: '777', senderName: '清三', text: '被引用的原话'
+  }),
+  getMsg: async () => { localReplyCalls += 1; throw new Error('本地有就不该打协议端'); }
+}));
+ok('★ 被引用消息在本地存档里时直接取本地（一次协议端请求都不发）',
+  localReplyCalls === 0 && localReply?.reply?.mid === '789'
+  && localReply?.reply?.sender === '清三' && localReply?.reply?.text === '被引用的原话',
+  JSON.stringify({ calls: localReplyCalls, reply: localReply?.reply }));
+
+// 自己发的消息在存档里叫「我」（appendSelf 的约定）—— 这正是模型判断
+// "这条引用的是我自己"的判据，比协议端回的群名片更直接。
+const selfReply = quotedOf(await replyIngestFor(135, {
+  prepare: (store) => store.appendSelf('group:135', { mid: '789', text: '我自己说过的' }),
+  getMsg: async () => { throw new Error('自己的发言同样在本地'); }
+}));
+ok('★ 引用 bot 自己的发言也走本地，发送者显示为「我」',
+  selfReply?.reply?.sender === '我' && selfReply?.reply?.text === '我自己说过的',
+  JSON.stringify(selfReply?.reply));
+
+// 展开过的合并转发必须回退协议端：存档里是展开后的正文，而引用预览的约定是
+// 只留占位符（展开是模型用 read_forward 主动做的事）。判据是展开产物那句前缀。
+let fwdReplyCalls = 0;
+const fwdReply = quotedOf(await replyIngestFor(136, {
+  prepare: (store) => store.appendIncoming('group:136', {
+    mid: 789, ts: Date.now() - 1000, senderId: '777', senderName: '清三',
+    text: '[合并转发 共2条]\n甲: 一\n乙: 二', media: [{ kind: 'forward', id: 'res-1' }]
+  }),
+  getMsg: async () => {
+    fwdReplyCalls += 1;
+    return { sender: { nickname: '清三' }, message: [{ type: 'forward', data: { id: 'res-1' } }] };
+  }
+}));
+ok('★ 展开过的合并转发仍回退协议端（预览保持 [合并转发聊天记录] 占位符）',
+  fwdReplyCalls === 1 && fwdReply?.reply?.text === '[合并转发聊天记录]',
+  JSON.stringify({ calls: fwdReplyCalls, reply: fwdReply?.reply }));
 
 // 真实入站契约：把**原始段**换成本轮新增的两种形态，其余断言与上面的老卡片完全一致。
 // 这三种形态的差异只在"链接藏在哪个字段/哪种段里"（老卡片 jumpUrl / 小程序 qqdocurl / xml 正文），

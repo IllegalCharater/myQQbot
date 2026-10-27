@@ -152,8 +152,8 @@ ok('摘要不许手改（后端 400；这条消息不是摘要，用 kind 判定
 const delRes = await call(`/api/chats/${CK}/messages/2`, { method: 'DELETE' });
 ok('DELETE 删消息', delRes.status === 200 && delRes.body.removed?.id === 2, `status=${delRes.status}`);
 ok('返回备份文件名（UI 上要写清去哪找回）', /\.panel\.bak$/.test(delRes.body.backup || ''), String(delRes.body.backup));
-ok('.panel.bak 真的生成了', fs.existsSync(path.join(DIR, 'messages', `${CK}.json.panel.bak`)));
-ok('压缩回滚点 .json.bak 没有被面板冲掉', !fs.existsSync(path.join(DIR, 'messages', `${CK}.json.bak`)));
+ok('.panel.bak 真的生成了', fs.existsSync(path.join(DIR, 'messages', `${CK}.jsonl.panel.bak`)));
+ok('压缩回滚点 .json.bak 没有被面板冲掉', !fs.existsSync(path.join(DIR, 'messages', `${CK}.jsonl.bak`)));
 ok('删完真的少了', (await call(`/api/chats/${CK}/messages`)).body.messages.length === 2);
 
 console.log('\n═══ 历史摘要：接口给的 digestStatus 就是"实际会注入什么" ═══');

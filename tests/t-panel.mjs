@@ -132,7 +132,7 @@ const ok = (label, cond, extra = '') => {
 };
 console.log('\n摘要存档回收（真压缩两轮）：');
 const GCKEY = 'group:456';
-const gcBase = path.join(DIR, 'messages', 'group_456.json');
+const gcBase = path.join(DIR, 'messages', 'group_456.jsonl');
 const gcAppend = (from, to) => {
   for (let i = from; i <= to; i++) store.appendIncoming(GCKEY, { mid: i, ts: base + i * 1000, senderId: '555', senderName: '张三', text: `第${i}条消息` });
   store.drainUnread(GCKEY);
@@ -184,7 +184,7 @@ console.log('\n管理端删除与存储上限：');
 
 // ① ChatStore.removeChat：存档 + 冷归档一起走，且留备份
 const DELKEY = 'group:789';
-const delBase = path.join(DIR, 'messages', 'group_789.json');
+const delBase = path.join(DIR, 'messages', 'group_789.jsonl');
 const delArchive = path.join(DIR, 'messages', 'archive', 'group_789.jsonl');
 for (let i = 1; i <= 5; i++) {
   store.appendIncoming(DELKEY, { mid: 900 + i, ts: base + i * 1000, senderId: '555', senderName: '张三', text: `待删${i}` });
@@ -208,7 +208,7 @@ const HTTPDEL = 'group:790';
 for (let i = 1; i <= 3; i++) {
   store.appendIncoming(HTTPDEL, { mid: 800 + i, ts: base + i * 1000, senderId: '555', senderName: '张三', text: `HTTP待删${i}` });
 }
-const httpDelFile = path.join(DIR, 'messages', 'group_790.json');
+const httpDelFile = path.join(DIR, 'messages', 'group_790.jsonl');
 ok('前置：HTTP 删除目标的存档在磁盘上', fs.existsSync(httpDelFile));
 const httpDel = await (await fetch(`http://127.0.0.1:${port}/api/chats/group_790`, { method: 'DELETE' })).json();
 ok('DELETE /api/chats/<key> 回报删掉的条数与剩余 0',
@@ -329,7 +329,7 @@ ok('对照：还剩成员时目录保留、列表里仍在（删一个成员 ≠
 // 留个空文件的话 `listChats()`（扫文件名）会继续列出它，存档页上就多出一个
 // "看似有、点开全空"的条目。
 const DROPKEY = 'group:793';
-const dropFile = path.join(DIR, 'messages', 'group_793.json');
+const dropFile = path.join(DIR, 'messages', 'group_793.jsonl');
 store.appendIncoming(DROPKEY, { mid: 7001, ts: base, senderId: '555', senderName: '张三', text: '唯一一条' });
 store.drainUnread(DROPKEY);
 const oneMsg = store.recent(DROPKEY, { limit: 10 })[0];
@@ -350,22 +350,23 @@ ok('删干净之后，存档列表里不再列出它（缓存里的空对象不�
 
 // 对照：还有别的消息时**不能**删文件 —— 否则删一条就等于清空整个会话
 const KEEPKEY = 'group:794';
-const keepFile = path.join(DIR, 'messages', 'group_794.json');
+const keepFile = path.join(DIR, 'messages', 'group_794.jsonl');
 for (let i = 1; i <= 3; i++) store.appendIncoming(KEEPKEY, { mid: 7100 + i, ts: base + i, senderId: '555', senderName: '张三', text: `留${i}` });
 store.drainUnread(KEEPKEY);
 const keepFirst = store.recent(KEEPKEY, { limit: 10 })[0];
 const keepOne = await (await fetch(`http://127.0.0.1:${port}/api/chats/group_794/messages/${keepFirst.id}`, { method: 'DELETE' })).json();
-// ⚠️ 这里必须**读盘**校验，不能查本套件那个 `store` 实例：管理端走的是 app 自己的
+// 这里必须**读盘**校验，不能查本套件那个 `store` 实例：管理端走的是 app 自己的
 // ChatStore（另一个实例，有自己的内存缓存），而本套件的实例还留着删之前的 3 条。
 // 查实例会拿到过期的 3（本套件初版就这么假红了一条）。
-const keepOnDisk = JSON.parse(fs.readFileSync(keepFile, 'utf8')).messages.length;
+// 存档现在是追加日志（JSONL），所以"读盘"= 起一个**全新实例**重放日志。
+const keepOnDisk = new ChatStore().recent(KEEPKEY, { limit: 100 }).length;
 ok('对照：还有别的消息时存档文件保留（删一条不等于清空整个会话）',
   keepOne.ok === true && fs.existsSync(keepFile) && keepOnDisk === 2 && keepOne.remaining === 2,
   JSON.stringify({ exists: fs.existsSync(keepFile), onDisk: keepOnDisk, remaining: keepOne.remaining }));
 
 // ⑦ 新建会话：一次建出空存档与空记忆，且能出现在两个列表里
 const NEWKEY = 'private:556677';
-const newArchive = path.join(DIR, 'messages', 'private_556677.json');
+const newArchive = path.join(DIR, 'messages', 'private_556677.jsonl');
 const newMemDir = path.join(DIR, 'memory', 'private_556677');
 const made = await (await fetch(`http://127.0.0.1:${port}/api/chats/private_556677`, { method: 'POST', body: '{}' })).json();
 ok('POST /api/chats/<key> 同时建出空存档与空记忆（只建一份的话另一个页签里找不到它）',

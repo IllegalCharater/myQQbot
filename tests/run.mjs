@@ -33,6 +33,7 @@ const ASSERT = [
   't-sticker.mjs',         // 表情包（含缓存）
   't-smoke.mjs',           // 端到端冒烟（真起 app 再 fetch）
   't-panel.mjs',           // 面板接口
+  't-chat-log.mjs',        // 存档层追加日志（一行一条 op、重放确定性、旧 JSON 迁移、折叠）
   't-panel-wiring.mjs',    // 面板静态接线（ui/* 文本层）
   't-sse-project.mjs',     // SSE 帧投影（event-projector 纯函数，逐字节）
   't-events.mjs',          // 事件名一致性（发射点必须用 EVENTS.*，词表无空转名字）

@@ -195,11 +195,34 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
    * `[引用 清三：[图片]]` —— `[图片]` 是所有图片共用的占位符，而 `get_message_images` 只认
    * 消息 id，于是模型只能在提示词里可见的 id 里瞎挑（实测踩到：挑中同一发送者的另一张图）。
    *
+   * **先查本地存档，查不到再问协议端**（2026-10-27）。被引用的消息绝大多数就在本进程刚
+   * 存下来的历史里，而 `getMsg` 是一次网络往返；整条入站链是按会话串行 await 的，
+   * 每一次往返都直接加在这个群后续消息的延迟上。
+   *
+   * 两条边界：
+   *  ① **合并转发展开过的条目必须回退协议端**：存档里那份是展开后的正文，而引用预览的
+   *     约定是只留占位符 —— 展开是模型用 `read_forward` 主动做的事（见下面 segmentsToText
+   *     那段注释）。判据是展开产物那句 `[合并转发 共N条]`。
+   *  ② 本地没有（机器人重启后历史被裁掉、被屏蔽的人发的话根本没入库、引用的是很久以前的
+   *     消息）时照常走 `getMsg`，行为与改动前一致。
+   *
    * ctx 传当前会话的 kind/id：QQ 里引用只可能发生在同一个会话内，所以被引用消息里的
    * @ 就是本群成员，能正常解析成群名片（与主消息路径的行为保持一致）。
    */
   async function resolveReply(messageId: unknown, { kind = '', id = '' }: { kind?: string; id?: string } = {}) {
     const mid = String(messageId ?? '');
+    const chatKey = kind && id ? `${kind}:${id}` : '';
+    const local = chatKey ? store.findByMid(chatKey, mid) : null;
+    if (local && !/^\[合并转发 共\d+条\]/.test(String(local.text || ''))) {
+      return {
+        mid,
+        // 自己的发言在存档里叫「我」（`appendSelf` 的约定），对模型来说这正是
+        // "这条是你自己说的"的唯一判据 —— 比协议端回的那个群名片更直接。
+        sender: String(local.senderName || local.senderId || ''),
+        text: String(local.text || '').slice(0, REPLY_PREVIEW_MAX),
+        media: (Array.isArray(local.media) ? local.media : []).map((item) => ({ ...item }))
+      };
+    }
     try {
       const msg = await onebot.getMsg(messageId);
       const sender = isRecord(msg) && isRecord(msg.sender) ? msg.sender : {};
