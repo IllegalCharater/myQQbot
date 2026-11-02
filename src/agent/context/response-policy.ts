@@ -89,6 +89,12 @@ export function evaluateWindowTrigger({ entries, identity = {}, policy, roll }: 
     const reason = sub === 'suggest' ? '行动建议' : sub === 'advance' ? '推进提示' : '跑团笔记';
     return { responseTier: 0, reason, shouldRespond: true };
   }
+  // 长任务进度（漫画先接入）：它不是结局，但同样必须让模型看到 —— 否则"还在跑"的
+  // 提示会被低档位静默消费，模型只会在任务完成时才第一次知道它存在。
+  // 排在结局之后：同一批里既有进度又有完成条目时，reason 应该记**结局**（进度只是旁支）。
+  if (entries.some((entry) => entry?.kind === 'media-progress')) {
+    return { responseTier: 0, reason: '任务进度', shouldRespond: true };
+  }
   if (tier >= 2 && hitKeyword(texts.join('\n'), policy.keywords)) return { responseTier: 2, reason: '关键词命中', shouldRespond: true };
   const rollValue = Number(roll);
   const randomHit = rollValue < Math.max(0, Math.min(100, Number(policy.randomPercent) || 0));

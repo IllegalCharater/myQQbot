@@ -3,6 +3,7 @@
 // 这一层**不 import 本模块任何文件**：它是所有别的文件的公共依赖，一旦它反向依赖
 // 就会形成环（`errors.ts` 要用 `FailureStage`，`primitives.ts` 要用 `TranscriptionError`…）。
 import type { AppConfig } from '../../core/config.js';
+import type { OutgoingMedia } from '../../core/outgoing-media.js';
 
 export type TranscriptionStatus = 'queued' | 'extracting' | 'uploading' | 'recognizing' | 'done' | 'failed';
 export type FailureStage = 'validation' | 'extracting' | 'uploading' | 'recognizing';
@@ -154,4 +155,9 @@ export interface QueueDeps {
   operations?: QueueOperations;
   /** 见 `TranscriptSink`。缺省时 assisted 任务退回 standalone 的投递行为（贴文本 / 贴失败文案）。 */
   deliverTranscript?: TranscriptSink | null;
+  /**
+   * 出站媒体记账：全文文件上传成功后调用（由宿主接到 `ChatStore.appendSelfMedia`）。
+   * 缺省 = 不记（测试/未接线宿主）—— 文件仍然会正常上传，只是存档里没有这一条。
+   */
+  recordMedia?: (chatKey: string, media: OutgoingMedia, text?: string) => void;
 }

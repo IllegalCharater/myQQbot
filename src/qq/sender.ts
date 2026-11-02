@@ -4,6 +4,8 @@
 // - Markdown → 纯文本、QQ 硬长度切分、CQ 转义
 // - 发出的每一条记进 ChatStore（self=true，供下一次运行当"自己的发言"）
 import { getConfig, DEFAULT_CONFIG } from '../core/config.js';
+import { outgoingMediaText } from '../core/outgoing-media.js';
+import type { OutgoingMedia } from '../core/outgoing-media.js';
 import { sleep, randInt, createSendChain, escapeCqText, formatClockTime } from '../core/util.js';
 import { SEGMENT_UPLOAD_TIMEOUT_MS } from './onebot.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
@@ -26,7 +28,9 @@ interface OneBotSender {
    */
   call(action: string, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
 }
-interface ChatStoreWriter { appendSelf(chatKey: string, input: { text: unknown; ts?: number; mid?: string | number | null }): unknown }
+interface ChatStoreWriter {
+  appendSelf(chatKey: string, input: { text: unknown; ts?: number; mid?: string | number | null; media?: OutgoingMedia[] }): unknown;
+}
 type SendChain = <T>(task: () => Promise<T>) => Promise<T>;
 function messageIdOf(data: unknown): string | number | null {
   const value = data && typeof data === 'object' && 'message_id' in data ? data.message_id : null;
@@ -215,7 +219,13 @@ export class SendQueue {
       });
       const ts = Date.now();
       const messageId = messageIdOf(data);
-      this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: messageId });
+      const stickerName = sticker.desc || sticker.localNote || sticker.id;
+      this.store.appendSelf(chatKey, {
+        text: outgoingMediaText({ kind: 'sticker', name: stickerName }),
+        ts,
+        mid: messageId,
+        media: [{ kind: 'sticker', name: stickerName, ...(sticker.url ? { url: sticker.url } : {}) }]
+      });
       this.onSent?.({ chatKey, text: `[表情包]`, messageId, sticker: sticker.id });
       return { message_id: messageId };
     });
@@ -250,7 +260,14 @@ export class SendQueue {
       });
       const ts = Date.now();
       const messageId = messageIdOf(data);
-      this.store.appendSelf(chatKey, { text: '[图片]', ts, mid: messageId });
+      const target = String(file);
+      this.store.appendSelf(chatKey, {
+        text: outgoingMediaText({ kind: 'image' }),
+        ts,
+        mid: messageId,
+        // 本机临时路径发完就删，存下来只是一条死路径；只有公网地址值得留。
+        media: [{ kind: 'image', ...(/^https?:\/\//i.test(target) ? { url: target } : {}) }]
+      });
       this.onSent?.({ chatKey, text: '[图片]', messageId });
       return { message_id: messageId };
     })();
@@ -293,7 +310,13 @@ export class SendQueue {
         );
         const ts = Date.now();
         const messageId = messageIdOf(data);
-        this.store.appendSelf(chatKey, { text: `[文件:${name}]`, ts, mid: messageId });
+        this.store.appendSelf(chatKey, {
+          text: outgoingMediaText({ kind: 'file', name }),
+          ts,
+          mid: messageId,
+          // 临时文件在 finally 里删掉，所以只留名字、大小与协议端给的 id。
+          media: [{ kind: 'file', name, size: Buffer.byteLength(content, 'utf8'), ...(messageId != null ? { fileId: String(messageId) } : {}) }]
+        });
         this.onSent?.({ chatKey, text: `[文件:${name}]`, messageId });
         return { message_id: messageId };
       } finally {

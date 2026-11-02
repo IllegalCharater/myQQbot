@@ -8,5 +8,8 @@ export * from './types.js';
 export * from './commands.js';
 export * from './search.js';
 export * from './queue.js';
+// 上传窗口对**网络层**也是约束：全局 dispatcher 的 headers/body 超时必须比它长
+// （见 `web/app.ts`），否则 undici 会在我们的死线之前把请求掐掉。
+export { UPLOAD_TIMEOUT_MS } from './shared.js';
 
 

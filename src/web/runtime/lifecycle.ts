@@ -33,7 +33,7 @@ import type { AgentControlPort } from '../../agent/runtime/control-port.js';
 import type { OneBotClient } from '../../qq/onebot.js';
 import type { SendQueue } from '../../qq/sender.js';
 import type { ChatStore } from '../../chat/store.js';
-import type { JmcomicCompletionSink } from '../../media/jmcomic/index.js';
+import type { JmcomicCompletionSink, JmcomicProgressSink } from '../../media/jmcomic/index.js';
 
 /** jmcomic 队列需要的运行时（与 `media/jmcomic.ts` 的 `JmRuntime` 结构一致）。 */
 export interface LifecycleJmRuntime {
@@ -41,6 +41,7 @@ export interface LifecycleJmRuntime {
   sender: SendQueue;
   store: ChatStore;
   onCompleted: JmcomicCompletionSink;
+  onProgress?: JmcomicProgressSink;
 }
 
 /**
@@ -63,7 +64,12 @@ export interface LifecycleDeps {
   sender: SendQueue;
   store: ChatStore;
   priceFeed: { init(url: string): void; stop(): void };
-  jmcomic: { init(runtime: LifecycleJmRuntime): void; stop(): void; onCompleted: JmcomicCompletionSink };
+  jmcomic: {
+    init(runtime: LifecycleJmRuntime): void;
+    stop(): void;
+    onCompleted: JmcomicCompletionSink;
+    onProgress?: JmcomicProgressSink;
+  };
   transcription: { start(): void | Promise<void>; stop(): void | Promise<void> };
   imageGen: { start(): void | Promise<void>; stop(): void | Promise<void> };
   hotSearch: { start(): void | Promise<void>; stop(): void | Promise<void> };
@@ -168,7 +174,8 @@ export const LIFECYCLE: readonly LifecycleEntry[] = [
       onebot: deps.onebot,
       sender: deps.sender,
       store: deps.store,
-      onCompleted: deps.jmcomic.onCompleted
+      onCompleted: deps.jmcomic.onCompleted,
+      ...(deps.jmcomic.onProgress ? { onProgress: deps.jmcomic.onProgress } : {})
     }),
     stop: (deps) => deps.jmcomic.stop()
   },

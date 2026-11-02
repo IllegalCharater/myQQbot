@@ -34,6 +34,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../core/config.js';
+import { outgoingMediaText } from '../core/outgoing-media.js';
+import type { OutgoingMedia } from '../core/outgoing-media.js';
 import type {
   AsyncResultStatus, ChatMessage, ChatReply, DigestRecord, ImageResultStatus, JmcomicStatus, MediaEntry,
   TranscriptStatus
@@ -144,7 +146,7 @@ const NON_WAKE_KINDS = new Set(['digest', 'note']);
  * 它另一个用途在 `agent/context/context-window.ts`：这些条目**不许被滑出窗口**
  * （滑出即标已读 = 模型永远看不到自己的任务结果，且没有任何日志）。
  */
-const ASYNC_RESULT_KINDS = new Set(['transcript', 'jmcomic-result', 'image-result', 'trpg-note']);
+const ASYNC_RESULT_KINDS = new Set(['transcript', 'jmcomic-result', 'image-result', 'trpg-note', 'media-progress']);
 
 /** 这条条目是不是异步任务结果（见上）。 */
 export function isAsyncResult(m: ChatMessage | null | undefined): boolean {
@@ -440,8 +442,10 @@ export class ChatStore {
     return entry;
   }
 
-  /** 记录机器人自己发出的消息（已读）。 */
-  appendSelf(chatKey: string, { text, ts, mid = null }: { text: unknown; ts?: number; mid?: string | number | null }) {
+  /** 记录机器人自己发出的消息（已读）。`media` 是出站媒体的结构化留档（可选）。 */
+  appendSelf(chatKey: string, { text, ts, mid = null, media = [] }: {
+    text: unknown; ts?: number; mid?: string | number | null; media?: OutgoingMedia[];
+  }) {
     const st = this.#state(chatKey);
     const entry = {
       id: st.nextLocalId++,
@@ -453,7 +457,7 @@ export class ChatStore {
       self: true,
       read: true,
       reply: null,
-      media: []
+      media: (Array.isArray(media) ? media : []).filter(isRecord).map((item) => ({ ...item, kind: String(item.kind ?? '') }))
     };
     st.messages.push(entry);
     const trimmed = this.#trim(st);
@@ -461,6 +465,27 @@ export class ChatStore {
     if (trimmed.length) ops.push({ t: 'del', ids: trimmed });
     this.#appendOps(st, ops);
     return entry;
+  }
+
+  /**
+   * 记录一条**出站媒体**（文件 / 语音 / 图片 / 表情）。
+   *
+   * 与 `appendSelf` 的分工只有一点：正文可以由 `media` 推出来（`[文件:name]` / `[语音]`
+   * / `[图片]` / `[表情包:…]`），于是所有媒体发送路径用的都是**同一份文本约定**。
+   * 仍然是 `self:true`、`read:true` —— 它只是"我说过什么"的上下文，不触发对话；
+   * 要唤醒模型请另落一条机器条目（`appendAsyncResult` 系列）。
+   */
+  appendSelfMedia(chatKey: string, { media, text, ts, mid = null }: {
+    media: OutgoingMedia[];
+    text?: unknown;
+    ts?: number;
+    mid?: string | number | null;
+  }) {
+    const list = (Array.isArray(media) ? media : []).filter(isRecord).map((item) => ({ ...item, kind: String(item.kind ?? '') }));
+    const label = text != null && String(text).trim()
+      ? String(text)
+      : (list[0] ? outgoingMediaText(list[0] as OutgoingMedia) : '[媒体]');
+    return this.appendSelf(chatKey, { text: label, ts, mid, media: list });
   }
 
   /**
@@ -1055,6 +1080,36 @@ export class ChatStore {
    * 【漫画下载结果】后可以自然地给请求者一句交代，但不能再提交同一任务。
    */
   /**
+   * 追加一条**长任务进度**（kind:'media-progress'）。
+   *
+   * 与三态结局分开：它只回答"任务还在跑"，**不**回答"成没成"。模型看到【任务进度】
+   * 只能说还在处理，不许说已完成（见 `prompt-catalog.capabilityProtocol`）。
+   *
+   * 落库四不变量由 `appendAsyncResult` 统一保证（未读、非 self、空 senderId、追加在末尾）。
+   */
+  appendMediaProgress(chatKey: string, { capability, taskId, stage, text, ts = Date.now() }: {
+    capability: string;
+    taskId: string;
+    stage: string;
+    text?: unknown;
+    ts?: number;
+  }) {
+    return this.appendAsyncResult(chatKey, {
+      kind: 'media-progress',
+      senderName: '任务进度',
+      text,
+      ts,
+      extra: {
+        progress: {
+          capability: String(capability ?? ''),
+          taskId: String(taskId ?? ''),
+          stage: String(stage ?? '')
+        }
+      }
+    });
+  }
+
+  /**
    * 追加一条**漫画下载结果**（kind:'jmcomic-result'）：异步任务的产物，不是群友说的话。
    *
    * **成功与失败走同一条**（`status` 三态），与出图那条一模一样：失败同样要落成**未读**条目，
@@ -1064,21 +1119,36 @@ export class ChatStore {
    * 三态各自的说法也分开写，尤其 `unsent` **不能说成"没下成"**：那份 PDF 可能已经在群里了
    * （上传核验不上时**刻意不重传**，就是为了避免重复发一份）。
    */
-  appendJmcomicResult(chatKey: string, { comicId, cached = false, status = 'sent', reason = '', ts = Date.now() }: {
+  appendJmcomicResult(chatKey: string, { comicId, cached = false, status = 'sent', reason = '', stage = 'download', late = false, ts = Date.now() }: {
     comicId: unknown;
     cached?: boolean;
     status?: JmcomicStatus;
     reason?: unknown;
+    /**
+     * 只有 `failed` 用它：区分"没下成"与"下载好了、但上传失败"。
+     *
+     * 缺省 `download` —— 旧调用点与旧存档都按它解释，行为逐字不变。
+     */
+    stage?: 'download' | 'upload';
+    /** 只有 `sent` 用它：这条是**晚到补记**（之前报过未确认，现在在群文件里找到了）。 */
+    late?: boolean;
     ts?: number;
   }) {
     const id = String(comicId ?? '').trim();
     const why = String(reason ?? '').trim().slice(0, 300);
     const what = `漫画 ${id}`;
+    // ⚠️ `unsent` **不许**写成"发出去了"（2026-11-02）：`upload_*_file` 抛错只说明
+    // 客户端没拿到响应 —— 协议端明确拒绝、文件读不到这些情形其实一条都没传上去。
+    // 这里只陈述能确定的事实："上传结果未确认"。
     const text = status === 'sent'
-      ? `${what} 的 PDF 已上传到当前会话${cached ? '（使用本地缓存）' : ''}`
+      ? (late
+          ? `${what} 的 PDF 之前没确认到，现在确认已经发出去了${cached ? '（使用本地缓存）' : ''}`
+          : `${what} 的 PDF 已上传到当前会话${cached ? '（使用本地缓存）' : ''}`)
       : status === 'unsent'
-        ? `${what} 的 PDF 发出去了，但没能确认${why ? `：${why}` : ''}`
-        : `${what}没下成${why ? `：${why}` : ''}`;
+        ? `${what} 的上传结果未确认${why ? `：${why}` : ''}`
+        : stage === 'upload'
+          ? `${what} 下载好了，但上传失败${why ? `：${why}` : ''}`
+          : `${what}没下成${why ? `：${why}` : ''}`;
     return this.appendAsyncResult(chatKey, {
       kind: 'jmcomic-result',
       senderName: '漫画下载',
@@ -1294,6 +1364,15 @@ function normalizeMessage(value: unknown): ChatMessage | null {
             cached: value.jmcomic.cached === true,
             status: normalizeStatus(value.jmcomic.status),
             reason: String(value.jmcomic.reason ?? '').slice(0, 300)
+          }
+        }
+      : {}),
+    ...(isRecord(value.progress)
+      ? {
+          progress: {
+            capability: String(value.progress.capability ?? '').slice(0, 40),
+            taskId: String(value.progress.taskId ?? '').slice(0, 80),
+            stage: String(value.progress.stage ?? '').slice(0, 40)
           }
         }
       : {})

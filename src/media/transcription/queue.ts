@@ -28,6 +28,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '../../core/config.js';
+import { outgoingMediaText } from '../../core/outgoing-media.js';
 import { SlidingWindowBudget } from '../call-budget.js';
 import { TaskQueue } from '../task-queue.js';
 import type { SetTaskStatus } from '../task-queue.js';
@@ -48,6 +49,7 @@ export class VideoTranscriptionQueue {
   #log: (...args: unknown[]) => void;
   #operations: QueueOperations;
   #deliverTranscript: TranscriptSink | null;
+  #recordMedia: QueueDeps['recordMedia'] | null;
   #queue: TaskQueue<InternalJob, EffectiveConfig>;
   #wake: ReturnType<typeof setTimeout> | null = null;
   #started = false;
@@ -60,13 +62,14 @@ export class VideoTranscriptionQueue {
    */
   #budget: SlidingWindowBudget;
 
-  constructor({ sender, onebot, getConfig, log = console.log, operations = {}, deliverTranscript = null }: QueueDeps) {
+  constructor({ sender, onebot, getConfig, log = console.log, operations = {}, deliverTranscript = null, recordMedia }: QueueDeps) {
     this.#sender = sender;
     this.#onebot = onebot;
     this.#getConfig = getConfig;
     this.#log = log;
     this.#operations = operations;
     this.#deliverTranscript = deliverTranscript;
+    this.#recordMedia = typeof recordMedia === 'function' ? recordMedia : null;
     this.#budget = new SlidingWindowBudget({
       getLimits: () => {
         const cfg = resolveTranscriptionConfig(this.#getConfig());
@@ -412,6 +415,15 @@ export class VideoTranscriptionQueue {
         ? { group_id: Number(id), file: filePath, name: path.basename(filePath) }
         : { user_id: Number(id), file: filePath, name: path.basename(filePath) };
       await this.#onebot.call(kind === 'group' ? 'upload_group_file' : 'upload_private_file', params, 120_000);
+      // 上传确认成功之后才记账 —— 临时文件随后就删，只留名字与大小。
+      const name = path.basename(filePath);
+      const media = { kind: 'file' as const, name, size: Buffer.byteLength(text, 'utf8') };
+      try {
+        this.#recordMedia?.(job.chatKey, media, outgoingMediaText(media));
+      } catch (recordError) {
+        // 文件已经在群里了；记账失败不能把这次上传算成失败。
+        this.#log(`[transcribe] task=${job.id} code=MEDIA_RECORD_FAILED err=${safeErrorCode(recordError)}`);
+      }
       return true;
     } catch (error) {
       this.#log(`[transcribe] task=${job.id} code=${safeErrorCode(error)}`);

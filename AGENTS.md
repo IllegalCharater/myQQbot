@@ -233,8 +233,9 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
   实测过的代价是：漏掉"退回"那一半，症状是**群里什么都等不到而日志里只有一行 code**
   —— 它不影响启动、不影响聊天，所以只有断言拦得住。
 - **结局的取值档数由"交付物是不是文件"决定，三条并不一样**：出图/漫画是**三态**
-  （`sent`/`unsent`/`failed`，"做好了但没发出去"是一件真实且与"没做成"不同的事 ——
-  那份东西**可能已经在群里了**）；转写是**两态**（`sent`/`failed`），因为它的交付物是文本、
+  （`sent`/`unsent`/`failed`，`unsent` 与"没做成"不同 —— 那份东西**可能已经在群里了**。
+  两者的确定性不同：出图是"**画好了**但没发出去"，漫画是"**上传结果未知**"—— 可能压根
+  没传上去，见 jmcomic 那节的三种事实）；转写是**两态**（`sent`/`failed`），因为它的交付物是文本、
   开口的是模型：结果要么交到回流端口（= 条目存在），要么无人接单 —— 而无人接单时队列
   自己把文本贴进群、**压根不产生条目**，那个中间态无处可记。**不许为了"对齐形状"给转写
   补一个 `unsent`**：一个没人能产生的取值，读代码的人分不清是"暂未使用"还是"忘了实现"。
@@ -251,6 +252,17 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 把 `await this.#step(...)` 改成不 await（破坏串行）会让套件**挂住**而不是干净地变红。
 所以动这两处时不要指望套件拦住你 —— 真正被钉住的是"取走的任务不算排队中"（`#activeId`）
 与"关停时状态照记、只是不汇报"这两条（都被 `t-image-gen.mjs` 的 stop 用例抓到过）。
+
+**出站媒体 / 进度 / 晚到核验的共用件（2026-11-02 加）**：骨架层早就是共用的（`task-queue` / `task-error` / `appendAsyncResult` / `deliverAsyncResult` / `async-task`），但投递、媒体记录、进度与核验此前各写各的。这一轮收成四件，**能跨 media 复用的都放共用件，不能复用的（阶段机、失败话术、计时器）留在各能力**：
+
+- `core/outgoing-media.ts`：出站媒体的形状与文本（`[文件:name]` / `[语音]` / `[图片]` / `[表情包:…]`）。放 core 是因为 `qq`/`media`/`chat` 同属 T1、互不能 import。
+- `chat/store.ts` 的 `appendSelfMedia`：**所有出站媒体都走它**（`SendQueue` 三个发送方法、漫画 PDF、转写全文文件）。判据是**上传确认成功才记**，只留 `name/size/fileId`，不存已删除的临时路径。仍是 `self:true/read:true`，**不唤醒模型**——要触发对话另落机器条目。
+- `media/task-progress.ts`：`progressDue` / `progressElapsedMs` / `progressText` 纯函数。**计时器不许进 `TaskQueue`**（`LONG_TERM_TASKS.owner` 要指实际持有它的文件）；漫画的在 `queue.ts`，60 秒扫一次，从任务真正开始处理算起 5 分钟仍未结束发**一次**。
+- `media/task-delivery.ts`：`uploadFile` / `matchGroupFile` / `matchPrivateHistory` / 晚到窗口常量。**只服务 `upload_*_file`**——出图发的是图片消息，没有群文件列表可按名字核验，别为了"统一"把图片塞进来。
+
+**进度是独立的第四种机器条目**（`kind:'media-progress'`，标签【任务进度】），**与三态结局分开**：它只说"还在跑"，模型不许据此宣布完成（`capabilityProtocol` 第 5 条）。加一种异步结果的**四处**（`ASYNC_RESULT_KINDS` / `response-policy` / `prompt-builder` / `prompt-catalog`）这次一次改完，所有能力可用；`t-window` 第 18 段有它"不参与滑出"的一行。**晚到核验**：正常核验走完先发一次如实的 `unsent`，然后每 5 分钟查一次、最多 1 小时；找到 → 补记 self 文件 + `jmcomic-result(status:'sent', late:true)`（"之前没确认到，现在确认到了"）再唤醒模型；到期静默收尾、**绝不重传**。
+
+**入站群文件上传**（`notice_type='group_upload'`）原先被 `ingest.dispatch` 丢掉：现在非自己的上传落成一条未读消息（`[群文件] 名字（大小）` + `media`），走同一套白名单/响应档位并唤醒模型；**自己的上传跳过**（完成路径已记过 `我：[文件:…]`）。⚠️ 协议端是否真的发这个 notice **仍需真机冒烟**（OneBot v11 规范里有，SnowLuma 未实测）；不发时分支不会被走到，不会有副作用。
 
 ## 上下文的四种数据必须分开
 
@@ -1085,6 +1097,8 @@ StructAct = { id, name, order, goal, keeperNotes, entryCondition, exitCondition,
 - **搜索超时 12 秒，远短于下载的 30 分钟**：它是模型在等的同步调用，不是后台任务。它**不写 per-job 日志、不碰 `jobs`、不做心跳**——搜索结果没有留存价值（同名再搜还要重查）。`tests/t-jmcomic.mjs` 第 5 段正面钉住"搜索前后 `jobs.json` 逐字节相同、onebot 调用数为 0"。
 - **"没搜到"与"搜索坏了"必须分开说**：都返回空列表的话模型会以为结果就是空的，而实际可能是查询词不对（`total > 0` 时提示换词或回前几页）或分页越界。库缺失时把"用哪个解释器装依赖"那句一并带出（同下载路径的 `PYTHON_MISSING_HINT`）。
 - 实测（2026-10-05，jmcomic 2.7.0）：`client.search_site/search_tag/search_author/search_work/search_actor` 都返回 `JmSearchPage`，用 `iter_id_title_tag()` 拿 `(album_id, name, tags)`；`total` 是总数（tag 搜索能到 10000），**分页大小由服务端定**，所以 `limit` 只在客户端截断。`iter_id` 是**方法不是属性**（写成属性会 `TypeError: 'method' object is not iterable`）。
+- **上传结果未知的文案必须区分三种事实**（2026-11-02 修）：`upload_*_file` 抛错只说明**客户端没拿到响应**，所以 `unsent` 的正文只说「上传结果未确认」，**绝不许说「PDF 发出去了」**（实测反馈：群里根本没有文件，模型却照着旧文案告诉用户"发出去了但没确认"）。三条判据：① **协议端明确拒绝**（错误里带 `retcode=` 或 HTTP 4xx）→ 文件没传上去，**立刻**按 `failed` 交代真实原因（旧写法要等 4 轮核验、约 8.5 分钟）；② 超时/断线/5xx → `upload_uncertain`，只核验不重传；③ 核验阶段必须分清「**查过列表、确实没有**」与「**根本没法查**（取群文件列表失败）」—— 后者不许说成"列表里没有"。`job.uploadError` 单独保存上传时的错误（`lastError` 会被核验反复覆盖），最终理由带上它。`failed` 另带 `stage: 'download' | 'upload'`，让正文能说"下载好了，但上传失败"而不是"没下成"。守护：`tests/t-jmcomic-upload.mjs`（明确拒绝立刻失败 / 取列表失败说"无法核验" / 列表确实没有说"没找到" + 上传错误仍在 / 三种都不重传）与 `t-jmcomic-callback.mjs`（正文文案）。
+- **那条 `fetch failed` 的根因是 undici 的 5 分钟头超时（2026-11-02 实测）**：`web/app.ts` 的全局 dispatcher 原先只设了 `connect.timeout`，`headersTimeout`/`bodyTimeout` 仍是 undici 默认的 **300 秒**；而 `upload_group_file` 的 `AbortSignal` 是 **30 分钟**。大 PDF 在第 5 分 03 秒被网络层掐掉（任务 id 里的创建时间与日志时间正好差 5 分 03 秒），协议端随之中断，群里没有文件；错误只剩一句 `fetch failed`（真实成因 `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` 在 `error.cause` 里，旧 `OneBotClient.call` 把它丢了）。修法两条：**全局 dispatcher 的 headers/body 超时取 `UPLOAD_TIMEOUT_MS + 60_000`**（从 jmcomic 桶文件导出，别写死数字），**`call` 的 catch 带出 `error.cause`**（`OneBot <action> 请求失败：<cause.message>（<code>）`）。判据是"**我们的死线必须永远先到**"。守护：`tests/t-notice.mjs` 第 7 段（连接被拒带 `ECONNREFUSED`、头超时带 `UND_ERR_HEADERS_TIMEOUT` 且早于 5 秒死线、源级断言 dispatcher 取自 `UPLOAD_TIMEOUT_MS`）。
 
 **`snowluma` 端点的热生效只有一条路（S11b）**：`applyConfigPatch` 把 `next.snowluma` 的四个字段交给 `OneBotClient.applyEndpoint(next)`，**它返回 `true` 才** `onebot.reconnect()`。三条不变量，改动时别拆散：
 

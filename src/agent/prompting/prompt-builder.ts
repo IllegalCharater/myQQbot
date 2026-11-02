@@ -182,9 +182,14 @@ function formatEntry(m: ChatMessage, { withId = true, config = null }: { withId?
     const cut = meta.truncated === true ? `（原文共 ${Number(meta.chars) || 0} 字，超出上限，此处为开头部分）` : '';
     return `[${formatShortTime(m.ts)}] ${label}${cut}${String(m.text || '')}`;
   }
+  // 长任务进度与三态结局**分开**：它只说明"还在跑"，模型据此只能说还在处理。
+  // 与 "转写结果 / 漫画下载结果" 用同一个位置（异步条目整条短路），但标签不同。
+  if (m.kind === 'media-progress') {
+    return `[${formatShortTime(m.ts)}] 【任务进度】${String(m.text || '')}`;
+  }
   // 漫画的异步完成回调与出图同形：**成功与失败都走这里**，标签按三态选。
-  // `unsent`（PDF 发出去了但没能确认）用【漫画发送未确认】——正文会写清原因，
-  // 而那份 PDF **可能已经在群里了**，说"没下成"会让模型对群友说反话。
+  // `unsent`（上传结果**未确认**：可能没发出去，也可能已经在群里）用【漫画发送未确认】——
+  // 正文会写清原因与"查过没有 / 根本没法查"，模型必须如实转述，不许断言"已经发好了"。
   if (m.kind === 'jmcomic-result') {
     const status = asRecord(m.jmcomic).status;
     const label = status === 'failed' ? '【漫画下载失败】' : (status === 'unsent' ? '【漫画发送未确认】' : '【漫画下载结果】');

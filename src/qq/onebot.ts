@@ -251,15 +251,30 @@ export class OneBotClient {
 
   /** OneBot HTTP API（发送与查询都走这里）。 */
   async call(action: string, params: Record<string, unknown> = {}, timeoutMs = 15000): Promise<unknown> {
-    const res = await fetch(`${this.httpUrl}/${action}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(this.httpToken ? { authorization: `Bearer ${this.httpToken}` } : {})
-      },
-      body: JSON.stringify(params),
-      signal: AbortSignal.timeout(timeoutMs)
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${this.httpUrl}/${action}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(this.httpToken ? { authorization: `Bearer ${this.httpToken}` } : {})
+        },
+        body: JSON.stringify(params),
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch (error) {
+      // ⚠️ **必须把 undici 的 `cause` 带出来**：fetch 的网络层错误只有一句
+      // `fetch failed`，真正的成因全在 `error.cause`（HeadersTimeoutError /
+      // ECONNRESET / ECONNREFUSED / UND_ERR_*）。实测 2026-11-02：漫画 PDF 上传
+      // 被 undici 默认的 5 分钟 headersTimeout 掐掉，日志里只剩 `fetch failed`，
+      // 既看不出是超时，也看不出是谁的死线。
+      const cause = error instanceof Error && error.cause instanceof Error ? error.cause : null;
+      const code = cause && isRecord(cause) && typeof cause.code === 'string' ? cause.code : '';
+      const detail = cause
+        ? `${cause.message}${code ? `（${code}）` : ''}`
+        : (error instanceof Error ? error.message : String(error));
+      throw new Error(`OneBot ${action} 请求失败：${detail}`);
+    }
     if (!res.ok) {
       const hint = res.status === 426
         ? '（HTTP 426：httpUrl 可能指向了 WebSocket 端口，请检查 snowluma.httpUrl 是否为 OneBot HTTP API 地址）'
@@ -270,6 +285,12 @@ export class OneBotClient {
     const body = isRecord(value) ? value : {};
     if (body.status !== 'ok' && body.retcode !== 0) {
       throw new Error(`OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`);
+    }
+    // ⚠️ 临时探针（2026-11-02）：确认 `upload_*_file` 的响应里到底有什么
+    // （有没有 file_id / message_id），以及它与 `group_upload` notice 的先后关系。
+    // 真机跑一次后与 `ingest.ts` 的 `probeEvent` 一起删掉。只打前 300 字。
+    if (action === 'upload_group_file' || action === 'upload_private_file') {
+      console.info(`[probe:upload] action=${action} data=${JSON.stringify(body.data ?? null).slice(0, 300)}`);
     }
     return body.data;
   }

@@ -43,6 +43,15 @@ function allowed(kind: 'group' | 'private', id: unknown, cfg: AppConfig) {
   return cfg.allowAllWhenEmpty === true;
 }
 
+/** 群文件大小的人话形态（只用于提示词里那条 `[群文件] …`）。 */
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
 /**
  * 把已解析的 card 媒体补成可定位的视频媒体。
  *
@@ -483,8 +492,108 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     orchestrator.onIncoming(chatKeyNow, entry);
   }
 
+  /**
+   * 群文件区上传（OneBot v11 `notice_type='group_upload'`）。
+   *
+   * 这不是一条聊天消息，而是一个 notice：群友往**群文件**里传了东西，群里没有对应的
+   * 消息气泡。原先 `dispatch()` 直接忽略它，于是"谁传了一份文件"既没有存档、也不会
+   * 触发模型（2026-11-02 用户要求补上）。
+   *
+   * 三条边界：
+   *  ① **自己的上传跳过**：`upload_group_file` 的完成路径（jmcomic / 转写 / 跑团导出）
+   *     已经写过一条 `我：[文件:…]`，再入库就是第二条；
+   *  ② 走与普通消息同一套白名单 / 屏蔽名单，落成**未读**条目（`wakeEligible` 默认 true），
+   *     由响应档位决定要不要惊动模型 —— 它和"群友说了句话"是同一类事件；
+   *  ③ 字段按 OneBot v11 的 `file: { id, name, size }` 取，取不到的就不写，**不猜**。
+   *     协议端是否真的发这个 notice 仍需真机冒烟；不发时这里永远不会被走到。
+   */
+  async function ingestGroupUpload(event: OneBotEvent) {
+    if (event.group_id == null) return;
+    const groupId = String(event.group_id);
+    const cfgNow = getConfig();
+    if (!allowed('group', groupId, cfgNow)) return;
+    const uploaderId = String(event.user_id ?? '');
+    if (!uploaderId) return;
+    // 自己上传的文件由完成路径记账（见上面注释①）。
+    if (String(onebot.selfId ?? '') && uploaderId === String(onebot.selfId)) return;
+    const blocklist = cfgNow.blocklist as Record<string, unknown[]>;
+    if ((blocklist[groupId] || []).map(String).includes(uploaderId)) return;
+
+    const file = isRecord(event.file) ? event.file : {};
+    const name = String(file.name ?? file.file ?? '').trim();
+    const fileId = String(file.id ?? file.file_id ?? '').trim();
+    const size = Number(file.size);
+    const sizeText = Number.isFinite(size) && size >= 0 ? formatBytes(size) : '';
+    const senderName = (await resolveAtName(groupId, uploaderId)) || uploaderId;
+    const text = `[群文件] ${name || '一个文件'}${sizeText ? `（${sizeText}）` : ''}`;
+    const media: MediaEntry[] = [{
+      kind: 'file',
+      ...(name ? { name } : {}),
+      ...(fileId ? { fileId } : {}),
+      ...(Number.isFinite(size) && size >= 0 ? { size } : {})
+    }];
+
+    const chatKey = `group:${groupId}`;
+    const entry = store.appendIncoming(chatKey, {
+      mid: null,
+      ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
+      senderId: uploaderId,
+      senderName,
+      text,
+      media
+    });
+    emit(EVENTS.chatUpdate, chatKey);
+    orchestrator.onIncoming(chatKey, entry);
+  }
+
+  /**
+   * ⚠️ **临时探针（2026-11-02）**：确认协议端在"文件上传成功"时到底发什么事件。
+   *
+   * 要回答的三个问题：
+   *   ① 机器人自己 `upload_group_file` 成功后，协议端会不会发 `notice_type='group_upload'`？
+   *   ② 如果发，`user_id` 是不是 `selfId`、`file.name/size` 是否与上传参数一致？
+   *   ③ 有没有协议端把它发成一条 `message`（而不是 notice）？
+   *
+   * 只打**事件结构**（类型 / 会话 / 发送者 / file 的 id/name/size），**不打消息正文、
+   * 不打 url**。真机跑一次（机器人自己传一份漫画 PDF、再让群友传一个文件）后，
+   * 把本函数与它的调用**一起删掉**（同 AGENTS 里 `[probe:file]` 的处理方式）。
+   */
+  function probeEvent(event: OneBotEvent) {
+    const file = isRecord(event.file) ? event.file : null;
+    const fileBrief = file
+      ? JSON.stringify({
+          id: file.id ?? file.file_id ?? '',
+          name: file.name ?? file.file ?? '',
+          size: file.size ?? '',
+          busid: file.busid ?? ''
+        })
+      : '';
+    if (event.post_type === 'notice') {
+      log(`[probe:notice] type=${String(event.notice_type ?? '')} sub=${String(event.sub_type ?? '')}`
+        + ` group=${String(event.group_id ?? '')} user=${String(event.user_id ?? '')}`
+        + ` self=${String(event.self_id ?? '')} bot=${String(onebot.selfId ?? '')}`
+        + ` target=${String(event.target_id ?? '')}${fileBrief ? ` file=${fileBrief}` : ''}`);
+      return;
+    }
+    if (event.post_type !== 'message' && event.post_type !== 'message_sent') return;
+    const segments = Array.isArray(event.message) ? event.message : [];
+    const fileSegs = segments.filter((seg) => isRecord(seg) && seg.type === 'file');
+    if (!fileSegs.length) return;
+    const sender = isRecord(event.sender) ? event.sender : {};
+    log(`[probe:file-message] post=${String(event.post_type)} type=${String(event.message_type ?? '')}`
+      + ` group=${String(event.group_id ?? '')} user=${String(event.user_id ?? '')}`
+      + ` sender=${String(sender.user_id ?? '')} self=${String(event.self_id ?? '')}`
+      + ` bot=${String(onebot.selfId ?? '')} segs=${segments.length}`
+      + ` files=${JSON.stringify(fileSegs.map((seg) => (isRecord(seg.data) ? {
+        name: seg.data.name ?? seg.data.file ?? '',
+        size: seg.data.size ?? seg.data.file_size ?? '',
+        id: seg.data.id ?? seg.data.file_id ?? ''
+      } : {})))}`);
+  }
+
   async function dispatch(event: OneBotEvent) {
     if (!event || typeof event !== 'object') return;
+    probeEvent(event);
     //机器人发送的消息
     if (event.post_type === 'message_sent') return;
     //普通消息
@@ -506,6 +615,9 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event);
       if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event);
       return;
+    }
+    if (event.post_type === 'notice' && event.notice_type === 'group_upload') {
+      return ingestGroupUpload(event);
     }
     if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_type === 'poke') {
       return ingestPoke(event);
@@ -529,6 +641,10 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
       const isGroup = event.group_id != null;
       const id = isGroup ? String(event.group_id) : String(event.user_id ?? '');
       return enqueueIngest(`${isGroup ? 'group' : 'private'}:${id}`, () => dispatch(event));
+    }
+    if (event.post_type === 'notice' && event.notice_type === 'group_upload' && event.group_id != null) {
+      // 与普通消息按同一个 chatKey 串行：文件上传事件也要保持到达顺序。
+      return enqueueIngest(`group:${event.group_id}`, () => dispatch(event));
     }
     return dispatch(event);
   }

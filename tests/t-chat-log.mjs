@@ -170,4 +170,37 @@ console.log('\n=== 8. 面板备份用的是新扩展名 ===');
     !!del?.backup && del.backup.endsWith('.jsonl.panel.bak') && fs.existsSync(del.backup), String(del?.backup));
 }
 
+console.log('\n=== 9. 出站媒体记账（文件 / 语音 / 图片 / 表情） ===');
+{
+  const { outgoingMediaText } = await load('core/outgoing-media.js');
+  ok('文本约定与入站占位符同形',
+    outgoingMediaText({ kind: 'file', name: 'a.pdf' }) === '[文件:a.pdf]'
+    && outgoingMediaText({ kind: 'audio' }) === '[语音]'
+    && outgoingMediaText({ kind: 'image' }) === '[图片]'
+    && outgoingMediaText({ kind: 'sticker', name: '猫' }) === '[表情包:猫]',
+    JSON.stringify([
+      outgoingMediaText({ kind: 'file', name: 'a.pdf' }),
+      outgoingMediaText({ kind: 'audio' }),
+      outgoingMediaText({ kind: 'image' }),
+      outgoingMediaText({ kind: 'sticker', name: '猫' })
+    ]));
+
+  const K = 'group:709';
+  const store = new ChatStore();
+  const entry = store.appendSelfMedia(K, {
+    media: [{ kind: 'file', name: 'x.pdf', size: 42, fileId: 'fid' }],
+    mid: null
+  });
+  ok('appendSelfMedia 写 [文件:name] 与结构化 media',
+    entry.self === true && entry.text === '[文件:x.pdf]'
+    && entry.media?.[0]?.name === 'x.pdf' && entry.media?.[0]?.size === 42,
+    JSON.stringify(entry));
+
+  const reload = new ChatStore();
+  const got = reload.recent(K, { limit: 10 }).at(-1);
+  ok('离开进程重放后，媒体留档仍在',
+    got?.text === '[文件:x.pdf]' && got?.media?.[0]?.fileId === 'fid',
+    JSON.stringify(got?.media));
+}
+
 process.exit(done() ? 0 : 1);

@@ -14,8 +14,8 @@ import { SessionRegistry } from '../chat/sessions.js';
 import { Orchestrator } from '../agent/runtime/orchestrator.js';
 import { initPriceFeed, stopPriceFeed } from '../llm/price-feed.js';
 import { addUsage, chatCompletion, emptyUsage } from '../llm/llm.js';
-import { initJmcomicQueue, stopJmcomicQueue, enqueueJmcomicDownload } from '../media/jmcomic/index.js';
-import type { JmcomicCompletion } from '../media/jmcomic/index.js';
+import { initJmcomicQueue, stopJmcomicQueue, enqueueJmcomicDownload, UPLOAD_TIMEOUT_MS } from '../media/jmcomic/index.js';
+import type { JmcomicCompletion, JmcomicProgress } from '../media/jmcomic/index.js';
 import { VideoTranscriptionQueue } from '../media/transcription/index.js';
 import type { TranscriptStatus } from '../media/transcription/index.js';
 import { ImageGenQueue } from '../media/image-gen/index.js';
@@ -46,10 +46,21 @@ export type { AppHandle, CreateAppOptions } from './types.js';
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
 // 请求超时——那是 llm.js 里 180 秒的 AbortSignal）。这里放宽到 30 秒。
+//
+// ⚠️ **headers/body 超时也必须一起放宽**（2026-11-02 实测）：undici 默认这两项都是
+// **5 分钟**，而最长合法请求是漫画 PDF 上传（`UPLOAD_TIMEOUT_MS` = 30 分钟）。默认值会在
+// 我们的 AbortSignal 之前把请求掐掉，错误只剩一句 `fetch failed`（真实成因
+// `HeadersTimeoutError` 在 `error.cause` 里）。真机症状：任务 18:07:50 入队、
+// 18:12:53 报 `fetch failed`，正好 5 分 03 秒，群里没有文件。这里取上传窗口 + 1 分钟，
+// 让**我们的死线永远先到**；其余请求都有自己的 AbortSignal，不会因此无限挂住。
 // 动态导入 + 容错：undici 与 Electron 内置 Node 不兼容时只退回默认超时，绝不崩主进程。
 try {
   const { Agent, setGlobalDispatcher } = await import('undici');
-  setGlobalDispatcher(new Agent({ connect: { timeout: 30_000 } }));
+  setGlobalDispatcher(new Agent({
+    connect: { timeout: 30_000 },
+    headersTimeout: UPLOAD_TIMEOUT_MS + 60_000,
+    bodyTimeout: UPLOAD_TIMEOUT_MS + 60_000
+  }));
 } catch (error) {
   console.warn('[net] 全局连接超时设置失败（使用 undici 默认值 10s）:', errorMessage(error));
 }
@@ -138,8 +149,15 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // 漫画队列的完成回流与转写同形：文件仍由队列确定性上传；OneBot 确认接收后，
   // 再把一条未读机器结果送进窗口，触发 Agent 给请求者自然收尾。
   // **失败也走这条路**（2026-10-10 统一）：队列不再往群里贴 ❌/⚠️ 文案，改由模型交代。
-  function deliverJmcomicCompletion({ chatKey, comicId, cached, status, reason }: JmcomicCompletion) {
-    deliverAsyncResult(chatKey, store.appendJmcomicResult(chatKey, { comicId, cached, status, reason }));
+  function deliverJmcomicCompletion({ chatKey, comicId, cached, status, reason, stage, late }: JmcomicCompletion) {
+    deliverAsyncResult(chatKey, store.appendJmcomicResult(chatKey, { comicId, cached, status, reason, stage, late }));
+  }
+
+  // 长任务进度：与结局分开。它只让模型知道"还在跑"，不承诺完成。
+  function deliverJmcomicProgress({ chatKey, comicId, stage, text }: JmcomicProgress) {
+    deliverAsyncResult(chatKey, store.appendMediaProgress(chatKey, {
+      capability: 'jmcomic', taskId: comicId, stage, text
+    }));
   }
 
   // 出图结果的回流：图片由队列直接发进群（图片就是交付物，模型没法"说"出一张图），
@@ -230,7 +248,11 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
   // 内置工具表算一次就够（它是常量，只有扩展那部分是变的）—— 上面那次调用只是为了拿名字。
   const BUILTIN_TOOLS = buildToolDefs();
 
-  const transcription = new VideoTranscriptionQueue({ onebot, sender, getConfig, log, deliverTranscript });
+  const transcription = new VideoTranscriptionQueue({
+    onebot, sender, getConfig, log, deliverTranscript,
+    // 全文文件上传成功后留一条 `我：[文件:…]`。走 store 的统一媒体记账（与发送队列同形）。
+    recordMedia: (chatKey, media, text) => { store.appendSelfMedia(chatKey, { media: [media], text }); }
+  });
   const imageGen = new ImageGenQueue({
     sender, getConfig, log, deliverImageResult, compilePrompt: compileImagePrompt
   });
@@ -363,7 +385,10 @@ export function createApp({ log = console.log }: CreateAppOptions = {}): AppHand
       sender,
       store,
       priceFeed: { init: initPriceFeed, stop: stopPriceFeed },
-      jmcomic: { init: initJmcomicQueue, stop: stopJmcomicQueue, onCompleted: deliverJmcomicCompletion },
+      jmcomic: {
+        init: initJmcomicQueue, stop: stopJmcomicQueue,
+        onCompleted: deliverJmcomicCompletion, onProgress: deliverJmcomicProgress
+      },
       transcription: { start: () => transcription.start(), stop: () => transcription.stop() },
       imageGen: { start: () => imageGen.start(), stop: () => imageGen.stop() },
       hotSearch: { start: () => hotSearchScheduler.start(), stop: () => hotSearchScheduler.stop() },

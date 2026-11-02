@@ -21,6 +21,7 @@ import {
   lastCleanupAt, saveCleanupAt, ensureDirs
 } from './jobs.js';
 import { downloadStage, uploadStage, uploadUncertainStage } from './stages.js';
+import { progressDue, progressElapsedMs, progressText } from '../task-progress.js';
 import {
   errorCode, errorMessage, isRecord, UPLOAD_VERIFY_RETRY_MS, CACHE_CLEANUP_CHECK_MS, CACHE_CLEANUP_INTERVAL_MS,
   JM_DIR, LOG_DIR, DOWNLOAD_DIR, JOBS_FILE, CLEANUP_STATE_FILE, DUPLICATE_WINDOW_MS
@@ -74,6 +75,9 @@ const taskQueue = new TaskQueue<JmJob, void>({
 
 let wakeTimer: ReturnType<typeof setTimeout> | null = null;
 let cleanupTimer: ReturnType<typeof setInterval> | null = null;
+let progressTimer: ReturnType<typeof setInterval> | null = null;
+/** 进度扫描频率：阈值是 5 分钟，一分钟扫一次足够，也不会让计时器变成热循环。 */
+const PROGRESS_CHECK_MS = 60_000;
 
 function saveJobs() {
   ensureDirs();
@@ -114,6 +118,52 @@ function startCleanupTimer() {
   cleanupTimer.unref?.();
 }
 
+/**
+ * 任务在跑超过 5 分钟就提醒模型一次（每个任务最多一次）。
+ *
+ * 计时器留在这里而不是 `stages.ts`：`LONG_TERM_TASKS.owner` 就是本文件，
+ * `tests/t-tasks.mjs` 按它反查"文件里有没有调度调用"。计时器只做扫描，
+ * 判定与文案在 `media/task-progress.ts`（三个能力共用）。
+ */
+function progressStage(status: string): string {
+  if (status === 'downloading') return '下载中';
+  if (status === 'uploading') return '上传中';
+  if (status === 'upload_uncertain') return '核验上传结果';
+  if (status === 'queued') return '等待重试';
+  return '处理中';
+}
+
+function checkProgress() {
+  const now = Date.now();
+  for (const job of taskQueue.all()) {
+    if (job.status === 'completed' || job.status === 'failed') continue;
+    if (!progressDue(job, now)) continue;
+    const elapsedMs = progressElapsedMs(job, now);
+    const stage = progressStage(job.status);
+    // 先落"已提醒"，再回调：回调抛错也不能让下一分钟重复发。
+    updateJob(job, { progressNotifiedAt: now });
+    const sink = getRuntime()?.onProgress;
+    if (!sink) continue;
+    try {
+      void Promise.resolve(sink({
+        chatKey: job.chatKey,
+        comicId: job.comicId,
+        stage,
+        elapsedMs,
+        text: progressText(`漫画 ${job.comicId}`, stage, elapsedMs)
+      })).catch((error) => console.warn(`[jmcomic] 进度回流失败（${job.id}）:`, errorMessage(error)));
+    } catch (error) {
+      console.warn(`[jmcomic] 进度回流失败（${job.id}）:`, errorMessage(error));
+    }
+  }
+}
+
+function startProgressTimer() {
+  if (progressTimer) return;
+  progressTimer = setInterval(checkProgress, PROGRESS_CHECK_MS);
+  progressTimer.unref?.();
+}
+
 function loadJobs() {
   if (isLoaded()) return;
   markLoaded();
@@ -137,6 +187,8 @@ function loadJobs() {
       // 收到文件。恢复后只能核验，不能重新执行非幂等的 upload_*_file。
       job.status = 'upload_uncertain';
       job.uploadVerifyAttempts = Number(job.uploadVerifyAttempts || 0);
+      // 恢复后进度提示也要有锚点（否则重启前已经跑了 10 分钟的任务再也不会提醒）。
+      job.progressAnchorAt = Number(job.progressAnchorAt || job.uploadStartedAt || Date.now());
       job.nextAttemptAt = Date.now() + UPLOAD_VERIFY_RETRY_MS[0];
       changed = true;
     }
@@ -168,10 +220,16 @@ async function runWorker() {
 }
 
 /** 绑定运行时依赖，并恢复上次退出时未完成的任务。可重复调用。 */
-export function initJmcomicQueue({ onebot, sender, store, spawnProcess, onCompleted }: JmRuntime) {
-  setRuntime({ onebot, sender, store, ...(spawnProcess ? { spawnProcess } : {}), ...(onCompleted ? { onCompleted } : {}) });
+export function initJmcomicQueue({ onebot, sender, store, spawnProcess, onCompleted, onProgress }: JmRuntime) {
+  setRuntime({
+    onebot, sender, store,
+    ...(spawnProcess ? { spawnProcess } : {}),
+    ...(onCompleted ? { onCompleted } : {}),
+    ...(onProgress ? { onProgress } : {})
+  });
   loadJobs();
   startCleanupTimer();
+  startProgressTimer();
   void runWorker();
 }
 
@@ -196,6 +254,7 @@ export function initJmcomicQueue({ onebot, sender, store, spawnProcess, onComple
 export function stopJmcomicQueue() {
   setRuntime(null);
   if (cleanupTimer) { clearInterval(cleanupTimer); cleanupTimer = null; }
+  if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
   if (wakeTimer) { clearTimeout(wakeTimer); wakeTimer = null; }
 }
 

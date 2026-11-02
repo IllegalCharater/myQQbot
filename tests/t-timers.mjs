@@ -193,14 +193,14 @@ await withFakeTimers(async (t) => {
     sender: {}, store: {}
   };
   jmcomic.initJmcomicQueue(stopDuringUpload);
-  ok('initJmcomicQueue 起了缓存清理 interval',
-    t.intervals.length === 1, `建了 ${t.intervals.length} 个 interval`);
+  ok('initJmcomicQueue 起了缓存清理 + 进度扫描两个 interval',
+    t.intervals.length === 2, `建了 ${t.intervals.length} 个 interval`);
 
   await flush();
   ok('worker 收尾时队列已被停 → scheduleNextWake 不再排新 wake（不会自我复活）',
     t.timeouts.length === 0, `排了 ${t.timeouts.length} 个 timeout` +
     ' —— 排了就是 runWorker 的 finally 把队列自己拉回来了，stop 形同虚设');
-  ok('worker 跑完这一轮后，缓存清理 interval 已被 stopJmcomicQueue 清掉',
+  ok('worker 跑完这一轮后，缓存清理与进度扫描 interval 都已被 stopJmcomicQueue 清掉',
     t.active().length === 0, `还剩 ${t.active().length} 个`);
 
   // 停之后重新 init：任务还在（stop 不清 jobs），所以 wake timer 会重新排出来。
@@ -210,14 +210,15 @@ await withFakeTimers(async (t) => {
   jmcomic.initJmcomicQueue({ onebot: {}, sender: {}, store: {} });
   await flush();
   ok('重新 init：jobs 没被 stop 清掉（wake timer 为那个待办重新排了出来）',
-    t.active().length === 1 && t.activeTimeouts().length === 1,
+    t.active().length === 2 && t.activeTimeouts().length === 1,
     `interval=${t.active().length} timeout=${t.activeTimeouts().length}` +
     ' —— 没有 timeout 就说明待办在内存里被清了（队列是持久化的，不该被停清空）');
-  ok('缓存清理周期就是模块头部的"每小时检查一次"',
-    t.intervals.at(-1).ms === 3600 * 1000, `实际 ${t.intervals.at(-1).ms}ms`);
+  ok('两个 interval 各司其职：缓存清理每小时、进度扫描每分钟',
+    t.active().some((h) => h.ms === 3600 * 1000) && t.active().some((h) => h.ms === 60_000),
+    `实际 ${JSON.stringify(t.active().map((h) => h.ms))}ms`);
 
   jmcomic.stopJmcomicQueue();
-  ok('stopJmcomicQueue 把两个句柄都清掉（interval + wake timer）',
+  ok('stopJmcomicQueue 把三个句柄都清掉（两个 interval + wake timer）',
     t.active().length === 0 && t.activeTimeouts().length === 0,
     `还剩 interval ${t.active().length} 个、timeout ${t.activeTimeouts().length} 个`);
 
@@ -246,9 +247,9 @@ await withFakeTimers(async (t) => {
 
   app.updateConfig({ api: { priceRemoteUrl: FEED_URL } });
   const port = await app.start();
-  ok('app.start() 起了价格表 + jmcomic 缓存清理两个 interval',
-    t.active().length === 2,
-    `活动 interval ${t.active().length} 个（期望 2）` +
+  ok('app.start() 起了价格表 + jmcomic 缓存清理 + jmcomic 进度扫描三个 interval',
+    t.active().length === 3,
+    `活动 interval ${t.active().length} 个（期望 3）` +
     ' —— 少一个就说明某个 init 没接进 start()；（wake timer 是 timeout，不在此列）');
 
   await app.stop();

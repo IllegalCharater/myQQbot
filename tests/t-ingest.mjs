@@ -132,4 +132,39 @@ const event = ({ postType, kind, chatId, senderId, text }) => ({
     JSON.stringify(rows.map((m) => [m.self ? 'self' : m.senderName, m.text])));
 }
 
+// ── 4. 群文件上传 notice：群友传的文件也要入档、也能触发对话（2026-11-02）──────
+//
+// 它不是聊天消息（群里没有气泡），原先 `dispatch()` 直接忽略 —— 于是"谁传了一份文件"
+// 既没有存档、也不会惊动模型。自己的上传必须跳过：完成路径已经写过 `我：[文件:…]`。
+{
+  const { ingest, store, forwarded } = makeIngest();
+  const uploadEvent = (groupId, userId, file) => ({
+    post_type: 'notice', notice_type: 'group_upload', group_id: groupId, user_id: userId,
+    self_id: SELF, time: 1700000000, file
+  });
+
+  await ingest.handle(uploadEvent(901, 555, { id: 'fid-1', name: '资料.pdf', size: 2048 }));
+  const entry = store.recent('group:901', { limit: 10 }).at(-1);
+  ok('★ 群友上传群文件 → 落成一条未读消息并交给编排器',
+    entry?.text === '[群文件] 资料.pdf（2.0 KB）' && entry?.read === false
+    && forwarded.length === 1 && forwarded[0][0] === 'group:901',
+    JSON.stringify({ entry, forwarded }));
+  ok('★ 结构化 media 带上文件名 / id / 大小',
+    entry?.media?.[0]?.kind === 'file' && entry.media[0].name === '资料.pdf'
+    && entry.media[0].fileId === 'fid-1' && entry.media[0].size === 2048,
+    JSON.stringify(entry?.media));
+
+  const before = store.recent('group:901', { limit: 100 }).length;
+  await ingest.handle(uploadEvent(901, SELF, { id: 'fid-2', name: '我的.pdf', size: 10 }));
+  ok('自己上传的 notice 不入档（完成路径已经记过 `我：[文件:…]`）',
+    store.recent('group:901', { limit: 100 }).length === before && forwarded.length === 1,
+    JSON.stringify({ n: store.recent('group:901', { limit: 100 }).length, forwarded: forwarded.length }));
+
+  await ingest.handle(uploadEvent(902, 556, {}));
+  const missing = store.recent('group:902', { limit: 10 }).at(-1);
+  ok('notice 字段缺失时仍记一条可读记录（不猜字段）',
+    missing?.text === '[群文件] 一个文件' && missing?.media?.[0]?.kind === 'file',
+    JSON.stringify(missing));
+}
+
 process.exit(done() ? 0 : 1);

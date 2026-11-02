@@ -700,6 +700,8 @@ const assistedUploads = [];   // upload_* 调用的文件名
 
 const sinkCalls = [];
 const assistedLogs = [];
+/** 全文文件上传成功后的出站媒体记账。 */
+const mediaRecords = [];
 let uploadShouldFail = false;
 let sinkShouldThrow = false;
 const ASSIST_LIMIT = Math.max(200, resolveTranscriptionConfig(cfg).resultMaxChars - '转写结果：\n'.length - 20);
@@ -723,6 +725,7 @@ const assistedQueue = new VideoTranscriptionQueue({
     sinkCalls.push(input);
     if (sinkShouldThrow) throw new Error('fixture-sink-failed');
   },
+  recordMedia: (chatKey, media, text) => { mediaRecords.push({ chatKey, media, text }); },
   operations: {
     checkFfmpeg: async () => {},
     runTask: async (job, _signal, setStatus) => {
@@ -763,6 +766,15 @@ ok('回流端口拿到的是开头一段（与群里那份截断段同一长度�
   && sinkCalls[1]?.truncated === true && sinkCalls[1]?.chars === 4000
   && sinkCalls[1]?.text === LONG_TEXT.slice(0, ASSIST_LIMIT),
   `${Array.from(sinkCalls[1]?.text || '').length} / limit=${ASSIST_LIMIT} truncated=${sinkCalls[1]?.truncated} chars=${sinkCalls[1]?.chars}`);
+// 全文文件上传成功后要留一条 `我：[文件:…]`（2026-11-02）：原先转写这条直传路径
+// 完全不记账，群里/存档里都看不到"我发过一个全文文件"。
+ok('★ 全文文件上传成功后写入一条出站媒体记录（名字 / 大小 / 文本约定）',
+  mediaRecords.length === 1 && mediaRecords[0].chatKey === 'group:7'
+  && mediaRecords[0].media.kind === 'file'
+  && String(mediaRecords[0].media.name).startsWith('transcription-')
+  && mediaRecords[0].media.size === Buffer.byteLength(LONG_TEXT, 'utf8')
+  && mediaRecords[0].text === `[文件:${mediaRecords[0].media.name}]`,
+  JSON.stringify(mediaRecords));
 
 // 回归：默认的 standalone 路径逐字节不变（截断段 + 文件 + 上传失败时的补救文案）
 uploadShouldFail = true;

@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { load } from './lib/src.mjs';
+import { ROOT, stripComments, load } from './lib/src.mjs';
+import { Agent, getGlobalDispatcher, setGlobalDispatcher } from 'undici';
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qqagent-notice-'));
 process.env.QQ_AGENT_DATA_DIR = DIR;
@@ -194,6 +195,62 @@ truthy('提示里给了下一步（不要编内容）', /不要编内容/.test(e
 console.log('\n  -- 私聊 --');
 const e2 = await tool.execute({ ...ctx, kind: 'private', chatKey: 'private:1' }, {});
 truthy('私聊明确回绝', e2.isError === true && /只在群聊/.test(e2.content));
+
+// ═══ 7. OneBot.call 的网络错误必须带出 undici 的 cause（2026-11-02） ═══
+//
+// 真机：漫画 PDF 上传 5 分钟后只留下 `fetch failed` —— 而下一条日志（核验）也看不出
+// 是"超时"还是"连不上"。`fetch` 把真实成因放在 `error.cause` 里，必须带出来。
+console.log('\n=== 7. OneBot.call 的网络错误：cause 不能再被丢掉 ===');
+{
+  // 7a. 连接被拒：cause 里有 ECONNREFUSED。
+  const probe = http.createServer();
+  await new Promise((r) => probe.listen(0, '127.0.0.1', r));
+  const closedPort = probe.address().port;
+  await new Promise((r) => probe.close(r));
+  const dead = new OneBotClient({
+    wsUrl: 'ws://127.0.0.1:1', httpUrl: `http://127.0.0.1:${closedPort}`, accessToken: '', onEvent: () => {}
+  });
+  let refused = '';
+  try { await dead.call('upload_group_file', {}, 3000); } catch (error) { refused = error.message; }
+  truthy('连接被拒时 message 里带 ECONNREFUSED，而不是只剩 fetch failed',
+    /OneBot upload_group_file 请求失败/.test(refused)
+    && /ECONNREFUSED/.test(refused) && refused !== 'fetch failed', refused);
+
+  // 7b. undici 自己的 headersTimeout：这才是真机上那 5 分 03 秒的成因。
+  //     用 300ms 的 dispatcher + 一个永不响应的服务复现，确认 message 里能看到
+  //     `Headers Timeout` / `UND_ERR_HEADERS_TIMEOUT`，而不是一句 `fetch failed`。
+  const previous = getGlobalDispatcher();
+  const slow = http.createServer(() => { /* 故意不响应 */ });
+  await new Promise((r) => slow.listen(0, '127.0.0.1', r));
+  const slowAgent = new Agent({ headersTimeout: 300, bodyTimeout: 300 });
+  setGlobalDispatcher(slowAgent);
+  try {
+    const slowClient = new OneBotClient({
+      wsUrl: 'ws://127.0.0.1:1', httpUrl: `http://127.0.0.1:${slow.address().port}`, accessToken: '', onEvent: () => {}
+    });
+    const t0 = Date.now();
+    let timedOut = '';
+    try { await slowClient.call('upload_group_file', {}, 5000); } catch (error) { timedOut = error.message; }
+    truthy('undici 头超时如实说是 Headers Timeout（带 UND_ERR_HEADERS_TIMEOUT）',
+      /OneBot upload_group_file 请求失败/.test(timedOut)
+      && /Headers Timeout/i.test(timedOut) && /UND_ERR_HEADERS_TIMEOUT/.test(timedOut), timedOut);
+    truthy('而且它发生在我们 5 秒死线之前（证明是网络层默认超时抢先掐的）',
+      Date.now() - t0 < 5000, `${Date.now() - t0}ms`);
+  } finally {
+    setGlobalDispatcher(previous);
+    await slowAgent.close();
+    slow.closeAllConnections?.();
+    await new Promise((r) => slow.close(r));
+  }
+
+  // 7c. 源级：全局 dispatcher 的 headers/body 超时必须跟着上传窗口走。
+  //     写成默认（或写死 5 分钟）就会再次出现"我们的 30 分钟死线根本没生效"。
+  const appSrc = stripComments(fs.readFileSync(path.join(ROOT, 'src', 'web', 'app.ts'), 'utf8'));
+  truthy('全局 dispatcher 的 headers/body 超时取自 UPLOAD_TIMEOUT_MS，不是 undici 默认 5 分钟',
+    /headersTimeout:\s*UPLOAD_TIMEOUT_MS\s*\+/.test(appSrc)
+    && /bodyTimeout:\s*UPLOAD_TIMEOUT_MS\s*\+/.test(appSrc),
+    appSrc.match(/headersTimeout[^\n]*/)?.[0] || '没找到 headersTimeout');
+}
 
 srv.close();
 fs.rmSync(DIR, { recursive: true, force: true });

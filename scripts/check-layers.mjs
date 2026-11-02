@@ -93,7 +93,9 @@ const MEDIA_FLAT_ALLOW = new Set([
   'call-budget.ts',       // 滑动窗口调用闸门
   'bookmark-request.ts',  // 收藏夹的「请求结构」取数
   'task-queue.ts',        // 异步任务队列的机械部分
-  'task-error.ts'         // 异步任务的错误形状
+  'task-error.ts',        // 异步任务的错误形状
+  'task-progress.ts',     // 长任务进度的纯判定与文案（计时器留在各能力）
+  'task-delivery.ts'      // 文件上传 / 群文件核验的共同助手
 ]);
 for (const entry of fs.readdirSync(mediaRoot, { withFileTypes: true })) {
   if (entry.isFile() && SOURCE_EXT.test(entry.name) && !MEDIA_FLAT_ALLOW.has(entry.name)) {

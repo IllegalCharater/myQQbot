@@ -488,6 +488,8 @@ store.promptContextMaxChars = 32000
 
 同一次测试还暴露了第二个症状：**出图的发送不该占每会话串行链**。`SendQueue.sendImage` 走的是与 `sendTextBatch` 同一条 chain，而上传一旦慢到分钟级，**正在进行的对话就整体堵住**——模型收尾那一步正是 `send_message`，它排在链上等上传，于是工具调用不返回、本轮运行不结束、面板上那条会话一直显示"运行中"。现在 `sendImage` 是链外实现（限频与 `我：[图片]` 的存档照旧），与转写全文文件、漫画 PDF 那条"大上传直接 `onebot.call`"的口径一致。代价是图片可能与文本交错，换来的是一条卡住的上传不再冻结会话；**sticker 不在豁免之列**（它是运行内动作，模型本来就在等它的结果，且是本地小文件）。
 
+还有一层**网络层**的死线，与上面两条同型（2026-11-02 实测）：全局 `fetch` 用的 undici 默认 `headersTimeout` / `bodyTimeout` 都是 **5 分钟**，而漫画 PDF 上传的 `AbortSignal` 是 **30 分钟**。大文件会在第 5 分 03 秒被网络层掐掉（任务 id 里的时间戳与日志时间实测正好差 5 分 03 秒），协议端随之中断、群里没有文件；错误只剩一句 `fetch failed`（真实成因 `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` 在 `error.cause` 里，旧 `OneBotClient.call` 把它丢了）。现在 `web/app.ts` 的全局 dispatcher 把这两项取 `UPLOAD_TIMEOUT_MS + 60_000`（从 jmcomic 桶文件导出，不写死数字），`call` 的 catch 把 `error.cause` 带进错误消息。判据与上面同一条：**我们的死线必须永远先到**。守护在 `tests/t-notice.mjs` 第 7 段（连接被拒带 `ECONNREFUSED` / 头超时带 `UND_ERR_HEADERS_TIMEOUT` 且早于 5 秒死线 / 源级断言 dispatcher 取自 `UPLOAD_TIMEOUT_MS`）。
+
 能力型工具的依赖（`transcription` / `imageGen` / `hotSearch`）是 `ToolContext` 上的**可选**字段，从 `OrchestratorDependencies` 经 `WakeScheduler`（真正的 `AgentRunnerHost`）透传进来；缺了不做 `instanceof` 校验，由工具自己返回友好错误。未启用的能力由 `agent-runner.ts` 按配置从工具集里过滤掉，与视觉/搜索的过滤同一处。
 
 ### 8.3 出图的提示词编译层（可选，2026-10-20）
@@ -569,6 +571,41 @@ store.promptContextMaxChars = 32000
 
 **默认关**（`imageGen.compile.enabled: false`）：每张图多一到两次模型调用，而图按张计费，出厂打开等于给所有升级的人悄悄加一倍成本。与仓库里其余重能力默认关是同一条口径。
 
+### 8.4 出站媒体、进度与晚到核验（2026-11-02）
+
+三个 async 能力的**骨架**早已共用（`task-queue.ts` / `task-error.ts` / `appendAsyncResult` /
+`deliverAsyncResult` / `async-task.ts`），但投递、媒体记录、进度与核验此前是各写各的。这一轮把
+可共用的部分收成四件：
+
+| 共用件 | 位置 | 职责 |
+| --- | --- | --- |
+| 出站媒体形状与文本 | `core/outgoing-media.ts` | `[文件:name]` / `[语音]` / `[图片]` / `[表情包:…]`；放 core 是因为 `qq`/`media`/`chat` 同属 T1，互不能 import |
+| 出站媒体落库 | `chat/store.ts` 的 `appendSelfMedia` | 一条 self 记录 + 结构化 `media`（`kind/name/size/fileId`），仍是已读、不唤醒 |
+| 进度判定与文案 | `media/task-progress.ts` | 纯函数：`progressDue` / `progressElapsedMs` / `progressText`；**计时器留在各能力**（`TaskQueue` 不持有计时器） |
+| 文件上传与核验 | `media/task-delivery.ts` | `uploadFile` / `matchGroupFile` / `matchPrivateHistory` / 晚到窗口常量；**只服务 `upload_*_file`**，图片消息不适用 |
+
+**所有出站媒体都走同一条记账**：`SendQueue` 的文本/表情/图片/文件、漫画 PDF、转写全文文件。
+判据是**上传确认成功才记**（临时文件随后就删，只留名字/大小/id）。
+
+**进度是独立的第四种机器条目**（`kind:'media-progress'`，标签【任务进度】），与三态结局分开：
+它只说"还在跑"，模型不许据此宣布完成。新增一种异步结果要改四处（`ASYNC_RESULT_KINDS` /
+`response-policy` / `prompt-builder` / `prompt-catalog`），这里一次改完、所有能力可用。
+漫画先接入：`queue.ts` 每 60 秒扫描，从任务真正开始处理算起 5 分钟仍未结束就发**一次**。
+
+**晚到核验**：正常核验（30s/60s/120s/300s）走完后，先发一次如实的 `unsent`，然后进入
+**晚到观察窗**（每 5 分钟查一次、最多 1 小时）。找到 → `completeUpload(..., { late: true })`：
+补一条 self 文件记录 + 一条 `jmcomic-result`（"之前没确认到，现在确认到了"），再唤醒模型；
+到期仍未找到 → 静默收尾，不再发第二条坏消息。全程**绝不重传**（非幂等上传）。
+
+**入站群文件上传**（`notice_type='group_upload'`）原先被 `ingest.dispatch` 丢掉：现在非自己的上传
+会落成一条未读消息（`[群文件] 名字（大小）` + `media`），走同一套白名单/响应档位并唤醒模型；
+自己的上传跳过（完成路径已经记过 `我：[文件:…]`）。协议端是否真的发这个 notice 仍需真机冒烟。
+
+守护：`t-chat-log`（出站媒体文本/留档/重放）、`t-transcription`（全文文件上传成功才记）、
+`t-jmcomic-upload`（进度只发一次 / 晚到补记 / 到期静默 / 不重传）、`t-jmcomic-callback`
+（【任务进度】标签与最低档位唤醒）、`t-ingest`（group_upload 入档/跳过自己/缺字段）、
+`t-window`（`media-progress` 不参与滑出）、`t-timers`（jmcomic 的两个 interval 与 stop 清零）。
+
 ## 9. 会话记录与可观测性
 
 每次运行记录：
@@ -645,7 +682,7 @@ npm run dist:desktop    # 打包绿色版桌面应用（scripts/build-desktop.mj
 
 当前重点回归包括动态窗口语义、摘要去重、当前窗口与独立历史分离、统一预算保护本轮消息、读图结果回填、`memory_query` 定向查询、主动冒泡的唤醒语义（`t-window.mjs` 第 15 段），以及 Web/UI 模块接线。
 
-长期任务与事件相关改动另有一组专项套件：`t-events.mjs`（事件名/载荷/注入类型/`session-update` 通道）、`t-sse-project.mjs`（SSE 帧逐字节）、`t-panel-wiring.mjs`（UI 订阅名跨边界 + 设置页接线：Python 工具那段的 id 解析、保存分支必须写 `patch.python.path` 且**兜底仍是空串**、两个按钮必须先 `saveConfig` 再打探测端点）、`t-ports.mjs`（跨模块端口与 `implements`；另扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`——`.mjs` 不受 `tsc` 管，这条只能文本扫）、`t-tasks.mjs`（`LONG_TERM_TASKS` 描述符与 `conformance` 一致性）、`t-timers.mjs`（计时器句柄：起没起、停没停、有没有被"清掉又没重建"、待触发的那一次取消不取消得掉）、`t-transcription.mjs`（视频命令、SSRF、单并发状态机、凭证脱敏、**失败回流与两态条目**：`status:'failed'` 进端口 + standalone 失败照旧贴文案 + 端口抛错/缺端口时退回贴文本且全文文件不重发）、`t-jmcomic.mjs`（漫画队列按"请求者 QQ + 漫画 ID"去重：完成后记录**留在** `jobs` 里而不是即时摘除，否则"同一用户短时间内不能重复提交"对**下载成功过**的漫画失效；窗口的计时起点是上传完成时刻而非创建时刻；2026-09-29 起还守 Python 解释器的解析优先级（`python.path` > `QQ_AGENT_PYTHON` > 随包内置运行时 > `conda run`）、每一层报出的 `source`、conda 环境可配置的三种形态（环境名 `-n` / 环境目录 `-p` / 留空不带选择器，见第 1b-3 段）、探测与自检模块（假 `spawn` 注入：非 JSON 输出、非零退出、超时 kill、输出截断、`--self-check` 确实进了 argv），以及旧配置迁移——`jmcomic.pythonPath` 搬进 `python.path` 后旧键必须消失，且保存一次**不会被写回**，因为 `updateConfig` 的 `deepMerge` 只加键不删键，漏掉那句 `delete` 的话内存里看着对、盘上却永远留着；安全网也换了形态：早先靠 `JMCOMIC_PYTHON` 指一个不存在的程序，现在把 `python.path` 写进夹具 `config.json`（`config` 优先级最高，不再依赖"某台机器上恰好有这个变量"），并另配一条正向断言证明安全网真的生效）、`t-jmcomic-callback.mjs`（结果帧即刻结算，不依赖 Python `close`；上传完成 sink 回流 `jmcomic-result`，最低档位仍唤醒）、`t-jmcomic-upload.mjs`（上传超时/断连与重启遗留的 `uploading` 统一进入 `upload_uncertain`：群文件按文件名和大小查群文件列表，私聊按文件名和大小查好友消息历史，核验期间不再次调用非幂等的上传动作）、`t-lifecycle.mjs`（注册层执行侧：退出路径的信号接线与幂等、装配清单 ⇄ 描述符表对账、`app.start()/stop()` 的接线与逆序、无按键分发；S11d 起还守"被删的死代码与空转事件不许长回来"——`core/config.ts` 无任何计时器、三个文件再无 `emit`、`EventMap` 与 `vision-scan` 在 `src/` 绝迹，同时**正向**钉住 `routes/providers.ts` 里那个活着的 `visionScan` 局部对象；S11e 起还守 electron 的退出等待——`before-quit` 的**函数体**里必须有 `preventDefault(`、排在它前面的 `stopping` 守卫、promise 链上的 `.catch(`，以及 `.finally` 里那次 `app.quit()`，否则桌面端要么不退要么死循环）。
+长期任务与事件相关改动另有一组专项套件：`t-events.mjs`（事件名/载荷/注入类型/`session-update` 通道）、`t-sse-project.mjs`（SSE 帧逐字节）、`t-panel-wiring.mjs`（UI 订阅名跨边界 + 设置页接线：Python 工具那段的 id 解析、保存分支必须写 `patch.python.path` 且**兜底仍是空串**、两个按钮必须先 `saveConfig` 再打探测端点）、`t-ports.mjs`（跨模块端口与 `implements`；另扫 `tests/` 里每个 `new Orchestrator({…})` 是否都传了 `emit`——`.mjs` 不受 `tsc` 管，这条只能文本扫）、`t-tasks.mjs`（`LONG_TERM_TASKS` 描述符与 `conformance` 一致性）、`t-timers.mjs`（计时器句柄：起没起、停没停、有没有被"清掉又没重建"、待触发的那一次取消不取消得掉）、`t-transcription.mjs`（视频命令、SSRF、单并发状态机、凭证脱敏、**失败回流与两态条目**：`status:'failed'` 进端口 + standalone 失败照旧贴文案 + 端口抛错/缺端口时退回贴文本且全文文件不重发）、`t-jmcomic.mjs`（漫画队列按"请求者 QQ + 漫画 ID"去重：完成后记录**留在** `jobs` 里而不是即时摘除，否则"同一用户短时间内不能重复提交"对**下载成功过**的漫画失效；窗口的计时起点是上传完成时刻而非创建时刻；2026-09-29 起还守 Python 解释器的解析优先级（`python.path` > `QQ_AGENT_PYTHON` > 随包内置运行时 > `conda run`）、每一层报出的 `source`、conda 环境可配置的三种形态（环境名 `-n` / 环境目录 `-p` / 留空不带选择器，见第 1b-3 段）、探测与自检模块（假 `spawn` 注入：非 JSON 输出、非零退出、超时 kill、输出截断、`--self-check` 确实进了 argv），以及旧配置迁移——`jmcomic.pythonPath` 搬进 `python.path` 后旧键必须消失，且保存一次**不会被写回**，因为 `updateConfig` 的 `deepMerge` 只加键不删键，漏掉那句 `delete` 的话内存里看着对、盘上却永远留着；安全网也换了形态：早先靠 `JMCOMIC_PYTHON` 指一个不存在的程序，现在把 `python.path` 写进夹具 `config.json`（`config` 优先级最高，不再依赖"某台机器上恰好有这个变量"），并另配一条正向断言证明安全网真的生效）、`t-jmcomic-callback.mjs`（结果帧即刻结算，不依赖 Python `close`；上传完成 sink 回流 `jmcomic-result`，最低档位仍唤醒；**`unsent` 文案只说"上传结果未确认"、不说"发出去了"**，上传失败与"没下成"分开说）、`t-jmcomic-upload.mjs`（上传超时/断连与重启遗留的 `uploading` 统一进入 `upload_uncertain`：群文件按文件名和大小查群文件列表，私聊按文件名和大小查好友消息历史，核验期间不再次调用非幂等的上传动作；**协议端明确拒绝（`retcode=` / HTTP 4xx）立刻按失败交代、不进核验**；核验阶段严格区分「查过列表、确实没有」与「根本没法查（取列表失败）」，并保留上传时的真实错误）、`t-lifecycle.mjs`（注册层执行侧：退出路径的信号接线与幂等、装配清单 ⇄ 描述符表对账、`app.start()/stop()` 的接线与逆序、无按键分发；S11d 起还守"被删的死代码与空转事件不许长回来"——`core/config.ts` 无任何计时器、三个文件再无 `emit`、`EventMap` 与 `vision-scan` 在 `src/` 绝迹，同时**正向**钉住 `routes/providers.ts` 里那个活着的 `visionScan` 局部对象；S11e 起还守 electron 的退出等待——`before-quit` 的**函数体**里必须有 `preventDefault(`、排在它前面的 `stopping` 守卫、promise 链上的 `.catch(`，以及 `.finally` 里那次 `app.quit()`，否则桌面端要么不退要么死循环）。
 
 每日热搜另有 `t-hot-search.mjs`，覆盖 ApiZero 匿名/Bearer 请求、429/5xx/超时重试、字段缺失与空榜、标题去重、按条目分页、白名单目标、重启后当天不重复以及手动/定时互斥。
 

@@ -32,8 +32,8 @@ export interface TranscriptRecord extends Record<string, unknown> {
 /**
  * 转写的结局：**只有 `sent` / `failed` 两态，没有 `unsent`**。
  *
- * 判据是**交付物是不是文件**：出图与漫画的交付物是队列自己发出去的文件，所以"做好了但没能
- * 发出去"（`unsent`）是一件真实、且与"没做成"完全不同的事 —— 那份东西**可能已经在群里了**。
+ * 判据是**交付物是不是文件**：出图与漫画的交付物是队列自己发出去的文件，所以"交付结果
+ * 未确认"（`unsent`）是一件真实、且与"没做成"完全不同的事 —— 那份东西**可能已经在群里了**。
  * 转写的交付物是**文本**：它要么交到回流端口（= 条目存在 = 模型会看到），要么无人接单 ——
  * 而"无人接单"时队列自己把文本贴进群，**压根不产生条目**，那个中间态无处可记。
  * 与 `media/transcription/types.ts` 的 `TranscriptStatus` 逐字同值（`chat` 与 `media` 同属 T1，
@@ -42,7 +42,9 @@ export interface TranscriptRecord extends Record<string, unknown> {
 export type TranscriptStatus = 'sent' | 'failed';
 
 /**
- * 异步任务结果的**三态结局**（`sent` 成功 / `unsent` 做成了但没能确认送达 / `failed` 没做成）。
+ * 异步任务结果的**三态结局**（`sent` 成功 / `unsent` 交付结果未确认 / `failed` 没做成）。
+ * 对漫画，`unsent` 还可能是"压根没传上去"——它的上传是非幂等动作，客户端没拿到响应时
+ * 既不能断言成功也不能重传，所以正文只许说"未确认"（见 `media/jmcomic/stages.ts`）。
  *
  * 出图与漫画**各写一份取值逐字相同的联合类型**（`media/image-gen/types.ts` 的
  * `ImageResultStatus`、`media/jmcomic.ts` 的 `JmcomicStatus`）：`chat` 与 `media` 同属 T1，
@@ -93,6 +95,21 @@ export interface JmcomicResultRecord extends Record<string, unknown> {
 }
 
 /**
+ * 长任务的**进度条目**（`kind:'media-progress'`）。
+ *
+ * 与三态结局分开：进度不是结局，模型看到它只该知道"任务还在跑"，**不许说已完成**。
+ * 目前由漫画的 5 分钟进度提示产生；转写/出图以后接同一套。
+ */
+export interface MediaProgressRecord extends Record<string, unknown> {
+  /** 能力标识（`jmcomic` / `transcription` / `image-gen`）—— 文案里已经写了，这里供结构化读取。 */
+  capability: string;
+  /** 业务 id（漫画 ID / 任务 id）。 */
+  taskId: string;
+  /** 人话阶段（下载中 / 上传中 / 核验上传结果）。 */
+  stage: string;
+}
+
+/**
  * 这条消息引用/回复的对象。**`mid` 是它存在的理由，不是附加信息**。
  *
  * 三者分工：`mid` = 被引用消息的 QQ id（可寻址），`sender`/`text` = 预览（人看着像话）。
@@ -125,6 +142,8 @@ export interface ChatMessage extends Record<string, unknown> {
   transcript?: TranscriptRecord;
   imageResult?: ImageResultRecord;
   jmcomic?: JmcomicResultRecord;
+  /** 长任务进度（`kind:'media-progress'`）。 */
+  progress?: MediaProgressRecord;
   /**
    * 引用对象。**预览只存在这里，不再拍进 `text`**（见 `Ingest` 的注释）：
    * 拍进去的话 id 就没了，而渲染层拿得到结构化数据才能把它印成 `[引用 #id 谁：什么]`。

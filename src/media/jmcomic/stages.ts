@@ -9,11 +9,21 @@ import { getRuntime } from './runtime.js';
 import { updateJob, cleanupCompletedJob, jobKind } from './jobs.js';
 import { runPython, validatePdf } from './python.js';
 import { errorMessage, isRecord, DOWNLOAD_RETRY_MS, UPLOAD_TIMEOUT_MS, UPLOAD_VERIFY_RETRY_MS } from './shared.js';
+import {
+  uploadFile, matchGroupFile, matchPrivateHistory, responseFileId,
+  LATE_WATCH_INTERVAL_MS, LATE_WATCH_TOTAL_MS
+} from '../task-delivery.js';
+import { outgoingMediaText } from '../../core/outgoing-media.js';
+import type { OutgoingMedia } from '../../core/outgoing-media.js';
 import type { JmcomicStatus, JmJob } from './types.js';
 
 export async function downloadStage(job: JmJob) {
   const attempt = Number(job.downloadAttempts || 0) + 1;
-  updateJob(job, { status: 'downloading', downloadAttempts: attempt, lastError: '', heartbeatAt: Date.now() });
+  updateJob(job, {
+    status: 'downloading', downloadAttempts: attempt, lastError: '', heartbeatAt: Date.now(),
+    // 进度**从整个任务真正开始处理算起**，跨阶段不重置（用户等的是"这个任务还没好"）。
+    progressAnchorAt: Number(job.progressAnchorAt) > 0 ? job.progressAnchorAt : Date.now()
+  });
   try {
     const result = await runPython(job);
     updateJob(job, {
@@ -35,11 +45,36 @@ export async function downloadStage(job: JmJob) {
   }
 }
 
-function responseFileId(value: unknown): string {
-  return isRecord(value) ? String(value.file_id ?? value.fileId ?? '') : '';
+/** 出站 PDF 的结构化留档：名字 + 大小（能算出来时）+ 协议端给的 id。 */
+function outgoingFileMedia(job: JmJob, fileId = ''): OutgoingMedia {
+  const name = `${job.comicId}.pdf`;
+  let size = 0;
+  try {
+    size = fs.statSync(validatePdf(job.pdfPath)).size;
+  } catch { /* 文件可能已被清理；记录名字与 id 仍然有价值 */ }
+  return { kind: 'file', name, ...(size > 0 ? { size } : {}), ...(fileId ? { fileId } : {}) };
 }
 
-async function completeUpload(job: JmJob, source: 'response' | 'group-file-check' | 'private-history-check', fileId = '') {
+/**
+ * 协议端**明确回了这次动作失败**（retcode 非 0 / HTTP 4xx）。
+ *
+ * 这与超时、断线、5xx 是两件事：那些"客户端没拿到响应"的情况不能证明文件没传上去，
+ * 所以只能核验、绝不能重传；而明确失败是服务端自己说这次动作没成 —— **文件没有传上去**。
+ * 判据沿用仓库既有口径（`chat-actions.ts` 的表情兜底也把 `retcode=` 当"明确拒绝"）。
+ *
+ * 分开的收益是具体的：不分开的话，一次"文件不存在 / 超过群文件上限"的明确拒绝要等
+ * 4 轮核验（约 8.5 分钟）才落成一句"未确认"——而用户其实立刻就能知道真实原因。
+ */
+function isDefinitiveUploadRejection(message: string): boolean {
+  return /retcode=\s*-?\d+/i.test(message) || /HTTP\s*4\d\d/i.test(message);
+}
+
+async function completeUpload(
+  job: JmJob,
+  source: 'response' | 'group-file-check' | 'private-history-check' | 'late-watch',
+  fileId = '',
+  { late = false }: { late?: boolean } = {}
+) {
   // 从这里开始 OneBot 已明确返回成功，或群文件列表已经证明目标文件存在。
   // 任何本地收尾失败都不能再把任务放回上传路径。
   try {
@@ -51,8 +86,14 @@ async function completeUpload(job: JmJob, source: 'response' | 'group-file-check
     console.warn(`[jmcomic] 文件已上传，但完成状态写入失败（${job.id}）:`, errorMessage(error));
     return;
   }
+  if (late) console.info(`[jmcomic] 晚到文件已确认（${job.id}）`);
   try {
-    getRuntime()?.store.appendSelf(job.chatKey, { text: `[文件:${job.comicId}.pdf]`, ts: Date.now(), mid: null });
+    getRuntime()?.store.appendSelf(job.chatKey, {
+      text: outgoingMediaText({ kind: 'file', name: `${job.comicId}.pdf` }),
+      ts: Date.now(),
+      mid: null,
+      media: [outgoingFileMedia(job, fileId)]
+    });
   } catch (error) {
     console.warn(`[jmcomic] 文件已上传，但聊天存档写入失败（${job.id}）:`, errorMessage(error));
   }
@@ -67,7 +108,8 @@ async function completeUpload(job: JmJob, source: 'response' | 'group-file-check
         cached: job.cached === true,
         source,
         fileId,
-        status: 'sent'
+        status: 'sent',
+        ...(late ? { late: true } : {})
       });
     } catch (error) {
       // 文件已经上传成功，回流失败不能把 completed 任务重新放回非幂等的上传路径。
@@ -88,14 +130,15 @@ async function completeUpload(job: JmJob, source: 'response' | 'group-file-check
  * 端口**抛错**时不退：那种情况下条目可能已经落库了，再贴一句就是重复发言。
  */
 async function reportTerminal(
-  job: JmJob, status: Exclude<JmcomicStatus, 'sent'>, reason: string, fallbackText: string
+  job: JmJob, status: Exclude<JmcomicStatus, 'sent'>, reason: string, fallbackText: string,
+  stage: 'download' | 'upload' = 'download'
 ): Promise<void> {
   const sink = getRuntime()?.onCompleted;
   if (sink) {
     try {
       await sink({
         chatKey: job.chatKey, comicId: job.comicId, cached: false,
-        source: 'response', fileId: '', status, reason
+        source: 'response', fileId: '', status, reason, stage
       });
       return;
     } catch (error) {
@@ -112,11 +155,15 @@ async function reportTerminal(
 }
 
 function deferUploadVerification(job: JmJob, error: unknown) {
+  const message = errorMessage(error);
   updateJob(job, {
-    status: 'upload_uncertain', lastError: errorMessage(error), uploadVerifyAttempts: 0,
+    status: 'upload_uncertain', lastError: message,
+    // 上传失败原因单独留一份：核验阶段会反复覆盖 `lastError`，覆盖掉就查不出
+    // "为什么没传上去"了。
+    uploadError: message, uploadVerifyAttempts: 0, verifyLooked: false, verifyError: '',
     nextAttemptAt: Date.now() + UPLOAD_VERIFY_RETRY_MS[0]
   });
-  console.warn(`[jmcomic] 上传结果未知，将先核验而不是自动重传（${job.id}）:`, errorMessage(error));
+  console.warn(`[jmcomic] 上传结果未知，将先核验而不是自动重传（${job.id}）:`, message);
 }
 
 export async function uploadStage(job: JmJob) {
@@ -130,51 +177,35 @@ export async function uploadStage(job: JmJob) {
   const attempt = Number(job.uploadAttempts || 0) + 1;
   updateJob(job, {
     status: 'uploading', uploadAttempts: attempt, uploadStartedAt: Date.now(),
-    uploadVerifyAttempts: 0, lastError: ''
+    uploadVerifyAttempts: 0, lastError: '',
+    // 同下载阶段：进度锚点跨阶段保留，5 分钟是"整个任务"的阈值，不是每一段的。
+    progressAnchorAt: Number(job.progressAnchorAt) > 0 ? job.progressAnchorAt : Date.now()
   });
   const kind = jobKind(job);
-  const params = kind === 'group'
-    ? { group_id: Number(job.chatId), file: pdfPath, name: `${job.comicId}.pdf` }
-    : { user_id: Number(job.chatId), file: pdfPath, name: `${job.comicId}.pdf` };
-  const action = kind === 'group' ? 'upload_group_file' : 'upload_private_file';
+  const onebot = getRuntime()?.onebot;
+  if (!onebot) throw new Error('漫画队列未初始化（没有 OneBot 端口）');
   try {
-    const result = await getRuntime()?.onebot.call(action, params, UPLOAD_TIMEOUT_MS);
+    const result = await uploadFile(onebot, {
+      kind, chatId: job.chatId, file: pdfPath, name: `${job.comicId}.pdf`, timeoutMs: UPLOAD_TIMEOUT_MS
+    });
     await completeUpload(job, 'response', responseFileId(result));
   } catch (error) {
-    // upload_*_file 是非幂等动作。AbortError、断线乃至 HTTP 错误都不能证明服务端
-    // 没有继续执行；统一进入“结果未知”，后续只核验，不重复发送。
+    const message = errorMessage(error);
+    // 协议端**明确拒绝**（retcode / HTTP 4xx）：文件没有被传上去，没有"可能已经发出"
+    // 这回事。立刻按失败交代 —— 否则用户要等 4 轮核验（约 8.5 分钟）才收到一句
+    // "未确认"，而真实原因（文件不存在 / 超过上限 / 无权限）被埋在日志里。
+    if (isDefinitiveUploadRejection(message)) {
+      updateJob(job, {
+        status: 'failed', lastError: message, uploadError: message,
+        uploadVerifyAttempts: 0, failedAt: Date.now(), nextAttemptAt: null
+      });
+      await reportTerminal(job, 'failed', message, `❌ PDF 上传失败：${message}`, 'upload');
+      return;
+    }
+    // 超时、断线、5xx、响应不可解析：`upload_*_file` 是非幂等动作，这些情况都不能证明
+    // 服务端没有继续执行 —— 统一进入"结果未知"，后续只核验，不重复发送。
     deferUploadVerification(job, error);
   }
-}
-
-function matchingGroupFile(value: unknown, job: JmJob, pdfPath: string): Record<string, unknown> | null {
-  if (!isRecord(value) || !Array.isArray(value.files)) throw new Error('群文件列表返回格式无效');
-  const expectedName = `${job.comicId}.pdf`;
-  const expectedSize = fs.statSync(pdfPath).size;
-  for (const item of value.files) {
-    if (!isRecord(item)) continue;
-    const name = String(item.file_name ?? item.fileName ?? '');
-    const size = Number(item.file_size ?? item.fileSize ?? -1);
-    if (name === expectedName && size === expectedSize) return item;
-  }
-  return null;
-}
-
-function matchingPrivateFile(value: unknown, job: JmJob, pdfPath: string): Record<string, unknown> | null {
-  if (!isRecord(value) || !Array.isArray(value.messages)) throw new Error('好友消息历史返回格式无效');
-  const expectedName = `${job.comicId}.pdf`;
-  const expectedSize = fs.statSync(pdfPath).size;
-  for (const message of value.messages) {
-    if (!isRecord(message) || !Array.isArray(message.message)) continue;
-    for (const segment of message.message) {
-      if (!isRecord(segment) || segment.type !== 'file' || !isRecord(segment.data)) continue;
-      const data = segment.data;
-      const name = String(data.name ?? data.file_name ?? data.fileName ?? data.file ?? '');
-      const size = Number(data.file_size ?? data.fileSize ?? data.size ?? -1);
-      if (name === expectedName && size === expectedSize) return data;
-    }
-  }
-  return null;
 }
 
 export async function uploadUncertainStage(job: JmJob) {
@@ -187,45 +218,108 @@ export async function uploadUncertainStage(job: JmJob) {
       failedAt: Date.now(), nextAttemptAt: null
     });
     await reportTerminal(job, 'failed', `无法核验已上传文件：${errorMessage(error)}`,
-      `❌ PDF 上传结果无法核验：${errorMessage(error)}`);
+      `❌ PDF 上传结果无法核验：${errorMessage(error)}`, 'upload');
     return;
   }
 
   const verifyAttempt = Number(job.uploadVerifyAttempts || 0) + 1;
   const kind = jobKind(job);
+  const surface = kind === 'group' ? '群文件' : '私聊历史';
+  const name = `${job.comicId}.pdf`;
+  const size = fs.statSync(pdfPath).size;
+  let fetched = false;
+  let lastVerifyError = String(job.verifyError || '');
   try {
     const result = kind === 'group'
       ? await getRuntime()?.onebot.call('get_group_root_files', { group_id: Number(job.chatId) })
       : await getRuntime()?.onebot.call('get_friend_msg_history', {
           user_id: Number(job.chatId), message_id: 0, count: 50, reverse_order: true
         });
-    const found = kind === 'group'
-      ? matchingGroupFile(result, job, pdfPath)
-      : matchingPrivateFile(result, job, pdfPath);
-    if (found) {
-      await completeUpload(job, kind === 'group' ? 'group-file-check' : 'private-history-check', responseFileId(found));
+    const match = kind === 'group'
+      ? matchGroupFile(result, { name, size })
+      : { found: matchPrivateHistory(result, { name, size }), sameName: null, total: 0, expectedSize: size };
+    fetched = true;
+    lastVerifyError = '';
+    if (match.found) {
+      // 已经向模型报过"未确认"的，是**晚到补记**：文案要说清是补记，别与上一句矛盾。
+      const late = job.terminalNotified === true;
+      await completeUpload(
+        job,
+        late ? 'late-watch' : (kind === 'group' ? 'group-file-check' : 'private-history-check'),
+        responseFileId(match.found),
+        { late }
+      );
       console.info(`[jmcomic] 已通过${kind === 'group' ? '群文件列表' : '好友消息历史'}确认上传完成（${job.id}）`);
       return;
     }
+    if (kind === 'group') {
+      console.info(`[jmcomic] 第 ${verifyAttempt} 次核验：群文件根目录共 ${match.total} 项，未见 ${name}（${job.id}）`);
+      // 同名但大小不符 = 可能是一次假阴性（协议端没给 file_size / 报的口径不同）。
+      // 不把它当作"这次传的"（那会把没成功的上传记成 sent），但必须留痕，
+      // 否则"其实在群里"与"确实没传上去"在日志里长得一模一样。
+      if (match.sameName) {
+        const actual = Number(match.sameName.file_size ?? match.sameName.fileSize ?? -1);
+        console.warn(`[jmcomic] 群文件里有同名 ${name} 但大小不符（期望 ${match.expectedSize}，实际 ${actual}），不当作已上传（${job.id}）`);
+      }
+    }
   } catch (error) {
-    console.warn(`[jmcomic] 第 ${verifyAttempt} 次核验群文件失败（${job.id}）:`, errorMessage(error));
+    lastVerifyError = errorMessage(error);
+    console.warn(`[jmcomic] 第 ${verifyAttempt} 次核验${surface}失败（${job.id}）:`, lastVerifyError);
   }
 
+  // "查过了没有"与"根本没法查"必须分开：前者是独立的证据，后者什么也证明不了。
+  const looked = job.verifyLooked === true || fetched;
   const nextDelay = UPLOAD_VERIFY_RETRY_MS[verifyAttempt];
   if (nextDelay !== undefined) {
     updateJob(job, {
       status: 'upload_uncertain', uploadVerifyAttempts: verifyAttempt,
+      verifyLooked: looked, verifyError: lastVerifyError,
       nextAttemptAt: Date.now() + nextDelay
     });
     return;
   }
 
-  const surface = kind === 'group' ? '群文件' : '私聊历史';
-  const message = `连续 ${verifyAttempt} 次未在${surface}中确认到 ${job.comicId}.pdf；为避免重复发送，未自动重传`;
-  updateJob(job, { status: 'failed', uploadVerifyAttempts: verifyAttempt, lastError: message, failedAt: Date.now(), nextAttemptAt: null });
-  // ⚠️ 这条是 **`unsent`**：PDF 发出去了，只是没能确认 —— **很可能已经在群里**。
-  // 说成"没下成"会让模型对群友说反话（同一个 PDF 就在他眼前）。
-  await reportTerminal(job, 'unsent', `${message}（请自己看一眼${surface}里有没有 ${job.comicId}.pdf）`,
-    `⚠️ ${message}，请检查${surface}后再决定是否重新提交。`);
+  const now = Date.now();
+  // 已经报过"未确认"：进入**晚到观察**（非幂等上传可能比客户端死线更晚完成）。
+  // 找到 → 上面那条 `completeUpload(..., { late: true })` 会补记 + 再通知一次；
+  // 没找到 → 到点静默收尾（不再发第二条坏消息）。
+  if (job.terminalNotified === true) {
+    if (Number(job.lateWatchUntil) > now) {
+      updateJob(job, {
+        status: 'upload_uncertain', uploadVerifyAttempts: verifyAttempt,
+        verifyLooked: looked, verifyError: lastVerifyError,
+        nextAttemptAt: now + LATE_WATCH_INTERVAL_MS
+      });
+      return;
+    }
+    updateJob(job, {
+      status: 'failed', uploadVerifyAttempts: verifyAttempt,
+      verifyLooked: looked, verifyError: lastVerifyError,
+      failedAt: now, nextAttemptAt: null
+    });
+    return;
+  }
+
+  const uploadError = String(job.uploadError || '').trim();
+  const outcome = looked
+    ? `已查询${surface}列表，但没有找到 ${name}（共核验 ${verifyAttempt} 次）`
+    : `无法核验上传结果：取${surface}列表失败（${lastVerifyError || '原因未知'}）`;
+  const message = [
+    uploadError ? `上传时的错误：${uploadError}` : '',
+    outcome,
+    '为避免重复发送，未自动重传；会继续留意是否晚到，确认到会再补一条'
+  ].filter(Boolean).join('；');
+  // ⚠️ 先记终局已通知 + 晚到观察窗，再发条目：条目抛错也不能让下一轮重复报。
+  updateJob(job, {
+    status: 'upload_uncertain', uploadVerifyAttempts: verifyAttempt,
+    verifyLooked: looked, verifyError: lastVerifyError,
+    terminalNotified: true, lateWatchUntil: now + LATE_WATCH_TOTAL_MS,
+    lastError: message, nextAttemptAt: now + LATE_WATCH_INTERVAL_MS
+  });
+  // ⚠️ 这条是 **`unsent`**：上传结果**未确认** —— 可能没发出去，也可能已经在群里。
+  // 文案不许断言"发出去了"：`upload_*_file` 抛错只说明客户端没拿到结果，如今有大量
+  // 实测情形（协议端明确拒绝、文件读不到）其实一条都没传上去。
+  await reportTerminal(job, 'unsent', `${message}（请自己看一眼${surface}里有没有 ${name}）`,
+    `⚠️ 漫画 ${job.comicId} 的 PDF 上传结果未确认：${message}`, 'upload');
 }
 

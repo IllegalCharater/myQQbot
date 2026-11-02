@@ -40,8 +40,15 @@ export function normalizeJob(value: unknown): JmJob | null {
     ...(typeof value.cached === 'boolean' ? { cached: value.cached } : {}),
     ...(typeof value.uploadStartedAt === 'number' ? { uploadStartedAt: value.uploadStartedAt } : {}),
     ...(typeof value.uploadVerifyAttempts === 'number' ? { uploadVerifyAttempts: value.uploadVerifyAttempts } : {}),
+    ...(typeof value.progressAnchorAt === 'number' ? { progressAnchorAt: value.progressAnchorAt } : {}),
+    ...(typeof value.progressNotifiedAt === 'number' ? { progressNotifiedAt: value.progressNotifiedAt } : {}),
+    ...(typeof value.lateWatchUntil === 'number' ? { lateWatchUntil: value.lateWatchUntil } : {}),
+    ...(typeof value.terminalNotified === 'boolean' ? { terminalNotified: value.terminalNotified } : {}),
+    ...(typeof value.uploadError === 'string' ? { uploadError: value.uploadError } : {}),
+    ...(typeof value.verifyLooked === 'boolean' ? { verifyLooked: value.verifyLooked } : {}),
+    ...(typeof value.verifyError === 'string' ? { verifyError: value.verifyError } : {}),
     ...(typeof value.uploadedFileId === 'string' ? { uploadedFileId: value.uploadedFileId } : {}),
-    ...(value.completionSource === 'response' || value.completionSource === 'group-file-check' || value.completionSource === 'private-history-check'
+    ...(value.completionSource === 'response' || value.completionSource === 'group-file-check' || value.completionSource === 'private-history-check' || value.completionSource === 'late-watch'
       ? { completionSource: value.completionSource } : {})
   };
 }

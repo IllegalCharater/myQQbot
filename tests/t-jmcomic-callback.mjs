@@ -184,4 +184,52 @@ try {
 }
 
 
+// ── 文案：上传结果未知时不许断言"已经发出去了"（2026-11-02）──────────────
+//
+// `upload_*_file` 抛错只说明**客户端没拿到响应**；协议端明确拒绝、文件读不到这些情形
+// 其实一条都没传上去。所以正文只能说"上传结果未确认"，不能说"发出去了"。
+{
+  const KEY = 'group:990';
+  const unsent = store.appendJmcomicResult(KEY, {
+    comicId: '888', status: 'unsent',
+    reason: '已查询群文件列表，但没有找到 888.pdf；上传时的错误：timeout'
+  });
+  ok('★ unsent 说"上传结果未确认"，不说"发出去了"（后者只是没被证伪）',
+    unsent.text.includes('上传结果未确认') && !unsent.text.includes('发出去了'), unsent.text);
+
+  const uploadFailed = store.appendJmcomicResult(KEY, {
+    comicId: '889', status: 'failed', stage: 'upload', reason: 'retcode=1200 文件上传失败'
+  });
+  ok('★ 上传失败与"没下成"分开说（下载其实成功了）',
+    uploadFailed.text.includes('下载好了，但上传失败') && !uploadFailed.text.includes('没下成'),
+    uploadFailed.text);
+
+  const lateSent = store.appendJmcomicResult(KEY, { comicId: '890', status: 'sent', late: true });
+  ok('★ 晚到补记的正文说清"之前没确认到、现在确认了"（不和上一句矛盾）',
+    lateSent.text.includes('之前没确认到') && lateSent.text.includes('现在确认已经发出去了'),
+    lateSent.text);
+}
+
+
+// ── 长任务进度：与三态结局分开（2026-11-02）──────────────────────────────
+{
+  const progress = store.appendMediaProgress('group:991', {
+    capability: 'jmcomic', taskId: '123', stage: '上传中',
+    text: '漫画 123 还在上传（已 6 分钟）；完成后会再通知一次。'
+  });
+  ok('进度条目：未读、非人、不是系统摘要',
+    progress.read === false && !isPersonMessage(progress) && !isSystemRecord(progress),
+    JSON.stringify(progress));
+  const block = buildTriggerBlock([progress], { selfNickname: '小鲸鱼' });
+  ok('进度用【任务进度】标签，正文保留阶段',
+    block.includes('【任务进度】') && block.includes('还在上传'), block);
+  const decision = evaluateWindowTrigger({
+    entries: [progress], identity: { selfNickname: '小鲸鱼' },
+    policy: { responseTier: 1, randomPercent: 0, keywords: [] }, roll: 99
+  });
+  ok('最低响应档位也会唤醒（reason=任务进度）',
+    decision.shouldRespond === true && decision.reason === '任务进度', JSON.stringify(decision));
+}
+
+
 process.exit(done() ? 0 : 1);
