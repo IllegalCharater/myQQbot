@@ -536,7 +536,7 @@ export async function segmentsToText(segments: OneBotSegment[] | string | null |
       case 'image': out.push('[图片]'); break;
       case 'record': out.push('[语音]'); break;
       case 'video': out.push('[视频]'); break;
-      case 'file': out.push(`[文件${d.name ?? ''}]`); break;
+      case 'file': out.push(`[文件${d.name ?? d.file_name ?? d.file ?? ''}]`); break;
       case 'reply': {
         if (includeReply) out.push('[引用消息]');
         break;
@@ -801,16 +801,21 @@ export function extractMediaFromSegments(segments: unknown): Array<Record<string
       // 所以"引用一份文件、从它里面抓正文"这条路是通的：带 `url` 就直接下，不必再换一次
       // `get_group_file_url`（那一档仍然留着 —— `file_id` 也带着，协议端哪天不给 url 就用它）。
       //
+      // ⚠️ **2026-11-02 真机探针又见到一种形状**（群友把 .mp4 传到群文件）：
+      //   { name: '8c1e….mp4', size: 4017474, id: '/f934f680-…' }（没有 file_id / file）
+      // 所以 id 要依次读 `file_id → fileId → id`，名字读 `name → file_name → file`，
+      // 大小读 `size → file_size`。**只认 file_id 会让这条消息有文本占位符、却没有结构化媒体。**
       // ⚠️ `url` 是**临时直链**（带签名），不是长期 id：要下就当场下，别存起来等下次用。
-      // 与 `record` 那条同一个判据：**两样都没有才不产出条目** —— 一条既没 url 又没 file_id 的
+      // 与 `record` 那条同一个判据：**两样都没有才不产出条目** —— 一条既没 url 又没 id 的
       // 条目只会让下游白找一轮。
       const fileUrl = String(d.url ?? '').trim();
-      const fileId = String(d.file_id ?? '').trim();
-      const size = Number(d.size);
+      const fileId = String(d.file_id ?? d.fileId ?? d.id ?? '').trim();
+      const fileName = String(d.name ?? d.file_name ?? d.file ?? '').trim();
+      const size = Number(d.size ?? d.file_size ?? d.fileSize);
       if (fileUrl || fileId) {
         media.push({
           kind: 'file',
-          name: String(d.name ?? d.file ?? '').trim(),
+          name: fileName,
           file: String(d.file ?? '').trim(),
           fileId,
           ...(Number.isFinite(size) && size >= 0 ? { size } : {}),

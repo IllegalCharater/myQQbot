@@ -281,6 +281,28 @@ console.log('\n=== 10. 群文件段 ===');
   const { segmentsToText } = await load('qq/onebot.js');
   ok('对照：文件在文本里仍是 [文件test.md] 占位符（这一步只加 media，不改文本化）',
     (await segmentsToText([REAL])).includes('[文件test.md]'));
+
+  // 2026-11-02 真机探针见到的第二种形状（群友把 .mp4 传到群文件）：
+  //   { name: '8c1e….mp4', size: 4017474, id: '/f934f680-…' } —— 没有 file_id / file / url。
+  // 旧实现只认 file_id，于是这条消息有 `[文件…]` 文本、却没有结构化媒体。
+  const PROBE_1102 = {
+    type: 'file',
+    data: {
+      name: '8c1efed3028c497bd67fdfd4cf012d2a.mp4',
+      size: 4017474,
+      // 真机日志里这个 id 被 journald 截断了；此处补成一条完整形状（前缀逐字照抄）。
+      id: '/f934f680-d6b8-11f0-0000-000000000000'
+    }
+  };
+  const probeHit = protocolMedia([PROBE_1102]).find((m) => m.kind === 'file');
+  ok('★ 2026-11-02 真机形状（只有 id/name/size）也产出 kind:file',
+    probeHit?.fileId === '/f934f680-d6b8-11f0-0000-000000000000'
+    && probeHit?.name === '8c1efed3028c497bd67fdfd4cf012d2a.mp4'
+    && probeHit?.size === 4017474,
+    JSON.stringify(probeHit));
+  ok('★ 同一形状的文本化也带文件名（不再是 [文件]）',
+    (await segmentsToText([PROBE_1102])).includes('[文件8c1efed3028c497bd67fdfd4cf012d2a.mp4]'),
+    await segmentsToText([PROBE_1102]));
 }
 
 // `done()` 自己会打印汇总（含通过/失败计数），别再手写一遍。
