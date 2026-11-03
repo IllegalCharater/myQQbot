@@ -262,7 +262,7 @@ Bot 不保留跨运行的模型侧 messages。长期连续性来自本地消息�
 
 **进度是独立的第四种机器条目**（`kind:'media-progress'`，标签【任务进度】），**与三态结局分开**：它只说"还在跑"，模型不许据此宣布完成（`capabilityProtocol` 第 5 条）。加一种异步结果的**四处**（`ASYNC_RESULT_KINDS` / `response-policy` / `prompt-builder` / `prompt-catalog`）这次一次改完，所有能力可用；`t-window` 第 18 段有它"不参与滑出"的一行。**晚到核验**：正常核验走完先发一次如实的 `unsent`，然后每 5 分钟查一次、最多 1 小时；找到 → 补记 self 文件 + `jmcomic-result(status:'sent', late:true)`（"之前没确认到，现在确认到了"）再唤醒模型；到期静默收尾、**绝不重传**。
 
-**入站群文件上传**（`notice_type='group_upload'`）原先被 `ingest.dispatch` 丢掉：现在非自己的上传落成一条未读消息（`[群文件] 名字（大小）` + `media`），走同一套白名单/响应档位并唤醒模型；**自己的上传跳过**（完成路径已记过 `我：[文件:…]`）。⚠️ 协议端是否真的发这个 notice **仍需真机冒烟**（OneBot v11 规范里有，SnowLuma 未实测）；不发时分支不会被走到，不会有副作用。
+**入站群文件上传**（`notice_type='group_upload'`）原先被 `ingest.dispatch` 丢掉：现在非自己的上传落成一条未读消息（`[群文件] 名字（大小）` + `media`），走同一套白名单/响应档位并唤醒模型；**自己的上传跳过**（完成路径已记过 `我：[文件:…]`）。⚠️ **2026-11-02 真机实测（SnowLuma）**：它**不发 `group_upload`** —— 群友上传群文件是普通 `message` + `file` 段（字段是 `name/size/id`，`id` 必须以 `file_id → fileId → id` 回退读取，否则文本有占位符却没有结构化 `media`，见 `qq/onebot.ts` 的 file 段与 `t-media-source.mjs` 第 10 段的第二组夹具），机器人自己的 `upload_group_file` **只返回 HTTP 响应**（`data.file_id`）、**不发任何 notice / message**。所以：入站群文件本来就走普通消息路径；**晚到补记只能靠 `get_group_root_files` 轮询，不存在事件快路径**；`group_upload` 分支保留给 NapCat / go-cqhttp 等其他实现，在 SnowLuma 上不会被走到（无副作用）。
 
 ## 上下文的四种数据必须分开
 

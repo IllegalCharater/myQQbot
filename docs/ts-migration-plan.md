@@ -599,7 +599,11 @@ store.promptContextMaxChars = 32000
 
 **入站群文件上传**（`notice_type='group_upload'`）原先被 `ingest.dispatch` 丢掉：现在非自己的上传
 会落成一条未读消息（`[群文件] 名字（大小）` + `media`），走同一套白名单/响应档位并唤醒模型；
-自己的上传跳过（完成路径已经记过 `我：[文件:…]`）。协议端是否真的发这个 notice 仍需真机冒烟。
+自己的上传跳过（完成路径已经记过 `我：[文件:…]`）。⚠️ **2026-11-02 真机实测（SnowLuma）：它不发 `group_upload`** ——
+群友上传群文件是普通 `message` + `file` 段（字段是 `name/size/id`，`id` 要回退读取；否则文本有占位符、
+结构化 `media` 却丢了），机器人自己的 `upload_group_file` 只返回 HTTP 响应（`data.file_id`），**不发任何事件**。
+所以**晚到补记只能靠 `get_group_root_files` 轮询，没有事件快路径**；`group_upload` 分支保留给
+NapCat / go-cqhttp 等实现，在 SnowLuma 上不会被走到。
 
 守护：`t-chat-log`（出站媒体文本/留档/重放）、`t-transcription`（全文文件上传成功才记）、
 `t-jmcomic-upload`（进度只发一次 / 晚到补记 / 到期静默 / 不重传）、`t-jmcomic-callback`

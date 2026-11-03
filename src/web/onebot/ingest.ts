@@ -505,7 +505,14 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
    *  ② 走与普通消息同一套白名单 / 屏蔽名单，落成**未读**条目（`wakeEligible` 默认 true），
    *     由响应档位决定要不要惊动模型 —— 它和"群友说了句话"是同一类事件；
    *  ③ 字段按 OneBot v11 的 `file: { id, name, size }` 取，取不到的就不写，**不猜**。
-   *     协议端是否真的发这个 notice 仍需真机冒烟；不发时这里永远不会被走到。
+   *
+   * ⚠️ **2026-11-02 真机实测（SnowLuma）：它不发这个 notice**——
+   *   · 群友上传群文件会以普通 `message` + `file` 段送达（`name/size/id`，
+   *     见 `qq/onebot.ts` 的 file 段处理），走的是 `ingestMessage` 那条路；
+   *   · 机器人自己的 `upload_group_file` **只返回 HTTP 响应**（`data.file_id`），
+   *     不发任何 notice / message（所以晚到补记只能靠 `get_group_root_files` 轮询）。
+   * 本分支在 SnowLuma 上不会被走到，保留给 OneBot v11 的其他实现（NapCat / go-cqhttp）
+   * 作为防御 —— 它们会发 `group_upload`。
    */
   async function ingestGroupUpload(event: OneBotEvent) {
     if (event.group_id == null) return;
@@ -546,54 +553,8 @@ export function createIngest({ onebot, store, sender, orchestrator, transcriptio
     orchestrator.onIncoming(chatKey, entry);
   }
 
-  /**
-   * ⚠️ **临时探针（2026-11-02）**：确认协议端在"文件上传成功"时到底发什么事件。
-   *
-   * 要回答的三个问题：
-   *   ① 机器人自己 `upload_group_file` 成功后，协议端会不会发 `notice_type='group_upload'`？
-   *   ② 如果发，`user_id` 是不是 `selfId`、`file.name/size` 是否与上传参数一致？
-   *   ③ 有没有协议端把它发成一条 `message`（而不是 notice）？
-   *
-   * 只打**事件结构**（类型 / 会话 / 发送者 / file 的 id/name/size），**不打消息正文、
-   * 不打 url**。真机跑一次（机器人自己传一份漫画 PDF、再让群友传一个文件）后，
-   * 把本函数与它的调用**一起删掉**（同 AGENTS 里 `[probe:file]` 的处理方式）。
-   */
-  function probeEvent(event: OneBotEvent) {
-    const file = isRecord(event.file) ? event.file : null;
-    const fileBrief = file
-      ? JSON.stringify({
-          id: file.id ?? file.file_id ?? '',
-          name: file.name ?? file.file ?? '',
-          size: file.size ?? '',
-          busid: file.busid ?? ''
-        })
-      : '';
-    if (event.post_type === 'notice') {
-      log(`[probe:notice] type=${String(event.notice_type ?? '')} sub=${String(event.sub_type ?? '')}`
-        + ` group=${String(event.group_id ?? '')} user=${String(event.user_id ?? '')}`
-        + ` self=${String(event.self_id ?? '')} bot=${String(onebot.selfId ?? '')}`
-        + ` target=${String(event.target_id ?? '')}${fileBrief ? ` file=${fileBrief}` : ''}`);
-      return;
-    }
-    if (event.post_type !== 'message' && event.post_type !== 'message_sent') return;
-    const segments = Array.isArray(event.message) ? event.message : [];
-    const fileSegs = segments.filter((seg) => isRecord(seg) && seg.type === 'file');
-    if (!fileSegs.length) return;
-    const sender = isRecord(event.sender) ? event.sender : {};
-    log(`[probe:file-message] post=${String(event.post_type)} type=${String(event.message_type ?? '')}`
-      + ` group=${String(event.group_id ?? '')} user=${String(event.user_id ?? '')}`
-      + ` sender=${String(sender.user_id ?? '')} self=${String(event.self_id ?? '')}`
-      + ` bot=${String(onebot.selfId ?? '')} segs=${segments.length}`
-      + ` files=${JSON.stringify(fileSegs.map((seg) => (isRecord(seg.data) ? {
-        name: seg.data.name ?? seg.data.file ?? '',
-        size: seg.data.size ?? seg.data.file_size ?? '',
-        id: seg.data.id ?? seg.data.file_id ?? ''
-      } : {})))}`);
-  }
-
   async function dispatch(event: OneBotEvent) {
     if (!event || typeof event !== 'object') return;
-    probeEvent(event);
     //机器人发送的消息
     if (event.post_type === 'message_sent') return;
     //普通消息

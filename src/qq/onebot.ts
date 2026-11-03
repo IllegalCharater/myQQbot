@@ -286,12 +286,6 @@ export class OneBotClient {
     if (body.status !== 'ok' && body.retcode !== 0) {
       throw new Error(`OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`);
     }
-    // ⚠️ 临时探针（2026-11-02）：确认 `upload_*_file` 的响应里到底有什么
-    // （有没有 file_id / message_id），以及它与 `group_upload` notice 的先后关系。
-    // 真机跑一次后与 `ingest.ts` 的 `probeEvent` 一起删掉。只打前 300 字。
-    if (action === 'upload_group_file' || action === 'upload_private_file') {
-      console.info(`[probe:upload] action=${action} data=${JSON.stringify(body.data ?? null).slice(0, 300)}`);
-    }
     return body.data;
   }
 
