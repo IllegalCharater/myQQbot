@@ -87,6 +87,57 @@ def ensure_page_limit(comic_id, option):
     return total_pages
 
 
+def is_policy_error(error):
+    """页数上限与权限拒绝是**策略**，不是网络失败 —— 有缓存也不能绕过。"""
+    if isinstance(error, PermissionError):
+        return True
+    return isinstance(error, ValueError) and "超过单次下载上限" in str(error)
+
+
+def evict_old_pdfs(download_dir, keep_name):
+    """
+    目录里的 PDF 超过 MAX_PDF_FILES 时，按 mtime **删最旧的**，只保留最新几份。
+
+    两条边界（都是“删错就丢用户数据”那类）：
+      · **永不删 keep_name**：那是这次请求要用的缓存；它可能恰好是最旧的一份，
+        按 mtime 排序会第一个被删 —— 然后任务白白重新下载一次。
+      · **给即将落盘的新 PDF 留位置**：目标文件还不在目录里时，按“+1”算容量，
+        否则一次下载结束后目录会短暂超过上限，下一轮才清。
+    同 mtime 按文件名排序，保证可复现。
+    """
+    try:
+        names = [name for name in os.listdir(download_dir) if name.lower().endswith(".pdf")]
+    except OSError:
+        return
+    will_add = 0 if keep_name in names else 1
+    if len(names) + will_add <= MAX_PDF_FILES:
+        return
+
+    entries = []
+    for name in names:
+        try:
+            entries.append((os.path.getmtime(os.path.join(download_dir, name)), name))
+        except OSError:
+            entries.append((0.0, name))
+    entries.sort(key=lambda item: (item[0], item[1]))
+
+    need = len(names) + will_add - MAX_PDF_FILES
+    victims = [name for _, name in entries if name != keep_name]
+    removed = 0
+    for name in victims[:max(0, need)]:
+        try:
+            os.remove(os.path.join(download_dir, name))
+            removed += 1
+        except OSError as error:
+            print(f"[删除失败] {name}: {error}", file=sys.stderr, flush=True)
+    if removed:
+        print(
+            f"[缓存清理] 删除最旧的 {removed} 份 PDF，保留最新 {MAX_PDF_FILES} 份",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def get_comic_pdf(comic_id, download_dir):
     try:
         from jmcomic import Feature, download_album
@@ -106,19 +157,27 @@ def get_comic_pdf(comic_id, download_dir):
     os.makedirs(download_dir, exist_ok=True)
     os.chdir(download_dir)
 
-    pdf_files = [
-        name for name in os.listdir(download_dir)
-        if name.lower().endswith(".pdf")
-    ]
-    if len(pdf_files) > MAX_PDF_FILES:
-        for name in pdf_files:
-            try:
-                os.remove(os.path.join(download_dir, name))
-            except OSError as error:
-                print(f"[删除失败] {name}: {error}", file=sys.stderr, flush=True)
+    keep_name = f"{comic_id}.pdf"
+    # 缓存上限按 mtime 淘汰最旧的（**不删这次要用的那一份**）。
+    evict_old_pdfs(download_dir, keep_name)
+
+    pdf_path = os.path.join(download_dir, keep_name)
+    cached_ok = is_valid_pdf(pdf_path)
 
     option = build_download_option()
-    page_count = ensure_page_limit(comic_id, option)
+    try:
+        page_count = ensure_page_limit(comic_id, option)
+    except Exception as error:
+        # 网络/接口失败时，已有**完整缓存**就直接用 —— 缓存的意义正是在站不可达时还能发。
+        # 但页数上限与权限拒绝是策略，不能借缓存绕过（is_policy_error）。
+        if cached_ok and not is_policy_error(error):
+            print(
+                f"[页数检查失败] {str(error)[:200]}；已有完整缓存，直接使用本地 PDF",
+                file=sys.stderr,
+                flush=True,
+            )
+            return pdf_path, True
+        raise
     print(
         f"[页数检查] 漫画 {comic_id} 共 {page_count} 页，允许下载",
         file=sys.stderr,
@@ -126,8 +185,7 @@ def get_comic_pdf(comic_id, download_dir):
     )
 
     # 即使已有 PDF 缓存也先执行页数检查，避免旧的大型缓存绕过新限制。
-    pdf_path = os.path.join(download_dir, f"{comic_id}.pdf")
-    if is_valid_pdf(pdf_path):
+    if cached_ok:
         return pdf_path, True
 
     staging_dir = os.path.join(download_dir, ".staging", f"{comic_id}-{os.getpid()}")

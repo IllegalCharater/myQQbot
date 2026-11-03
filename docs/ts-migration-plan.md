@@ -490,6 +490,8 @@ store.promptContextMaxChars = 32000
 
 还有一层**网络层**的死线，与上面两条同型（2026-11-02 实测）：全局 `fetch` 用的 undici 默认 `headersTimeout` / `bodyTimeout` 都是 **5 分钟**，而漫画 PDF 上传的 `AbortSignal` 是 **30 分钟**。大文件会在第 5 分 03 秒被网络层掐掉（任务 id 里的时间戳与日志时间实测正好差 5 分 03 秒），协议端随之中断、群里没有文件；错误只剩一句 `fetch failed`（真实成因 `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` 在 `error.cause` 里，旧 `OneBotClient.call` 把它丢了）。现在 `web/app.ts` 的全局 dispatcher 把这两项取 `UPLOAD_TIMEOUT_MS + 60_000`（从 jmcomic 桶文件导出，不写死数字），`call` 的 catch 把 `error.cause` 带进错误消息。判据与上面同一条：**我们的死线必须永远先到**。守护在 `tests/t-notice.mjs` 第 7 段（连接被拒带 `ECONNREFUSED` / 头超时带 `UND_ERR_HEADERS_TIMEOUT` 且早于 5 秒死线 / 源级断言 dispatcher 取自 `UPLOAD_TIMEOUT_MS`）。
 
+**本地 PDF 缓存的两条判据（2026-11-03）**：`python-tools/jmcomic_download.py` 的 `MAX_PDF_FILES = 6` 从"超了就整目录删光"改成 **按 mtime 删最旧的**（`evict_old_pdfs`, 永不删 `keep_name`，并为即将落盘的新 PDF 留一个位置）；`ensure_page_limit` 失败时，只要本地 `is_valid_pdf` 为真且**不是策略错误**（黑名单 `PermissionError` / 页数超限 `ValueError`）就直接用缓存 —— 缓存的意义正是站不可达时还能发，而策略错误不许借缓存绕过。两条都是 Python 侧行为，套件只做源码级断言（不启动真解释器），落盘/联网是否真的按判据走要靠真机日志的 `[缓存清理]` 与 `[页数检查失败] … 直接使用本地 PDF` 复核。
+
 能力型工具的依赖（`transcription` / `imageGen` / `hotSearch`）是 `ToolContext` 上的**可选**字段，从 `OrchestratorDependencies` 经 `WakeScheduler`（真正的 `AgentRunnerHost`）透传进来；缺了不做 `instanceof` 校验，由工具自己返回友好错误。未启用的能力由 `agent-runner.ts` 按配置从工具集里过滤掉，与视觉/搜索的过滤同一处。
 
 ### 8.3 出图的提示词编译层（可选，2026-10-20）

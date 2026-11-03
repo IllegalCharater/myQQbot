@@ -29,7 +29,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { checker, dataDir } from './lib/harness.mjs';
-import { BASE_URL, load, readSrc, stripComments } from './lib/src.mjs';
+import { BASE_URL, ROOT, load, readSrc, stripComments } from './lib/src.mjs';
 
 const DATA = dataDir('qqagent-jmcomic-');
 const { ok, done } = checker();
@@ -665,5 +665,31 @@ const safetyJob = await waitForFailedJob();
 ok('安全网真的兜住了：那条真被排上队的任务失败于"无法启动 Python（不存在的解释器）"，而不是联网下载',
   !!safetyJob && String(safetyJob.lastError).includes('无法启动 Python'),
   `拿到 ${JSON.stringify(safetyJob && { status: safetyJob.status, lastError: safetyJob.lastError })}`);
+
+// ── 7. 本地缓存的淘汰与"网络失败信任缓存"（2026-11-03） ──
+//
+// Python 侧不能在这套件里真跑（测试约定不启动真解释器），所以只能做**源码级**断言：
+// 它们挡得住"这段判据被删掉/改反"，挡不住"跑起来不对" —— 后者靠真机日志里的
+// `[缓存清理]` / `[页数检查失败] … 直接使用本地 PDF` 两行复核。
+{
+  const py = fs.readFileSync(path.join(ROOT, 'python-tools', 'jmcomic_download.py'), 'utf8');
+  ok('★ 缓存淘汰按 mtime 删最旧的，且**永不删这次要用的 keep_name**',
+    /def evict_old_pdfs\(download_dir, keep_name\)/.test(py)
+    && /getmtime/.test(py)
+    && /name != keep_name/.test(py)
+    && /will_add = 0 if keep_name in names else 1/.test(py)
+    && /len\(names\) \+ will_add <= MAX_PDF_FILES/.test(py),
+    '缓存淘汰实现不对');
+  ok('★ 旧的"超过上限就把全部 PDF 删掉"已经不在',
+    !/if len\(pdf_files\) > MAX_PDF_FILES/.test(py),
+    '仍能找到整目录清空的旧写法');
+  ok('★ 页数检查失败时：有完整缓存且不是策略错误 → 用缓存；策略错误仍然抛',
+    /cached_ok = is_valid_pdf\(pdf_path\)/.test(py)
+    && /if cached_ok and not is_policy_error\(error\)/.test(py)
+    && /def is_policy_error\(error\)/.test(py)
+    && /超过单次下载上限/.test(py)
+    && /已有完整缓存，直接使用本地 PDF/.test(py),
+    '缓存兜底/策略拒绝的判据不对');
+}
 
 process.exit(done() ? 0 : 1);
