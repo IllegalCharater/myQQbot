@@ -136,6 +136,31 @@ export function midHint(ctx: ToolContext): string {
     : '聊天记录里还没有带 #id 的消息';
 }
 
+/**
+ * 校验模型要引用的消息 id 在当前会话里是否真的存在。
+ *
+ * **实测反馈**：模型读图之后填了一个**根本不存在的** `replyToMessageId: "1852997901"`，
+ * 而发送层原先只做格式校验（`/^-?[1-9]\d*$/`，在 `qq/onebot.ts` 里），于是它被静默接受、
+ * 还回了 `{"sent":1,…}` —— 模型得到的反馈是"我引用对了"，下一轮照旧编。
+ * 根因是**"模型可以引用的 id"与"系统会校验的 id"从来不是同一个集合**。
+ *
+ * 判据与 `get_message_images` 的 `findEntry` 同形：**本轮触发批优先，再回落到实时存档**
+ * （存档可能因为容量裁剪、面板删除而失去一条模型确实看见过的消息）。
+ *
+ * 返回 `null` = 放行；返回字符串 = 该说的话（调用方直接 `err(...)` 出去）。
+ * **刻意不"退一步、不引用照样发"**：那会让模型以为引用成功了，而群里那条消息旁边空着。
+ * 与「工具不得代模型发言」同一条 —— 失败要把真实原因回给模型，让它自己决定下一步。
+ */
+export function checkReplyTarget(ctx: ToolContext, replyToMessageId: unknown): string | null {
+  if (replyToMessageId === undefined || replyToMessageId === null) return null;
+  const rid = String(replyToMessageId).trim();
+  if (!rid) return null;
+  const hit = ctx.store.findByMid(ctx.chatKey, rid)
+    ?? (ctx.triggerEntries || []).find((message) => String(message.mid) === rid);
+  if (hit) return null;
+  return `引用的消息 id ${rid} 在当前会话里不存在，这条没发出去。${midHint(ctx)}`;
+}
+
 /** 从存档的 media 里取转发 res_id（入库时 extractMediaFromSegments 存下的）。 */
 export function forwardResIdFromMedia(entry: ChatMessage | null | undefined): string {
   const hit = (entry?.media || []).find((x) => x && x.kind === 'forward' && x.id);

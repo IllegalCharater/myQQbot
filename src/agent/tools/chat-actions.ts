@@ -2,7 +2,7 @@ import { TOOL_PROMPT_TEXT } from '../../core/prompt-catalog.js';
 import { normalizeMessageList, unquoteJsonString } from '../../core/util.js';
 import { cachedDataUrl, isCacheFile, sendTarget } from '../../stickers/sticker-cache.js';
 import { validateImageUrl } from '../../media/safe-fetch.js';
-import { downloadImageAsDataUrl, err, errorMessage, imageParts, isRecord, midHint, memberHint, ok, recordSent, sentTextEntries } from './shared.js';
+import { checkReplyTarget, downloadImageAsDataUrl, err, errorMessage, imageParts, isRecord, midHint, memberHint, ok, recordSent, sentTextEntries } from './shared.js';
 import type { ToolDefinition } from '../shared/types.js';
 
 /** 发送消息、表情和拍一拍等会话动作。 */
@@ -24,6 +24,9 @@ export function chatActionTools(): ToolDefinition[] {
         try {
           const messages = normalizeMessageList(args.messages);
           if (!messages.length) return err('消息内容为空');
+          // 引用的 id 必须是**这个会话里真有的**（格式对不等于存在，见 checkReplyTarget 的注释）
+          const badReply = checkReplyTarget(ctx, args.replyToMessageId);
+          if (badReply) return err(badReply);
           const result = await ctx.sender.sendTextBatch(ctx.chatKey, messages, {
             replyToMessageId: args.replyToMessageId ?? null,
             atUserId: args.atUserId ?? null
@@ -73,6 +76,9 @@ export function chatActionTools(): ToolDefinition[] {
           return err(`表情 ${sticker.id} 的图片地址不合法，已拒绝发送：${errorMessage(error)}`);
             }
           }
+          // 与 send_message 同一道闸门：引用不存在的 id 就整条不发（重发那一步也复用 options，所以只需查一次）
+          const badReply = checkReplyTarget(ctx, args.replyToMessageId);
+          if (badReply) return err(badReply);
           const options = {
             file: target,
             replyToMessageId: args.replyToMessageId ?? null,

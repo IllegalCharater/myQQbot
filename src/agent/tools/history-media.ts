@@ -247,7 +247,25 @@ export function historyMediaTools(): ToolDefinition[] {
           const label = viaReply
             ? `消息 ${args.messageId} 引用的是消息 #${source.mid}（${who}）的图片内容`
             : `消息 ${args.messageId}（${who}）的图片内容`;
-          return { content: imageParts(`${label}${note}：`, dataUrls) };
+          // ── 末尾再补一段**结构化 id**（2026-11-03 加）──
+          //
+          // **实测反馈**：模型读了这条结果（散文里写着 `消息 1879018598（源赖氏佐田 发的）的图片内容`），
+          // 下一轮 `send_message` 却填了一个**根本不存在的** `replyToMessageId: "1852997901"`，
+          // 而发送层当时只做格式校验（`/^-?[1-9]\d*$/`），于是它被静默接受、还回了
+          // `{"sent":1,…}` —— 模型得到的反馈是"我引用对了"。
+          //
+          // 成因是**这条结果里的 id 只以散文形式存在**：十位数字要靠模型隔一轮自己复述，
+          // 而同一文件里的 `get_recent_messages` / `get_message_detail` 都给的是
+          // `messageId: m.mid` 这样的**字段**。对齐它们之后，id 变成"抄下来就行"的东西。
+          //
+          // 放在**末尾**是刻意的：上面那句 label 的"X 发的"必须仍在开头附近
+          // （description 承诺了"返回内容开头会写明是谁发的"，`t-vision-log.mjs` 按位置钉着它）。
+          // 也**只放 id、不放名字**：同套件有一对负对照断言"甲某那张里不出现乙某"，
+          // 把发送者名字带进这一段会当场打红。
+          const citableId = source.mid === null || source.mid === undefined ? '' : String(source.mid).trim();
+          const parts = imageParts(`${label}${note}：`, dataUrls);
+          if (citableId) parts.push({ type: 'text', text: `{"messageId": ${citableId}}` });
+          return { content: parts };
         } catch (error) {
           return err(errorMessage(error));
         }

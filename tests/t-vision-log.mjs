@@ -211,6 +211,17 @@ console.log('\n=== 5. 填了没有图的那条 → 顺着 reply.mid 取被引用
   ok('结果里点明发送者是谁（"张三 发的"），模型才不会把图归错人',
     String(readCall?.toolCall?.result || '').includes('张三'), String(readCall?.toolCall?.result || '').slice(0, 160));
 
+  // ── 末尾那段**结构化 id**（2026-11-03 加）──
+  //
+  // **实测反馈**：模型读了这条结果，下一轮 `send_message` 却填了一个根本不存在的
+  // `replyToMessageId`。成因是这条结果里的 id **只以散文形式存在**（`消息 1879018598（…）的图片内容`），
+  // 十位数字要靠模型隔一轮自己复述；而同文件的 `get_recent_messages` / `get_message_detail`
+  // 给的都是 `messageId: m.mid` 这样的**字段**。这一条钉住对齐之后的形状。
+  // ⚠️ 值是 **81**（真正持有图片的那条），不是模型问的 82 —— 引用预览/发送都以它为准。
+  ok('结果末尾给出结构化 id（可直接填进 replyToMessageId）',
+    String(readCall?.toolCall?.result || '').includes('{"messageId": 81}'),
+    String(readCall?.toolCall?.result || '').slice(-120));
+
   // 直接取图那条路同样要点名（上面的回退路已经验过"张三"，这里换成另一个发送者，
   // 避免"名字碰巧出现在别处"造成假绿）
   const { buildToolDefs: btd, executeTool: exe } = await load('agent/tools/index.js');
@@ -268,6 +279,12 @@ console.log('\n=== 5. 两个人各发一张图：每张图各点各的名（不�
   ok('★ 第二张图里**不出现**甲某的名字', !tb.includes('甲某'), tb.slice(0, 140));
   // 两条结果不能一模一样，否则"点名"等于没点
   ok('★ 两条结果文本不同（点名真的生效了）', ta !== tb, JSON.stringify([ta.slice(0, 80), tb.slice(0, 80)]));
+  // 结构化 id 也必须各是各的（这一段**只放 id、不放名字**：带上名字会当场打红上面那对负对照）
+  ok('每条结果末尾的结构化 id 各是各的', ta.includes('{"messageId": 91}') && tb.includes('{"messageId": 92}'),
+    JSON.stringify([ta.slice(-60), tb.slice(-60)]));
+  ok('★ 结构化 id 里不夹带发送者名字（负对照才成立）',
+    !ta.includes('{"messageId": 91,') && !tb.includes('{"messageId": 92,'),
+    JSON.stringify([ta.slice(-60), tb.slice(-60)]));
 
   // 工具 description 里承诺了"返回内容开头会写明这张图是谁发的" —— 承诺与实现必须一致，
   // 否则模型会照着一个不存在的格式去找（这类"文案说 A、代码给 B"没人会去核对）。
@@ -277,6 +294,8 @@ console.log('\n=== 5. 两个人各发一张图：每张图各点各的名（不�
   ok('实现真的把"X 发的"放在**开头附近**（description 说的是"开头会写明"）',
     ta.indexOf('甲某 发的') >= 0 && ta.indexOf('甲某 发的') < 40, `位置=${ta.indexOf('甲某 发的')} | ${ta.slice(0, 90)}`);
   ok('description 里也提醒了"不要算到另一个群友头上"', desc.includes('不要把某张图算到另一个群友头上'));
+  // 描述里承诺了末尾那个结构化 id —— 与上面"实现真的给了"配对，两边都不能单飞
+  ok('description 里说明了末尾的 messageId 怎么用', desc.includes('{"messageId": 数字}') && desc.includes('replyToMessageId'), desc.slice(-120));
 }
 
 model.close();
